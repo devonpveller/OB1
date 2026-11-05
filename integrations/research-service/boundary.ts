@@ -215,14 +215,59 @@ export interface Q { queryObject<T>(sql: string, args?: unknown[]): Promise<{ ro
  *  refinery_id, no seed content / callback / on-behalf in options (the public links ride as `public_links`, which
  *  the research service fetches itself), caller 'boundary', origin 'manual' (generic: no lane names the inlet), the
  *  boundary stamp. No research_prompts row: the question is public. Slot 420's trigger refuses anything else. */
-export async function insertDerivedJob(c: Q, req: DerivedRequest): Promise<string> {
-  const options = { public_links: req.links, queue_origin: "manual" };
+export async function insertDerivedJob(c: Q, req: DerivedRequest, run: DerivedRun = {}): Promise<string> {
+  // rw-boundary-digest (slot 460): the engine's run knobs ride beside the links - fixed values, a flag and a time,
+  // nothing a caller wrote (parseDoorBody validated them; slot 460's allow-list refuses anything else)
+  const options = { public_links: req.links, queue_origin: "manual", ...runOptions(run) };
   const r = await c.queryObject<{ id: string }>(
     `INSERT INTO public.research_jobs (status, origin, caller, query, anchor, options, request_kind, boundary)
      VALUES ('queued', 'manual', 'boundary', $1, $1, $2::jsonb, 'derived', $3::jsonb) RETURNING id::text AS id`,
     [req.question, JSON.stringify(options), JSON.stringify({ ...req.boundary, topic: req.topic })],
   );
   return r.rows[0].id;
+}
+
+/** rw-boundary-digest (plan 09 2.5 P3/P5, slot 460): how a derived job RUNS - never what it is about. The digest's
+ *  article keeps its article mode and its preliminary gap pass; a dry run writes nothing canonical; the caller's
+ *  deadline means the engine never starts a job nobody waits for. Enumerated values, a boolean and a timestamp only. */
+export interface DerivedRun { mode?: "article"; gap_research?: "none" | "preliminary"; dry_run?: boolean; deadline_at?: string }
+
+export function runOptions(run: DerivedRun): Record<string, unknown> {
+  return {
+    ...(run.mode === "article" ? { mode: "article" } : {}),
+    ...(run.gap_research ? { gap_research: run.gap_research } : {}),
+    ...(run.dry_run === true ? { dry_run: true } : {}),
+    ...(run.deadline_at ? { deadline_at: run.deadline_at } : {}),
+  };
+}
+
+/** The door's `run` object, validated: anything but the four keys and their fixed shapes is refused. The deadline is
+ *  normalised to the one stored shape (Date#toISOString), as POST /research does. */
+export function parseRun(v: unknown): { run: DerivedRun } | { error: string } {
+  if (v === undefined || v === null) return { run: {} };
+  if (typeof v !== "object" || Array.isArray(v)) return { error: "run is an object" };
+  const r = v as Record<string, unknown>;
+  const extra = Object.keys(r).filter((k) => !["mode", "gap_research", "dry_run", "deadline_at"].includes(k));
+  if (extra.length) return { error: `run carries only mode, gap_research, dry_run, deadline_at (not ${extra.join(", ").slice(0, 80)})` };
+  const run: DerivedRun = {};
+  if (r.mode !== undefined) { if (r.mode !== "article") return { error: "run.mode is article" }; run.mode = "article"; }
+  if (r.gap_research !== undefined) {
+    if (r.gap_research !== "none" && r.gap_research !== "preliminary") return { error: "run.gap_research is none or preliminary" };
+    run.gap_research = r.gap_research;
+  }
+  if (r.dry_run !== undefined) { if (typeof r.dry_run !== "boolean") return { error: "run.dry_run is a boolean" }; if (r.dry_run) run.dry_run = true; }
+  if (r.deadline_at !== undefined && r.deadline_at !== null && r.deadline_at !== "") {
+    const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})$/i;
+    if (typeof r.deadline_at !== "string" || !ISO.test(r.deadline_at.trim())) return { error: "run.deadline_at is an ISO-8601 date-time with a zone" };
+    const d = new Date(r.deadline_at.trim());
+    if (!Number.isFinite(d.getTime())) return { error: "run.deadline_at is not a valid time" };
+    // round 2 (tester F4): after its zone offset the time must still be a four-digit year (slot 460 stores only that
+    // shape; 9999-12-31T23:59:59-23:59 normalises to +010000-..., 0000-01-01T00:00:00+01:00 to -000001-...)
+    const iso = d.toISOString();
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(iso)) return { error: "run.deadline_at is outside the years 0000-9999" };
+    run.deadline_at = iso;
+  }
+  return { run };
 }
 
 /** The hand-back row (slot 420's SECURITY DEFINER handback_open: the app role has no grant on the table). */
@@ -242,7 +287,7 @@ export async function openHandback(c: Q, h: {
  *  query or options are refused outright - a derived request carries nothing a caller chose to put on the job. */
 export const DOOR_REFUSED_KEYS = ["seed_sources", "callback", "inlet_ref", "on_behalf_of", "query", "options", "thread_id", "refinery_id"];
 
-export function parseDoorBody(body: unknown): { item: PersonalItem; purpose: Purpose; deliver: Record<string, unknown> } | { error: string } {
+export function parseDoorBody(body: unknown): { item: PersonalItem; purpose: Purpose; deliver: Record<string, unknown>; run: DerivedRun } | { error: string } {
   if (!body || typeof body !== "object" || Array.isArray(body)) return { error: "bad body" };
   const b = body as Record<string, unknown>;
   const bad = DOOR_REFUSED_KEYS.filter((k) => k in b);
@@ -270,8 +315,45 @@ export function parseDoorBody(body: unknown): { item: PersonalItem; purpose: Pur
   if (JSON.stringify(deliver).length > 4000) return { error: "deliver is at most 4000 characters of JSON" };
   const rev = it.revision === undefined || it.revision === null ? undefined : Number(it.revision);
   if (rev !== undefined && !Number.isInteger(rev)) return { error: "item.revision is an integer" };
+  const run = parseRun(b.run);
+  if ("error" in run) return { error: run.error };
   return {
     item: { kind: kind as InletKind, id, revision: rev, owner_sub: String(it.owner_sub ?? ""), fields, links: (links as string[]).slice(0, 50), identity },
-    purpose: purpose as Purpose, deliver,
+    purpose: purpose as Purpose, deliver, run: run.run,
   };
+}
+
+/** rw-boundary-digest: the delivery record's body - job ids (uuid), a boolean, and at most two ids (uuid) per job:
+ *  the private episode it fed and the shared thread it resolved to. Nothing else reaches the hand-back. */
+export interface Delivery { job_id: string; ok: boolean; note: { episode_id?: string; thread_id?: string } }
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export function parseDeliveries(body: unknown): { deliveries: Delivery[] } | { error: string } {
+  const b = body as { deliveries?: unknown } | null;
+  if (!b || typeof b !== "object" || !Array.isArray(b.deliveries)) return { error: "deliveries required" };
+  if (b.deliveries.length > 500) return { error: "at most 500 deliveries" };
+  const out: Delivery[] = [];
+  for (const raw of b.deliveries) {
+    const d = raw as Record<string, unknown>;
+    if (!d || typeof d !== "object" || Array.isArray(d)) return { error: "a delivery is an object" };
+    const extra = Object.keys(d).filter((k) => !["job_id", "ok", "episode_id", "thread_id"].includes(k));
+    if (extra.length) return { error: `a delivery carries only job_id, ok, episode_id, thread_id` };
+    if (typeof d.job_id !== "string" || !UUID.test(d.job_id)) return { error: "job_id is a uuid" };
+    if (typeof d.ok !== "boolean") return { error: "ok is a boolean" };
+    const note: Delivery["note"] = {};
+    for (const k of ["episode_id", "thread_id"] as const) {
+      if (d[k] === undefined || d[k] === null) continue;
+      if (typeof d[k] !== "string" || !UUID.test(d[k] as string)) return { error: `${k} is a uuid` };
+      note[k] = (d[k] as string).toLowerCase();
+    }
+    out.push({ job_id: d.job_id.toLowerCase(), ok: d.ok, note });
+  }
+  return { deliveries: out };
+}
+
+/** The delivery on the private hand-back (slot 460's SECURITY DEFINER handback_deliver: the caller that opened it
+ *  only, a queued row only, the two ids only). True when a hand-back took it. */
+export async function recordDelivery(c: Q, d: Delivery, caller: string): Promise<boolean> {
+  const r = await c.queryObject<{ ok: boolean }>(`SELECT public.handback_deliver($1::uuid, $2, $3, $4::jsonb) AS ok`,
+    [d.job_id, caller, d.ok, JSON.stringify(d.note)]);
+  return r.rows[0]?.ok === true;
 }

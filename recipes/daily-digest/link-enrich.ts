@@ -5,8 +5,9 @@
  * Tasks: …/TASKS-digest-podcast-services.md (P1)
  *
  * For each label-email in the window: reconstruct the full body → gather +
- * unwrap + hygiene-filter its links → fetch + extract each article THROUGH TOR →
- * submit it to the proper research channel (openbrain-research, ARTICLE mode:
+ * unwrap + hygiene-filter its links → hand each public link to the request
+ * boundary, which fetches the article itself (rw-boundary-digest) →
+ * the proper research channel (openbrain-research, ARTICLE mode:
  * the article is the seed/subject, corroboration from existing OB claims, plus
  * bounded PRELIMINARY research on the gaps it leaves open). Then the WAIT-GATE:
  * poll every research job to a terminal `done` state before building the report.
@@ -17,7 +18,14 @@
  *     article synthesis + preliminary gaps but writes NOTHING canonical (no
  *     sources, claims, or thread). You can eyeball the synthesis it returns.
  *   --commit          — full write: grounded claims + thread resolution via the
- *     curator, plus the gmail-id stamp on the written sources.
+ *     curator. Nothing of the email reaches a shared row (rw-boundary-digest, plan 09
+ *     PD0c): research is asked for ONLY through the request boundary
+ *     (POST /research/derived) - an article by its public link (the research service
+ *     fetches it and forms the question from its title), a gap dive by a gated
+ *     question. The Gmail ids, labels and dates live in the PRIVATE hand-back. A
+ *     newsletter with no public link is never researched (D2): its own text feeds
+ *     the private episode. The episode's script lives on the owner's own episode
+ *     row (podcast_episodes.transcript), not as a shared source.
  *
  * Best-effort throughout: a dead link / paywall / robots block / submit failure /
  * research timeout → `email-only`, logged, never fatal.
@@ -47,12 +55,13 @@ import { BrainClient } from "./src/clients/postgrest.ts";
 import { GoogleOAuth } from "./src/clients/google-oauth.ts";
 import { AiNewsSection } from "./src/sections/ai-news.ts";
 import { reconstructEmailBody } from "./src/enrich/email-body.ts";
-import { extractUrls, gatherAnchors, gatherLinks, isResearchable } from "./src/enrich/links.ts";
+import { extractUrls, gatherAnchors, gatherLinks, isCalendarInvite, isResearchable } from "./src/enrich/links.ts";
 import { extractAnchors, GmailReader } from "./src/enrich/gmail-fetch.ts";
 import { selectPOI } from "./src/enrich/poi.ts";
-import { extractTextFromHtml, fetchAndExtract } from "./src/enrich/extract.ts";
+import { extractTextFromHtml } from "./src/enrich/extract.ts";
 import { closeEgress, egressMode } from "./src/enrich/egress.ts";
-import { isModelDown, JobRecord, ResearchClient, ResearchDeadlineError, waitForAll } from "./src/enrich/research-client.ts";
+import { type Delivery, isModelDown, JobRecord, ResearchClient, ResearchDeadlineError, waitForAll } from "./src/enrich/research-client.ts";
+import { digestOwnerSub } from "./src/enrich/owner-sub.ts";
 import { realClock } from "./src/routine/clock.ts";
 import { probeModel, waitForModel } from "./src/routine/model-gate.ts";
 import { RoutineStore } from "./src/routine/store.ts";
@@ -123,7 +132,12 @@ const BLOCKLIST_PATH = env("PROMO_BLOCKLIST_PATH", `${REPORTS_DIR}/promo-blockli
 // to its newsletter's topic is researched, tangential ones are dropped. The
 // CEILING below is only a runaway safety valve; overflow + unfinished dives carry
 // in a freshness-bounded ledger. See implementation-guide/digest-gap-deep-research/.
-const GAP_DIVE_ENABLED = env("GAP_DIVE_ENABLED", "1") === "1";
+// rw-boundary-digest round 2 (tester F2): the digest asks for research with ITS OWN caller key (RESEARCH_CALLERS
+// `digest=notebook:<key>` on the research service), never the shared MCP_ACCESS_KEY that ~11 services hold - the door
+// stamps the caller on each private hand-back and only that caller may record its delivery. No key = no research at
+// all (fail closed: every link is email-only, no dive; the episode and the email still go out).
+const RESEARCH_KEY = env("RESEARCH_DIGEST_KEY").trim();
+const GAP_DIVE_ENABLED = env("GAP_DIVE_ENABLED", "1") === "1" && !!RESEARCH_KEY;
 const GAP_DIVE_CEILING = num("GAP_DIVE_CEILING", 12); // runaway safety, NOT the throttle
 const GAP_DIVE_MIN_TAGGED = num("GAP_DIVE_MIN_TAGGED", 2); // < this tagged lines = "thin"
 const GAP_DIVE_WAIT_MS = num("GAP_DIVE_WAIT_MS", 7_200_000); // same-night budget (2h)
@@ -136,7 +150,7 @@ const LEDGER_PATH = `${REPORTS_DIR}/gap-dives-pending${COMMIT ? "" : "-dryrun"}.
 const brain = new BrainClient({ baseUrl: env("BRAIN_REST_URL", "http://openbrain-rest") });
 const research = new ResearchClient({
   baseUrl: env("RESEARCH_URL", "http://openbrain-research:8000"),
-  brainKey: env("MCP_ACCESS_KEY"),
+  brainKey: RESEARCH_KEY,
 });
 // LiteLLM virtual key for every direct chat call this runner makes. The gateway
 // has REQUIRED an sk- key since J.1 (2026-08-21); before this was wired the calls
@@ -181,7 +195,9 @@ const gapTriageChat = makeScriptChat({
 // configuration store's podcast.archive_destination says (read on every render from the
 // workbench). Nothing here talks to Open Notebook.
 const AUDIO = args.has("--audio");
-const PODCAST_OWNER_SUB = env("PODCAST_OWNER_SUB", "").trim() || "operator"; // = WORKSPACE_DEFAULT_SUB (the workbench's fallback when blank)
+// rw-boundary-digest: the run's owner comes from ONE place (owner-sub.ts; WORKSPACE_DEFAULT_SUB until PD2/PD4). It owns
+// the private hand-back of every research request and the daily episode.
+const PODCAST_OWNER_SUB = digestOwnerSub();
 const PODCAST_TEAM = env("PODCAST_TEAM", "").trim();
 const presenterStore = new PresenterStore(env("BRAIN_REST_URL", "http://openbrain-rest"));
 const segmentCache = new SegmentCache(
@@ -310,6 +326,20 @@ interface Pending {
   subject: string;
 }
 
+// rw-boundary-digest: every derived job this run asked for, and how it ended for the digest - recorded on its private
+// hand-back at the end of the run (POST /research/derived/delivered): the episode it fed and the thread it resolved
+// to are the hand-back's, never a shared row. A job still running (a carried gap dive) is recorded by a later run.
+const deliveries = new Map<string, Delivery>();
+function noteDelivery(jobId: string, ok: boolean, threadId?: string | null) {
+  deliveries.set(jobId, { jobId, ok, threadId: ok ? (threadId ?? null) : null });
+}
+
+/** The private inlet id of a research request (hand-back only): one per email + link, one per dive question. */
+async function inletId(...parts: string[]): Promise<string> {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(parts.slice(1).join("\n")));
+  return `${parts[0]}:${[...new Uint8Array(d)].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("")}`;
+}
+
 // S4a — per-label segment material (grounded syntheses) collected for the episode.
 const segments = new Map<string, SegmentItem[]>();
 function addSegmentItem(label: string, item: SegmentItem) {
@@ -317,8 +347,6 @@ function addSegmentItem(label: string, item: SegmentItem) {
   arr.push(item);
   segments.set(label, arr);
 }
-// Threads the day's research resolved to (commit only) — for loop-close.
-const threadIds = new Set<string>();
 
 // ── gap-dive state ───────────────────────────────────────────────────────────
 // "Source lacked context" signals collected across the day's items.
@@ -341,11 +369,9 @@ interface WorkItem {
   email: { gmailId: string; gmailThreadId: string; emailDate: string; gmailLabels: string[] };
   label: string;
   subject: string;
+  /** The sender, "Name <address>" (a personal field: the boundary denies it, never stores it). */
+  from: string;
   link: LinkCandidate;
-  /** Pre-supplied content (the email body itself) — skip the fetch when set. */
-  preContent?: string;
-  /** Source title for a body item (the newsletter subject). */
-  title?: string;
 }
 
 /** Bounded-concurrency map — caps in-flight research jobs (GPU throttle). */
@@ -364,8 +390,12 @@ async function main() {
       `maxEmails=${MAX_EMAILS} label=${ONLY_LABEL ?? "(all " + LABEL_PREFIX + "*)"} egress=${egressMode()}`,
   );
   if (!env("MCP_ACCESS_KEY")) {
-    console.error("[link-enrich] MCP_ACCESS_KEY required (research API is authenticated); aborting.");
+    console.error("[link-enrich] MCP_ACCESS_KEY required (the workbench's archive destination is authenticated); aborting.");
     Deno.exit(2);
+  }
+  if (!RESEARCH_KEY) {
+    console.warn("[link-enrich] RESEARCH_DIGEST_KEY is not set: NO research this run (every link email-only, no gap dive) - " +
+      "the digest never researches with the shared key. The operator creates it (test plan, Live deploy).");
   }
 
   // Resolve yesterday's carried-over gap dives (durable server-side jobs) before
@@ -411,6 +441,8 @@ async function main() {
     report.totals.emailsScanned++;
     const label = pickTopicHint(email.gmailLabels) ?? "(unlabeled)";
     const subject = email.header?.subject ?? "";
+    const from = email.header ? `${email.header.sender} <${email.header.address}>` : "";
+    // the user's own mailbox link: the PRIVATE side only (the email and the episode), never a research request
     const gmailUrl = `https://mail.google.com/mail/u/0/#inbox/${email.gmailThreadId}`;
 
     // Original HTML (for links + body); fall back to the lossy stored body.
@@ -466,7 +498,8 @@ async function main() {
       // expression used to be inline here, where nothing could import it, and
       // the test that "guarded" it asserted a hand-typed copy - a tester put the
       // regression back and the whole suite stayed green.
-      external = gathered.filter(isResearchable);
+      // rw-boundary-digest round 2 (F1): a calendar notification's links are the meeting's - none is researched
+      external = isCalendarInvite(subject) ? [] : gathered.filter(isResearchable);
     }
     // Promo filter (blocklist → nothink): drop ad/sponsor links before POI so
     // they never become sources/claims. Domains judged promo are remembered.
@@ -487,7 +520,9 @@ async function main() {
     // links (single-post / promo emails). For news editions the per-source links
     // carry the content and the curator can place each on a thread; a multi-topic
     // roundup body can't be placed on one thread (→ 0 claims) and just adds noise.
-    let bodyItem: WorkItem | null = null;
+    // rw-boundary-digest (plan 09 D2): a body with no public link is NEVER a research request - its text feeds the
+    // user's private digest and episode directly (no job, no source, no claim, no hand-back).
+    let bodyItem = false;
     if (bodyText.trim().length > 400 && selected.length === 0) {
       // Drop ONLY a primarily-promotional body (e.g. "20% off every plan"); keep
       // a body with substantive content even if it carries some promo (the ad is
@@ -496,10 +531,7 @@ async function main() {
         promoDropped++;
         console.log(`  · ${label} | "${subject.slice(0, 55)}" → body is PROMO, dropped (no source)`);
       } else {
-        bodyItem = {
-          email, label, subject, title: subject, preContent: bodyText,
-          link: { rawUrl: gmailUrl, url: gmailUrl, domain: "newsletter", text: subject },
-        };
+        bodyItem = true;
       }
     }
     console.log(`  · ${label} | "${subject.slice(0, 55)}" → ${external.length} ext link(s), ${selected.length} selected${bodyItem ? " + body-fallback" : ""}`);
@@ -509,8 +541,12 @@ async function main() {
       external.forEach((c) => console.log(`      ${keep.has(c.url) ? "KEEP" : "drop"} [${c.domain}] ${(c.text || "(no text)").slice(0, 60)} — ${c.url.slice(0, 80)}`));
       continue; // inspect only; no research
     }
-    if (bodyItem) items.push(bodyItem);
-    for (const link of selected) items.push({ email, label, subject, link });
+    if (bodyItem) {
+      addSegmentItem(label, { title: subject || label, url: gmailUrl, synthesis: "", emailOnly: true, newsletter: bodyText });
+      record({ gmailId: email.gmailId, label, rawUrl: gmailUrl, url: gmailUrl, domain: "newsletter", status: "email-only",
+        note: "newsletter body: no public link, not researched (plan 09 D2); in the private episode" });
+    }
+    for (const link of selected) items.push({ email, label, subject, from, link });
   }
   await saveBlocklist(BLOCKLIST_PATH, blocklist);
   if (promoDropped) {
@@ -544,7 +580,7 @@ async function main() {
   // email. The episode is in the archive (voiced.dir); the email says so without a link.
   const urls = { viewUrl: null, downloadUrl: null };
   if (voiced) console.log(`[link-enrich] 🎧 episode archived at ${voiced.dir}`);
-  if (COMMIT && ep && threadIds.size) await closeLoop(ep, urls.downloadUrl);
+  await closeLoop(ep, voiced);
   if (ep) await writeEnrichment(ep, urls);
   await writeResult(ep ? "produced" : "nothing-to-do", ep ? undefined : "no segments");
   const t = report.totals;
@@ -554,9 +590,12 @@ async function main() {
   );
 }
 
-/** Fetch (already resolved) → submit research (article mode) → wait → record. */
+/** One public link of a newsletter -> the request boundary (article mode) -> wait -> record. The digest sends the
+ *  email's PERSONAL fields only for the boundary to deny them (never stored) and the link as a candidate; the research
+ *  service fetches the article itself, without the link's query string, and forms the question from its title. */
+const seenInlets = new Set<string>();
 async function processLink(item: WorkItem) {
-  const { email, label, subject, link } = item;
+  const { email, label, subject, from, link } = item;
   const base: DayReportEntry = {
     gmailId: email.gmailId, label, rawUrl: link.rawUrl, url: link.url, domain: link.domain, status: "email-only",
   };
@@ -579,31 +618,36 @@ async function processLink(item: WorkItem) {
     console.log(`      ✗ ${link.domain} — email-only (${note})`);
   };
 
-  // Body item → use the supplied content; link item → fetch the article.
-  let title: string, content: string;
-  if (item.preContent) {
-    title = item.title || subject;
-    content = item.preContent;
-  } else {
-    const ex = await fetchAndExtract(link.url, { timeoutMs: LINK_TIMEOUT_MS });
-    if (!ex.ok) return fallback(`extract: ${ex.reason}`);
-    title = ex.title;
-    content = ex.text;
-  }
+  if (!RESEARCH_KEY) return fallback("research: off (no RESEARCH_DIGEST_KEY)");
+  const inlet = await inletId(email.gmailId, "article", link.url);
+  if (seenInlets.has(inlet)) return; // the same link twice in one email: one request
+  seenInlets.add(inlet);
 
   let jobId = "";
   let job: JobRecord | null = null;
   for (let attempt = 1; ; attempt++) {
     try {
-      jobId = await research.submit({
-        query: buildQuery(title, subject, content),
-        seedSources: [{ url: link.url, title, content }],
-        mode: "article", gapResearch: "preliminary", dryRun: !COMMIT, origin: "notebook",
+      const a = await research.submitDerived({
+        item: {
+          kind: "gmail", id: inlet, owner_sub: PODCAST_OWNER_SUB, links: [link.url],
+          fields: {
+            subject, from, label, labels: email.gmailLabels.join(" "), link_text: link.text ?? "",
+            gmail_id: email.gmailId, gmail_thread_id: email.gmailThreadId,
+          },
+        },
+        purpose: "digest-article",
+        deliver: {
+          digest_run: report.generatedAt, segment: label, gmail_id: email.gmailId, gmail_thread_id: email.gmailThreadId,
+          labels: email.gmailLabels, email_date: email.emailDate,
+        },
+        mode: "article", gapResearch: "preliminary", dryRun: !COMMIT,
         // The engine never starts this job after we stop waiting for it.
         deadlineAt: Date.now() + RESEARCH_WAIT_MS,
       });
+      if ("refused" in a) return fallback(`boundary: ${a.refused}`);
+      jobId = a.jobId;
     } catch (err) { return fallback(`research-submit: ${err}`); }
-    console.log(`      → ${item.preContent ? "newsletter-body" : link.domain} researching (job ${jobId.slice(0, 8)})${attempt > 1 ? ` [attempt ${attempt}]` : ""}…`);
+    console.log(`      → ${link.domain} researching (job ${jobId.slice(0, 8)})${attempt > 1 ? ` [attempt ${attempt}]` : ""}…`);
 
     // At the deadline waitForDone CANCELS the job (it would otherwise keep its
     // queue place and run for nobody); the note says when the model was down.
@@ -619,6 +663,7 @@ async function processLink(item: WorkItem) {
       modelDown = err instanceof ResearchDeadlineError && err.modelDown;
       note = modelDown ? `research: model_down: ${(err as Error).message}` : `research: ${err}`;
     }
+    noteDelivery(jobId, false);
     // mr-routine-outage: a job the MODEL failed is not an email-only verdict on
     // the article - wait for the model and run it again (bounded).
     if (!modelDown || attempt > RESEARCH_MODEL_DOWN_RESUBMITS) return fallback(note);
@@ -626,7 +671,16 @@ async function processLink(item: WorkItem) {
     await gateModel(`research ${link.domain}`); // throws ModelDownExit past the wait bound
   }
 
+  // the article's own title, as the research service fetched it (its cited source); else the link's text
+  const cited = job!.result?.cited_sources?.find((c) => c.url && sameArticle(c.url, link.url));
+  const title = cited?.title || job!.result?.cited_sources?.[0]?.title || link.text || "";
   await recordDoneJob({ base, jobId, email, title, subject }, job!);
+}
+
+/** The research service cites the article by its canonical link (no query string, no fragment). */
+function sameArticle(a: string, b: string): boolean {
+  const c = (u: string) => { try { const x = new URL(u); return `${x.hostname.toLowerCase()}${x.pathname}`; } catch { return u; } };
+  return c(a) === c(b);
 }
 
 async function recordDoneJob(p: Pending, job: JobRecord) {
@@ -672,6 +726,9 @@ async function recordDoneJob(p: Pending, job: JobRecord) {
     }
   }
 
+  // the private hand-back records it at the end of the run (with the episode and the thread)
+  noteDelivery(p.jobId, true, curator?.thread_id ?? result.thread_id);
+
   // dry-run: no canonical write; report the previewed synthesis.
   if (!COMMIT) {
     record({
@@ -683,9 +740,8 @@ async function recordDoneJob(p: Pending, job: JobRecord) {
     return;
   }
 
-  // commit: claims + thread written by the curator; stamp gmail metadata on the sources.
-  const stamped = await stampGmailMetadata(curator?.persist?.source_ids ?? [], p.email);
-  if (curator?.thread_id) threadIds.add(curator.thread_id); // for loop-close
+  // commit: claims + thread written by the curator - shared knowledge from the public article only. The email's ids,
+  // labels and date are on the private hand-back (deliver), never stamped onto a shared source (plan 09 2.5 P3).
   record({
     ...p.base, status: "enriched",
     threadId: curator?.thread_id ?? result.thread_id,
@@ -694,7 +750,6 @@ async function recordDoneJob(p: Pending, job: JobRecord) {
     claimsWritten: curator?.claims?.claimsWritten,
     claimsDeduped: curator?.claims?.claimsDeduped,
     ungroundedSkipped: curator?.claims?.ungroundedSkipped,
-    note: stamped ? undefined : "gmail-stamp: skipped/failed",
   });
   console.log(
     `      ✓ ${p.base.domain} → thread "${curator?.thread_name ?? "?"}" (${curator?.thread_decision ?? "?"}) ` +
@@ -702,12 +757,28 @@ async function recordDoneJob(p: Pending, job: JobRecord) {
   );
 }
 
-/** Submit a full topic-mode research job (a gap dive). Returns the job id or null. */
-async function submitDive(question: string, threadId?: string): Promise<string | null> {
+/** A gap dive through the request boundary: a full topic-mode run (web search on, no seed) of a PUBLIC question the
+ *  local model proposes from the gap and the gate accepts - the article page is its evidence. The triage question,
+ *  the item's title and label are personal fields: the boundary denies their ids and copied phrases and stores none
+ *  of them. No thread id rides along (the door takes none; the curator places the result). Returns the job id, or
+ *  null when the boundary refused it (dropped: the digest never waits for a human) or the submit failed. */
+async function submitDive(q: QueuedDive): Promise<string | null> {
   try {
-    // No seeds, no article mode → the default full-research path (web search ON,
-    // iterative deepening). origin "notebook" → the ob-research queue lane.
-    return await research.submit({ query: question, origin: "notebook", threadId, dryRun: !COMMIT });
+    const links = /^https?:\/\//i.test(q.url) && !/^https?:\/\/mail\.google\./i.test(q.url) ? [q.url] : [];
+    const a = await research.submitDerived({
+      item: {
+        kind: "gmail", id: await inletId(q.gmailId || "carry", "gap", q.question), owner_sub: PODCAST_OWNER_SUB, links,
+        fields: { question: q.question, title: q.title, label: q.label, ...(q.gmailId ? { gmail_id: q.gmailId } : {}) },
+      },
+      purpose: "digest-gap",
+      deliver: { digest_run: report.generatedAt, segment: q.label, ...(q.gmailId ? { gmail_id: q.gmailId } : {}), dive: true },
+      dryRun: !COMMIT,
+    });
+    if ("refused" in a) {
+      console.log(`      ⊘ gap dive refused by the request boundary (${a.refused}) - dropped`);
+      return null;
+    }
+    return a.jobId;
   } catch (err) {
     console.warn(`      (gap-dive submit failed: ${err})`);
     return null;
@@ -733,6 +804,7 @@ interface QueuedDive {
   title: string;
   url: string;
   threadId?: string;
+  gmailId?: string;
   attempts: number;
   firstSeen: string; // ISO — drives the freshness gate
 }
@@ -741,7 +813,7 @@ interface DiveSub extends QueuedDive {
 }
 
 function deferredEntry(q: QueuedDive, submittedAt: string): LedgerEntry {
-  return { jobId: "", question: q.question, label: q.label, title: q.title, url: q.url, threadId: q.threadId, attempts: q.attempts, firstSeen: q.firstSeen, submittedAt };
+  return { jobId: "", question: q.question, label: q.label, title: q.title, url: q.url, threadId: q.threadId, gmailId: q.gmailId, attempts: q.attempts, firstSeen: q.firstSeen, submittedAt };
 }
 
 /**
@@ -757,8 +829,9 @@ function deferredEntry(q: QueuedDive, submittedAt: string): LedgerEntry {
 async function runGapDives(ledgerRes: LedgerResolution) {
   const nowIso = new Date().toISOString();
 
-  // (1) Prior runs' resolved dives → follow-ups.
-  for (const r of ledgerRes.resolved) recordResolvedFollowUp(r);
+  // (1) Prior runs' resolved dives → follow-ups (their hand-backs are recorded delivered at the end of this run).
+  for (const r of ledgerRes.resolved) { recordResolvedFollowUp(r); noteDelivery(r.jobId, true); }
+  for (const d of ledgerRes.dropped) if (d.jobId) noteDelivery(d.jobId, false);
 
   // (2) Relevance triage — the throttle. Told what's already in flight/deferred.
   const inFlight = [...ledgerRes.stillRunning, ...ledgerRes.retry, ...ledgerRes.deferred].map((e) => e.question);
@@ -790,9 +863,9 @@ async function runGapDives(ledgerRes: LedgerResolution) {
     seenQ.add(key);
     queue.push(q);
   };
-  for (const e of ledgerRes.deferred) pushQ({ origin: "carry", question: e.question, label: e.label, title: e.title, url: e.url, threadId: e.threadId, attempts: e.attempts, firstSeen: e.firstSeen || nowIso });
-  for (const e of ledgerRes.retry) pushQ({ origin: "carry", question: e.question, label: e.label, title: e.title, url: e.url, threadId: e.threadId, attempts: e.attempts, firstSeen: e.firstSeen || nowIso });
-  for (const p of planned) pushQ({ origin: "today", question: p.question, label: p.label, title: p.title, url: p.url, threadId: p.threadId, attempts: 0, firstSeen: nowIso });
+  for (const e of ledgerRes.deferred) pushQ({ origin: "carry", question: e.question, label: e.label, title: e.title, url: e.url, threadId: e.threadId, gmailId: e.gmailId, attempts: e.attempts, firstSeen: e.firstSeen || nowIso });
+  for (const e of ledgerRes.retry) { if (e.jobId) noteDelivery(e.jobId, false); pushQ({ origin: "carry", question: e.question, label: e.label, title: e.title, url: e.url, threadId: e.threadId, gmailId: e.gmailId, attempts: e.attempts, firstSeen: e.firstSeen || nowIso }); }
+  for (const p of planned) pushQ({ origin: "today", question: p.question, label: p.label, title: p.title, url: p.url, threadId: p.threadId, gmailId: p.gmailId, attempts: 0, firstSeen: nowIso });
 
   // (4) Runaway safety: submit up to the ceiling; DEFER the overflow (still fresh,
   //     still vetted) to tomorrow instead of dropping relevant work.
@@ -814,7 +887,7 @@ async function runGapDives(ledgerRes: LedgerResolution) {
   // (5) Submit.
   const subs: DiveSub[] = [];
   for (const q of toSubmit) {
-    const jobId = await submitDive(q.question, q.threadId);
+    const jobId = await submitDive(q);
     if (jobId) subs.push({ ...q, jobId });
     else if (q.origin === "carry") newEntries.push(deferredEntry(q, nowIso)); // keep for next run
   }
@@ -830,6 +903,7 @@ async function runGapDives(ledgerRes: LedgerResolution) {
     const out = results.get(s.jobId);
     const job = out && out.ok ? out.job : null;
     const synthesis = job?.result?.synthesis ?? "";
+    if (job) noteDelivery(s.jobId, countTaggedClaimLines(synthesis) > 0, job.result?.curator?.thread_id ?? job.result?.thread_id);
     if (job && countTaggedClaimLines(synthesis) > 0) {
       if (s.origin === "today" && attachDiveToItem(s.label, s.url, synthesis)) {
         console.log(`      ✓ gap dive filled "${s.title.slice(0, 50)}" inline.`);
@@ -841,31 +915,12 @@ async function runGapDives(ledgerRes: LedgerResolution) {
       // done but no grounded material → dropped (honest floor; item stays unfilled).
     } else {
       // still running / errored / timed out → carry over (freshness-bounded).
-      newEntries.push({ jobId: s.jobId, question: s.question, label: s.label, title: s.title, url: s.url, threadId: s.threadId, attempts: s.attempts, firstSeen: s.firstSeen, submittedAt: nowIso });
+      newEntries.push({ jobId: s.jobId, question: s.question, label: s.label, title: s.title, url: s.url, threadId: s.threadId, gmailId: s.gmailId, attempts: s.attempts, firstSeen: s.firstSeen, submittedAt: nowIso });
       pendingFollowUpQuestions.push(s.question);
     }
   }
   await saveLedger(LEDGER_PATH, { entries: newEntries });
   console.log(`[gap-dive] done. resolved=${resolvedFollowUps.length} pending=${pendingFollowUpQuestions.length} ledger=${newEntries.length}.`);
-}
-
-/** Stamp gmail_id/labels/email_date onto the curator-written sources (commit only). */
-async function stampGmailMetadata(
-  sourceIds: Array<string | null>,
-  email: { gmailId: string; gmailThreadId: string; emailDate: string; gmailLabels: string[] },
-): Promise<boolean> {
-  const ids = sourceIds.filter((x): x is string => !!x);
-  if (ids.length === 0) return false;
-  const patch = {
-    gmail_id: email.gmailId, gmail_thread_id: email.gmailThreadId,
-    gmail_labels: email.gmailLabels, email_date: email.emailDate, enriched_via: "daily-digest-link-enrich",
-  };
-  let ok = true;
-  for (const id of ids) {
-    try { if (!(await brain.mergeSourceMetadata(id, patch))) ok = false; }
-    catch (err) { console.warn(`      (gmail-stamp failed for source ${id}: ${err})`); ok = false; }
-  }
-  return ok;
 }
 
 /** Write the email-enrichment artifact for the digest. The email is SHORT (a
@@ -1005,41 +1060,31 @@ async function generateAudio(ep: Episode, team: Team | null): Promise<Voiced | n
   );
 }
 
-/** Loop-close (commit only) — ingest the episode as a `podcast_transcript`
- *  source and link it to every thread the day's research resolved to. Closes
- *  the research loop back into the brain (P4.2/4.3). Best-effort. */
-async function closeLoop(ep: Episode, audioUrl: string | null) {
-  const tids = [...threadIds];
-  console.log(`[link-enrich] 🔗 loop-close: ingesting episode + linking to ${tids.length} thread(s)…`);
-  try {
-    const rows = await brain.rpc<Array<{ id: string; was_duplicate: boolean }>>("find_or_create_source", {
-      p_url: audioUrl ?? `podcast://episode/${ep.name}`,
-      p_content: ep.script,
-      p_title: ep.title,
-      p_content_type: "podcast_transcript",
-      p_metadata: {
-        source: "daily-digest-podcast",
-        episode: ep.name,
-        episode_number: ep.number,
-        audio_url: audioUrl,
-        date: report.generatedAt.slice(0, 10),
-      },
-    });
-    const sourceId = rows?.[0]?.id;
-    if (!sourceId) { console.warn("[link-enrich] loop-close: find_or_create_source returned no id"); return; }
-    let linked = 0;
-    for (const tid of tids) {
-      try {
-        await brain.rpc("link_source_to_thread", {
-          p_thread_id: tid, p_source_id: sourceId,
-          p_link_type: "deliberate", p_reason: `daily podcast ${ep.name}`, p_status: "confirmed",
-        });
-        linked++;
-      } catch (e) { console.warn(`[link-enrich]   link thread ${tid.slice(0, 8)} failed: ${e}`); }
+/** Loop-close (rw-boundary-digest, plan 09 2.5 P6). The episode is the USER's: on commit its script goes on the
+ *  owner's own episode row (podcast_episodes.transcript - private to owner_sub, shared false), and the day's derived
+ *  jobs are recorded on their PRIVATE hand-backs - delivered or failed, with the episode they fed and the thread each
+ *  resolved to. No shared sources row, no thread link: the old `podcast_transcript` source carried the Gmail label
+ *  names and subjects into the shared store. A dry run records the hand-backs too (nothing canonical, no episode).
+ *  Best-effort: a failure here never costs the email. */
+async function closeLoop(ep: Episode | null, voiced: Voiced | null) {
+  let episodeId: string | null = null;
+  if (COMMIT && ep && voiced?.episodeRowId) {
+    try {
+      if (await presenterStore.setTranscript(voiced.episodeRowId, PODCAST_OWNER_SUB, ep.script)) episodeId = voiced.episodeRowId;
+      else console.warn(`[link-enrich] loop-close: the episode row ${voiced.episodeRowId.slice(0, 8)} took no transcript`);
+    } catch (err) {
+      console.warn(`[link-enrich] loop-close: storing the transcript failed (best-effort): ${err}`);
     }
-    console.log(`[link-enrich] 🔗 episode source ${sourceId.slice(0, 8)} linked into ${linked}/${tids.length} thread(s).`);
+  } else if (COMMIT && ep) {
+    console.log("[link-enrich] loop-close: no voiced episode row - the script stays in the private reports folder only.");
+  }
+  const list = [...deliveries.values()].map((d) => ({ ...d, episodeId: d.ok ? episodeId : null }));
+  if (!list.length) return;
+  try {
+    const n = await research.delivered(list);
+    console.log(`[link-enrich] 🔗 loop-close: ${n}/${list.length} hand-back(s) recorded${episodeId ? ` with episode ${episodeId.slice(0, 8)}` : ""}${ep ? "" : " (no episode)"}.`);
   } catch (err) {
-    console.warn(`[link-enrich] loop-close failed (best-effort): ${err}`);
+    console.warn(`[link-enrich] loop-close: recording the hand-backs failed (best-effort): ${err}`);
   }
 }
 

@@ -23,7 +23,8 @@
 import { LEXICON_COUNT, LEXICON_SHA256, LEXICON_SOURCE, LEXICON_WORDS } from "./boundary-lexicon.ts";
 
 /** Bumped on any change to the rules here; every verdict records it. */
-export const BOUNDARY_VERSION = "pd0a-2";
+// pd0c-1 (rw-boundary-digest round 2): the private-host list gained the meeting / invite / share-link rule (shareLink)
+export const BOUNDARY_VERSION = "pd0c-1";
 export const COPY_RUN = 4;
 export const MIN_TOKENS = 3;
 export const MAX_TOKENS = 60;
@@ -262,7 +263,62 @@ export function privateHost(u: URL): boolean {
   if (ipv4Private(h)) return true;
   if (h === "mail.google.com" || h.startsWith("accounts.") || h === "myaccount.google.com") return true;
   if ((h === "google.com" || h.endsWith(".google.com")) && GOOGLE_PRIVATE_PATHS.test(u.pathname)) return true;
+  if (shareLink(h, u.pathname)) return true;
   return PRIVATE_HOST_SUFFIXES.some((s) => h === s.slice(1) || h.endsWith(s));
+}
+
+// ── rw-boundary-digest round 2 (tester F1): meeting, invite and share links ────────────────────────
+// A link that opens a MEETING, a shared FILE or a personal page is the user's, not a public page: its code (a Meet
+// code is letters and hyphens - not id-shaped) would become a shared job, a shared sources.url and a second user's
+// read. Rules first, lists for the hosts no rule reaches. Versioned with BOUNDARY_VERSION; a URL here is never public.
+/** Hosts whose EVERY page is the user's (meeting rooms, file drops, personal pages, booking pages, workspace apps). */
+const SHARE_HOSTS = [
+  "meet.google.com", "drive.google.com", "docs.google.com", "sites.google.com", "calendar.google.com", "chat.google.com",
+  "hangouts.google.com", "keep.google.com", "photos.google.com", "contacts.google.com", "classroom.google.com",
+  "jamboard.google.com", "script.google.com", "lookerstudio.google.com", "datastudio.google.com", "groups.google.com",
+  "forms.gle", "goo.gl", "photos.app.goo.gl", "meet.goto.com", "global.gotomeeting.com", "app.gotomeeting.com", "gotomeet.me",
+  "whereby.com", "meet.jit.si", "teams.live.com", "chime.aws", "bluejeans.com",
+  "dl.dropboxusercontent.com", "1drv.ms", "onedrive.live.com", "we.tl", "wetransfer.com", "mega.nz", "drive.proton.me",
+  "docsend.com", "icloud.com", "www.icloud.com", "forms.office.com", "forms.microsoft.com", "calendly.com", "cal.com",
+  "notion.site", "docs.zoho.com", "docs.zoho.eu", "workdrive.zoho.com", "workdrive.zoho.eu", "sharepoint.com",
+];
+/** Host suffixes whose every page is the user's (tenant subdomains). */
+const SHARE_SUFFIXES = [".sharepoint.com", ".notion.site", ".slack.com", ".my.webex.com", ".whereby.com"];
+/** host (suffix match) + a path that is a meeting / share / file / invite. */
+const SHARE_PATHS: Array<[string, RegExp]> = [
+  ["zoom.us", /^\/(j|my|w|s|wc|rec|meeting|webinar)\//i], ["zoom.com", /^\/(j|my|w|s|wc|rec|meeting|webinar)\//i],
+  ["zoomgov.com", /^\/(j|my|w|s|wc|rec)\//i],
+  ["teams.microsoft.com", /^\/(l\/(meetup-join|meetup|chat|channel|team|file|message|entity)|meet)\b/i],
+  ["webex.com", /^\/(meet|join|wbxmjs|m|webappng|mw3300)\b/i],
+  ["gotomeeting.com", /^\/(join|meeting)\b/i], ["goto.com", /^\/(join|meeting)\b/i],
+  ["dropbox.com", /^\/(s|scl|sh|t|l|request|transfer|preview)\//i], ["box.com", /^\/(s|file|folder|v|notes)\//i],
+  ["airtable.com", /^\/(shr|app|embed|invite)/i], ["notion.so", /^\/./], ["figma.com", /^\/(file|design|board|proto|deck|slides)\//i],
+  ["miro.com", /^\/(app|welcomeonboard)\//i], ["loom.com", /^\/(share|embed)\//i], ["trello.com", /^\/(b|c|invite)\//i],
+  ["discord.gg", /^\/./], ["discord.com", /^\/invite\//i], ["zoho.com", /^\/(file|folder|meeting|meet)\b/i],
+  ["office.com", /^\/(r|x|w|p|o|e)\//i], ["live.com", /^\/(redir|embed|edit)\b/i],
+];
+/** A path segment that hands out access (the rule for the hosts no list reaches): a share / invite / join segment
+ *  followed by another segment, or a Meet-shaped code (xxx-xxxx-xxx). */
+const SHARE_SEGMENT = /^(share|shared|sharing|invite|invitation|join|meeting|meetings|meetup-join)$/i;
+const MEET_CODE = /^[a-z]{3}-[a-z]{4}-[a-z]{3}$/i;
+
+export function shareLink(host: string, path: string): boolean {
+  const h = host.toLowerCase().replace(/\.+$/, "");
+  const bare = h.replace(/^www\./, "");
+  if (SHARE_HOSTS.includes(h) || SHARE_HOSTS.includes(bare)) return true;
+  if (SHARE_SUFFIXES.some((s) => h.endsWith(s))) return true;
+  // a meeting host by its first label (meet.<anything>, meeting(s).<anything>, join.<anything>)
+  if (/^(meet|meeting|meetings|join|video|conference|conf)\./.test(bare)) return true;
+  for (const [suffix, rx] of SHARE_PATHS) if ((bare === suffix || bare.endsWith("." + suffix)) && rx.test(path)) return true;
+  // Google's own share shapes on any google host: /file/, /open (?id= is dropped with the query), /folders/, /share
+  if ((bare === "google.com" || bare.endsWith(".google.com")) && /^\/(file|open|folders|uc|share|a\/[^/]+\/(file|open))(\/|$)/i.test(path)) return true;
+  const segs = path.split("/").filter(Boolean).map((x) => safeDecode(x) ?? x);
+  for (let i = 0; i < segs.length; i++) {
+    if (MEET_CODE.test(segs[i])) return true;
+    if (SHARE_SEGMENT.test(segs[i]) && i + 1 < segs.length) return true;
+    if (/\.ics$/i.test(segs[i])) return true;   // a calendar file
+  }
+  return false;
 }
 
 /** A path that carries a per-recipient token (unsubscribe, preferences, view-in-browser, `/p/<token>`, a segment

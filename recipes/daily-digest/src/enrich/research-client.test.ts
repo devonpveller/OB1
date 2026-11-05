@@ -3,7 +3,7 @@
 // WHY: on 2026-10-13 link-enrich gave up on research jobs after its deadline but
 // never told the engine, so every abandoned job kept its FIFO place and ran
 // ~77 minutes for nobody. waitForDone now CANCELS its job at its own deadline,
-// submit() carries the caller's deadline to the engine, and a deadline error says
+// submitDerived() (rw-boundary-digest; was submit()) carries the caller's deadline to the engine, and a deadline error says
 // whether the model was down - the signal mr-routine-outage acts on.
 //
 // The real ResearchClient against a real stub research-service over HTTP. The
@@ -24,7 +24,14 @@ function stubEngine(job: (n: number, cancelSeen: boolean) => Partial<JobRecord>,
     const path = new URL(req.url).pathname;
     const body = req.method === "POST" ? await req.json().catch(() => null) : null;
     seen.push({ method: req.method, path, body });
-    if (req.method === "POST" && path === "/research") return Response.json({ job_id: ID, status: "queued" }, { status: 202 });
+    if (req.method === "POST" && path === "/research/derived") {
+      // rw-boundary-digest: the door answers a job or a refusal
+      if ((body as { item?: { id?: string } } | null)?.item?.id === "refuse-me") return Response.json({ refused: "no_candidate_passed", handback_id: "h1" });
+      return Response.json({ job_id: ID, status: "queued" }, { status: 202 });
+    }
+    if (req.method === "POST" && path === "/research/derived/delivered") {
+      return Response.json({ delivered: ((body as { deliveries?: unknown[] } | null)?.deliveries ?? []).length });
+    }
     if (req.method === "POST" && path.endsWith("/cancel")) {
       if (cancelAnswer === "filing") return Response.json({ job_id: ID, status: "running", filing: true }, { status: 409 });
       return Response.json({ job_id: ID, status: cancelAnswer });
@@ -87,15 +94,32 @@ Deno.test("the job finished between the last poll and the cancel: its result is 
   } finally { await e.close(); }
 });
 
-Deno.test("submit carries the caller deadline as ISO deadline_at; omitted when not given", async () => {
+const ITEM = { kind: "gmail" as const, id: "g1:abc", owner_sub: "operator", fields: { subject: "s" }, links: ["https://example.org/a"] };
+
+Deno.test("submitDerived carries the caller deadline as ISO run.deadline_at; omitted when not given", async () => {
   const e = stubEngine(() => ({ status: "done" }));
   try {
     const at = Date.UTC(2026, 9, 13, 12);
-    await e.client.submit({ query: "q", deadlineAt: at });
-    await e.client.submit({ query: "q" });
-    const posts = e.seen.filter((s) => s.path === "/research");
-    assertEquals(posts[0].body?.deadline_at, "2026-10-13T12:00:00.000Z");
-    assertEquals("deadline_at" in (posts[1].body ?? {}), false);
+    await e.client.submitDerived({ item: ITEM, purpose: "digest-article", deliver: {}, mode: "article", gapResearch: "preliminary", deadlineAt: at });
+    await e.client.submitDerived({ item: ITEM, purpose: "digest-gap", deliver: {} });
+    const posts = e.seen.filter((s) => s.path === "/research/derived");
+    assertEquals(posts[0].body?.run, { mode: "article", gap_research: "preliminary", deadline_at: "2026-10-13T12:00:00.000Z" });
+    assertEquals(posts[1].body?.run, {});
+  } finally { await e.close(); }
+});
+
+Deno.test("rw-boundary-digest: submitDerived sends no query, seed content or thread id - and a refusal is an answer, not an error", async () => {
+  const e = stubEngine(() => ({ status: "done" }));
+  try {
+    assertEquals(await e.client.submitDerived({ item: ITEM, purpose: "digest-article", deliver: { gmail_id: "g1" }, dryRun: true }), { jobId: ID });
+    const body = e.seen.find((s) => s.path === "/research/derived")!.body!;
+    assertEquals(Object.keys(body).sort(), ["deliver", "item", "purpose", "run"]);
+    assertEquals(body.run, { dry_run: true });
+    assertEquals(await e.client.submitDerived({ item: { ...ITEM, id: "refuse-me" }, purpose: "digest-gap", deliver: {} }), { refused: "no_candidate_passed", handbackId: "h1" });
+    assertEquals(await e.client.delivered([{ jobId: ID, ok: true, episodeId: ID, threadId: null }, { jobId: ID, ok: false }]), 2);
+    const d = e.seen.find((s) => s.path === "/research/derived/delivered")!.body!;
+    assertEquals(d.deliveries, [{ job_id: ID, ok: true, episode_id: ID }, { job_id: ID, ok: false }]);
+    assertEquals(e.seen.filter((s) => s.path === "/research").length, 0, "never the old door");
   } finally { await e.close(); }
 });
 
@@ -142,7 +166,7 @@ Deno.test("a job already FILING (engine answers 409) is awaited and its real 'do
 Deno.test("deadlineAt that looks like epoch SECONDS is refused before anything is sent", async () => {
   const e = stubEngine(() => ({ status: "done" }));
   try {
-    await assertRejects(() => e.client.submit({ query: "q", deadlineAt: Math.floor(Date.now() / 1000) + 3600 }), Error, "SECONDS");
-    assertEquals(e.seen.filter((s) => s.path === "/research").length, 0);
+    await assertRejects(() => e.client.submitDerived({ item: ITEM, purpose: "digest-article", deliver: {}, deadlineAt: Math.floor(Date.now() / 1000) + 3600 }), Error, "SECONDS");
+    assertEquals(e.seen.filter((s) => s.path.startsWith("/research")).length, 0);
   } finally { await e.close(); }
 });
