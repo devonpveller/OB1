@@ -263,11 +263,21 @@ async function caseOwner() {
       const r = await call(REST, "POST", `/rpc/${f.name}`, { token: RED ? undefined : tok, body });
       result("4-owner", refused(r), `${RED ? "anonymous" : key} rpc/${f.name}(p_owner = the operator) -> ${r.status} ${r.text.slice(0, 100)}`);
     }
-    for (const rel of cat.privateRels) {
+    // a private relation a caller legitimately reads (the podcast's presenter model, owner-stamped) is its own case 2;
+    // here every OTHER one must be refused to that token
+    const mine = new Set(RED ? [] : (cat.allowed[cfg.roles[key] ?? "ob_rest_digest"]?.relations ?? []));
+    for (const rel of cat.privateRels.filter((r) => !mine.has(r))) {
       const r = await call(REST, "GET", `/${rel}?limit=5`, { token: RED ? undefined : tok });
       result("4-owner", refused(r), `${RED ? "anonymous" : key} GET ${rel} -> ${r.status} ${r.text.slice(0, 100)}`);
     }
     if (RED) break;
+  }
+  // a caller that reads thoughts sees the ops plane only: the operator's personal (owner-stamped) thought is not in it
+  if (!RED) {
+    for (const key of ["WIKI", "ENTITY", "DIGEST", "PODCAST", "GMAIL_PULL", "GMAIL_PRUNE"]) {
+      const r = await call(REST, "GET", "/thoughts?select=id,exposure&user_id=not.is.null&exposure=neq.ops", { token: T[key] });
+      result("4-owner", okish(r) && Array.isArray(r.json) && r.json.length === 0, `${key} reads no personal owner-stamped thought: ${r.status} ${r.text.slice(0, 80)}`);
+    }
   }
   // and the owner-stamped thought is not readable without a credential (rw-inlet-owner finding 2's class)
   const st = await call(REST, "GET", "/thoughts?select=id&user_id=not.is.null");

@@ -273,9 +273,16 @@ SELECT json_build_object(
   'functions', (SELECT json_agg(json_build_object('name', proname, 'args', args, 'nargs', nargs) ORDER BY proname) FROM fns),
   'ownerFns', (SELECT json_agg(json_build_object('name', proname, 'args', args) ORDER BY proname) FROM fns
                 WHERE ident ~* '\m(p_owner|p_owner_sub|p_sub|p_user_id|p_requester)\M' OR proname IN ('research_job_report_owner', 'setting_get', 'setting_problem', 'user_setting_set')),
-  'privateRels', (SELECT json_agg(relname ORDER BY relname) FROM rels WHERE relname IN ('ideas', 'idea_revisions', 'idea_schedule', 'user_settings', 'research_handbacks',
-                  'research_private_reports', 'research_private_report_claims', 'user_document_listings', 'workspace_rooms', 'workspace_room_entries',
-                  'workspace_users', 'workspace_impersonation', 'refinery_user_sources', 'idea_thought_archive', 'idea_wiki_archive', 'admin_audit', 'held_sources')),
+  -- private: every relation that records whose a row is (an owner / requester / actor / user column), plus the stores of
+  -- private material that carry no such column - generated, so a slot that adds an owner-stamped table is covered
+  'privateRels', (SELECT json_agg(relname ORDER BY relname) FROM rels WHERE relname IN (
+                  SELECT c.relname FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+                   WHERE c.relnamespace = 'public'::regnamespace AND a.attnum > 0 AND NOT a.attisdropped
+                     AND a.attname IN ('owner_sub', 'requester_sub', 'actor_sub', 'user_id', 'owner')
+                  UNION SELECT unnest(ARRAY['ideas', 'idea_revisions', 'idea_schedule', 'user_settings', 'research_private_reports',
+                  'research_private_report_claims', 'user_document_listings', 'workspace_rooms', 'workspace_room_entries',
+                  'workspace_users', 'workspace_impersonation', 'refinery_user_sources', 'idea_thought_archive', 'idea_wiki_archive',
+                  'admin_audit', 'held_sources']))),
   'allowed', (SELECT COALESCE(json_object_agg(d.rolname, json_build_object(
                 'relations', (SELECT COALESCE(json_agg(relname ORDER BY relname), '[]') FROM rels WHERE has_table_privilege(d.rolname, ('public.' || quote_ident(relname))::regclass, 'SELECT')),
                 'functions', (SELECT COALESCE(json_agg(DISTINCT p.proname), '[]') FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND has_function_privilege(d.rolname, p.oid, 'EXECUTE')))), '{}') FROM door d)
