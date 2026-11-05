@@ -173,6 +173,15 @@ function DoorCaddy {
   $line = (($o -split "`n") | Where-Object { $_ -match '^DOOR ' } | Select-Object -Last 1)
   if ($line -match '^DOOR 401 credentials required') { return 'new' } elseif ($line) { return "old ($($line.Substring(5)))" } else { return "unknown ($o)" }
 }
+function WaitDoor([string]$why) {
+  # PostgREST loads its schema cache after a (re)start (503 PGRST002 meanwhile): wait for the door to answer anything else
+  for ($i = 0; $i -lt 60; $i++) {
+    $o = Dk exec (Ctr 'openbrain-wiki-viewer') node -e "fetch('http://openbrain-rest/rest/v1/wiki_pages?limit=0').then(r=>console.log('READY '+r.status)).catch(()=>console.log('READY 0'))"
+    if ($o -match 'READY (\d+)' -and $Matches[1] -ne '503' -and $Matches[1] -ne '0' -and $Matches[1] -ne '502') { return }
+    Start-Sleep -Seconds 1
+  }
+  Note "${why}: the door did not settle in 60 s"
+}
 function Psql-File([string]$path) {
   $db = Ctr 'openbrain-db'
   $null = Dk cp $path "${db}:/tmp/step.sql"
@@ -183,6 +192,7 @@ function Step([string]$name, [scriptblock]$do, [string[]]$expectRecreated, [stri
   $before = Snap
   & $do
   Start-Sleep -Seconds 3
+  WaitDoor $name
   $after = Snap
   $rec = Recreated $before $after
   Note "$name recreated: [$($rec -join ', ')]$(if ($rec.Count) { ' hashes ' + (($rec | ForEach-Object { "$_ $($before[$_].hash.Substring(0, [Math]::Min(8, "$($before[$_].hash)".Length)))->$($after[$_].hash.Substring(0, 8))" }) -join ' ') })"
@@ -210,6 +220,7 @@ try {
   for ($i = 0; $i -lt 90; $i++) { if ((Dk logs (Ctr 'openbrain-db')) -match 'database system is ready to accept connections' -and (Dk logs (Ctr 'openbrain-db')) -match 'PostgreSQL init process complete') { break }; Start-Sleep -Seconds 2 }
   Start-Sleep -Seconds 5
   $null = Psql-File (Join-Path $ct 'rest-door-fixtures.sql')
+  WaitDoor 'A'
   $s0 = Snap
   $dbIdStart = $s0['openbrain-db'].id
   Note "A containers: $(($s0.Keys | Sort-Object | ForEach-Object { "$_=$($s0[$_].id.Substring(0,12))" }) -join ' ')"
