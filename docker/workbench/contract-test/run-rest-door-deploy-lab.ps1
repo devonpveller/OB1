@@ -144,7 +144,10 @@ const t = (process.env.OPEN_BRAIN_REST_TOKEN || process.env.OPEN_BRAIN_SERVICE_K
 const base = (process.env.OPEN_BRAIN_URL || process.env.BRAIN_REST_URL || process.env.SUPABASE_URL || "http://openbrain-rest").replace(/\/+$/, "");
 const h = { apikey: "local-trust" };
 if (t) h.authorization = "Bearer " + t;
-fetch(base + process.argv[1], { headers: h }).then(async (r) => { const b = await r.text(); console.log("CALLER " + r.status + " " + (r.ok ? "ok" : b.slice(0, 120).replace(/\s+/g, " "))); })
+// argv[2]: the path (argv[1] is this script). "ok" only for a PostgREST answer - a JSON array - so Caddy's own text
+// (its catch-all 200) can never pass for a caller's read
+fetch(base + process.argv[2], { headers: h }).then(async (r) => { const b = await r.text(); const rows = r.ok && b.trim().startsWith("[");
+  console.log("CALLER " + r.status + " " + (rows ? "ok" : b.slice(0, 120).replace(/\s+/g, " "))); })
   .catch((e) => console.log("CALLER 0 " + e.message));
 '@
 [System.IO.File]::WriteAllText((Join-Path $work 'caller.js'), $probeJs, (New-Object System.Text.UTF8Encoding $false))
