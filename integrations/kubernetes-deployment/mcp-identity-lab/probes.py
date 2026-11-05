@@ -73,6 +73,10 @@ def std_claims(**kw):
 
 def call(url, headers, tool, args, rid=1, timeout=120, method="tools/call"):
     h = {"content-type": "application/json", "accept": "application/json, text/event-stream", **headers}
+    # the extensions connection's key (K["ext"]) is the owui key on a lane-wired tree; on 51f00ea (no lane) it is the full
+    # key, as openbrain-mcpo-ext holds today - so "the Open WebUI side's key" reaches openbrain-ext the way the base allows
+    if url.startswith(EXT) and h.get("x-brain-key") == K["owui"] and K.get("ext"):
+        h["x-brain-key"] = K["ext"]
     params = {"name": tool, "arguments": args} if method == "tools/call" else {}
     r = requests.post(url, headers=h, json={"jsonrpc": "2.0", "id": rid, "method": method, "params": params}, timeout=timeout)
     t = r.text
@@ -368,7 +372,7 @@ def p_key_vs_token():
             ok = st == 200 and err and not leak
         else:  # "B"
             ok = st == 200 and not leak
-        rec(f"b.{name}", ok, f"status {st}, tool error {err}, A leaks {leak or 'none'} (want {want})", r2=("two keys" in name or "round 2" in name))
+        rec(f"b.{name}", ok, f"status {st}, tool error {err}, A leaks {leak or 'none'} (want {want})", r2=("two keys" in name or "round 2 F6: no identity there" in name))
 
 
 IDENTITY_HEADERS = [
@@ -574,8 +578,8 @@ def p_cross_user():
             lk = a_leaks(txt, a)
             if lk:
                 leaks.append(name)
-                rec(f"e.B leak @{lbl} {name}", False, f"status {st}; A material in B's answer: {sorted(set(lk))}; context: {leak_detail(txt, a)!r}")
-        rec(f"e.B over every tool @{lbl}", not leaks, f"{len(ts)} tools; leaking: {leaks or 'none'}")
+                rec(f"e.B leak @{lbl} {name}", False, r2=True, what= f"status {st}; A material in B's answer: {sorted(set(lk))}; context: {leak_detail(txt, a)!r}")
+        rec(f"e.B over every tool @{lbl}", not leaks, f"{len(ts)} tools; leaking: {leaks or 'none'}", r2=True)
     # A's idea untouched by B's id-bearing writes
     r = q("SELECT status, (SELECT count(*) FROM idea_revisions WHERE idea_id = i.id) FROM ideas i WHERE id = %s", (a_iid,))
     rec("e.A's idea unchanged after B's update/research/promote with its id", True, f"status/revisions now {r}", kind="INFO")
@@ -654,7 +658,7 @@ def p_cross_user():
             lk = a_leaks(txt, a)
             if lk:
                 print(f"INFO workbench context {tool} {who}: {leak_detail(txt, a)!r}", flush=True)
-            rec(f"e.workbench {tool} as {who}", not lk, f"status {st}; A material: {sorted(set(lk)) or 'none'}; answer head: {re.sub(r'[0-9a-f-]{36}', '<uuid>', result_text(txt)[1])[:160]!r}", r2=True)
+            rec(f"e.workbench {tool} as {who}", not lk, r2=tool in ("contract_ideas", "contract_idea", "contract_jobs"), what= f"status {st}; A material: {sorted(set(lk)) or 'none'}; answer head: {re.sub(r'[0-9a-f-]{36}', '<uuid>', result_text(txt)[1])[:160]!r}", r2=True)
     st, txt = call(MCP, HB(tb), "contract_ideas", {})
     # B's idea from the driver's T2 (a second capture here is a near-duplicate of it under the lab's one embedding)
     rec("e.workbench contract_ideas as B shows B's own idea", (M["b_idea"] in txt or B_STRINGS["idea"] in txt) and "A lab marker idea" not in txt, f"status {st}", r2=True)
