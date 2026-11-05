@@ -970,8 +970,11 @@ try {
       $redR1 = [string]$script:lastInlet
       # (the manifest case reads the query the new wiki-service issues, so it holds on round 1's data too: its RED is the
       # compile step's, below)
-      $r1Fails = @('round 2 \(tester 2, 5\)', 'round 2 \(tester 4, 6\)', 'user B reads no marker') | Where-Object { $redR1 -match ($_ + '[^\n]*\.\.\. FAILED') }
-      Check ($pvRc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'FAILED' -and $r1Fails.Count -eq 3 -and $redR1 -match "B's reads with a personal marker: [1-9][^\n]*contract session") "[5r] RED: round 1's migration ($InletPrevSha) - B still reads the service-owned job's markers, the functions answer PostgREST's anon role, the link and text variants pass ($($s.Value))"
+      # (since rw-boundary-core (slot 420) the workbench's session reads redact an unclassified / service-key job for a
+      # non-owner, so on this integrated base B's WORKBENCH reads no longer show round 1's leftovers; the shared rows - what
+      # the research service reads - still carry them: the round-3 case fails on them)
+      $r1Fails = @('round 2 \(tester 2, 5\)', 'round 2 \(tester 4, 6\)', 'round 3 \(tester attempt 2, P1b\)') | Where-Object { $redR1 -match ($_ + '[^\n]*\.\.\. FAILED') }
+      Check ($pvRc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'FAILED' -and $r1Fails.Count -eq 3 -and $redR1 -match 'seeded-tree shared rows carrying the seed body.s text: [1-9]') "[5r] RED: round 1's migration ($InletPrevSha) - the functions answer PostgREST's anon role, the link and text variants pass, the seeded trees' shared rows keep the seed body's text ($($s.Value))"
       $null = & $inBack
       $pvRevRc = & $inPsql $pvR "round 1 revert ($InletPrevSha)" @()
       $s = & $inPhase 'reverted' 'inlet-after-round1-revert.log'
@@ -987,7 +990,7 @@ try {
       $null = & $inOut
       $s = & $inPhase 'migrated' 'inlet-red-round2.log'
       $redR2 = [string]$script:lastInlet
-      Check ($p2Rc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'FAILED' -and $redR2 -match 'round 3 \(tester attempt 2, P1b\)[^\n]*\.\.\. FAILED' -and $redR2 -match 'round 2 \(tester 2, 5\)[^\n]*\.\.\. ok' -and $redR2 -match 'round 2 \(tester 4, 6\)[^\n]*\.\.\. ok' -and $redR2 -match "B's reads with a personal marker: [1-9][^\n]*body-seeded") "[5r] RED: round 2's migration ($InletPrev2Sha) - the derived text of a tree seeded with an email body or a podcast transcript survives where B reads it (the seed-body case fails; the round-2 cases pass) ($($s.Value))"
+      Check ($p2Rc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'FAILED' -and $redR2 -match 'round 3 \(tester attempt 2, P1b\)[^\n]*\.\.\. FAILED' -and $redR2 -match 'round 2 \(tester 2, 5\)[^\n]*\.\.\. ok' -and $redR2 -match 'round 2 \(tester 4, 6\)[^\n]*\.\.\. ok' -and $redR2 -match 'seeded-tree shared rows carrying the seed body.s text: [1-9]') "[5r] RED: round 2's migration ($InletPrev2Sha) - the derived text of a tree seeded with an email body or a podcast transcript survives in the shared rows every reader reads (the seed-body case fails; the round-2 cases pass) ($($s.Value))"
       $null = & $inBack
       $p2RevRc = & $inPsql $p2R "round 2 revert ($InletPrev2Sha)" @()
       $s = & $inPhase 'reverted' 'inlet-after-round2-revert.log'

@@ -3,6 +3,9 @@
 // plus the reader's own. This server's lanes have one subject: the operator's (WORKSPACE_DEFAULT_SUB, blank =
 // "operator", the identity seam's placeholder - the same rule as idea-tools.ts), so on today's single-user stack it reads
 // what it read before. A lane that one day carries another user reads shared rows plus theirs, never the operator's.
+// THE ONE PLACE the lane's subject is decided for every thought read (index.ts calls only thoughtReader(); a source check
+// in thought-owner.test.ts refuses a read without the clause). rw-mcp-identity replaces this function's body with the
+// request's per-user subject; nothing else in index.ts names a subject for a thought read.
 import { ideaOwner } from "./idea-tools.ts";
 
 export function thoughtReader(get: (k: string) => string | undefined = (k) => Deno.env.get(k)): string {
