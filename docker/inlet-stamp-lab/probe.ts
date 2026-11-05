@@ -54,6 +54,48 @@ const importA = await jwt({ role: "ob_rest_import", sub: A });
 await w("import token for A, a row with B's user_id", "thoughts", thought({ user_id: B }, { source: "chatgpt" }), importA);
 await w("import token for A, a row naming B's connection", "thoughts", thought({ user_id: B }, { source: "gmail", gmail_id: `p-${TAG}-9`, inlet_connection: "gmail-b" }), importA);
 await w("import token for A, A's own row (control)", "thoughts", thought({ user_id: A }, { source: "chatgpt" }), importA);
+
+// round 2 (tester attempt 1, F1): every UPDATE is judged on the NEW row in full - PATCH through PostgREST as a door
+// caller (a lab stand-in for 450's wiki role, verified subject A) and as PostgREST's anonymous role. Each case starts
+// from a row of its own (created as the superuser-free anonymous role or the door role, as noted), then PATCHes it.
+const wikiA = await jwt({ role: "ob_rest_wiki", sub: A });
+const DOSSIER = { type: "dossier", generated_by: "recipes/entity-wiki/generate-wiki.mjs" };
+async function mk(row: Record<string, unknown>, token?: string): Promise<number | null> {
+  const r = await fetch(`${token ? REST_DIRECT : REST}/thoughts`, { method: "POST", headers: token ? { ...H, Authorization: `Bearer ${token}` } : H, body: JSON.stringify(row) });
+  const t = await r.text();
+  try { return (JSON.parse(t)[0] ?? {}).id ?? null; } catch { return null; }
+}
+async function patch(id: number | null, body: Record<string, unknown>, token?: string) {
+  const r = await fetch(`${token ? REST_DIRECT : REST}/thoughts?id=eq.${id}`, { method: "PATCH", headers: token ? { ...H, Authorization: `Bearer ${token}` } : H, body: JSON.stringify(body) });
+  const t = await r.text();
+  return { status: r.status, refused: /inlet stamp/.test(t), changed: /"id"/.test(t) };
+}
+const updates: Record<string, { status: number; refused: boolean; changed: boolean }> = {};
+const u = async (name: string, start: Record<string, unknown>, body: Record<string, unknown>, token?: string) => {
+  const id = await mk(start, token);
+  updates[name] = id === null ? { status: 0, refused: false, changed: false } : await patch(id, body, token);
+};
+const g = (m: Record<string, unknown>) => ({ source: "gmail", gmail_id: `u-${TAG}-${Math.random().toString(36).slice(2, 8)}`, ...m });
+for (const [who, tok] of [["anon", undefined], ["door wiki A", wikiA]] as const) {
+  // from the dossier (the one unowned row)
+  await u(`${who}: dossier -> unowned gmail naming gmail`, thought({}, DOSSIER), { user_id: null, metadata: { exposure: "ops", ...g({ inlet_connection: "gmail" }) } }, tok);
+  await u(`${who}: dossier -> B naming gmail (A's connection)`, thought({}, DOSSIER), { user_id: B, metadata: { exposure: "ops", ...g({ inlet_connection: "gmail" }) } }, tok);
+  await u(`${who}: dossier -> unowned mcp row`, thought({}, DOSSIER), { metadata: { exposure: "ops", source: "mcp" } }, tok);
+  await u(`${who}: dossier -> dossier (control)`, thought({}, DOSSIER), { metadata: { exposure: "ops", ...DOSSIER, wiki_slug: `u-${TAG}` } }, tok);
+  await u(`${who}: dossier -> A naming gmail (control)`, thought({}, DOSSIER), { user_id: A, metadata: { exposure: "ops", ...g({ inlet_connection: "gmail" }) } }, tok);
+  // from a personal owned row
+  await u(`${who}: A gmail/gmail -> connection dropped`, thought({ user_id: A }, g({ inlet_connection: "gmail" })), { metadata: { exposure: "ops", ...g({}) } }, tok);
+  await u(`${who}: A gmail/gmail -> connection gmail-b (B's)`, thought({ user_id: A }, g({ inlet_connection: "gmail" })), { metadata: { exposure: "ops", ...g({ inlet_connection: "gmail-b" }) } }, tok);
+  await u(`${who}: A gmail/gmail -> owner B`, thought({ user_id: A }, g({ inlet_connection: "gmail" })), { user_id: B }, tok);
+  await u(`${who}: A gmail/gmail -> owner cleared`, thought({ user_id: A }, g({ inlet_connection: "gmail" })), { user_id: null }, tok);
+  await u(`${who}: A gmail/gmail -> dossier, unowned`, thought({ user_id: A }, g({ inlet_connection: "gmail" })), { user_id: null, metadata: { exposure: "ops", ...DOSSIER } }, tok);
+  await u(`${who}: A gmail/gmail -> content only (control)`, thought({ user_id: A }, g({ inlet_connection: "gmail" })), { content: `edited ${TAG}` }, tok);
+  await u(`${who}: A mcp (no connection) -> owner B`, thought({ user_id: A }, { source: "mcp" }), { user_id: B }, tok);
+  await u(`${who}: A mcp (no connection) -> names gmail-b (B's)`, thought({ user_id: A }, { source: "mcp" }), { metadata: { exposure: "ops", source: "mcp", inlet_connection: "gmail-b" } }, tok);
+  await u(`${who}: A mcp (no connection) -> metadata only (control)`, thought({ user_id: A }, { source: "mcp" }), { metadata: { exposure: "ops", source: "mcp", topics: ["x"] } }, tok);
+}
+// a door caller with subject A may not write a row owned by B that names no connection, even by UPDATE from a dossier
+await u("door wiki A: dossier -> B with no connection", thought({}, DOSSIER), { user_id: B, metadata: { exposure: "ops", source: "mcp" } }, wikiA);
 // the wiki note mirror's shape (wiki-service.mjs)
 await w("note shape, no owner", "thoughts", thought({}, { source: "user_note", note_path: `notes/notebooks/lab/${TAG}.md` }));
 await w("note shape, the vault's owner (control)", "thoughts", thought({ user_id: A }, { source: "user_note", note_path: `notes/notebooks/lab/${TAG}-2.md`, inlet_connection: "vault" }));
@@ -66,6 +108,11 @@ const src = (o: Record<string, unknown>) => ({ title: `probe ${TAG}`, content: `
 await w("source, an email body", "sources", src({ url: `https://mail.google.com/mail/u/0/#inbox/${TAG}` }));
 await w("source, a podcast transcript", "sources", src({ url: `https://example.org/${TAG}/t`, content_type: "podcast_transcript" }));
 await w("source, a Gmail id", "sources", src({ url: `https://example.org/${TAG}/g`, metadata: { gmail_id: "abc" } }));
+// round 2 (tester attempt 1, F2): the shapes 440 strips, at any depth and in any case
+await w("source, a nested Gmail id", "sources", src({ url: `https://example.org/${TAG}/n`, metadata: { origin: { gmail_id: "abc" } } }));
+await w("source, a Gmail_Id key", "sources", src({ url: `https://example.org/${TAG}/c`, metadata: { Gmail_Id: "abc" } }));
+await w("source, a Gmail URL in metadata", "sources", src({ url: `https://example.org/${TAG}/m`, metadata: { via: "https://MAIL.google.com/mail/u/0/#inbox/x" } }));
+await w("source, a Gmail URL in content", "sources", src({ url: `https://example.org/${TAG}/t2`, content: `read https://mail.google.com/mail/u/0/#inbox/${TAG}` }));
 await w("source, a public article (control)", "sources", src({ url: `https://example.org/${TAG}/article` }));
 // the podcast episode's owner
 const ep = (owner: string, n: string) => ({ owner_sub: owner, shared: false, origin: "render", title: `probe ${TAG} ${n}`, team_id: null, audio_format: "mp3", seconds: 1, archive_dir: `/tmp/${TAG}-${n}` });
@@ -96,4 +143,4 @@ const reads = {
   "match_thoughts shared only (the wiki compile)": await match("shared"),
   "the wiki compile's thoughts read (user_id=is.null)": await count("thoughts?select=id,content,metadata&user_id=is.null&limit=100000"),
 };
-console.log(`PROBE ${JSON.stringify({ writes, record, reads })}`);
+console.log(`PROBE ${JSON.stringify({ writes, record, reads, updates })}`);

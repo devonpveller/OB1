@@ -358,7 +358,7 @@ try {
   Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) 'fixtures applied'
   $null = Stamp-Guard 'ENABLE ALWAYS'
   $gs = Stamp-GuardState
-  Check ($gs -in @('on', 'absent')) "rw-inlet-stamp: slot 470's guards are ON again after the legacy-shaped fixture load ($gs)"
+  Check ($gs -eq 'on' -or ($gs -eq 'absent' -and @($chain | Where-Object { $_[1] -eq '470-init-inlet-stamp.sql' }).Count -eq 0)) "rw-inlet-stamp: slot 470's guards are PRESENT and ALWAYS-enabled again after the legacy-shaped fixture load ($gs; absent passes only on a chain without slot 470)"
 
   $ctMount = "${ct}:/ct:ro"
   $null = Run-Detached "$P-embed" @('--network-alias', 'stub-embed', '-v', $ctMount, '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '/ct/stub-embed.ts')
@@ -1224,7 +1224,7 @@ try {
     Check ($staleIds.Count -eq 2 -and @(($after -split "`n") | Where-Object { $_ -match '^failed\|interrupted: the workbench restarted' }).Count -eq 2) '[5g] the start-up sweep marks the stale holding / embedding jobs failed (retryable)'
   }
   $gs = Stamp-GuardState
-  Check ($gs -eq 'on' -or ($Red -and $gs -eq 'absent')) "rw-inlet-stamp: slot 470's guards are ON before the isolation sweep ($gs)"
+  Check ($gs -eq 'on' -or ($gs -eq 'absent' -and @($chain | Where-Object { $_[1] -eq '470-init-inlet-stamp.sql' }).Count -eq 0)) "rw-inlet-stamp: slot 470's guards are PRESENT and ALWAYS-enabled before the isolation sweep ($gs; absent passes only on a chain without slot 470)"
   Write-Host "[5d] the route-wide isolation sweep (as user A, every registered route, both doors; response walk $walk)"
   $o = Lab-Docker 1800 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
     '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro",

@@ -37,6 +37,9 @@ param(
   [string]$Evidence = '',
   [switch]$Red,
   [string]$BaseSha = '0f4c680',
+  # round 2: run the GREEN cases against another OB1 commit's code and chain (e.g. round 1, 97565a2) - the RED of a
+  # round's fixes: the cases that commit fails are the defects this round fixes
+  [string]$CodeSha = '',
   [switch]$KeepImage
 )
 $ErrorActionPreference = 'Continue'
@@ -51,7 +54,7 @@ $pyTag = "openbrain-inlet-stamp-py:wt-$short"
 if ($pyTag -match ':local$') { throw 'refusing a :local tag' }
 $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $jwtSecret = -join ((48..57 + 97..122) | Get-Random -Count 40 | ForEach-Object { [char]$_ })   # the lab PostgREST's, per run
-$mode = if ($Red) { 'red' } else { 'green' }
+$mode = if ($Red) { 'red' } elseif ($CodeSha) { "green-at-$CodeSha" } else { 'green' }
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "rwis-evidence-$mode-$rand" }
 New-Item -ItemType Directory -Force $Evidence | Out-Null
 $work = Join-Path $env:TEMP "rwis-work-$rand"
@@ -101,10 +104,11 @@ $made = @{ net = $false; containers = @(); images = @() }
 try {
   Write-Host "[1] the code under test ($mode)"
   New-Item -ItemType Directory -Force $work | Out-Null
-  if ($Red) {
+  if ($Red -or $CodeSha) {
+    $sha = if ($CodeSha) { $CodeSha } else { $BaseSha }
     $tar = Join-Path $work 'base.tar'
-    & git -C $ob1 archive --format=tar -o $tar $BaseSha docker recipes/email-history-import recipes/google-activity-import recipes/chatgpt-conversation-import integrations/intake/sql
-    Check ($LASTEXITCODE -eq 0) "git archive of OB1 $BaseSha"
+    & git -C $ob1 archive --format=tar -o $tar $sha docker recipes/email-history-import recipes/google-activity-import recipes/chatgpt-conversation-import integrations/intake/sql
+    Check ($LASTEXITCODE -eq 0) "git archive of OB1 $sha"
     $code = Join-Path $work 'base'
     New-Item -ItemType Directory -Force $code | Out-Null
     & tar -x -f $tar -C $code
@@ -114,7 +118,7 @@ try {
     $t = [IO.File]::ReadAllText($pg)
     $seamLine = 'const GMAIL_API = (Deno.env.get("GMAIL_API_BASE") || "https://gmail.googleapis.com").replace(/\/+$/, "") + "/gmail/v1/users/me";'
     $t2 = $t.Replace('const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";', $seamLine)
-    Check ($t2 -ne $t) 'RED seam: the base pull reads GMAIL_API_BASE (one line, nothing else changed)'
+    Check ($t2 -ne $t -or $t -match 'GMAIL_API_BASE') 'the pull reads GMAIL_API_BASE (the base: one seam line, nothing else changed)'
     [IO.File]::WriteAllText($pg, $t2, (New-Object System.Text.UTF8Encoding $false))
     Save 'red-seam.txt' "base $BaseSha; seam: recipes/email-history-import/pull-gmail.ts GMAIL_API line -> $seamLine"
   } else {
@@ -191,6 +195,8 @@ try {
   # a lab stand-in for slot 450's import door role (450 is not in this chain): a NOLOGIN role PostgREST switches to
   # from a verified token; it writes thoughts as the ops plane allows (service_role)
   $null = Q "DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_rest_import') THEN CREATE ROLE ob_rest_import NOLOGIN NOBYPASSRLS IN ROLE service_role; END IF; END `$`$"
+  # and for 450's wiki role (it may INSERT, UPDATE, DELETE thoughts: the note mirror) - the UPDATE probes' door caller
+  $null = Q "DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_rest_wiki') THEN CREATE ROLE ob_rest_wiki NOLOGIN NOBYPASSRLS IN ROLE service_role; END IF; END `$`$"
   Check ((Q "SELECT count(*) FROM pg_roles WHERE rolname = 'ob_rest_import'") -eq '1') 'a lab stand-in for 450''s import door role (ob_rest_import, a member of service_role)'
   $t0 = Q "SELECT max(id) FROM public.thoughts"
 
@@ -339,7 +345,23 @@ try {
   $escInDb = [regex]::Matches($guardDefs, $escRx, 'IgnoreCase').Count
   $sqlNoComments = (($sqlText -split "`n") | ForEach-Object { $_ -replace '--.*$', '' }) -join "`n"
   $escInFile = [regex]::Matches($sqlNoComments, 'allow_unowned|session_replication_role|DISABLE\s+TRIGGER|rolsuper\s+THEN', 'IgnoreCase').Count
-  Save 'direct-pg.log' ("[mcp] $($m1.out)`n[agent-memory] $($m2.out)`n[clear] $clr`n[change] $chg`n[superuser] $($su0.out)`n[superuser + a setting] $($su1.out)`n[superuser + session_replication_role=replica] $($su2.out)`nescape-shaped tokens: in the guards' definitions $escInDb, in the slot file $escInFile")
+  # round 2 (tester attempt 1, F1), the tester's sequence direct-PG as ob_app_memory: a dossier, then UPDATE it into an
+  # unowned gmail row naming gmail, then give it B's owner (gmail is A's); a dossier stripped to an unowned mcp row
+  $seqFile = Join-Path $work 'f1-seq.sql'
+  [IO.File]::WriteAllText($seqFile, @"
+\set ON_ERROR_STOP 0
+INSERT INTO thoughts (content, metadata, exposure) VALUES ('f1 seq $rand', jsonb_build_object('exposure', 'ops', 'type', 'dossier', 'generated_by', 'recipes/entity-wiki/generate-wiki.mjs'), 'ops');
+UPDATE thoughts SET metadata = jsonb_build_object('exposure', 'ops', 'source', 'gmail', 'gmail_id', 'f1seq$rand', 'inlet_connection', 'gmail') WHERE content = 'f1 seq $rand';
+UPDATE thoughts SET user_id = '$B' WHERE content = 'f1 seq $rand';
+UPDATE thoughts SET user_id = '$B', metadata = jsonb_build_object('exposure', 'ops', 'source', 'gmail', 'gmail_id', 'f1seq$rand', 'inlet_connection', 'gmail') WHERE content = 'f1 seq $rand';
+UPDATE thoughts SET metadata = jsonb_build_object('exposure', 'ops', 'source', 'mcp') WHERE content = 'f1 seq $rand';
+"@, (New-Object System.Text.UTF8Encoding $false))
+  $null = Dk cp $seqFile "${db}:/tmp/f1-seq.sql"
+  $seqOut = Dk exec $db psql -U ob_app_memory -d openbrain -X -q -f /tmp/f1-seq.sql
+  $seqRow = Q "SELECT coalesce(user_id, 'none') || '|' || coalesce(metadata->>'source', '-') || '|' || coalesce(metadata->>'type', '-') || '|' || coalesce(metadata->>'inlet_connection', '-') FROM public.thoughts WHERE content = 'f1 seq $rand'"
+  $seqRefusals = @(($seqOut -split "`n") | Where-Object { $_ -match 'inlet stamp' }).Count
+  $badShapes = Q "SELECT (SELECT count(*) FROM public.thoughts WHERE user_id IS NULL AND NOT (metadata->>'type' = 'dossier' AND metadata->>'generated_by' = 'recipes/entity-wiki/generate-wiki.mjs' AND metadata->>'inlet_connection' IS NULL)) || '|' || (SELECT count(*) FROM public.thoughts t JOIN public.inlet_connections c ON c.id = t.metadata->>'inlet_connection' WHERE t.user_id IS DISTINCT FROM c.owner_sub)"
+  Save 'direct-pg.log' ("[f1 sequence] row $seqRow; refusals $seqRefusals`n$seqOut`n[unowned non-dossier | rows owned against their connection] $badShapes`n" + "[mcp] $($m1.out)`n[agent-memory] $($m2.out)`n[clear] $clr`n[change] $chg`n[superuser] $($su0.out)`n[superuser + a setting] $($su1.out)`n[superuser + session_replication_role=replica] $($su2.out)`nescape-shaped tokens: in the guards' definitions $escInDb, in the slot file $escInFile")
   if ($pj) {
     $wr = $pj.writes
     $lines = @($wr.PSObject.Properties | ForEach-Object { "$($_.Name): $($_.Value.status)$(if ($_.Value.refused) { ' refused' })$(if ($_.Value.why -and -not $_.Value.refused) { ' - ' + $_.Value.why })" })
@@ -347,6 +369,7 @@ try {
     $refusedCases = @('pull shape, no owner', 'pull shape, owner but no connection', "pull shape, A's row naming B's connection", 'pull shape, unknown connection',
       'pull shape, the literal operator', 'pull shape, a service principal', 'pull shape, blank owner', 'import shape, no owner', 'note shape, no owner',
       'note shape, B on the vault', 'dossier look-alike, unowned', 'source, an email body', 'source, a podcast transcript', 'source, a Gmail id',
+      'source, a nested Gmail id', 'source, a Gmail_Id key', 'source, a Gmail URL in metadata', 'source, a Gmail URL in content',
       'episode, the literal operator', 'episode, a service principal', "import token for A, a row with B's user_id", "import token for A, a row naming B's connection")
     $okCases = @('pull shape, owned right (control)', 'import shape, owned (control)', 'note shape, the vault''s owner (control)', 'dossier, unowned (control)',
       'source, a public article (control)', 'episode, A (control)', "import token for A, A's own row (control)")
@@ -365,6 +388,42 @@ try {
       Check ($m1.refused -and $m1.rc -ne 0 -and $m2.refused -and $m2.rc -ne 0) 'direct PG as ob_app_memory: an unstamped MCP-shaped capture_thought and agent-memory insert is refused (rw-mcp-identity must stamp them before 470 goes live)'
       Check ($clrRefused -and $chgRefused) 'an app role can neither clear nor change an owner'
       Check ($su0.refused -and $su1.refused -and $su2.refused -and "$($su0.out)$($su1.out)$($su2.out)" -notmatch 'landed' -and $alwaysOn -eq '2') "no escape hatch: a superuser's unowned personal insert is refused too - with a setting, and under session_replication_role = replica (both guards are ALWAYS triggers: $alwaysOn)"
+      # the dossier -> unowned gmail naming gmail and the dossier -> B naming gmail (A's connection) are refused; giving the
+      # dossier an owner with no connection (B: direct PG has no verified subject) and then any metadata lands - it is an
+      # OWNED row, never an unowned personal one and never owned against a connection
+      Check ($seqRefusals -eq 2 -and $seqRow -notmatch '^none\|' -and $seqRow -notmatch '\|gmail$') "F1 (the tester's sequence, direct PG as ob_app_memory): the dossier cannot become an unowned gmail row or a row owned by B on A's connection (2 of 2 refused); where it lands it is an owned row on no connection ($seqRow)"
+      $up = $pj.updates
+      $upRefused = @($up.PSObject.Properties | Where-Object { $_.Name -notmatch '\(control\)' })
+      $upControls = @($up.PSObject.Properties | Where-Object { $_.Name -match '\(control\)' })
+      foreach ($x in $up.PSObject.Properties) { Write-Host "    $($x.Name): $($x.Value.status)$(if ($x.Value.refused) { ' refused' })" }
+      $upBad = @($upRefused | Where-Object { -not ($_.Value.status -ge 400 -and $_.Value.refused) } | ForEach-Object { $_.Name })
+      $ctlBad = @($upControls | Where-Object { -not ($_.Value.status -ge 200 -and $_.Value.status -lt 300 -and $_.Value.changed) } | ForEach-Object { $_.Name })
+      Check ($upRefused.Count -ge 20 -and $upBad.Count -eq 0) "F1, PATCH through PostgREST (anonymous and a door caller, verified subject A): every transition into an unowned personal row, a dossier made by UPDATE, a row owned against its connection, a dropped or changed connection, a changed or cleared owner, a door row for B is refused ($($upRefused.Count) cases; not refused: $($upBad -join ', '))"
+      Check ($upControls.Count -ge 6 -and $ctlBad.Count -eq 0) "F1 controls: a dossier rewritten as a dossier, a dossier adopted by its connection's owner, a content-only and a metadata-only edit land ($($upControls.Count); failed: $($ctlBad -join ', '))"
+      Check ($badShapes -eq '0|0') "after every probe: no unowned non-dossier thought and no row owned against its connection ($badShapes)"
+      # F2: no drift from 440 - every candidate row 440's own predicates select (its move scope and its fail-closed strip
+      # check, read from init-inlet-owner.sql itself), 470's predicate selects too
+      $i440 = [IO.File]::ReadAllText((Join-Path $dockerDir 'init-inlet-owner.sql'))
+      $m1 = [regex]::Match($i440, 'FROM public\.sources s\s+WHERE (s\.url ILIKE[^;]+);')
+      $m2 = [regex]::Match($i440, 'IF EXISTS \(SELECT 1 FROM public\.sources s WHERE (s\.metadata \?\|[^\r\n]+?)\)\s*\r?\n')
+      $driftSql = @"
+WITH s(url, content_type, metadata, content) AS (VALUES
+  ('https://mail.google.com/mail/u/0/#inbox/1', 'web_article', '{}'::jsonb, 'x'), ('https://example.org/a', 'podcast_transcript', '{}'::jsonb, 'x'),
+  ('https://example.org/b', 'web_article', jsonb_build_object('source', 'daily-digest-podcast'), 'x'), ('https://example.org/c', 'web_article', jsonb_build_object('gmail_id', 'x'), 'x'),
+  ('https://example.org/d', 'web_article', jsonb_build_object('gmail_thread_id', 'x'), 'x'), ('https://example.org/e', 'web_article', jsonb_build_object('gmail_labels', jsonb_build_array('x')), 'x'),
+  ('https://example.org/f', 'web_article', jsonb_build_object('via', 'https://mail.google.com/x'), 'x'), ('https://example.org/g', 'web_article', '{}'::jsonb, 'see https://Mail.Google.com/y'),
+  ('https://example.org/h', 'web_article', jsonb_build_object('n', jsonb_build_object('gmail_id', 'x')), 'x'), ('https://example.org/i', 'web_article', jsonb_build_object('Gmail_Id', 'x'), 'x'),
+  ('https://example.org/j', 'web_article', '{}'::jsonb, 'an ordinary article'))
+SELECT count(*) FILTER (WHERE (($($m1.Groups[1].Value)) OR ($($m2.Groups[1].Value)))) || '|' ||
+       count(*) FILTER (WHERE (($($m1.Groups[1].Value)) OR ($($m2.Groups[1].Value))) AND NOT public.inlet_stamp_source_personal(s.url, s.content_type, s.metadata, s.content)) || '|' ||
+       count(*) FILTER (WHERE public.inlet_stamp_source_personal(s.url, s.content_type, s.metadata, s.content)) FROM s
+"@
+      $driftFile = Join-Path $work 'f2-drift.sql'
+      [IO.File]::WriteAllText($driftFile, $driftSql, (New-Object System.Text.UTF8Encoding $false))
+      $null = Dk cp $driftFile "${db}:/tmp/f2-drift.sql"
+      $drift = "$(Dk exec $db psql -U postgres -d openbrain -X -A -t -f /tmp/f2-drift.sql)".Trim()
+      Save 'f2-drift.txt' "440 move scope: $($m1.Groups[1].Value)`n440 strip check: $($m2.Groups[1].Value)`nselected by 440 | by 440 but not by 470 | by 470: $drift"
+      Check ($m1.Success -and $m2.Success -and $drift -eq '8|0|10') "F2: 470's personal-source predicate selects every candidate 440's own predicates select (read from init-inlet-owner.sql), plus a nested and a case-variant Gmail id ($drift = 440 | 440-not-470 | 470)"
       Check ($escInDb -eq 0 -and $escInFile -eq 0 -and $guardDefs.Length -gt 500) "no setting- or role-based escape in the guard path: the guards' definitions read no setting and no role ($escInDb), slot 470's file switches off nothing ($escInFile)"
       $rec = $pj.record
       Check ($rec.table_read_status -ge 400 -and -not $rec.table_read_gave_rows) "the owner record is not readable through PostgREST ($($rec.table_read_status))"

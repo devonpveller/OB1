@@ -21,7 +21,7 @@
 --        change an owner.
 --      * sources: a shared source may never be personal - an email body (url mail.google.com), a podcast transcript, or a
 --        row carrying a Gmail id / thread / labels (440's predicate; they belong in 440's owner-private stores).
---      * owner columns: podcast_episodes.owner_sub, research_handbacks.owner_sub and 440's private stores' owner columns
+--      * owner columns: the owner columns of the podcast tables, the hand-back table and 440's private stores
 --        must pass inlet_subject_ok (CHECK, added NOT VALID then validated) - the literal 'operator' included.
 --      Triggers, not CHECKs, on thoughts and sources: the rule reads the connection record (another table), exempts one
 --      shaped writer, and treats INSERT and UPDATE differently; a CHECK on thoughts would also fire on every UPDATE of a
@@ -217,58 +217,53 @@ CREATE OR REPLACE FUNCTION public.inlet_stamp_thoughts_guard() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
+-- Round 2 (tester attempt 1, F1): the NEW row is judged IN FULL on every INSERT and UPDATE, whatever the statement
+-- changed - an UPDATE is a write like any other. The rules, in order:
+--   1. an owner is never cleared or changed (UPDATE);
+--   2. no owner: only the wiki compile's dossier, naming no connection, and an UPDATE may not MAKE a dossier (the
+--      exemption is not reachable from any other shape). After this slot applies there is no other unowned thought
+--      (its precondition), so every other unowned row is refused, INSERT and UPDATE alike;
+--   3. an owner must be a valid subject;
+--   4. a door request (slot 450's verified token): the import role names no connection; a row that names no
+--      connection is owned by the token's own subject;
+--   5. a row that names a connection carries that connection's recorded owner; a gmail row names one - an UPDATE may
+--      not drop it (a legacy gmail row that never named one keeps that shape).
 DECLARE
     v_conn   TEXT := NEW.metadata ->> 'inlet_connection';
     v_owner  TEXT;
     v_claims JSONB;
 BEGIN
-    IF TG_OP = 'UPDATE' THEN
-        IF OLD.user_id IS NOT NULL AND NEW.user_id IS DISTINCT FROM OLD.user_id THEN
-            RAISE EXCEPTION 'inlet stamp: a thought''s owner may not be cleared or changed' USING ERRCODE = '23514';
+    IF TG_OP = 'UPDATE' AND OLD.user_id IS NOT NULL AND NEW.user_id IS DISTINCT FROM OLD.user_id THEN
+        RAISE EXCEPTION 'inlet stamp: a thought''s owner may not be cleared or changed' USING ERRCODE = '23514';
+    END IF;
+    IF NEW.user_id IS NULL THEN
+        IF public.inlet_stamp_is_dossier(NEW.metadata) AND v_conn IS NULL
+           AND (TG_OP = 'INSERT' OR public.inlet_stamp_is_dossier(OLD.metadata)) THEN
+            RETURN NEW;               -- the compile's dossier (written, or rewritten, as a dossier)
         END IF;
-        IF NEW.user_id IS NULL THEN
-            RETURN NEW;               -- a legacy unowned row (slot 440's re-run gives it its owner)
+        RAISE EXCEPTION 'inlet stamp: a personal row needs its owner (thoughts.user_id); nothing was written' USING ERRCODE = '23514';
+    END IF;
+    IF NOT public.inlet_subject_ok(NEW.user_id) THEN
+        RAISE EXCEPTION 'inlet stamp: a thought''s owner must be a valid subject (never blank, a service principal or the literal operator)' USING ERRCODE = '23514';
+    END IF;
+    -- a door request (slot 450: PostgREST verified the caller's token): the owner is the inlet connection's record
+    -- (rule 5) or, for a row that names no connection, the token's own verified subject - never a user_id the caller
+    -- chose for someone else. The import role names no connection at all (imports are not inlets).
+    v_claims := public.inlet_stamp_door_claims();
+    IF coalesce(v_claims ->> 'role', '') LIKE 'ob\_rest\_%' THEN
+        IF v_claims ->> 'role' = 'ob_rest_import' AND v_conn IS NOT NULL THEN
+            RAISE EXCEPTION 'inlet stamp: an import names no inlet connection' USING ERRCODE = '23514';
         END IF;
-        IF NEW.user_id IS DISTINCT FROM OLD.user_id AND NOT public.inlet_subject_ok(NEW.user_id) THEN
-            RAISE EXCEPTION 'inlet stamp: a thought''s owner must be a valid subject' USING ERRCODE = '23514';
-        END IF;
-        -- a door request may give a legacy row an owner only as it may write one (its verified subject, or its connection's)
-        v_claims := public.inlet_stamp_door_claims();
-        IF NEW.user_id IS DISTINCT FROM OLD.user_id AND coalesce(v_claims ->> 'role', '') LIKE 'ob\_rest\_%'
-           AND v_conn IS NULL AND NEW.user_id IS DISTINCT FROM (v_claims ->> 'sub') THEN
+        IF v_conn IS NULL AND NEW.user_id IS DISTINCT FROM (v_claims ->> 'sub') THEN
             RAISE EXCEPTION 'inlet stamp: a door caller may write only rows owned by its verified subject or by its inlet connection''s recorded owner' USING ERRCODE = '23514';
         END IF;
-        IF v_conn IS NULL OR v_conn IS NOT DISTINCT FROM (OLD.metadata ->> 'inlet_connection') THEN
-            RETURN NEW;
+    END IF;
+    IF v_conn IS NULL THEN
+        IF NEW.metadata ->> 'source' = 'gmail'
+           AND (TG_OP = 'INSERT' OR (OLD.metadata ->> 'inlet_connection') IS NOT NULL) THEN
+            RAISE EXCEPTION 'inlet stamp: a gmail row must name its inlet connection (metadata.inlet_connection)' USING ERRCODE = '23514';
         END IF;
-    ELSE
-        IF NEW.user_id IS NULL THEN
-            IF public.inlet_stamp_is_dossier(NEW.metadata) AND v_conn IS NULL THEN
-                RETURN NEW;
-            END IF;
-            RAISE EXCEPTION 'inlet stamp: a personal row needs its owner (thoughts.user_id); nothing was written' USING ERRCODE = '23514';
-        END IF;
-        IF NOT public.inlet_subject_ok(NEW.user_id) THEN
-            RAISE EXCEPTION 'inlet stamp: a thought''s owner must be a valid subject (never blank, a service principal or the literal operator)' USING ERRCODE = '23514';
-        END IF;
-        -- a door request (slot 450: PostgREST verified the caller's token): the owner is the inlet connection's record
-        -- (checked below) or, for a row that names no connection, the token's own verified subject - never a user_id
-        -- the caller chose for someone else. The import role names no connection at all (imports are not inlets).
-        v_claims := public.inlet_stamp_door_claims();
-        IF coalesce(v_claims ->> 'role', '') LIKE 'ob\_rest\_%' THEN
-            IF v_claims ->> 'role' = 'ob_rest_import' AND v_conn IS NOT NULL THEN
-                RAISE EXCEPTION 'inlet stamp: an import names no inlet connection' USING ERRCODE = '23514';
-            END IF;
-            IF v_conn IS NULL AND NEW.user_id IS DISTINCT FROM (v_claims ->> 'sub') THEN
-                RAISE EXCEPTION 'inlet stamp: a door caller may write only rows owned by its verified subject or by its inlet connection''s recorded owner' USING ERRCODE = '23514';
-            END IF;
-        END IF;
-        IF v_conn IS NULL THEN
-            IF NEW.metadata ->> 'source' = 'gmail' THEN
-                RAISE EXCEPTION 'inlet stamp: a gmail row must name its inlet connection (metadata.inlet_connection)' USING ERRCODE = '23514';
-            END IF;
-            RETURN NEW;
-        END IF;
+        RETURN NEW;
     END IF;
     SELECT c.owner_sub INTO v_owner FROM public.inlet_connections c WHERE c.id = v_conn;
     IF v_owner IS NULL THEN
@@ -282,28 +277,35 @@ END;
 $$;
 REVOKE ALL ON FUNCTION public.inlet_stamp_thoughts_guard() FROM PUBLIC;
 CREATE OR REPLACE TRIGGER trg_inlet_stamp_thoughts
-    BEFORE INSERT OR UPDATE OF user_id, metadata ON public.thoughts
+    BEFORE INSERT OR UPDATE ON public.thoughts
     FOR EACH ROW EXECUTE FUNCTION public.inlet_stamp_thoughts_guard();
 -- ALWAYS: the guard fires under session_replication_role = replica too (440's init and revert run parts of themselves
 -- that way, and any superuser session can set it) - it is not a switch that turns the guard off
 ALTER TABLE public.thoughts ENABLE ALWAYS TRIGGER trg_inlet_stamp_thoughts;
 
 -- a source that is personal (440's predicate: the email body, the podcast transcript, a Gmail id on a shared row)
-CREATE OR REPLACE FUNCTION public.inlet_stamp_source_personal(p_url TEXT, p_content_type TEXT, p_meta JSONB) RETURNS BOOLEAN
+-- Round 2 (tester attempt 1, F2): ONE predicate for "a personal source", the union of what slot 440 moves out of
+-- `sources` (init-inlet-owner.sql: url mail.google.com, metadata.source daily-digest-podcast, content_type
+-- podcast_transcript) and what it strips from a shared row (its step 5 and its fail-closed check: a Gmail id key, a Gmail
+-- URL anywhere in the metadata or the content). Wider than 440 where 440 would miss: a Gmail id key at ANY depth and in
+-- ANY case. The lab checks that every row 440's own predicates select, this one selects too (no drift).
+CREATE OR REPLACE FUNCTION public.inlet_stamp_source_personal(p_url TEXT, p_content_type TEXT, p_meta JSONB, p_content TEXT) RETURNS BOOLEAN
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
 SET search_path = pg_catalog
 AS $$
-    SELECT coalesce(p_url, '') ILIKE '%mail.google.com%'
+    SELECT coalesce(p_url, '') ~* 'mail\.google\.com'
         OR coalesce(p_content_type, '') = 'podcast_transcript'
         OR coalesce(p_meta ->> 'source', '') = 'daily-digest-podcast'
-        OR coalesce(p_meta ?| ARRAY['gmail_id', 'gmail_thread_id', 'gmail_labels'], false)
+        OR coalesce(p_meta::text, '') ~* '"gmail_(id|thread_id|labels)"\s*:'
+        OR coalesce(p_meta::text, '') ~* 'mail\.google\.com'
+        OR coalesce(p_content, '') ~* 'mail\.google\.com'
 $$;
 CREATE OR REPLACE FUNCTION public.inlet_stamp_sources_guard() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 BEGIN
-    IF public.inlet_stamp_source_personal(NEW.url, NEW.content_type, NEW.metadata) THEN
+    IF public.inlet_stamp_source_personal(NEW.url, NEW.content_type, NEW.metadata, NEW.content) THEN
         RAISE EXCEPTION 'inlet stamp: a shared source may not be personal (an email body, a podcast transcript or a Gmail id); nothing was written'
             USING ERRCODE = '23514';
     END IF;
@@ -312,7 +314,8 @@ END;
 $$;
 REVOKE ALL ON FUNCTION public.inlet_stamp_sources_guard() FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.inlet_stamp_is_dossier(JSONB) FROM PUBLIC;
-REVOKE ALL ON FUNCTION public.inlet_stamp_source_personal(TEXT, TEXT, JSONB) FROM PUBLIC;
+DROP FUNCTION IF EXISTS public.inlet_stamp_source_personal(TEXT, TEXT, JSONB);   -- round 1's narrower predicate
+REVOKE ALL ON FUNCTION public.inlet_stamp_source_personal(TEXT, TEXT, JSONB, TEXT) FROM PUBLIC;
 
 -- the preconditions: nothing left for 440 to make private (run 440 first), checked under the locks
 DO $$
@@ -322,14 +325,14 @@ BEGIN
     SELECT count(*) INTO n_t FROM public.thoughts t
      WHERE t.user_id IS NULL
        AND NOT (lower(coalesce(t.metadata ->> 'type', '')) = 'dossier' AND t.created_at > coalesce(v_first, '-infinity'::timestamptz));
-    SELECT count(*) INTO n_s FROM public.sources s WHERE public.inlet_stamp_source_personal(s.url, s.content_type, s.metadata);
+    SELECT count(*) INTO n_s FROM public.sources s WHERE public.inlet_stamp_source_personal(s.url, s.content_type, s.metadata, s.content);
     IF n_t > 0 OR n_s > 0 THEN
         RAISE EXCEPTION 'inlet stamp: refused, nothing changed - % unowned thought(s) and % personal shared source(s) are still there: run slot 440 (init-inlet-owner.sql) first', n_t, n_s
             USING ERRCODE = '55000';
     END IF;
 END $$;
 CREATE OR REPLACE TRIGGER trg_inlet_stamp_sources
-    BEFORE INSERT OR UPDATE OF url, content_type, metadata ON public.sources
+    BEFORE INSERT OR UPDATE ON public.sources
     FOR EACH ROW EXECUTE FUNCTION public.inlet_stamp_sources_guard();
 ALTER TABLE public.sources ENABLE ALWAYS TRIGGER trg_inlet_stamp_sources;
 
@@ -340,6 +343,9 @@ DECLARE c TEXT[];
 BEGIN
     FOREACH c SLICE 1 IN ARRAY ARRAY[
         ARRAY['podcast_episodes', 'owner_sub'], ARRAY['research_handbacks', 'owner_sub'],
+        -- round 2 (F3, coordinator: podcasts are per user): the presenter model and the render requests too
+        ARRAY['podcast_teams', 'owner_sub'], ARRAY['podcast_presenters', 'owner_sub'], ARRAY['podcast_voice_links', 'owner_sub'],
+        ARRAY['podcast_formats', 'owner_sub'], ARRAY['podcast_render_requests', 'requester_sub'],
         ARRAY['inlet_private_sources', 'inlet_owner_sub'], ARRAY['inlet_private_source_chunks', 'inlet_owner_sub'],
         ARRAY['inlet_private_claims', 'inlet_owner_sub'], ARRAY['inlet_private_claim_links', 'owner_sub'],
         ARRAY['inlet_private_jobs', 'owner_sub'], ARRAY['inlet_private_job_events', 'owner_sub']] LOOP

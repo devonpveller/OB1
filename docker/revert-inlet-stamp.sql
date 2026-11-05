@@ -14,7 +14,8 @@ DROP TRIGGER IF EXISTS trg_inlet_stamp_sources ON public.sources;
 DO $$
 DECLARE c TEXT;
 BEGIN
-    FOREACH c IN ARRAY ARRAY['podcast_episodes', 'research_handbacks', 'inlet_private_sources', 'inlet_private_source_chunks',
+    FOREACH c IN ARRAY ARRAY['podcast_episodes', 'research_handbacks', 'podcast_teams', 'podcast_presenters',
+                             'podcast_voice_links', 'podcast_formats', 'podcast_render_requests', 'inlet_private_sources', 'inlet_private_source_chunks',
                              'inlet_private_claims', 'inlet_private_claim_links', 'inlet_private_jobs', 'inlet_private_job_events'] LOOP
         IF to_regclass('public.' || c) IS NOT NULL THEN
             EXECUTE format('ALTER TABLE public.%I DROP CONSTRAINT IF EXISTS %I', c, c || '_inlet_stamp_owner_ok');
@@ -24,6 +25,7 @@ END $$;
 DROP VIEW IF EXISTS public.inlet_connection_mail;
 DROP FUNCTION IF EXISTS public.inlet_stamp_thoughts_guard();
 DROP FUNCTION IF EXISTS public.inlet_stamp_sources_guard();
+DROP FUNCTION IF EXISTS public.inlet_stamp_source_personal(TEXT, TEXT, JSONB, TEXT);
 DROP FUNCTION IF EXISTS public.inlet_stamp_source_personal(TEXT, TEXT, JSONB);
 DROP FUNCTION IF EXISTS public.inlet_stamp_is_dossier(JSONB);
 DROP FUNCTION IF EXISTS public.inlet_stamp_door_claims();
