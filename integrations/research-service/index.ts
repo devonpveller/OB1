@@ -32,7 +32,7 @@ import { resolveContract } from "./contract.ts";
 import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
 import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, SlotGate, type ClaimedJob } from "./jobs.ts";
 import { type Caller, callerFor, inletRef, MismatchLog, onBehalfOf, parseCallers, parseServiceCallers, promptOwner, requestKindOf, resolveOrigin } from "./origin.ts";
-import { formDerivedRequest, insertDerivedJob, openHandback, parseDeliveries, parseDoorBody, parseProposals, PROPOSER_SYSTEM, proposerUser, publicAddress, sha256Hex } from "./boundary.ts";
+import { formDerivedRequest, insertDerivedJob, openHandback, parseDeliveries, parseDoorBody, recordDelivery, parseProposals, PROPOSER_SYSTEM, proposerUser, publicAddress, sha256Hex } from "./boundary.ts";
 import { canonicalLink } from "./boundary-gate.ts";
 import { actorOf, FOREIGN_PROMPTS_SQL, HIDDEN_STEER_TEXTS_SQL, nonActorView, LISTED_FOR, MAY_ACT_SQL, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
@@ -1401,7 +1401,7 @@ Deno.serve({ port: PORT }, async (req) => {
 
   // rw-boundary-digest (plan 09 2.5 P6, slot 460): a delivering caller records that it used its derived jobs - the
   // digest after the day's episode: {deliveries: [{job_id, ok, episode_id?, thread_id?}]}. Each goes to the private
-  // hand-back (handback_deliver: the caller that opened it only, a queued row only, the two ids only) - the episode's
+  // hand-back (boundary.ts recordDelivery: the caller that opened it only, a queued row only, the two ids only) - the episode's
   // thread links live there, never as a shared sources row. -> 200 {delivered: n}
   if (req.method === "POST" && url.pathname === "/research/derived/delivered") {
     if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
@@ -1414,9 +1414,7 @@ Deno.serve({ port: PORT }, async (req) => {
     let delivered = 0;
     try {
       for (const d of parsed.deliveries) {
-        const r = await c.queryObject<{ ok: boolean }>(`SELECT public.handback_deliver($1::uuid, $2, $3, $4::jsonb) AS ok`,
-          [d.job_id, caller, d.ok, JSON.stringify(d.note)]);
-        if (r.rows[0]?.ok) delivered++;
+        if (await recordDelivery(c, d, caller)) delivered++;
       }
     } catch (e) {
       console.error(`[boundary] recording a delivery failed (${(e as { fields?: { code?: string } }).fields?.code ?? (e as Error).name})`);

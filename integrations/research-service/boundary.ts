@@ -345,3 +345,11 @@ export function parseDeliveries(body: unknown): { deliveries: Delivery[] } | { e
   }
   return { deliveries: out };
 }
+
+/** The delivery on the private hand-back (slot 460's SECURITY DEFINER handback_deliver: the caller that opened it
+ *  only, a queued row only, the two ids only). True when a hand-back took it. */
+export async function recordDelivery(c: Q, d: Delivery, caller: string): Promise<boolean> {
+  const r = await c.queryObject<{ ok: boolean }>(`SELECT public.handback_deliver($1::uuid, $2, $3, $4::jsonb) AS ok`,
+    [d.job_id, caller, d.ok, JSON.stringify(d.note)]);
+  return r.rows[0]?.ok === true;
+}
