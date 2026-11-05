@@ -24,14 +24,17 @@ KID = E["kid"]
 PUB_PEM = KEY.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
 RES = []
 R2 = set()  # the round-2 probes (tester attempt 1's F1 / F2 / the two-key combination)
+R3 = set()  # the round-3 probes (review F3: service mcp reaches the contract reads only; F6: OWN_QUERY's foreign-idea arm)
 A_STRINGS = {}   # name -> string that only A's rows hold
 A_IDS = {}       # id of a row A owns -> label
 B_STRINGS = {}
 
 
-def rec(probe, ok, what, kind=None, r2=False):
+def rec(probe, ok, what, kind=None, r2=False, r3=False):
     if r2:
         R2.add(probe)
+    if r3:
+        R3.add(probe)
     tag = kind or ("PASS" if ok else "FAIL")
     RES.append((probe, tag))
     print(f"{tag} {probe}: {what}", flush=True)
@@ -688,6 +691,46 @@ def p_cross_user():
         st, t = wbget({"x-brain-key": E["wb_mcp_key"]})
         rec("e.workbench direct: the mcp key alone is nobody", st == 200 and not a_leaks(t), f"status {st}; A material {a_leaks(t) or 'none'}")
 
+    if wbu:
+        # round 3 (review F3): openbrain-mcp's service key reaches exactly the contract reads (userTokenRoute); every
+        # other route is 403 - a write included, with or without a user token
+        def wbreq(m, path, h, body=None):
+            try:
+                r = requests.request(m, f"{wbu}{path}", headers=h, json=body, timeout=30)
+                return r.status_code
+            except Exception as e:
+                return type(e).__name__
+        mk = {"x-brain-key": E["wb_mcp_key"]}
+        for name, m, path, h, want in [
+            ("mcp key POST a contract write (steer)", "POST", "/workbench/contract/sessions/x/steer", mk, 403),
+            ("mcp key + B's token POST a contract write (steer)", "POST", "/workbench/contract/sessions/x/steer", {**mk, "x-ob-user-token": tb}, 403),
+            ("mcp key GET a non-contract route (/workbench/sources)", "GET", "/workbench/sources", mk, 403),
+            ("mcp key POST a non-contract write (/workbench/notes)", "POST", "/workbench/notes", mk, 403),
+        ]:
+            st = wbreq(m, path, h, {"text": "r3 probe", "query": "r3 probe"})
+            rec(f"e.r3 workbench direct: {name}", st == want, f"status {st} (want {want})", r3=True)
+        for name, m, path in [("mcp key GET contract ideas", "GET", "/workbench/contract/ideas"),
+                              ("mcp key POST contract diff-check", "POST", "/workbench/contract/diff-check")]:
+            st = wbreq(m, path, mk, {"a": "x", "b": "y"})
+            rec(f"e.r3 workbench direct (still allowed): {name}", st not in (401, 403) and isinstance(st, int) and st < 500, f"status {st}")
+    # round 3 (review F6, defence in depth): an idea job of B's idea with NO research_prompts row - the viewer the
+    # ownerless rule does not cover (the operator = the ownerless owner) must still read its query as empty
+    b_iid = (q("SELECT id::text FROM ideas WHERE owner_sub = %s LIMIT 1", (SUB_B,)) or [[None]])[0][0]
+    mark = f"MKR3IDEAJOB{random.randrange(16**6):06x}"
+    if not b_iid:
+        rec("e.r3 OWN_QUERY: B's idea job hidden from the operator", False, "B has no idea (the seed failed): the probe cannot run", r3=True)
+    else:
+        jid = q("INSERT INTO research_jobs (query, refinery_id) VALUES (%s, %s::uuid) RETURNING id::text", (f"B idea job {mark}", b_iid))[0][0]
+        q("DELETE FROM research_prompts WHERE job_id = %s::uuid", (jid,))
+        try:
+            st, txt = call(MCP, {"x-brain-key": K["full"]}, "contract_timeline", {})
+            rec("e.r3 OWN_QUERY: B's idea job (no prompt row) hidden from the operator's timeline", mark not in txt and st == 200,
+                f"status {st}; marker {'SHOWN' if mark in txt else 'hidden'}", r3=True)
+            st, txt = call(MCP, HB(tb), "contract_timeline", {})
+            rec("e.r3 OWN_QUERY: B's idea job shows its query to B", mark in txt, f"status {st}; marker {'shown' if mark in txt else 'MISSING'}")
+        finally:
+            q("DELETE FROM research_jobs WHERE id = %s::uuid", (jid,))
+
 
 def p_concurrency():
     ta, tb = mint(SUB_A), mint(SUB_B)
@@ -809,9 +852,18 @@ def main():
     mode = E.get("probe_mode", "green")
     bad = [p for p, t in RES if t == "FAIL"]
     good = [p for p, t in RES if t == "PASS"]
-    print(f"== PROBES ({mode}): {len(good)} PASS / {len(bad)} FAIL / {sum(1 for _, t in RES if t == 'INFO')} INFO; R2 probes {len(R2)}", flush=True)
+    print(f"== PROBES ({mode}): {len(good)} PASS / {len(bad)} FAIL / {sum(1 for _, t in RES if t == 'INFO')} INFO; R2 probes {len(R2)}; R3 probes {len(R3)}", flush=True)
     if mode == "green":
         sys.exit(1 if bad else 0)
+    if mode == "red-r3":
+        # the base is 7b302ed (round 2): every R3 probe must FAIL and every other probe pass
+        r3_passing = [p for p in good if p in R3]
+        other = [p for p in bad if p not in R3]
+        print(f"== RED-R3: R3 probes failing {len([p for p in bad if p in R3])} of {len(R3)}; R3 passing (must be none): {r3_passing}; non-R3 failing (must be none): {other[:20]}", flush=True)
+        sys.exit(0 if R3 and not r3_passing and not other else 1)
+    # red-r2 / red-r1: the round-3 probes are reported, not judged (their RED base is 7b302ed: mode red-r3)
+    good = [p for p in good if p not in R3]
+    bad = [p for p in bad if p not in R3]
     r2_passing = [p for p in good if p in R2]
     others_failing = [p for p in bad if p not in R2]
     print(f"== RED: R2 probes failing {len([p for p in bad if p in R2])} of {len(R2)}; R2 passing (must be none): {r2_passing[:20]}", flush=True)

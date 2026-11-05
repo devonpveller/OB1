@@ -43,6 +43,8 @@ param(
   [string]$BaseSha = '69a04a5',
   [string]$Cases = '',
   [switch]$Red,
+  # round 3: 'red-r3' judges a 7b302ed base (every R3 probe fails, every other passes); empty = from -Red and the base
+  [string]$ProbeMode = '',
   # development only: leave the lab up after the run (the leftover check then fails; clean up by the label)
   [switch]$Keep
 )
@@ -313,7 +315,7 @@ SELECT 'seeded';
     keys = @{ full = $K.full; personal = $K.personal; owui = $kMcp; ext = $kExt; mcpo = $K.mcpo }; markers = $markers; subs = $subs; default_user_id = $defaultUser
     iss = $iss; aud = $clientId; client_secret = $clientSecret; kid = $kid; oidc_base = 'http://stub-oidc:8080/application/o/open-webui'
     db_dsn = "postgresql://postgres:$pw@openbrain-db:5432/openbrain"; mode = $(if (-not $laneWired) { 'red' } else { 'green' }); cases = $Cases
-    probe_mode = $(if (-not $Red) { 'green' } elseif ($baseHasLane) { 'red-r2' } else { 'red-r1' })
+    probe_mode = $(if ($ProbeMode) { $ProbeMode } elseif (-not $Red) { 'green' } elseif ($baseHasLane) { 'red-r2' } else { 'red-r1' })
     workbench = 'http://openbrain-workbench-real:8000'; wb_mcp_key = $wbMcpKey; wb_owui_key = $wbOwuiKey
   } | ConvertTo-Json -Depth 5
   [System.IO.File]::WriteAllText((Join-Path $state 'cfg.json'), $cfg, (New-Object System.Text.UTF8Encoding $false))
@@ -341,6 +343,7 @@ SELECT 'seeded';
   Write-Host (Redact (($o -split "`n") | Where-Object { $_ -match '^(FAIL|== )' } | Out-String))
   $prbRc = $script:rc
   if (-not $Red) { Check ($prbRc -eq 0) 'probes: every probe passed' }
+  elseif ($ProbeMode -eq 'red-r3') { Check ($prbRc -eq 0) 'RED (round 2 on the base): exactly the R3 probes FAILED, every other probe passed' }
   elseif ($baseHasLane) { Check ($prbRc -eq 0) 'RED (round 1 on the base): exactly the R2 probes FAILED, every other probe passed' }
   else { Check ($prbRc -eq 0) 'RED (no OWUI lane on the base): every R2 probe FAILED' }
   foreach ($c in @($mcp, $ext, $mcpo, $owui, $stub, $wbReal)) { Save "$c.log" (Redact (Dk logs $c)) }

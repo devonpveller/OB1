@@ -77,6 +77,9 @@ export const OWN_QUERY = (alias: string, ownerParam: string, who: Who, actorPara
                      AND p.owner_sub <> ${ownerParam} AND NOT (p.owner_sub LIKE 'service:%' AND ${SERVICE_PROMPT_SHARED(alias, ownerParam)}))
               OR ${OWNERLESS_FOREIGN(alias, ownerParam)}
               OR ${STEER_TEXT_HIDDEN(alias, ownerParam, actorParam, who)}
+              -- rw-mcp-identity round 3 (review F6, defence in depth): an idea job of ANOTHER owner's idea never shows its
+              -- query, even without a research_prompts row (the trigger normally adds one)
+              OR ${FOREIGN_IDEA(`${alias}.refinery_id`, ownerParam)}
         THEN '' ELSE ${alias}.query END`;
 
 // A job is shared research output; its private fields (the original prompt, inlet_ref, refinery_id,

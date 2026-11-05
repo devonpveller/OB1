@@ -340,6 +340,12 @@ export function identitySeam(deps: SeamDeps = seamDeps(null)) {
         return c.json({ error: "the identity store is not answering" }, 503);
       }
     }
+    // round 3 (review r-mcp-identity F3): service `mcp` (openbrain-mcp's contract tools) is LEAST PRIVILEGE by
+    // construction: exactly the contract reads userTokenRoute names, with or without a user token. Every other route -
+    // a contract write, a notes or sources route, anything not USER_ONLY - is 403 for it.
+    if (who.kind === "service" && USER_TOKEN_SERVICES.has(who.sub.slice("service:".length)) && !userTokenRoute(c.req.method, path)) {
+      return c.json({ error: "openbrain-mcp's service key reaches the contract reads only" }, 403);
+    }
     const userToken = c.req.header(USER_TOKEN_HEADER);
     if (userToken !== undefined) {
       const svc = who.kind === "service" ? who.sub.slice("service:".length) : "";

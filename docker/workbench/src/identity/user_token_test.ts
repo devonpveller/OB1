@@ -107,3 +107,19 @@ Deno.test("the module is a byte-identical copy of openbrain-mcp's", async () => 
   try { theirs = norm(await Deno.readTextFile(new URL("../../../../integrations/kubernetes-deployment/mcp-identity.ts", import.meta.url))); } catch { return; } // the image has only this tree
   assertEquals(here, theirs);
 });
+
+Deno.test("round 3 (review F3): service mcp reaches the contract reads ONLY - every other route is 403, writes included", async () => {
+  const a = app(ENV);
+  for (const [why, path, method] of [
+    ["a contract write", "/workbench/contract/sessions/x/steer", "POST"],
+    ["a non-contract read", "/workbench/sources", "GET"],
+  ] as Array<[string, string, string]>) {
+    const r = await call(a, path, { "x-brain-key": MCPK }, method);
+    assertEquals([r.status, r.sub], [403, undefined], `${why}: the mcp key alone`);
+  }
+  // still allowed: the contract reads, with or without a token
+  assertEquals((await call(a, "/workbench/contract/ideas", { "x-brain-key": MCPK })).status, 200);
+  assertEquals((await call(a, "/workbench/contract/diff-check", { "x-brain-key": MCPK }, "POST")).status, 200);
+  // another service key is not limited by this rule (owui keeps its own routes)
+  assertEquals((await call(a, "/workbench/sources", { "x-brain-key": OWUIK })).status, 200);
+});
