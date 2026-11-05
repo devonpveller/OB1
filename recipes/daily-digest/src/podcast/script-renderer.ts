@@ -33,6 +33,12 @@ export interface SegmentItem {
    * (PLAN D0, honest-by-default). Narrated as "we dug deeper on this overnight".
    */
   dive?: string;
+  /**
+   * rw-boundary-digest (plan 09 D2): a newsletter with no public link is never researched - its own text feeds the
+   * user's PRIVATE episode directly (the script pass is the local model; the script lives on the owner's episode row).
+   * Narrated as what the newsletter itself says, not as grounded research.
+   */
+  newsletter?: string;
 }
 export interface Segment {
   label: string; // gmail label, e.g. "brain/ai/nate b jones"
@@ -383,6 +389,9 @@ function trimTagged(synthesis: string, max = 6): string {
   return kept.join("\n");
 }
 
+/** How much of a body-only newsletter's own text the script prompt carries per item. */
+const NEWSLETTER_PROMPT_CHARS = 1500;
+
 /** Compact, tagged view of a segment for the script prompt. */
 function renderSegmentForPrompt(seg: Segment): string {
   const lines: string[] = [`## SEGMENT: ${seg.label}`];
@@ -393,6 +402,10 @@ function renderSegmentForPrompt(seg: Segment): string {
     lines.push(`### ${it.title || headlineOf(it)}${incomplete ? "  (EMAIL-ONLY / incomplete)" : ""}`);
     if (it.threadName) lines.push(`(ongoing thread: ${it.threadName})`);
     if (it.synthesis.trim()) lines.push(it.synthesis.trim());
+    if (it.newsletter && it.newsletter.trim()) {
+      lines.push(`NEWSLETTER TEXT (what the newsletter itself says - not researched; attribute it to the newsletter):`);
+      lines.push(it.newsletter.replace(/\s+/g, " ").trim().slice(0, NEWSLETTER_PROMPT_CHARS));
+    }
     if (it.dive && it.dive.trim()) {
       lines.push(`DEEPER DIVE (our own overnight research — the newsletter only mentioned this):`);
       lines.push(trimTagged(it.dive));

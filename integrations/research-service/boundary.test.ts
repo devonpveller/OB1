@@ -4,7 +4,7 @@
  * DB, no network, no model.   deno test --allow-read boundary.test.ts
  */
 import { assert, assertEquals, assertFalse } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { type BoundaryDeps, canonicalJson, formDerivedRequest, parseDoorBody, parseProposals, type PersonalItem, type Purpose, PURPOSES } from "./boundary.ts";
+import { type BoundaryDeps, canonicalJson, formDerivedRequest, parseDeliveries, parseDoorBody, parseProposals, parseRun, type PersonalItem, type Purpose, PURPOSES, runOptions } from "./boundary.ts";
 import { gate, lexicon, tokens } from "./boundary-gate.ts";
 import { type Caller, parseServiceCallers, requestKindOf } from "./origin.ts";
 import { promptSpans, withoutPromptSpansKeepLines } from "./prompt-private.ts";
@@ -177,4 +177,33 @@ Deno.test("the curator copy's span filter keeps the line structure", () => {
   assertEquals(out.split("\n").length, text.split("\n").length);
   assertEquals(promptSpans(out, prompt), []);
   assert(out.includes("[Source 1]") && out.includes("Other line. [Source 2]"));
+});
+
+// ── rw-boundary-digest (plan 09 PD0c, slot 460) ────────────────────────────────────────────────
+Deno.test("rw-boundary-digest: the door's run object carries only the four engine knobs, in their fixed shapes", () => {
+  const ok = { item: { kind: "gmail", id: "x1", owner_sub: OWNER.sub, fields: { subject: "s" }, links: ["https://example.org/a"] }, purpose: "digest-article" };
+  const p = parseDoorBody({ ...ok, run: { mode: "article", gap_research: "preliminary", dry_run: true, deadline_at: "2026-11-05T01:00:00+01:00" } });
+  assert(!("error" in p));
+  assertEquals(p.run, { mode: "article", gap_research: "preliminary", dry_run: true, deadline_at: "2026-11-05T00:00:00.000Z" });
+  assertEquals(runOptions(p.run), { mode: "article", gap_research: "preliminary", dry_run: true, deadline_at: "2026-11-05T00:00:00.000Z" });
+  const none = parseDoorBody(ok);
+  assert(!("error" in none) && Object.keys(none.run).length === 0, "no run: no knob");
+  assertEquals(runOptions({ dry_run: false }), {}, "dry_run false is not stored");
+  for (const bad of [{ seed_sources: [] }, { mode: "topic" }, { gap_research: "full" }, { dry_run: "yes" }, { deadline_at: 1767225600000 },
+    { deadline_at: "tomorrow" }, { deadline_at: "2026-11-05T01:00:00" }, { query: "q" }, "article", [1]]) {
+    assert("error" in parseRun(bad), JSON.stringify(bad));
+    assert("error" in parseDoorBody({ ...ok, run: bad }), `door: ${JSON.stringify(bad)}`);
+  }
+});
+
+Deno.test("rw-boundary-digest: a delivery carries a job id, ok, and at most the episode and thread ids (uuids)", () => {
+  const J = "11111111-2222-4333-8444-555555555555", E = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+  const ok = parseDeliveries({ deliveries: [{ job_id: J, ok: true, episode_id: E, thread_id: null }, { job_id: J.toUpperCase(), ok: false }] });
+  assert(!("error" in ok));
+  assertEquals(ok.deliveries, [{ job_id: J, ok: true, note: { episode_id: E } }, { job_id: J, ok: false, note: {} }]);
+  for (const bad of [{}, { deliveries: "x" }, { deliveries: [{ job_id: "nope", ok: true }] }, { deliveries: [{ job_id: J, ok: "y" }] },
+    { deliveries: [{ job_id: J, ok: true, episode_id: "zqLBLm3c9e7f01" }] }, { deliveries: [{ job_id: J, ok: true, labels: ["x"] }] },
+    { deliveries: [{ job_id: J, ok: true, gmail_id: "g" }] }, { deliveries: Array(501).fill({ job_id: J, ok: true }) }]) {
+    assert("error" in parseDeliveries(bad), JSON.stringify(bad).slice(0, 80));
+  }
 });
