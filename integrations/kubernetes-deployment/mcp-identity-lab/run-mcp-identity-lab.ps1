@@ -110,7 +110,7 @@ function Test-LabDockerArgs([string[]]$a) {
   }
   if ($a.Count -and $a[0] -eq 'build') {
     $ti = [array]::IndexOf($a, '-t')
-    if ($ti -lt 0 -or $a[$ti + 1] -notmatch "^[a-z0-9._/-]+:$([regex]::Escape($tag))(-[a-z0-9]+)?$") { return "a build tag that is not :$tag[-suffix]" }
+    if ($ti -lt 0 -or $a[$ti + 1] -notmatch "^[a-z0-9._/-]+:$([regex]::Escape($tag))(-[a-z0-9-]+)?$") { return "a build tag that is not :$tag[-suffix]" }
     if ($a -notcontains '--label') { return 'an unlabelled build' }
   }
   return ''
