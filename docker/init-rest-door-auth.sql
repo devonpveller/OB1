@@ -27,10 +27,15 @@
 -- later slot creates carries that slot's number (`slot` column): it is skipped (NOTICE) until the object exists, and
 -- the chain's last mount (990, this file again) grants it on a fresh volume; on live, re-run this file after the slot.
 --
--- OWNER ARGUMENTS (section 5). No door role may run a function that takes an owner (an argument named p_owner /
--- owner_sub / p_sub / p_user_id / p_requester, or the named owner functions) - EXCEPT a pure predicate: a function that
--- returns boolean, is IMMUTABLE (it may not read a table), and is not SECURITY DEFINER. Such a function answers a
--- question about the value it is given (a CHECK's "is this owner well formed") and can read or write nothing for an owner.
+-- OWNER ARGUMENTS (section 5). No door role may run a function that takes an owner - an argument of the owner family
+-- (owner, owner_id, owner_sub, sub, subject, user, user_id, user_sub, requester, requester_sub, actor, actor_sub, each with
+-- or without p_), or one of the named owner functions - EXCEPT
+--   * a pure predicate: returns boolean (not a set), is IMMUTABLE, and is not SECURITY DEFINER. It answers a question
+--     about the value it is given (a CHECK's "is this owner well formed"). This trusts the CATALOG FLAGS: a function that
+--     lies (declared IMMUTABLE, reads or writes a table) still runs as the caller (INVOKER), so it gains a door role
+--     nothing beyond that role's own table grants and RLS; review of the map line is the control for that;
+--   * a named function whose family-shaped argument is not a person: post_research_notification(... p_subject ...)
+--     (a notification's subject line).
 --
 -- The authenticator's password is not in this file: it is set out of band from OB_REST_AUTHENTICATOR_PASSWORD
 -- (OB1/docker/rest-door/mint-rest-tokens.ps1 -SetAuthenticatorPassword; the ob_pantry / ob_app_memory way).
@@ -61,6 +66,10 @@ CREATE TABLE IF NOT EXISTS rest_door.regrants (
     role_name TEXT NOT NULL,
     PRIMARY KEY (signature, role_name)
 );
+-- round 5 (F-3): the oid of the function object the stand-in was granted on. A restore recreates every function (a
+-- NEW oid), so a stand-in missing from a function whose oid moved is given back; one missing from the SAME function
+-- object was revoked on purpose and stays revoked.
+ALTER TABLE rest_door.regrants ADD COLUMN IF NOT EXISTS fn_oid OID;
 REVOKE ALL ON ALL TABLES IN SCHEMA rest_door FROM PUBLIC;
 
 -- first run only: the before-state. A function created later (slot 440 landing second) is not in it; its
@@ -191,23 +200,63 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', g.fn::regprocedure, g.role_name);
   END LOOP;
 END $$;
-INSERT INTO rest_door.regrants (signature, role_name) SELECT signature, role_name FROM _rda_regrant
-ON CONFLICT DO NOTHING;
--- R1 (the review): a restore with --no-acl (the runbook's) recreates every function under the CURRENT default ACLs -
--- PUBLIC no longer holds them, so the query above finds nothing - and drops the stand-in grants, while
--- rest_door.regrants comes back as data. Every archived stand-in whose function and role exist is granted again.
+INSERT INTO rest_door.regrants (signature, role_name, fn_oid) SELECT signature, role_name, fn FROM _rda_regrant
+ON CONFLICT (signature, role_name) DO UPDATE SET fn_oid = EXCLUDED.fn_oid;
+-- R1 (the review) + round 5 (F-1, F-2, F-3): a restore with --no-acl (the runbook's) recreates every function under the
+-- CURRENT default ACLs - PUBLIC no longer holds them, so the query above finds nothing - and drops the stand-in grants,
+-- while rest_door.regrants comes back as data. So, row by row (a loop: every existence test runs before anything that
+-- needs the object, and has_function_privilege gets oids, never a name that may not exist):
+--   * a row whose role or function no longer exists is stale: skipped with a NOTICE and pruned;
+--   * a row 450 could never have written is refused with a NOTICE (and left for the operator): its role must be a
+--     stand-in candidate (not PUBLIC, a superuser, pg_*, anon, authenticated, the authenticator or a door role) and its
+--     function one whose archived before-state let PUBLIC run it;
+--   * the stand-in is given back only when the function object CHANGED since it was granted (fn_oid differs: a restore
+--     or a drop-and-recreate). Missing from the SAME object = revoked on purpose: left revoked (see the runbook).
 DO $$
 DECLARE
-  g RECORD;
-  n INT := 0;
+  x RECORD;
+  v_role OID;
+  v_super BOOLEAN;
+  v_fn OID;
+  n_back INT := 0;
+  n_stale INT := 0;
+  n_refused INT := 0;
+  n_kept INT := 0;
 BEGIN
-  FOR g IN SELECT to_regprocedure(x.signature) AS fn, x.role_name FROM rest_door.regrants x
-            WHERE to_regprocedure(x.signature) IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = x.role_name)
-              AND NOT has_function_privilege(x.role_name, to_regprocedure(x.signature), 'EXECUTE') LOOP
-    EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', g.fn, g.role_name);
-    n := n + 1;
+  -- archives written before round 5 have no fn_oid: they name the function as it is now
+  UPDATE rest_door.regrants r SET fn_oid = to_regprocedure(r.signature) WHERE r.fn_oid IS NULL AND to_regprocedure(r.signature) IS NOT NULL;
+  FOR x IN SELECT signature, role_name, fn_oid FROM rest_door.regrants ORDER BY signature, role_name LOOP
+    SELECT r.oid, r.rolsuper INTO v_role, v_super FROM pg_roles r WHERE r.rolname = x.role_name;
+    v_fn := to_regprocedure(x.signature);
+    IF v_role IS NULL OR v_fn IS NULL THEN
+      RAISE NOTICE 'rest door: stale archived stand-in % -> % (% no longer exists): skipped and pruned',
+        x.signature, x.role_name, CASE WHEN v_role IS NULL THEN 'the role' ELSE 'the function' END;
+      DELETE FROM rest_door.regrants WHERE signature = x.signature AND role_name = x.role_name;
+      n_stale := n_stale + 1;
+      CONTINUE;
+    END IF;
+    IF v_super OR x.role_name ~ '^pg_' OR x.role_name IN ('anon', 'authenticated', 'ob_rest_authenticator') OR x.role_name ~ '^ob_rest_'
+       OR NOT EXISTS (SELECT 1 FROM rest_door.fn_acl_before b WHERE b.signature = x.signature AND b.public_had) THEN
+      RAISE NOTICE 'rest door: archived stand-in % -> % is not one this file grants: refused (not granted)', x.signature, x.role_name;
+      n_refused := n_refused + 1;
+      CONTINUE;
+    END IF;
+    IF has_function_privilege(v_role, v_fn, 'EXECUTE') THEN
+      IF x.fn_oid IS DISTINCT FROM v_fn THEN
+        UPDATE rest_door.regrants SET fn_oid = v_fn WHERE signature = x.signature AND role_name = x.role_name;
+      END IF;
+      CONTINUE;
+    END IF;
+    IF x.fn_oid IS NOT DISTINCT FROM v_fn THEN
+      n_kept := n_kept + 1;   -- revoked from this very function object: on purpose
+      CONTINUE;
+    END IF;
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', v_fn::regprocedure, x.role_name);
+    UPDATE rest_door.regrants SET fn_oid = v_fn WHERE signature = x.signature AND role_name = x.role_name;
+    n_back := n_back + 1;
   END LOOP;
-  RAISE NOTICE 'rest door: % archived stand-in grant(s) given back (after a restore without ACLs; 0 otherwise)', n;
+  RAISE NOTICE 'rest door: % archived stand-in grant(s) given back (a restore without ACLs; 0 otherwise); % stale row(s) pruned; % row(s) refused; % deliberately revoked left revoked',
+    n_back, n_stale, n_refused, n_kept;
 END $$;
 -- a function created after the first run (440 landing second) that PUBLIC could run: archive its before-state too
 INSERT INTO rest_door.fn_acl_before (signature, public_had, proacl)
@@ -548,8 +597,10 @@ BEGIN
     FROM pg_proc p CROSS JOIN pg_roles r
    WHERE p.pronamespace = 'public'::regnamespace AND (r.rolname ~ '^ob_rest_')
      AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
-     AND (pg_get_function_identity_arguments(p.oid) ~* '\m(p_owner|p_owner_sub|owner_sub|p_sub|p_user_id|p_requester)\M'
+     AND (pg_get_function_identity_arguments(p.oid) ~* '\m(p_)?(owner|owner_id|owner_sub|sub|subject|user|user_id|user_sub|requester|requester_sub|actor|actor_sub)\M'
           OR p.proname IN ('research_job_report_owner', 'setting_get', 'setting_problem', 'user_setting_set'))
+     -- named: an argument of the family that is NOT a person (header, OWNER ARGUMENTS)
+     AND p.oid::regprocedure::text NOT IN ('post_research_notification(text,text,text,text,text,text)')
      -- a pure predicate is not an owner argument (header, OWNER ARGUMENTS): boolean, IMMUTABLE, not SECURITY DEFINER
      AND NOT (p.prorettype = 'boolean'::regtype AND p.provolatile = 'i' AND NOT p.prosecdef AND p.proretset = false
               AND p.proname NOT IN ('research_job_report_owner', 'setting_get', 'setting_problem', 'user_setting_set'));
