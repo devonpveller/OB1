@@ -321,6 +321,8 @@ try {
   $mx = { param($pre) $o = Dk exec $db psql -U postgres -d openbrain -X -A -t -c "$pre INSERT INTO thoughts (content, metadata, exposure) VALUES ('escape probe $mode$rand', jsonb_build_object('source', 'mcp', 'exposure', 'ops'), 'ops') RETURNING 'landed'"; @{ rc = $script:rc; refused = ($o -match 'inlet stamp'); out = $o } }
   $su0 = & $mx ''
   $su1 = & $mx "SET inlet_stamp.allow_unowned = 'on';"
+  $su2 = & $mx "SET session_replication_role = replica;"   # what 440's init / revert do for parts of themselves
+  $alwaysOn = Q "SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_inlet_stamp_thoughts', 'trg_inlet_stamp_sources') AND tgenabled = 'A'"
   $null = Q "DELETE FROM public.thoughts WHERE content LIKE 'escape probe%'"
   $guardDefs = Q "SELECT string_agg(pg_get_functiondef(p.oid), ' ') FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('inlet_stamp_thoughts_guard', 'inlet_stamp_sources_guard', 'inlet_stamp_is_dossier', 'inlet_stamp_source_personal', 'inlet_subject_ok', 'inlet_owner_column_ok')"
   $sqlText = if (Test-Path (Join-Path $dockerDir 'init-inlet-stamp.sql')) { [IO.File]::ReadAllText((Join-Path $dockerDir 'init-inlet-stamp.sql')) } else { '' }
@@ -328,7 +330,7 @@ try {
   $escInDb = [regex]::Matches($guardDefs, $escRx, 'IgnoreCase').Count
   $sqlNoComments = (($sqlText -split "`n") | ForEach-Object { $_ -replace '--.*$', '' }) -join "`n"
   $escInFile = [regex]::Matches($sqlNoComments, 'allow_unowned|session_replication_role|DISABLE\s+TRIGGER|rolsuper\s+THEN', 'IgnoreCase').Count
-  Save 'direct-pg.log' ("[mcp] $($m1.out)`n[agent-memory] $($m2.out)`n[clear] $clr`n[change] $chg`n[superuser] $($su0.out)`n[superuser + a setting] $($su1.out)`nescape-shaped tokens: in the guards' definitions $escInDb, in the slot file $escInFile")
+  Save 'direct-pg.log' ("[mcp] $($m1.out)`n[agent-memory] $($m2.out)`n[clear] $clr`n[change] $chg`n[superuser] $($su0.out)`n[superuser + a setting] $($su1.out)`n[superuser + session_replication_role=replica] $($su2.out)`nescape-shaped tokens: in the guards' definitions $escInDb, in the slot file $escInFile")
   if ($pj) {
     $wr = $pj.writes
     $lines = @($wr.PSObject.Properties | ForEach-Object { "$($_.Name): $($_.Value.status)$(if ($_.Value.refused) { ' refused' })$(if ($_.Value.why -and -not $_.Value.refused) { ' - ' + $_.Value.why })" })
@@ -352,7 +354,7 @@ try {
       Check ($controlsOk -eq $okCases.Count) "PostgREST: the correctly owned controls land, and the compile's dossier stays shared ($controlsOk of $($okCases.Count))"
       Check ($m1.refused -and $m1.rc -ne 0 -and $m2.refused -and $m2.rc -ne 0) 'direct PG as ob_app_memory: an unstamped MCP-shaped capture_thought and agent-memory insert is refused (rw-mcp-identity must stamp them before 470 goes live)'
       Check ($clrRefused -and $chgRefused) 'an app role can neither clear nor change an owner'
-      Check ($su0.refused -and $su1.refused -and $su0.out -notmatch 'landed' -and $su1.out -notmatch 'landed') 'no escape hatch: a superuser''s unowned personal insert is refused too, with or without a setting'
+      Check ($su0.refused -and $su1.refused -and $su2.refused -and "$($su0.out)$($su1.out)$($su2.out)" -notmatch 'landed' -and $alwaysOn -eq '2') "no escape hatch: a superuser's unowned personal insert is refused too - with a setting, and under session_replication_role = replica (both guards are ALWAYS triggers: $alwaysOn)"
       Check ($escInDb -eq 0 -and $escInFile -eq 0 -and $guardDefs.Length -gt 500) "no setting- or role-based escape in the guard path: the guards' definitions read no setting and no role ($escInDb), slot 470's file switches off nothing ($escInFile)"
       $rec = $pj.record
       Check ($rec.table_read_status -ge 400 -and -not $rec.table_read_gave_rows) "the owner record is not readable through PostgREST ($($rec.table_read_status))"
@@ -410,7 +412,7 @@ try {
     Check ($r3.rc -eq 0 -and [int]$legacyBack -ge 1) "then 440's revert (470 gone): the legacy rows are unowned again ($legacyBack)"
     $null = Q "INSERT INTO public.thoughts (content, metadata, exposure) VALUES ('drill unowned $rand', jsonb_build_object('source', 'mcp', 'exposure', 'ops'), 'ops')"
     $r = PsqlFile (Join-Path $dockerDir 'init-inlet-stamp.sql') @()
-    Check ($r.rc -ne 0 -and $r.out -match 'run slot 440' -and (Q "SELECT to_regclass('public.inlet_connections') IS NULL") -eq 't') '470 with an unowned thought still there is refused ("run slot 440 first"), nothing changed'
+    Check ($r.rc -ne 0 -and $r.out -match 'slot 440' -and (Q "SELECT to_regclass('public.inlet_connections') IS NULL") -eq 't') "470 with 440 reverted (and an unowned thought there) is refused naming slot 440, nothing changed"
     $r = PsqlFile (Join-Path $dockerDir 'init-inlet-owner.sql') @('-v', "owner_sub=$A")
     $r2 = PsqlFile (Join-Path $dockerDir 'init-inlet-stamp.sql') @()
     $conns = Q "SELECT string_agg(id, ',' ORDER BY id) FROM public.inlet_connections"

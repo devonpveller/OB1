@@ -209,8 +209,8 @@ function Start-Db([string]$name) {
   $o = Dk exec $name psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/fixtures.sql
   Save "$name-fixtures.log" $o
   Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) "$name fixtures applied"
-  $null = Dk exec $name psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF to_regclass('public.inlet_connections') IS NOT NULL THEN ALTER TABLE public.thoughts ENABLE TRIGGER trg_inlet_stamp_thoughts; ALTER TABLE public.sources ENABLE TRIGGER trg_inlet_stamp_sources; END IF; END `$`$"
-  $stampState = "$(Dk exec $name psql -U postgres -d openbrain -X -A -t -c "SELECT CASE WHEN to_regclass('public.inlet_connections') IS NULL THEN 'absent' WHEN (SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_inlet_stamp_thoughts', 'trg_inlet_stamp_sources') AND tgenabled = 'O') = 2 THEN 'on' ELSE 'off' END")".Trim()
+  $null = Dk exec $name psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF to_regclass('public.inlet_connections') IS NOT NULL THEN ALTER TABLE public.thoughts ENABLE ALWAYS TRIGGER trg_inlet_stamp_thoughts; ALTER TABLE public.sources ENABLE ALWAYS TRIGGER trg_inlet_stamp_sources; END IF; END `$`$"
+  $stampState = "$(Dk exec $name psql -U postgres -d openbrain -X -A -t -c "SELECT CASE WHEN to_regclass('public.inlet_connections') IS NULL THEN 'absent' WHEN (SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_inlet_stamp_thoughts', 'trg_inlet_stamp_sources') AND tgenabled = 'A') = 2 THEN 'on' ELSE 'off' END")".Trim()
   Check ($stampState -in @('on', 'absent')) "rw-inlet-stamp: slot 470's guards are ON again after the fixture load ($stampState)"
   return $true
 }

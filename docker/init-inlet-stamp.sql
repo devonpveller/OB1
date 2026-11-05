@@ -248,6 +248,9 @@ REVOKE ALL ON FUNCTION public.inlet_stamp_thoughts_guard() FROM PUBLIC;
 CREATE OR REPLACE TRIGGER trg_inlet_stamp_thoughts
     BEFORE INSERT OR UPDATE OF user_id, metadata ON public.thoughts
     FOR EACH ROW EXECUTE FUNCTION public.inlet_stamp_thoughts_guard();
+-- ALWAYS: the guard fires under session_replication_role = replica too (440's init and revert run parts of themselves
+-- that way, and any superuser session can set it) - it is not a switch that turns the guard off
+ALTER TABLE public.thoughts ENABLE ALWAYS TRIGGER trg_inlet_stamp_thoughts;
 
 -- a source that is personal (440's predicate: the email body, the podcast transcript, a Gmail id on a shared row)
 CREATE OR REPLACE FUNCTION public.inlet_stamp_source_personal(p_url TEXT, p_content_type TEXT, p_meta JSONB) RETURNS BOOLEAN
@@ -292,6 +295,7 @@ END $$;
 CREATE OR REPLACE TRIGGER trg_inlet_stamp_sources
     BEFORE INSERT OR UPDATE OF url, content_type, metadata ON public.sources
     FOR EACH ROW EXECUTE FUNCTION public.inlet_stamp_sources_guard();
+ALTER TABLE public.sources ENABLE ALWAYS TRIGGER trg_inlet_stamp_sources;
 
 -- the owner columns. Their rule is the subject SHAPE and no service principal (inlet_owner_column_ok): the literal
 -- 'operator' is refused at the inlet writers (their code, thoughts.user_id, the record), but these columns are also

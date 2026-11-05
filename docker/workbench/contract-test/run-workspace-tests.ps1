@@ -221,7 +221,7 @@ function Stamp-Guard([string]$how) {
   return $script:rc
 }
 function Stamp-GuardState {
-  $r = "$(Dk exec $db psql -U postgres -d openbrain -X -A -t -c "SELECT CASE WHEN to_regclass('public.inlet_connections') IS NULL THEN 'absent' WHEN (SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_inlet_stamp_thoughts', 'trg_inlet_stamp_sources') AND tgenabled = 'O') = 2 THEN 'on' ELSE 'off' END")".Trim()
+  $r = "$(Dk exec $db psql -U postgres -d openbrain -X -A -t -c "SELECT CASE WHEN to_regclass('public.inlet_connections') IS NULL THEN 'absent' WHEN (SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_inlet_stamp_thoughts', 'trg_inlet_stamp_sources') AND tgenabled = 'A') = 2 THEN 'on' ELSE 'off' END")".Trim()
   return $r
 }
 function LocalSnapshot { (Dk images --filter 'reference=*:local' --format '{{.Repository}}:{{.Tag}} {{.ID}}' | Out-String).Trim() -split "`n" | Sort-Object }
@@ -356,7 +356,7 @@ try {
   $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/fixtures.sql
   Save 'fixtures.log' $o
   Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) 'fixtures applied'
-  $null = Stamp-Guard 'ENABLE'
+  $null = Stamp-Guard 'ENABLE ALWAYS'
   $gs = Stamp-GuardState
   Check ($gs -in @('on', 'absent')) "rw-inlet-stamp: slot 470's guards are ON again after the legacy-shaped fixture load ($gs)"
 
@@ -465,7 +465,7 @@ try {
     '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/ideas/ideas_integration_test.ts')
-  $null = Stamp-Guard 'ENABLE'
+  $null = Stamp-Guard 'ENABLE ALWAYS'
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
   Save 'ideas-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|Values are not equal|\[Diff\]|^\s+[-+]' }) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
@@ -719,7 +719,7 @@ try {
   # keeps the reconcile repair (files still present) from writing either back; a clean page goes in; the revert brings
   # them back; init again withholds them.
   if (-not $Red -and -not $SettingsOnly) {
-    $null = Stamp-Guard 'ENABLE'
+    $null = Stamp-Guard 'ENABLE ALWAYS'
     Write-Host '[5q] slot 390 and the wiki: plant, RED with round 1, init, the viewer''s reconcile repair with the files present, search as B, revert, init'
     $wk = -join ((97..122) | Get-Random -Count 10 | ForEach-Object { [char]$_ })
     $mark = "wikireportsecret$wk"
@@ -900,7 +900,7 @@ try {
   # changed; init again; the late rows; the second run (exactly the new unowned rows). The sweep then runs on that state.
   if (-not $SettingsOnly -and (-not $Red -or $IdeasOnly)) {
     Write-Host '[5r] slot 440: personal data becomes its owner''s and private (plant, RED, refusals, init x2, reconcile, deploy step, revert x2, mutants, init, late rows, second run)'
-    $null = Stamp-Guard 'ENABLE'
+    $null = Stamp-Guard 'ENABLE ALWAYS'
     # rw-inlet-stamp: [5r] plants pre-PD1 data and reverts 440, which writes owners back to NULL - so 470 comes off first
     # (the revert order: 470 before 440) and goes back on after 440's second run, as on the live database
     $has470 = (Stamp-GuardState) -ne 'absent'
@@ -1161,7 +1161,7 @@ try {
       foreach ($run in @(@('red', $pruneBase), @('green', (Join-Path $ob1 'recipes\email-history-import')))) {
         $null = Stamp-Guard 'DISABLE'   # the plant includes an unowned legacy mail (and pre-470 mail with no connection)
         $ids = ((Dk exec $db psql -U postgres -d openbrain -X -tAc "WITH x AS (INSERT INTO public.thoughts (content, metadata, exposure, user_id) SELECT 'Subject: lab prune | ' || o, jsonb_build_object('source', 'gmail', 'email_date', '2020-01-01T00:00:00Z', 'gmail_labels', jsonb_build_array('brain/keep-short-term')), 'ops', NULLIF(o, 'none') FROM unnest(ARRAY['$inA', '$inB', 'none']) o RETURNING id) SELECT string_agg(id::text, ',') FROM x") | Out-String).Trim()
-        $null = Stamp-Guard 'ENABLE'
+        $null = Stamp-Guard 'ENABLE ALWAYS'
         # rw-inlet-stamp (slot 470): this prune serves ONE inlet connection, `gmail`, whose recorded owner is the owner
         # slot 440 recorded (470 seeded it); the base's prune ignores both
         $po = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "$($run[1]):/p:ro", '-e', 'SUPABASE_URL=http://openbrain-rest', '-e', 'INLET_CONNECTION=gmail',
@@ -1189,7 +1189,7 @@ try {
     '-e', 'INTAKE_TEST_RESEARCH=http://stub-research:8000', '-e', 'INTAKE_TEST_GATE=http://stub-gate:8080',
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/intake/intake_integration_test.ts')
-  $null = Stamp-Guard 'ENABLE'
+  $null = Stamp-Guard 'ENABLE ALWAYS'
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
   Save 'intake-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|Values are not equal|\[Diff\]|^\s+[-+]' }) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
