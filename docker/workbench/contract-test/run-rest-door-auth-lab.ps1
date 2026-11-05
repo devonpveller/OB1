@@ -283,6 +283,7 @@ SELECT json_build_object(
                   'research_private_report_claims', 'user_document_listings', 'workspace_rooms', 'workspace_room_entries',
                   'workspace_users', 'workspace_impersonation', 'refinery_user_sources', 'idea_thought_archive', 'idea_wiki_archive',
                   'admin_audit', 'held_sources']))),
+  'settingKeys', (SELECT COALESCE(json_agg(json_build_object('key', key, 'tier', tier) ORDER BY key), '[]') FROM public.settings_keys),
   'allowed', (SELECT COALESCE(json_object_agg(d.rolname, json_build_object(
                 'relations', (SELECT COALESCE(json_agg(relname ORDER BY relname), '[]') FROM rels WHERE has_table_privilege(d.rolname, ('public.' || quote_ident(relname))::regclass, 'SELECT')),
                 'functions', (SELECT COALESCE(json_agg(DISTINCT p.proname), '[]') FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND has_function_privilege(d.rolname, p.oid, 'EXECUTE')))), '{}') FROM door d)

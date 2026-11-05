@@ -98,9 +98,19 @@ GRANT ob_rest_wiki, ob_rest_viewer, ob_rest_entity, ob_rest_digest, ob_rest_podc
    TO ob_rest_authenticator;
 
 -- ------------------------------------------------------------
--- 2. rest_setting_get(p_key): a setting read for the owner the TOKEN names. PostgREST puts the verified claims
---    in request.jwt.claims; a door role has no way to set that GUC itself (no SQL, no function that sets one).
+-- 2. rest_setting_get(p_key): a setting read for the owner the TOKEN names, of a key the token's ROLE may read.
+--    PostgREST puts the verified claims in request.jwt.claims (and has switched to the claim's role); a door role
+--    has no way to set that GUC itself (no SQL, no function that sets one). The key allow-list is each caller's
+--    `setting` lines in section 4 (rest_door.setting_keys): a key prefix per role, and only USER-tier keys - an
+--    admin-tier key (the shared store) is never readable from the door.
 -- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS rest_door.setting_keys (
+    role_name  TEXT NOT NULL,
+    key_prefix TEXT NOT NULL CHECK (key_prefix ~ '^[a-z][a-z0-9_]*\.$'),
+    PRIMARY KEY (role_name, key_prefix)
+);
+REVOKE ALL ON rest_door.setting_keys FROM PUBLIC;
+
 CREATE OR REPLACE FUNCTION public.rest_setting_get(p_key TEXT)
 RETURNS JSONB
 LANGUAGE plpgsql STABLE
@@ -108,21 +118,34 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $fn$
 DECLARE
+  v_claims JSONB;
   v_sub TEXT;
+  v_role TEXT;
 BEGIN
   BEGIN
-    v_sub := NULLIF(btrim(COALESCE(current_setting('request.jwt.claims', true)::jsonb ->> 'sub', '')), '');
+    v_claims := current_setting('request.jwt.claims', true)::jsonb;
   EXCEPTION WHEN others THEN
-    v_sub := NULL;
+    v_claims := NULL;
   END;
-  IF v_sub IS NULL OR v_sub LIKE 'service:%' THEN
+  v_sub := NULLIF(btrim(COALESCE(v_claims ->> 'sub', '')), '');
+  v_role := COALESCE(v_claims ->> 'role', '');
+  IF v_sub IS NULL OR v_sub ILIKE 'service:%' THEN
     RAISE EXCEPTION 'rest_setting_get: the token names no owner' USING ERRCODE = '42501';
+  END IF;
+  -- the claim's role is the role PostgREST switched to; it must also be the session's role (no claims set by hand)
+  IF v_role = '' OR v_role IS DISTINCT FROM current_setting('role', true) THEN
+    RAISE EXCEPTION 'rest_setting_get: no caller role' USING ERRCODE = '42501';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM rest_door.setting_keys k
+                  WHERE k.role_name = v_role AND left(p_key, length(k.key_prefix)) = k.key_prefix)
+     OR NOT EXISTS (SELECT 1 FROM public.settings_keys sk WHERE sk.key = p_key AND sk.tier = 'user') THEN
+    RAISE EXCEPTION 'rest_setting_get: this caller may not read that setting' USING ERRCODE = '42501';
   END IF;
   RETURN public.setting_get(v_sub, p_key);
 END
 $fn$;
 COMMENT ON FUNCTION public.rest_setting_get(TEXT) IS
-  'rw-rest-door-auth: setting_get for the owner in the verified token''s sub (the REST door''s only settings read).';
+  'rw-rest-door-auth: setting_get for the owner in the verified token''s sub, of a user-tier key the caller''s role may read (rest_door.setting_keys).';
 -- only the door roles that read a setting (section 4) run it; a direct-Postgres service calls setting_get itself
 REVOKE ALL ON FUNCTION public.rest_setting_get(TEXT) FROM PUBLIC, service_role;
 
@@ -194,74 +217,98 @@ BEGIN
   END LOOP;
 END $$;
 
-CREATE TEMP TABLE _rda_map (role_name TEXT, rel TEXT, privs TEXT) ON COMMIT DROP;
-INSERT INTO _rda_map VALUES
-  -- openbrain-wiki: wiki-service.mjs, the shared wiki-pages / reconcile / compile-notify modules, and the two
-  -- children it spawns (entity-wiki/generate-wiki.mjs, wiki-synthesis/scripts/synthesize-notebooks.mjs)
-  ('ob_rest_wiki', 'entities',          'SELECT, UPDATE'),
-  ('ob_rest_wiki', 'thought_entities',  'SELECT'),
-  ('ob_rest_wiki', 'source_entities',   'SELECT'),
-  ('ob_rest_wiki', 'edges',             'SELECT'),
-  ('ob_rest_wiki', 'threads',           'SELECT, INSERT, UPDATE'),
-  ('ob_rest_wiki', 'thread_sources',    'SELECT, INSERT'),
-  ('ob_rest_wiki', 'sources',           'SELECT'),
-  ('ob_rest_wiki', 'thoughts',          'SELECT, INSERT, UPDATE, DELETE'),   -- the note-file mirror (ops plane by policy)
-  ('ob_rest_wiki', 'wiki_pages',        'SELECT, INSERT, UPDATE, DELETE'),
-  -- post_research_notification (SECURITY INVOKER): checks the class in the registry view, upserts the notification
-  ('ob_rest_wiki', 'contract_registry_view', 'SELECT'),
-  ('ob_rest_wiki', 'research_notifications', 'SELECT, INSERT, UPDATE'),
-  -- openbrain-wiki-viewer: reads, and the reconcile's repair upsert
-  ('ob_rest_viewer', 'wiki_pages',      'SELECT, INSERT, UPDATE'),
-  -- openbrain-entity-worker (supabase-js)
-  ('ob_rest_entity', 'entities',                'SELECT, INSERT, UPDATE'),
-  ('ob_rest_entity', 'thought_entities',        'SELECT, INSERT, UPDATE, DELETE'),
-  ('ob_rest_entity', 'edges',                   'SELECT, INSERT, UPDATE'),
-  ('ob_rest_entity', 'entity_extraction_queue', 'SELECT, UPDATE'),
-  ('ob_rest_entity', 'source_extraction_queue', 'SELECT, UPDATE'),
-  ('ob_rest_entity', 'thoughts',                'SELECT'),
-  ('ob_rest_entity', 'sources',                 'SELECT'),
-  ('ob_rest_entity', 'source_entities',         'SELECT, INSERT, UPDATE, DELETE'),
-  -- openbrain-digest
-  ('ob_rest_digest', 'thoughts',        'SELECT'),
-  -- openbrain-podcast (the render service and the link-enrich run it spawns)
-  ('ob_rest_podcast', 'podcast_render_requests', 'SELECT, UPDATE'),
-  ('ob_rest_podcast', 'podcast_teams',           'SELECT'),
-  ('ob_rest_podcast', 'podcast_team_members',    'SELECT'),
-  ('ob_rest_podcast', 'podcast_presenters',      'SELECT'),
-  ('ob_rest_podcast', 'podcast_voice_links',     'SELECT'),
-  ('ob_rest_podcast', 'podcast_episodes',        'SELECT, INSERT'),
-  ('ob_rest_podcast', 'thoughts',                'SELECT'),
-  -- the metadata merge, and find_or_create_source / link_source_to_thread (both SECURITY INVOKER: they find or
-  -- insert the transcript's source and upsert its thread link as the caller)
-  ('ob_rest_podcast', 'sources',                 'SELECT, INSERT, UPDATE'),
-  ('ob_rest_podcast', 'thread_sources',          'SELECT, INSERT, UPDATE'),
-  -- the sources insert's tombstone gate (trg_sources_tombstone_gate, SECURITY INVOKER) reads the tombstones
-  ('ob_rest_podcast', 'source_tombstones',       'SELECT'),
-  -- openbrain-gmail-pull: inserts ops-plane thoughts (return=representation reads the row back)
-  ('ob_rest_gmail_pull', 'thoughts',    'SELECT, INSERT'),
-  -- openbrain-gmail-prune: previews and deletes expired gmail thoughts; the delete trigger
-  -- (touch_entities_for_deleted_thought, SECURITY INVOKER) touches the linked entities
-  ('ob_rest_gmail_prune', 'thoughts',          'SELECT, DELETE'),
-  ('ob_rest_gmail_prune', 'thought_entities',  'SELECT'),
-  ('ob_rest_gmail_prune', 'entities',          'UPDATE');
--- the delete trigger's UPDATE ... WHERE id IN (...) reads entities.id too
-INSERT INTO _rda_map VALUES ('ob_rest_gmail_prune', 'entities', 'SELECT');
--- the wiki's note mirror deletes thoughts too (same trigger)
--- (ob_rest_wiki already holds SELECT/UPDATE on entities and SELECT on thought_entities)
+-- THE DOOR MAP: one block per caller. A caller's whole grant is its block - the tables (with privileges), the
+-- functions, whole extensions, and the setting-key prefixes rest_setting_get lets it read. Everything else a
+-- role gets (sequences, functions in defaults / CHECKs / copied policies, the call closure) is generated from
+-- these lines below. To change what a caller may do, change its block and nothing else.
+--   kind: table (object = relation, privs = privileges) | function (object = name, every overload) |
+--         extension (object = extension name: all its functions) | setting (object = key prefix, e.g. 'digest.')
+CREATE TEMP TABLE _rda_door (role_name TEXT, kind TEXT, object TEXT, privs TEXT) ON COMMIT DROP;
+INSERT INTO _rda_door VALUES
+  -- == openbrain-wiki ==================================================================================
+  -- wiki-service.mjs, the shared wiki-pages / reconcile / compile-notify modules, and the two children it spawns
+  -- (entity-wiki/generate-wiki.mjs, wiki-synthesis/scripts/synthesize-notebooks.mjs)
+  ('ob_rest_wiki', 'table', 'entities',               'SELECT, UPDATE'),
+  ('ob_rest_wiki', 'table', 'thought_entities',       'SELECT'),
+  ('ob_rest_wiki', 'table', 'source_entities',        'SELECT'),
+  ('ob_rest_wiki', 'table', 'edges',                  'SELECT'),
+  ('ob_rest_wiki', 'table', 'threads',                'SELECT, INSERT, UPDATE'),
+  ('ob_rest_wiki', 'table', 'thread_sources',         'SELECT, INSERT'),
+  ('ob_rest_wiki', 'table', 'sources',                'SELECT'),
+  ('ob_rest_wiki', 'table', 'thoughts',               'SELECT, INSERT, UPDATE, DELETE'),  -- the note-file mirror (ops plane by policy)
+  ('ob_rest_wiki', 'table', 'wiki_pages',             'SELECT, INSERT, UPDATE, DELETE'),
+  ('ob_rest_wiki', 'function', 'post_research_notification', NULL),
+  -- post_research_notification is SECURITY INVOKER: it checks the class in the registry view, upserts the notification
+  ('ob_rest_wiki', 'table', 'contract_registry_view', 'SELECT'),
+  ('ob_rest_wiki', 'table', 'research_notifications', 'SELECT, INSERT, UPDATE'),
+  ('ob_rest_wiki', 'function', 'contract_registry_has', NULL),
 
--- whole extensions a caller's queries need: match_thoughts orders by pgvector's distance operator
-CREATE TEMP TABLE _rda_ext (role_name TEXT, ext TEXT) ON COMMIT DROP;
-INSERT INTO _rda_ext VALUES ('ob_rest_digest', 'vector');
+  -- == openbrain-wiki-viewer ===========================================================================
+  -- reads, and the reconcile's repair upsert
+  ('ob_rest_viewer', 'table', 'wiki_pages', 'SELECT, INSERT, UPDATE'),
 
-CREATE TEMP TABLE _rda_fn (role_name TEXT, fn TEXT) ON COMMIT DROP;
-INSERT INTO _rda_fn VALUES
-  ('ob_rest_wiki',    'post_research_notification'),
-  ('ob_rest_wiki',    'contract_registry_has'),
-  ('ob_rest_digest',  'match_thoughts'),
-  ('ob_rest_digest',  'rest_setting_get'),
-  ('ob_rest_podcast', 'find_or_create_source'),
-  ('ob_rest_podcast', 'link_source_to_thread'),
-  ('ob_rest_podcast', 'rest_setting_get');
+  -- == openbrain-entity-worker (supabase-js) ===========================================================
+  ('ob_rest_entity', 'table', 'entities',                'SELECT, INSERT, UPDATE'),
+  ('ob_rest_entity', 'table', 'thought_entities',        'SELECT, INSERT, UPDATE, DELETE'),
+  ('ob_rest_entity', 'table', 'edges',                   'SELECT, INSERT, UPDATE'),
+  ('ob_rest_entity', 'table', 'entity_extraction_queue', 'SELECT, UPDATE'),
+  ('ob_rest_entity', 'table', 'source_extraction_queue', 'SELECT, UPDATE'),
+  ('ob_rest_entity', 'table', 'thoughts',                'SELECT'),
+  ('ob_rest_entity', 'table', 'sources',                 'SELECT'),
+  ('ob_rest_entity', 'table', 'source_entities',         'SELECT, INSERT, UPDATE, DELETE'),
+
+  -- == openbrain-digest ================================================================================
+  ('ob_rest_digest', 'table', 'thoughts', 'SELECT'),
+  ('ob_rest_digest', 'function', 'match_thoughts', NULL),
+  ('ob_rest_digest', 'extension', 'vector', NULL),          -- match_thoughts orders by pgvector's distance operator
+  ('ob_rest_digest', 'function', 'rest_setting_get', NULL),
+  ('ob_rest_digest', 'setting', 'digest.', NULL),
+
+  -- == openbrain-podcast (the render service and the link-enrich run it spawns) ========================
+  ('ob_rest_podcast', 'table', 'podcast_render_requests', 'SELECT, UPDATE'),
+  ('ob_rest_podcast', 'table', 'podcast_teams',           'SELECT'),
+  ('ob_rest_podcast', 'table', 'podcast_team_members',    'SELECT'),
+  ('ob_rest_podcast', 'table', 'podcast_presenters',      'SELECT'),
+  ('ob_rest_podcast', 'table', 'podcast_voice_links',     'SELECT'),
+  ('ob_rest_podcast', 'table', 'podcast_episodes',        'SELECT, INSERT'),
+  ('ob_rest_podcast', 'table', 'thoughts',                'SELECT'),
+  ('ob_rest_podcast', 'function', 'rest_setting_get', NULL),
+  ('ob_rest_podcast', 'setting', 'podcast.', NULL),
+  -- link-enrich's loop-close (closeLoop): the metadata merge, find_or_create_source and link_source_to_thread (both
+  -- SECURITY INVOKER: they find or insert the transcript's source and upsert its thread link as the caller), and the
+  -- sources insert's tombstone gate (trg_sources_tombstone_gate, SECURITY INVOKER) reading the tombstones.
+  -- rw-boundary-digest (slot 460) retires this loop-close: these five lines go with it.
+  ('ob_rest_podcast', 'table', 'sources',           'SELECT, INSERT, UPDATE'),
+  ('ob_rest_podcast', 'table', 'thread_sources',    'SELECT, INSERT, UPDATE'),
+  ('ob_rest_podcast', 'table', 'source_tombstones', 'SELECT'),
+  ('ob_rest_podcast', 'function', 'find_or_create_source', NULL),
+  ('ob_rest_podcast', 'function', 'link_source_to_thread', NULL),
+
+  -- == openbrain-gmail-pull ============================================================================
+  -- inserts ops-plane thoughts (return=representation reads the row back)
+  ('ob_rest_gmail_pull', 'table', 'thoughts', 'SELECT, INSERT'),
+
+  -- == openbrain-gmail-prune ===========================================================================
+  -- previews and deletes expired gmail thoughts; the delete trigger (touch_entities_for_deleted_thought, SECURITY
+  -- INVOKER) touches the linked entities (UPDATE ... WHERE id IN (SELECT entity_id FROM thought_entities ...))
+  ('ob_rest_gmail_prune', 'table', 'thoughts',         'SELECT, DELETE'),
+  ('ob_rest_gmail_prune', 'table', 'thought_entities', 'SELECT'),
+  ('ob_rest_gmail_prune', 'table', 'entities',         'SELECT, UPDATE');
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM _rda_door WHERE role_name !~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune)$'
+                                       OR kind NOT IN ('table', 'function', 'extension', 'setting')
+                                       OR (kind = 'table') <> (privs IS NOT NULL)) THEN
+    RAISE EXCEPTION 'rest door: a door map line has an unknown role or kind, or privileges on a non-table' USING ERRCODE = '55000';
+  END IF;
+END $$;
+-- the views of the map the generators below read
+CREATE TEMP TABLE _rda_map ON COMMIT DROP AS SELECT role_name, object AS rel, privs FROM _rda_door WHERE kind = 'table';
+CREATE TEMP TABLE _rda_fn  ON COMMIT DROP AS SELECT role_name, object AS fn FROM _rda_door WHERE kind = 'function';
+CREATE TEMP TABLE _rda_ext ON COMMIT DROP AS SELECT role_name, object AS ext FROM _rda_door WHERE kind = 'extension';
+DELETE FROM rest_door.setting_keys;
+INSERT INTO rest_door.setting_keys (role_name, key_prefix) SELECT role_name, object FROM _rda_door WHERE kind = 'setting';
 
 DO $$
 DECLARE

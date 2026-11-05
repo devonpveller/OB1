@@ -89,6 +89,17 @@ if (-not $NoMint) {
   $secret = Get-Val 'OB_REST_JWT_SECRET'
   if ($secret.Length -lt 32) { throw 'OB_REST_JWT_SECRET is blank or shorter than 32 characters (run with -Generate)' }
   $sub = Get-Val 'WORKSPACE_DEFAULT_SUB'
+  # PostgREST reads `sub` as a JWT StringOrURI: a value with ':' must be a valid absolute URI, or EVERY request with
+  # the token is refused (401), not only the settings read. A service-shaped sub ('service:...', any case) names no
+  # owner. Refuse both here, before any token is written.
+  if ($sub) {
+    if ($sub -match '^(?i)service:') { throw "WORKSPACE_DEFAULT_SUB names a service ('service:...'), not a person: set it to the operator's Authentik subject" }
+    $u = $null
+    if ($sub.Contains(':') -and -not [System.Uri]::TryCreate($sub, [System.UriKind]::Absolute, [ref]$u)) {
+      throw "WORKSPACE_DEFAULT_SUB contains ':' but is not a valid URI; PostgREST would refuse every request made with the digest's and podcast's tokens. Use the plain Authentik subject (hex)."
+    }
+    if ($sub -match '[\s"\\]' -or $sub -match '[^\x20-\x7e]') { throw 'WORKSPACE_DEFAULT_SUB has whitespace, a quote, a backslash or a non-ASCII character: use the plain Authentik subject' }
+  }
   foreach ($c in $Callers) {
     $claims = New-Object System.Collections.Specialized.OrderedDictionary
     $claims['role'] = $c.Role; $claims['aud'] = 'openbrain-rest'; $claims['caller'] = $c.Caller

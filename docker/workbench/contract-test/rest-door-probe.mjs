@@ -253,6 +253,18 @@ async function caseOwner() {
       result("4-owner", refused(r) || (r.status >= 400 && /42501|names no owner/.test(r.text)), `${what}: refused (${r.status} ${r.text.slice(0, 100)})`);
     }
   }
+  // T3: each caller reads only its own user-tier keys; an admin-tier key never; a caller without settings none
+  if (!RED) {
+    const prefix = { DIGEST: "digest.", PODCAST: "podcast." };
+    for (const key of Object.keys(cfg.roles)) {
+      for (const k of cat.settingKeys ?? []) {
+        const r = await call(REST, "POST", "/rpc/rest_setting_get", { token: T[key], body: { p_key: k.key } });
+        const may = prefix[key] && k.key.startsWith(prefix[key]) && k.tier === "user";
+        result("4-owner", may ? okish(r) : refused(r) || (r.status >= 400 && /42501|may not read/.test(r.text)),
+          `${key} rest_setting_get(${k.key}, ${k.tier}) -> ${r.status} ${r.text.slice(0, 80)} (${may ? "its own key" : "not its key"})`);
+      }
+    }
+  }
   // every owner-argument function, with every caller's token and with the second user's, naming the operator
   const tokens = { ...T, SECOND_USER: jwt({ role: "ob_rest_digest", aud: "openbrain-rest", sub: S.other }) };
   for (const [key, tok] of Object.entries(tokens)) {
