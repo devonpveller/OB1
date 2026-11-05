@@ -163,12 +163,16 @@ function Start-Db([string]$name) {
   # The production DB user shape: not a superuser, no BYPASSRLS, a member of service_role.
   $o = Dk exec $name psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) "$name has ob_app_memory (non-superuser, service_role member)"
-  # rw-inlet-stamp (slot 470): this lab's fixtures are legacy-shaped (unowned thoughts, as before PD1); its SUPERUSER sessions may write them (the maintenance setting - no app role and no PostgREST request can)
-  $null = Dk exec $name psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF to_regprocedure('public.inlet_stamp_maintenance()') IS NOT NULL THEN ALTER DATABASE openbrain SET inlet_stamp.allow_unowned = 'on'; END IF; END `$`$"
   $null = Dk cp (Join-Path $ct 'fixtures.sql') "${name}:/tmp/fixtures.sql"
+  # rw-inlet-stamp (slot 470): fixtures.sql is legacy-shaped (an unowned idea thought); the LAB switches 470's guards off
+  # around this load only and on again right after (the migration has no escape hatch)
+  $null = Dk exec $name psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF to_regclass('public.inlet_connections') IS NOT NULL THEN ALTER TABLE public.thoughts DISABLE TRIGGER trg_inlet_stamp_thoughts; ALTER TABLE public.sources DISABLE TRIGGER trg_inlet_stamp_sources; END IF; END `$`$"
   $o = Dk exec $name psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/fixtures.sql
   Save "$name-fixtures.log" $o
   Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) "$name fixtures applied"
+  $null = Dk exec $name psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF to_regclass('public.inlet_connections') IS NOT NULL THEN ALTER TABLE public.thoughts ENABLE TRIGGER trg_inlet_stamp_thoughts; ALTER TABLE public.sources ENABLE TRIGGER trg_inlet_stamp_sources; END IF; END `$`$"
+  $stampState = "$(Dk exec $name psql -U postgres -d openbrain -X -A -t -c "SELECT CASE WHEN to_regclass('public.inlet_connections') IS NULL THEN 'absent' WHEN (SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_inlet_stamp_thoughts', 'trg_inlet_stamp_sources') AND tgenabled = 'O') = 2 THEN 'on' ELSE 'off' END")".Trim()
+  Check ($stampState -in @('on', 'absent')) "rw-inlet-stamp: slot 470's guards are ON again after the fixture load ($stampState)"
   return $true
 }
 

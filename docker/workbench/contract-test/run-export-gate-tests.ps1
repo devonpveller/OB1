@@ -264,8 +264,6 @@ try {
   $errs = @(($logs -split "`n") | Where-Object { $_ -match 'ERROR:' })
   Check ($errs.Count -eq 0) "initdb logged no ERROR ($($errs.Count))"
   $null = Dk exec "$P-db" psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
-  # rw-inlet-stamp (slot 470): this lab's fixtures are legacy-shaped (unowned thoughts, as before PD1); its SUPERUSER sessions may write them (the maintenance setting - no app role and no PostgREST request can)
-  $null = Dk exec "$P-db" psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF to_regprocedure('public.inlet_stamp_maintenance()') IS NOT NULL THEN ALTER DATABASE openbrain SET inlet_stamp.allow_unowned = 'on'; END IF; END `$`$"
   Check ($script:rc -eq 0) 'ob_app_memory (non-superuser, service_role member) - the production shape'
   foreach ($f in @('export-fixtures.sql', 'gate-fixtures.sql', 'gate-fixtures-r4.sql', 'gate-fixtures-r5.sql')) {
     $null = Dk cp (Join-Path $ct $f) "$P-db:/tmp/$f"

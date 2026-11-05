@@ -28,19 +28,18 @@
 --      Triggers, not CHECKs, on thoughts and sources: the rule reads the connection record (another table), exempts one
 --      shaped writer, and treats INSERT and UPDATE differently; a CHECK on thoughts would also fire on every UPDATE of a
 --      legacy row (the entity worker, intake) and break writers instead of refusing new unowned rows. The triggers run
---      for every role - PostgREST's (service_role today, slot 450's door roles), ob_app_memory, and superusers.
---      THE ONE EXCEPTION: a SUPERUSER session that sets inlet_stamp.allow_unowned = 'on' (maintenance: a migration's
---      revert that restores unowned rows - 380, 390, 440 - the Authentik re-key, a lab's legacy-shaped fixture). No app
---      role is a superuser (every container runs as ob_app_memory; PostgREST switches to its anon / door role), and a
---      superuser can disable a trigger anyway, so the setting opens nothing a writer can reach. Never set it on a role
---      or a database of the live stack.
+--      for every role - PostgREST's (service_role today, slot 450's door roles), ob_app_memory, and superusers. There
+--      is NO escape hatch: no setting, no role exception (coordinator decision 2026-11-05). A migration whose revert
+--      writes unowned rows (440, 390, 380) runs after this slot is reverted: the revert order is the reverse of the
+--      apply order, 470 first. If one ever has to run with 470 in place, that is a finding, not a reason for a bypass.
 --   4. inlet_connection_mail: the prune's view, per connection (440's inlet_owner_mail stays as it is, so a 440 re-run
 --      still runs).
 --
 --   psql -v ON_ERROR_STOP=1 [-v owner_sub="<the operator's subject>"] -U postgres -d openbrain -f init-inlet-stamp.sql
 -- Refused (nothing changed) unless 440 is applied AND 440's own predicate finds nothing left to make private: run 440
 -- first. From then on these triggers keep that at 0, so a 440 re-run has nothing to do. Re-runnable (nothing to do the
--- second time). Revert: revert-inlet-stamp.sql, BEFORE 440's (revert order 470, 460, 450, 440, 430, 390, 380).
+-- second time). Revert: revert-inlet-stamp.sql, BEFORE 440's (revert order 470, 460, 450, 440, 430, 390, 380): 440's
+-- revert writes the owners back to NULL, which these guards refuse for every role.
 -- Slot 450 (rw-rest-door-auth): this slot grants nothing to its door roles; the lines they need are in 450's door map
 -- (inlet_connection_owner for the stamping writers, the view for the prune, the import role).
 -- ============================================================
@@ -186,19 +185,6 @@ COMMENT ON VIEW public.inlet_connection_mail IS
   'rw-inlet-stamp (slot 470): a connection''s owner''s gmail thoughts, for prune-short-term.ts (filters inlet_connection, deletes by owner). Owned by ob_inlet_stamp_view.';
 
 -- ── 3. the database fails closed ──────────────────────────────────────────────────────────────────────────────────
--- maintenance (see the header): the session asked for it AND its EFFECTIVE role is a superuser. The guards are SECURITY
--- DEFINER (current_user is the definer there), so the effective role is read from the `role` setting a SET ROLE leaves
--- (PostgREST switches every request to its anon / door role: service_role is no superuser, though its login is), else
--- the session's own login role.
-CREATE OR REPLACE FUNCTION public.inlet_stamp_maintenance() RETURNS BOOLEAN
-LANGUAGE sql STABLE
-SET search_path = pg_catalog
-AS $$
-    SELECT coalesce(current_setting('inlet_stamp.allow_unowned', true), '') = 'on'
-       AND coalesce((SELECT r.rolsuper FROM pg_roles r
-                      WHERE r.rolname = coalesce(NULLIF(current_setting('role', true), 'none'), session_user::text)), false)
-$$;
-REVOKE ALL ON FUNCTION public.inlet_stamp_maintenance() FROM PUBLIC;
 
 -- the one shared thought: the wiki compile's dossier (shared output, compiled from shared thoughts only - 440)
 CREATE OR REPLACE FUNCTION public.inlet_stamp_is_dossier(p_meta JSONB) RETURNS BOOLEAN
@@ -218,9 +204,6 @@ DECLARE
     v_conn  TEXT := NEW.metadata ->> 'inlet_connection';
     v_owner TEXT;
 BEGIN
-    IF public.inlet_stamp_maintenance() THEN
-        RETURN NEW;
-    END IF;
     IF TG_OP = 'UPDATE' THEN
         IF OLD.user_id IS NOT NULL AND NEW.user_id IS DISTINCT FROM OLD.user_id THEN
             RAISE EXCEPTION 'inlet stamp: a thought''s owner may not be cleared or changed' USING ERRCODE = '23514';
@@ -281,9 +264,6 @@ LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 BEGIN
-    IF public.inlet_stamp_maintenance() THEN
-        RETURN NEW;
-    END IF;
     IF public.inlet_stamp_source_personal(NEW.url, NEW.content_type, NEW.metadata) THEN
         RAISE EXCEPTION 'inlet stamp: a shared source may not be personal (an email body, a podcast transcript or a Gmail id); nothing was written'
             USING ERRCODE = '23514';

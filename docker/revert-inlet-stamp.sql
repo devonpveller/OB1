@@ -26,7 +26,6 @@ DROP FUNCTION IF EXISTS public.inlet_stamp_thoughts_guard();
 DROP FUNCTION IF EXISTS public.inlet_stamp_sources_guard();
 DROP FUNCTION IF EXISTS public.inlet_stamp_source_personal(TEXT, TEXT, JSONB);
 DROP FUNCTION IF EXISTS public.inlet_stamp_is_dossier(JSONB);
-DROP FUNCTION IF EXISTS public.inlet_stamp_maintenance();
 DROP FUNCTION IF EXISTS public.inlet_connection_owner(TEXT);
 DROP TABLE IF EXISTS public.inlet_connections;
 DROP FUNCTION IF EXISTS public.inlet_subject_ok(TEXT);

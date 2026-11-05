@@ -316,16 +316,19 @@ try {
   $clrRefused = $clr -match 'inlet stamp'
   $chg = Dk exec $db psql -U ob_app_memory -d openbrain -X -A -t -c "UPDATE thoughts SET user_id = '$B' WHERE content LIKE '%$MA%' AND metadata->>'source' = 'gmail'"
   $chgRefused = $chg -match 'inlet stamp'
-  # the maintenance setting (superuser sessions only): postgres without it is refused; with it, allowed; an app role
-  # or PostgREST's role (SET ROLE service_role) with it is still refused
-  $mx = { param($pre) $o = Dk exec $db psql -U postgres -d openbrain -X -A -t -c "$pre INSERT INTO thoughts (content, metadata, exposure) VALUES ('maint probe $mode$rand', jsonb_build_object('source', 'mcp', 'exposure', 'ops'), 'ops') RETURNING 'landed'"; @{ rc = $script:rc; refused = ($o -match 'inlet stamp'); out = $o } }
+  # no escape hatch (coordinator, 2026-11-05): a superuser is refused too, with or without a setting; the guard path
+  # reads no setting and no role
+  $mx = { param($pre) $o = Dk exec $db psql -U postgres -d openbrain -X -A -t -c "$pre INSERT INTO thoughts (content, metadata, exposure) VALUES ('escape probe $mode$rand', jsonb_build_object('source', 'mcp', 'exposure', 'ops'), 'ops') RETURNING 'landed'"; @{ rc = $script:rc; refused = ($o -match 'inlet stamp'); out = $o } }
   $su0 = & $mx ''
   $su1 = & $mx "SET inlet_stamp.allow_unowned = 'on';"
-  $su2 = & $mx "SET inlet_stamp.allow_unowned = 'on'; SET ROLE service_role;"
-  $o = Dk exec $db psql -U ob_app_memory -d openbrain -X -A -t -c "SET inlet_stamp.allow_unowned = 'on'; INSERT INTO thoughts (content, metadata, exposure) VALUES ('maint probe app $mode$rand', jsonb_build_object('source', 'mcp', 'exposure', 'ops'), 'ops')"
-  $su3 = @{ refused = ($o -match 'inlet stamp'); out = $o }
-  $null = Q "DELETE FROM public.thoughts WHERE content LIKE 'maint probe%'"
-  Save 'direct-pg.log' ("[mcp] $($m1.out)`n[agent-memory] $($m2.out)`n[clear] $clr`n[change] $chg`n[superuser] $($su0.out)`n[superuser + maintenance] $($su1.out)`n[maintenance + SET ROLE service_role] $($su2.out)`n[ob_app_memory + maintenance] $($su3.out)")
+  $null = Q "DELETE FROM public.thoughts WHERE content LIKE 'escape probe%'"
+  $guardDefs = Q "SELECT string_agg(pg_get_functiondef(p.oid), ' ') FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('inlet_stamp_thoughts_guard', 'inlet_stamp_sources_guard', 'inlet_stamp_is_dossier', 'inlet_stamp_source_personal', 'inlet_subject_ok', 'inlet_owner_column_ok')"
+  $sqlText = if (Test-Path (Join-Path $dockerDir 'init-inlet-stamp.sql')) { [IO.File]::ReadAllText((Join-Path $dockerDir 'init-inlet-stamp.sql')) } else { '' }
+  $escRx = 'current_setting\s*\(|session_user|current_user|rolsuper|pg_has_role|allow_unowned|session_replication_role'
+  $escInDb = [regex]::Matches($guardDefs, $escRx, 'IgnoreCase').Count
+  $sqlNoComments = (($sqlText -split "`n") | ForEach-Object { $_ -replace '--.*$', '' }) -join "`n"
+  $escInFile = [regex]::Matches($sqlNoComments, 'allow_unowned|session_replication_role|DISABLE\s+TRIGGER|rolsuper\s+THEN', 'IgnoreCase').Count
+  Save 'direct-pg.log' ("[mcp] $($m1.out)`n[agent-memory] $($m2.out)`n[clear] $clr`n[change] $chg`n[superuser] $($su0.out)`n[superuser + a setting] $($su1.out)`nescape-shaped tokens: in the guards' definitions $escInDb, in the slot file $escInFile")
   if ($pj) {
     $wr = $pj.writes
     $lines = @($wr.PSObject.Properties | ForEach-Object { "$($_.Name): $($_.Value.status)$(if ($_.Value.refused) { ' refused' })$(if ($_.Value.why -and -not $_.Value.refused) { ' - ' + $_.Value.why })" })
@@ -349,7 +352,8 @@ try {
       Check ($controlsOk -eq $okCases.Count) "PostgREST: the correctly owned controls land, and the compile's dossier stays shared ($controlsOk of $($okCases.Count))"
       Check ($m1.refused -and $m1.rc -ne 0 -and $m2.refused -and $m2.rc -ne 0) 'direct PG as ob_app_memory: an unstamped MCP-shaped capture_thought and agent-memory insert is refused (rw-mcp-identity must stamp them before 470 goes live)'
       Check ($clrRefused -and $chgRefused) 'an app role can neither clear nor change an owner'
-      Check ($su0.refused -and -not $su1.refused -and $su1.out -match 'landed' -and $su2.refused -and $su3.refused) "a superuser is refused too; only a superuser session that sets inlet_stamp.allow_unowned (maintenance) may write an unowned row - not PostgREST's role, not an app role, with the setting"
+      Check ($su0.refused -and $su1.refused -and $su0.out -notmatch 'landed' -and $su1.out -notmatch 'landed') 'no escape hatch: a superuser''s unowned personal insert is refused too, with or without a setting'
+      Check ($escInDb -eq 0 -and $escInFile -eq 0 -and $guardDefs.Length -gt 500) "no setting- or role-based escape in the guard path: the guards' definitions read no setting and no role ($escInDb), slot 470's file switches off nothing ($escInFile)"
       $rec = $pj.record
       Check ($rec.table_read_status -ge 400 -and -not $rec.table_read_gave_rows) "the owner record is not readable through PostgREST ($($rec.table_read_status))"
       Check ($rec.gmail.same.A -and $rec.'gmail-b'.same.B -and $rec.vault.same.A -and $rec.nobody.status -ge 400) 'inlet_connection_owner answers each connection''s owner, and refuses an unknown one'
@@ -386,19 +390,28 @@ try {
   }
 
   if (-not $Red) {
-    Write-Host '[8] the 470 drill: init again, a subject check, revert x2, init before 440 (refused), 440, init (re-seeded)'
+    Write-Host '[8] the 470 drill: init again, a subject check, 440''s revert first (refused), revert 470 x2, 440''s revert, init before 440 (refused), 440, init (re-seeded)'
     $r = PsqlFile (Join-Path $dockerDir 'init-inlet-stamp.sql') @()
     Check ($r.rc -eq 0 -and (Q "SELECT count(*) FROM public.inlet_connections") -eq '3') '470 again: nothing changes (the record kept, the guards replaced in place)'
     $subj = Q "SELECT string_agg(public.inlet_subject_ok(s)::text, ',' ORDER BY o) FROM (VALUES (1, '$A'), (2, 'operator'), (3, 'Operator'), (4, 'service:x'), (5, 'SYSTEM:y'), (6, ''), (7, 'a b'), (8, 'https://idp.example/u/1')) v(o, s)"
     Check ($subj -eq 'true,false,false,false,false,false,false,true') "inlet_subject_ok: a subject yes; the literal operator, service/system principals, blank, a space no ($subj)"
+    # the revert order is the reverse of the apply order: 440's revert with 470 still in place is refused by the guard
+    # (it writes owners back to NULL) and changes nothing
+    $own0 = Q "SELECT count(*) FROM public.thoughts WHERE user_id IS NOT NULL"
+    $r0 = PsqlFile (Join-Path $dockerDir 'revert-inlet-owner.sql') @()
+    $own1 = Q "SELECT count(*) FROM public.thoughts WHERE user_id IS NOT NULL"
+    Check ($r0.rc -ne 0 -and $r0.out -match 'inlet stamp' -and $own0 -eq $own1) "440's revert with 470 still in place is refused by the guard and changes nothing ($own0 -> $own1 owned): revert 470 first"
     $r1 = PsqlFile (Join-Path $dockerDir 'revert-inlet-stamp.sql') @()
     $r2 = PsqlFile (Join-Path $dockerDir 'revert-inlet-stamp.sql') @()
     $gone = Q "SELECT (to_regclass('public.inlet_connections') IS NULL)::text || '|' || (SELECT count(*) FROM pg_trigger WHERE tgname LIKE 'trg_inlet_stamp%') || '|' || (SELECT count(*) FROM pg_constraint WHERE conname LIKE '%inlet_stamp_owner_ok') || '|' || (to_regprocedure('public.inlet_subject_ok(text)') IS NULL)::text"
     Check ($r1.rc -eq 0 -and $r2.rc -eq 0 -and $gone -eq 'true|0|0|true') "revert, revert again: every slot-470 object is gone ($gone)"
+    $r3 = PsqlFile (Join-Path $dockerDir 'revert-inlet-owner.sql') @()
+    $legacyBack = Q "SELECT count(*) FROM public.thoughts WHERE content LIKE '%$ML%' AND user_id IS NULL"
+    Check ($r3.rc -eq 0 -and [int]$legacyBack -ge 1) "then 440's revert (470 gone): the legacy rows are unowned again ($legacyBack)"
     $null = Q "INSERT INTO public.thoughts (content, metadata, exposure) VALUES ('drill unowned $rand', jsonb_build_object('source', 'mcp', 'exposure', 'ops'), 'ops')"
     $r = PsqlFile (Join-Path $dockerDir 'init-inlet-stamp.sql') @()
     Check ($r.rc -ne 0 -and $r.out -match 'run slot 440' -and (Q "SELECT to_regclass('public.inlet_connections') IS NULL") -eq 't') '470 with an unowned thought still there is refused ("run slot 440 first"), nothing changed'
-    $r = PsqlFile (Join-Path $dockerDir 'init-inlet-owner.sql') @()
+    $r = PsqlFile (Join-Path $dockerDir 'init-inlet-owner.sql') @('-v', "owner_sub=$A")
     $r2 = PsqlFile (Join-Path $dockerDir 'init-inlet-stamp.sql') @()
     $conns = Q "SELECT string_agg(id, ',' ORDER BY id) FROM public.inlet_connections"
     Check ($r.rc -eq 0 -and $r2.rc -eq 0 -and $conns -eq 'gmail,vault' -and (Q "SELECT count(*) FROM public.thoughts WHERE user_id IS NULL AND content LIKE 'drill unowned%'") -eq '0') "440 stamps it, then 470 applies and re-seeds the record from 440's ($conns; a PD4 connection is recorded again by its flow)"
