@@ -57,7 +57,7 @@ Deno.test("the AI-news section reads its window on every produce() (the digest's
       asked.push(o.windowHours);
       return Promise.resolve([]);
     }
-  })({ baseUrl: "http://rest" });
+  })({ baseUrl: "http://rest", owner: () => Promise.resolve("sub-a") });
   const s = new AiNewsSection(brain, { windowHours: () => digestWindowFor(r, "operator", 24), limit: 10 });
   await s.produce();
   store["operator|digest.window_hours"] = 36;

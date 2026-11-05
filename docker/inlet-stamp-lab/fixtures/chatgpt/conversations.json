@@ -1,0 +1,269 @@
+[
+ {
+  "id": "lab-conv-0001",
+  "title": "Garden irrigation plan",
+  "create_time": 1759300000,
+  "update_time": 1759300100,
+  "current_node": "m11",
+  "mapping": {
+   "root": {
+    "id": "root",
+    "message": null,
+    "parent": null,
+    "children": [
+     "m0"
+    ]
+   },
+   "m0": {
+    "id": "m0",
+    "parent": "root",
+    "children": [
+     "m1"
+    ],
+    "message": {
+     "id": "m0",
+     "author": {
+      "role": "user"
+     },
+     "create_time": 1759300000,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "Turn 0 of a lab conversation about planning a garden irrigation schedule with drip lines and timers __MARK__."
+      ]
+     },
+     "metadata": {}
+    }
+   },
+   "m1": {
+    "id": "m1",
+    "parent": "m0",
+    "children": [
+     "m2"
+    ],
+    "message": {
+     "id": "m1",
+     "author": {
+      "role": "assistant"
+     },
+     "create_time": 1759300001,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "Turn 1 of a lab conversation about planning a garden irrigation schedule with drip lines and timers __MARK__."
+      ]
+     },
+     "metadata": {}
+    }
+   },
+   "m2": {
+    "id": "m2",
+    "parent": "m1",
+    "children": [
+     "m3"
+    ],
+    "message": {
+     "id": "m2",
+     "author": {
+      "role": "user"
+     },
+     "create_time": 1759300002,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "Turn 2 of a lab conversation about planning a garden irrigation schedule with drip lines and timers __MARK__."
+      ]
+     },
+     "metadata": {}
+    }
+   },
+   "m3": {
+    "id": "m3",
+    "parent": "m2",
+    "children": [
+     "m4"
+    ],
+    "message": {
+     "id": "m3",
+     "author": {
+      "role": "assistant"
+     },
+     "create_time": 1759300003,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "Turn 3 of a lab conversation about planning a garden irrigation schedule with drip lines and timers __MARK__."
+      ]
+     },
+     "metadata": {}
+    }
+   },
+   "m4": {
+    "id": "m4",
+    "parent": "m3",
+    "children": [
+     "m5"
+    ],
+    "message": {
+     "id": "m4",
+     "author": {
+      "role": "user"
+     },
+     "create_time": 1759300004,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "Turn 4 of a lab conversation about planning a garden irrigation schedule with drip lines and timers __MARK__."
+      ]
+     },
+     "metadata": {}
+    }
+   },
+   "m5": {
+    "id": "m5",
+    "parent": "m4",
+    "children": [
+     "m6"
+    ],
+    "message": {
+     "id": "m5",
+     "author": {
+      "role": "assistant"
+     },
+     "create_time": 1759300005,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "Turn 5 of a lab conversation about planning a garden irrigation schedule with drip lines and timers __MARK__."
+      ]
+     },
+     "metadata": {}
+    }
+   },
+   "m6": {
+    "id": "m6",
+    "parent": "m5",
+    "children": [
+     "m7"
+    ],
+    "message": {
+     "id": "m6",
+     "author": {
+      "role": "user"
+     },
+     "create_time": 1759300006,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "Turn 6 of a lab conversation about planning a garden irrigation schedule with drip lines and timers __MARK__."
+      ]
+     },
+     "metadata": {}
+    }
+   },
+   "m7": {
+    "id": "m7",
+    "parent": "m6",
+    "children": [
+     "m8"
+    ],
+    "message": {
+     "id": "m7",
+     "author": {
+      "role": "assistant"
+     },
+     "create_time": 1759300007,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "Turn 7 of a lab conversation about planning a garden irrigation schedule with drip lines and timers __MARK__."
+      ]
+     },
+     "metadata": {}
+    }
+   },
+   "m8": {
+    "id": "m8",
+    "parent": "m7",
+    "children": [
+     "m9"
+    ],
+    "message": {
+     "id": "m8",
+     "author": {
+      "role": "user"
+     },
+     "create_time": 1759300008,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "Turn 8 of a lab conversation about planning a garden irrigation schedule with drip lines and timers __MARK__."
+      ]
+     },
+     "metadata": {}
+    }
+   },
+   "m9": {
+    "id": "m9",
+    "parent": "m8",
+    "children": [
+     "m10"
+    ],
+    "message": {
+     "id": "m9",
+     "author": {
+      "role": "assistant"
+     },
+     "create_time": 1759300009,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "Turn 9 of a lab conversation about planning a garden irrigation schedule with drip lines and timers __MARK__."
+      ]
+     },
+     "metadata": {}
+    }
+   },
+   "m10": {
+    "id": "m10",
+    "parent": "m9",
+    "children": [
+     "m11"
+    ],
+    "message": {
+     "id": "m10",
+     "author": {
+      "role": "user"
+     },
+     "create_time": 1759300010,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "Turn 10 of a lab conversation about planning a garden irrigation schedule with drip lines and timers __MARK__."
+      ]
+     },
+     "metadata": {}
+    }
+   },
+   "m11": {
+    "id": "m11",
+    "parent": "m10",
+    "children": [],
+    "message": {
+     "id": "m11",
+     "author": {
+      "role": "assistant"
+     },
+     "create_time": 1759300011,
+     "content": {
+      "content_type": "text",
+      "parts": [
+       "Turn 11 of a lab conversation about planning a garden irrigation schedule with drip lines and timers __MARK__."
+      ]
+     },
+     "metadata": {}
+    }
+   }
+  }
+ }
+]

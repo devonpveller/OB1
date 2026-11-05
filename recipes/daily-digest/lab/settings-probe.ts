@@ -35,7 +35,7 @@ const brain = new (class extends BrainClient {
     asked.push(o.windowHours);
     return super.fetchRecentThoughts(o); // the real PostgREST query, with the window the run read
   }
-})({ baseUrl: REST });
+})({ baseUrl: REST, owner: () => Promise.resolve(OWNER) });
 // the digest's section as src/app.ts builds it (DIGEST_WINDOW_HOURS = 24 here)
 const news = new AiNewsSection(brain, { windowHours: () => digestWindowFor(reader, OWNER, 24), limit: 5 });
 

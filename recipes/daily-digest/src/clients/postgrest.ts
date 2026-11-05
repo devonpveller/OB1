@@ -14,13 +14,28 @@ export interface Thought {
 export interface BrainClientOptions {
   /** Base URL of the openbrain-rest Caddy proxy. e.g. http://openbrain-rest */
   baseUrl: string;
+  /**
+   * rw-inlet-stamp (plan 08 PD2): whose digest this is (src/enrich/owner-sub.ts). Every thought read is shared rows
+   * plus this owner's own - the rule of every other reader since slot 440 - so a digest never reads another owner's
+   * mail, profile fields or calendar. Required: a read with no owner fails instead of reading everyone's.
+   */
+  owner: () => Promise<string>;
 }
 
 export class BrainClient {
   private readonly baseUrl: string;
+  private readonly owner: () => Promise<string>;
 
   constructor(opts: BrainClientOptions) {
     this.baseUrl = opts.baseUrl.replace(/\/$/, "");
+    this.owner = opts.owner;
+  }
+
+  /** The owner clause for a thoughts read: shared rows (no owner) or the digest owner's. */
+  private async ownerClause(params: URLSearchParams): Promise<URLSearchParams> {
+    const o = await this.owner();
+    params.append("or", `(user_id.is.null,user_id.eq."${o}")`);
+    return params;
   }
 
   /**
@@ -43,7 +58,7 @@ export class BrainClient {
       // PostgREST: metadata->>type=not.eq.profile_field
       params.append("metadata->>type", `not.eq.${t}`);
     }
-    return await this.getJson<Thought[]>(`/rest/v1/thoughts?${params}`);
+    return await this.getJson<Thought[]>(`/rest/v1/thoughts?${await this.ownerClause(params)}`);
   }
 
   /**
@@ -60,7 +75,7 @@ export class BrainClient {
       limit: "1",
     });
     const rows = await this.getJson<Array<{ content: string }>>(
-      `/rest/v1/thoughts?${params}`,
+      `/rest/v1/thoughts?${await this.ownerClause(params)}`,
     );
     return rows[0]?.content?.trim() || null;
   }
@@ -87,7 +102,7 @@ export class BrainClient {
     for (const [k, v] of opts.extraFilters ?? []) {
       params.append(k, v);
     }
-    return await this.getJson<Thought[]>(`/rest/v1/thoughts?${params}`);
+    return await this.getJson<Thought[]>(`/rest/v1/thoughts?${await this.ownerClause(params)}`);
   }
 
   /**
@@ -102,7 +117,7 @@ export class BrainClient {
       "metadata->>gmail_id": `eq.${gmailId}`,
       limit: "200",
     });
-    return await this.getJson<Thought[]>(`/rest/v1/thoughts?${params}`);
+    return await this.getJson<Thought[]>(`/rest/v1/thoughts?${await this.ownerClause(params)}`);
   }
 
   /**
@@ -124,7 +139,8 @@ export class BrainClient {
         query_embedding: opts.embedding,
         match_threshold: opts.threshold ?? 0.5,
         match_count: opts.k,
-        filter: opts.filter ?? {},
+        // slot 440's match_thoughts: owner_scope = shared rows plus this owner's
+        filter: { ...(opts.filter ?? {}), owner_scope: await this.owner() },
       }),
     });
     if (!res.ok) {

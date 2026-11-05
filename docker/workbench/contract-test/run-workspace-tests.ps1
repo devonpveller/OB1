@@ -337,6 +337,8 @@ try {
   if ($errs.Count) { Save 'initdb-errors.log' ($errs -join "`n") }
   $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) 'ob_app_memory (non-superuser, service_role) - the production shape'
+  # rw-inlet-stamp (slot 470): this lab's fixtures are legacy-shaped (unowned thoughts, as before PD1); its SUPERUSER sessions may write them (the maintenance setting - no app role and no PostgREST request can)
+  $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF to_regprocedure('public.inlet_stamp_maintenance()') IS NOT NULL THEN ALTER DATABASE openbrain SET inlet_stamp.allow_unowned = 'on'; END IF; END `$`$"
   $null = Dk cp (Join-Path $ct 'fixtures.sql') "${db}:/tmp/fixtures.sql"
   $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/fixtures.sql
   Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) 'fixtures applied'
@@ -1106,7 +1108,10 @@ try {
       $pruneRes = @{}
       foreach ($run in @(@('red', $pruneBase), @('green', (Join-Path $ob1 'recipes\email-history-import')))) {
         $ids = ((Dk exec $db psql -U postgres -d openbrain -X -tAc "WITH x AS (INSERT INTO public.thoughts (content, metadata, exposure, user_id) SELECT 'Subject: lab prune | ' || o, jsonb_build_object('source', 'gmail', 'email_date', '2020-01-01T00:00:00Z', 'gmail_labels', jsonb_build_array('brain/keep-short-term')), 'ops', NULLIF(o, 'none') FROM unnest(ARRAY['$inA', '$inB', 'none']) o RETURNING id) SELECT string_agg(id::text, ',') FROM x") | Out-String).Trim()
-        $po = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "$($run[1]):/p:ro", '-e', 'SUPABASE_URL=http://openbrain-rest',
+        # rw-inlet-stamp (slot 470): this prune serves ONE inlet connection, `gmail`, whose recorded owner is the owner
+        # slot 440 recorded (the base's prune ignores both)
+        $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF to_regclass('public.inlet_connections') IS NOT NULL THEN INSERT INTO public.inlet_connections (id, kind, owner_sub) VALUES ('gmail', 'gmail', '$inA') ON CONFLICT (id) DO NOTHING; END IF; END `$`$"
+        $po = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "$($run[1]):/p:ro", '-e', 'SUPABASE_URL=http://openbrain-rest', '-e', 'INLET_CONNECTION=gmail',
           '--entrypoint', 'deno', $wbTestTag, 'run', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '/p/prune-short-term.ts', '--retention-days=30', '--no-wiki-recompile')
         Save "inlet-prune-$($run[0]).log" ((($po -split "`n") | Where-Object { $_ -match 'Found|Deleted|nothing|owner' }) -join "`n")
         $left = ((Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT coalesce(user_id, 'none') FROM public.thoughts WHERE id IN ($ids) ORDER BY 1") -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ','

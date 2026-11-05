@@ -26,6 +26,12 @@
  * package the way the real one does (find_or_create_source for every cited page and the synthesis, one claim per
  * tagged line, a thread), a Gmail API stub (the seeded emails' HTML: no real mailbox, no Google), the workbench's
  * archive-destination setting, and a pass-through to the lab's real PostgREST (the digest's BRAIN_REST_URL).
+ * rw-inlet-stamp (plan 08 PD2, slot 470): the digest's owner is the database's record for its inlet connection
+ * (INLET_CONNECTION=gmail -> OWNER), and a SECOND user's mailbox (connection gmail-b -> BEE) holds an email carrying its
+ * own marker (BEEM) under the same label. GREEN: BEEM is in BEE's email only - in no hand-back, episode, job, brief,
+ * log or shared row of OWNER's run; every hand-back and episode is OWNER's.
+ * BND_DG_MODE=red-stamp: the same run on the pre-PD2 digest (OB1 0f4c680) - it PASSES only if BEE's mail reaches the
+ * OWNER's run (the digest reads every mailbox).
  * IGNORED unless BND_DG_DB_HOST is set (run-digest-boundary-lab.ps1 sets it inside a disposable internal network).
  */
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
@@ -41,7 +47,7 @@ const PGRST = E("BND_DG_PGRST").replace(/\/+$/, "");
 const DIGEST_DIR = E("BND_DG_DIGEST_DIR") || "/digest";
 const SERVICE_DIR: string | URL = E("BND_DG_SERVICE_DIR") || new URL(".", import.meta.url);
 const PAGES_PORT = E("BND_DG_PAGES_PORT") || "8080";
-const MODE = (E("BND_DG_MODE") || "green") as "green" | "red" | "red-share";
+const MODE = (E("BND_DG_MODE") || "green") as "green" | "red" | "red-share" | "red-stamp";
 const ignore = !DB_HOST;
 const opts = { ignore, sanitizeOps: false, sanitizeResources: false };
 const SHARED = "e2e-shared-key-000000";
@@ -49,6 +55,11 @@ const OWUI = "e2e-owui-key-0000000000";
 // round 2 (tester F2): the digest's OWN research caller key (RESEARCH_CALLERS digest=notebook:<key>)
 const DIGESTKEY = "e2e-digest-key-0000000000";
 const BEE = "user-bee-second";
+// rw-inlet-stamp: the second user's mailbox (inlet connection gmail-b) and its marker
+const BEEM = "zqBEEm4d7c2a91";
+const BEEMAIL = { gmailId: `${MK.GID}e5`, threadId: `${MK.THR}e5` };
+const BEE_TEXT = `${BEEM} Hello Bee, this is your own letter about the allotment rota and the seed swap. ` +
+  "We talked about the beds by the fence, the compost bins and who waters in August. ".repeat(6);
 
 // the digest's markers (plan 09 section 5, the Gmail row)
 // round 2 (tester F1): the codes of meeting / share links - NOT id-shaped (a Meet code is letters and hyphens, a Drive id
@@ -100,12 +111,25 @@ const BODY_HTML = `<html><body><p>${BODY_TEXT}</p></body></html>`;
 async function seed() {
   await q(su, `INSERT INTO public.workspace_users (sub, name, email) VALUES ($1, $2, $3) ON CONFLICT (sub) DO NOTHING`, [OWNER.sub, OWNER.name, OWNER.email]);
   const now = new Date().toISOString();
+  // rw-inlet-stamp (slot 470): the inlet owner record - OWNER's mailbox is connection gmail, BEE's is gmail-b. Every
+  // email is written as the stamped pull writes it (thoughts.user_id + metadata.inlet_connection); a chain without 470
+  // (red-stamp) gets the same rows (the column exists since slot 180) and no record.
+  const stamp = (await q<{ t: boolean }>(su, `SELECT to_regclass('public.inlet_connections') IS NOT NULL AS t`))[0].t;
+  if (stamp) {
+    await q(su, `INSERT INTO public.inlet_connections (id, kind, owner_sub) VALUES ('gmail', 'gmail', $1), ('gmail-b', 'gmail', $2) ON CONFLICT (id) DO NOTHING`, [OWNER.sub, BEE]);
+  }
+  await q(su, `INSERT INTO public.thoughts (content, metadata, exposure, user_id, created_at) VALUES ($1, $2::jsonb, 'ops', $3, now())`, [
+    `[Email from Allotment Club <club@allotment.example.org> | Subject: ${BEEM} your rota | Date: ${now}]\n${BEE_TEXT}`,
+    JSON.stringify({ type: "email", gmail_id: BEEMAIL.gmailId, gmail_thread_id: BEEMAIL.threadId, gmail_labels: [LABEL], chunk_index: 0, chunk_count: 1, email_date: now, topics: ["energy"], inlet_connection: "gmail-b" }),
+    BEE,
+  ]);
   for (const [m, subj, body] of [[ARTICLE, `${MK.SUBJ} your weekly energy notes`, `${MK.BODY} This week in community energy. ${SHARE_LINKS.join(" ")}`],
     [BODYONLY, `${MK.SUBJ} a long letter`, BODY_TEXT], [INVITE, `Invitation: ${MK.SUBJ} budget review @ Wed 10am`, INVITE_TEXT]] as const) {
     // the gmail pull's shape: an ops-plane thought per email chunk (openbrain-gmail-pull)
-    await q(su, `INSERT INTO public.thoughts (content, metadata, exposure, created_at) VALUES ($1, $2::jsonb, 'ops', now())`, [
+    await q(su, `INSERT INTO public.thoughts (content, metadata, exposure, user_id, created_at) VALUES ($1, $2::jsonb, 'ops', $3, now())`, [
       `[Email from ${FROM_NAME} <${FROM_ADDR}> | Subject: ${subj} | Date: ${now}]\n${body}`,
-      JSON.stringify({ type: "email", gmail_id: m.gmailId, gmail_thread_id: m.threadId, gmail_labels: [LABEL], chunk_index: 0, chunk_count: 1, email_date: now, topics: ["energy"] }),
+      JSON.stringify({ type: "email", gmail_id: m.gmailId, gmail_thread_id: m.threadId, gmail_labels: [LABEL], chunk_index: 0, chunk_count: 1, email_date: now, topics: ["energy"], inlet_connection: "gmail" }),
+      OWNER.sub,
     ]);
   }
   // the owner's podcast team (the presenter model, init-podcasts.sql)
@@ -136,7 +160,8 @@ function stubs() {
     if (p.startsWith("/gmail/v1/users/me/messages/")) {
       const id = decodeURIComponent(p.split("/").pop() ?? "");
       log.gmail.push(id);
-      const html = id === ARTICLE.gmailId ? ARTICLE_HTML : id === BODYONLY.gmailId ? BODY_HTML : id === INVITE.gmailId ? INVITE_HTML : "";
+      const html = id === ARTICLE.gmailId ? ARTICLE_HTML : id === BODYONLY.gmailId ? BODY_HTML : id === INVITE.gmailId ? INVITE_HTML :
+        id === BEEMAIL.gmailId ? `<html><body><p>${BEE_TEXT}</p></body></html>` : "";
       if (!html) return new Response("not found", { status: 404 });
       return Response.json({ id, payload: { mimeType: "text/html", body: { data: b64url(html) } } });
     }
@@ -256,7 +281,8 @@ async function runDigest(stubBase: string, svcBase: string, dir: string, args: s
       CHAT_API_BASE: `${stubBase}/v1`, CHAT_API_KEY: "sk-lab", PODCAST_TTS_KEY: "sk-lab-tts", CHAT_MODEL: "local-large",
       REPORTS_DIR: `${dir}/reports`, GMAIL_API_BASE: stubBase,
       GMAIL_READ_CREDENTIALS: `${dir}/gmail-credentials.json`, GMAIL_READ_TOKEN: `${dir}/gmail-token.json`,
-      PODCAST_OWNER_SUB: OWNER.sub, PODCAST_TEAM: "lab team", CONTRACT_MOUNTS_ROOT: "/tmp/mounts", FFMPEG_BIN: `${dir}/fake-ffmpeg`,
+      // rw-inlet-stamp: the run's owner = the record's for INLET_CONNECTION (PODCAST_OWNER_SUB is read by the pre-PD2 digest only)
+      INLET_CONNECTION: "gmail", PODCAST_OWNER_SUB: OWNER.sub, PODCAST_TEAM: "lab team", CONTRACT_MOUNTS_ROOT: "/tmp/mounts", FFMPEG_BIN: `${dir}/fake-ffmpeg`,
       PODCAST_SEGMENT_CACHE_DIR: `${dir}/segment-cache`, FETCH_PROXY_URL: "", TARGET_LABEL_PREFIX: "brain/",
       GAP_DIVE_ENABLED: "1", GAP_DIVE_WAIT_MS: "90000", RESEARCH_WAIT_MS: "180000", RESEARCH_POLL_MS: "500",
       MODEL_GATE_INITIAL_MS: "200", MODEL_GATE_MAX_MS: "500", MODEL_WAIT_MAX_MS: "60000", NO_COLOR: "1",
@@ -353,6 +379,27 @@ Deno.test({ name: `PD0c ${MODE.toUpperCase()}: a digest run (dry, then commit) o
     const items = (brief.segments ?? []).flatMap((s: { items: Array<{ title: string; emailOnly: boolean }> }) => s.items);
     out.push(`brief: ${items.length} item(s): ${items.map((i: { emailOnly: boolean }) => (i.emailOnly ? "email-only" : "researched")).join(" ")}`);
 
+    // rw-inlet-stamp: BEE's mail (connection gmail-b) in OWNER's run - anywhere but BEE's own email row
+    const bee = { BEEM };
+    const sc2 = await su!.connect();
+    let beeRes: Awaited<ReturnType<typeof sweepTables>>;
+    try { beeRes = await sweepTables(sc2, bee, (t) => t === "thoughts"); } finally { sc2.release(); }
+    const beePrivate = beeRes.private.filter((h) => h.table !== "thoughts");
+    const beeEps: Record<string, number> = {};
+    for (const e of eps) add(beeEps, sweepText(e.t, bee));
+    const briefText = await Deno.readTextFile(`${dir}/reports/podcast-brief-latest.json`).catch(() => "");
+    const beeBrief = sweepText(briefText, bee);
+    const beeLogs = sweepText([dry.log, com.log].join("\n"), bee);
+    const beeElsewhere = beeRes.hits.length + beePrivate.length + Object.keys(beeEps).length + Object.keys(beeBrief).length + Object.keys(beeLogs).length;
+    out.push(`second mailbox (gmail-b) marker outside BEE's own email: tables ${[...beeRes.hits, ...beePrivate].map((h) => `${h.table}.${h.column}`).join(",") || "none"}; episodes ${Object.keys(beeEps).length ? "yes" : "none"}; brief ${Object.keys(beeBrief).length ? "yes" : "none"}; logs ${Object.keys(beeLogs).length ? "yes" : "none"}`);
+    const owners = await q<{ t: string; o: string }>(su, `SELECT 'handback' AS t, owner_sub AS o FROM public.research_handbacks UNION ALL SELECT 'episode', owner_sub FROM public.podcast_episodes`);
+    out.push(`owners: ${owners.map((r) => `${r.t}=${r.o === OWNER.sub ? "OWNER" : r.o === BEE ? "BEE" : "other"}`).join(" ") || "none"}`);
+    if (MODE === "red-stamp") {
+      out.push(`RED-STAMP: BEE's mail in OWNER's run: ${beeElsewhere}`);
+      assert(beeElsewhere > 0, "RED-STAMP: the pre-PD2 digest reads every mailbox - BEE's email reaches OWNER's run");
+      return;
+    }
+
     if (MODE === "red-share") {
       // round 1's code (the item as attempt 1 tested it): the meeting / Drive codes reached shared rows
       const leaked = [...new Set(res.hits.map((h) => h.marker))].filter((m) => m in SHR);
@@ -372,6 +419,8 @@ Deno.test({ name: `PD0c ${MODE.toUpperCase()}: a digest run (dry, then commit) o
     }
 
     // ── GREEN
+    assertEquals(beeElsewhere, 0, "rw-inlet-stamp: the second mailbox's mail reaches no row, episode, brief or log of OWNER's run");
+    assert(owners.length > 0 && owners.every((r) => r.o === OWNER.sub), "rw-inlet-stamp: every hand-back and episode of the run is OWNER's (the record's owner of connection gmail)");
     assertEquals([dry.code, com.code], [0, 0], `both runs pass\n--- dry ---\n${dry.log.slice(-3000)}\n--- commit ---\n${com.log.slice(-3000)}`);
     assertEquals(sourcesDry, sources0, "the dry run wrote no shared source");
     assertEquals(res.hits, [], "no marker in any shared table");

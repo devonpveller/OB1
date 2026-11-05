@@ -443,6 +443,28 @@ async function obFetch(method, pathq, body) {
 //   content/notebooks/<nb>/…  AI-generated from external inlets  (ai_note)
 // The Changes log (notes/Changes/…) is excluded — it's a log, not a note.
 const NOTE_TREES = ["notes/notebooks/", "content/notebooks/"];
+
+// rw-inlet-stamp (plan 08 PD2, slot 470): a note is its owner's. The vault is an inlet connection (INLET_CONNECTION,
+// compose: `vault`); its owner is what the database records for it (public.inlet_connections, read through
+// rpc/inlet_connection_owner) - never a constant. Every note thought is written with that owner (thoughts.user_id) and
+// names its connection; with no connection or no recorded owner, a NEW note is not written (the database would refuse
+// it anyway) - an edit of an existing note's row still lands.
+const NOTE_INLET = (ENV.INLET_CONNECTION || "").trim();
+let noteOwnerKnown = null;
+function subjectOk(s) {
+  return typeof s === "string" && /^[A-Za-z0-9][A-Za-z0-9._@|+=:\/-]{0,254}$/.test(s) &&
+    !/^(service|system|anonymous):/i.test(s) && s.toLowerCase() !== "operator";
+}
+async function noteOwner() {
+  if (noteOwnerKnown) return noteOwnerKnown;
+  if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(NOTE_INLET)) {
+    throw new Error("inlet owner: INLET_CONNECTION is not set (the vault's inlet connection) - the note is not written");
+  }
+  const v = await obFetch("POST", "rpc/inlet_connection_owner", { p_id: NOTE_INLET });
+  if (!subjectOk(v)) throw new Error("inlet owner: no valid owner is recorded for the vault's inlet connection - the note is not written");
+  noteOwnerKnown = v;
+  return v;
+}
 function isExcludedNote(file) {
   return !file.endsWith(".md") || /(^|\/)README\.md$/i.test(file) || file.startsWith("notes/Changes/");
 }
@@ -499,6 +521,7 @@ async function ingestNotes(prevCommit) {
       // POST itself. 'ops': a note in the wiki vault is published wiki material, which is
       // the ops surface, and it is the plane U5's backfill already put this corpus on.
       const meta = { source, note_path: rel, notebook, title, exposure: "ops" };
+      if (NOTE_INLET) meta.inlet_connection = NOTE_INLET; // rw-inlet-stamp: the row names its connection (PATCH keeps it)
       if (source === "ai_note" && fmAgent) meta.agent = fmAgent;
       const enc = encodeURIComponent(rel);
       const existing = await obFetch(
@@ -511,7 +534,8 @@ async function ingestNotes(prevCommit) {
         // `exposure` the COLUMN as well as the mirror inside `meta`: the H3 policies read
         // the column, the currently deployed U5 policy reads the mirror, and this insert
         // bypasses `upsert_thought`, which is where the door's own stamp lives.
-        await obFetch("POST", "thoughts", { content, metadata: meta, exposure: "ops" });
+        // rw-inlet-stamp: and the note's owner (the vault connection's recorded owner)
+        await obFetch("POST", "thoughts", { content, metadata: meta, exposure: "ops", user_id: await noteOwner() });
       }
       ingested++;
     } catch (e) {

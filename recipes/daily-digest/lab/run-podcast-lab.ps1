@@ -158,7 +158,7 @@ function Run-Detached([string]$name, [string[]]$extra) {
   return $true
 }
 # a one-shot in the podcast image on the lab network (the podcast service's own env + extra)
-$podEnv = @('-e', 'CHAT_API_BASE=http://llama-cpp:8080/v1', '-e', "PODCAST_TTS_KEY=$master", '-e', "PODCAST_OWNER_SUB=$labSub",
+$podEnv = @('-e', 'CHAT_API_BASE=http://llama-cpp:8080/v1', '-e', "PODCAST_TTS_KEY=$master", '-e', 'INLET_CONNECTION=gmail',
   '-e', 'BRAIN_REST_URL=http://openbrain-rest', '-e', 'WORKBENCH_URL=http://openbrain-workbench:8000', '-e', "MCP_ACCESS_KEY=$key",
   '-e', 'ON_BASE=http://open_notebook:5055')
 function Pod([int]$timeout, [string[]]$extra, [string[]]$cmd) {
@@ -249,6 +249,8 @@ try {
   $errs = @(($logs -split "`n") | Where-Object { $_ -match 'ERROR:' })
   Check (($logs -match 'PostgreSQL init process complete') -and $errs.Count -eq 0) "the database ran the initdb chain, no ERROR ($($errs.Count))"
   $null = Dk exec $script:db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
+  # rw-inlet-stamp (slot 470): the inlet owner record - the podcast's inlet connection belongs to the lab's subject
+  $null = Dk exec $script:db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "INSERT INTO public.inlet_connections (id, kind, owner_sub) VALUES ('gmail', 'gmail', '$labSub') ON CONFLICT (id) DO NOTHING"
   $null = Dk cp (Join-Path $dockerDir 'init-podcasts.sql') "$($script:db):/tmp/init-podcasts.sql"
   $o = Dk exec $script:db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/init-podcasts.sql
   Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) 'init-podcasts.sql re-applied cleanly (idempotent)'
@@ -322,7 +324,7 @@ yaml.safe_dump(base, open(sys.argv[2], 'w', encoding='utf-8'), sort_keys=False)
   # lab copy lost on import; put that shape back (CBOR over /rpc) so the capture meets what it meets live
   $o = Pod 300 $capEnv @('run', '-A', 'lab/lab-probe.ts', 'nul-row'); $pr = Probe $o; Save 'capture-fix-nul-row.log' $o
   Check ($pr -and $pr.rpc -eq 200 -and $pr.select_star -eq 400 -and $pr.null_byte_refused) 'capture-fix: the copy holds the live shape - a source row with a NUL byte that SELECT * cannot return (400)'
-  $o = Pod 3600 $capEnv @('run', '-A', 'on-capture.ts', 'capture'); Save 'c8-c9-capture.log' $o
+  $o = Pod 3600 $capEnv @('run', '-A', 'on-capture.ts', 'capture', "--owner=$labSub"); Save 'c8-c9-capture.log' $o
   Check ($script:rc -eq 0) 'on-capture.ts capture exited 0'
   $man = Get-ChildItem (Join-Path $archive 'on-archive') -Filter 'CAPTURE-*.json' -ErrorAction SilentlyContinue | Select-Object -First 1
   Check ([bool]$man) "the capture manifest was written ($($man.Name))"

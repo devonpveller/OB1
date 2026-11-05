@@ -23,7 +23,8 @@
  *   P7a audio (src/podcast/render-service.ts, link-enrich --audio):
  *   PODCAST_TTS_KEY      this service's LiteLLM virtual key for /v1/audio/speech (blank = inert:
  *                        the gateway refuses every speech call, nothing is voiced)
- *   PODCAST_TEAM / PODCAST_OWNER_SUB  the team that voices the daily episode, and whose it is
+ *   PODCAST_TEAM / INLET_CONNECTION  the team that voices the daily episode, and the inlet connection whose recorded
+ *                                    owner it is (rw-inlet-stamp; src/enrich/owner-sub.ts)
  *   WORKBENCH_URL        where the configuration store is read (podcast.archive_destination)
  *   PODCAST_SEGMENT_CACHE_DIR / PODCAST_TTS_CONCURRENCY / FFMPEG_BIN
  */

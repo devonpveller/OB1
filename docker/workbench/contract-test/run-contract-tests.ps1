@@ -163,6 +163,8 @@ function Start-Db([string]$name) {
   # The production DB user shape: not a superuser, no BYPASSRLS, a member of service_role.
   $o = Dk exec $name psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) "$name has ob_app_memory (non-superuser, service_role member)"
+  # rw-inlet-stamp (slot 470): this lab's fixtures are legacy-shaped (unowned thoughts, as before PD1); its SUPERUSER sessions may write them (the maintenance setting - no app role and no PostgREST request can)
+  $null = Dk exec $name psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF to_regprocedure('public.inlet_stamp_maintenance()') IS NOT NULL THEN ALTER DATABASE openbrain SET inlet_stamp.allow_unowned = 'on'; END IF; END `$`$"
   $null = Dk cp (Join-Path $ct 'fixtures.sql') "${name}:/tmp/fixtures.sql"
   $o = Dk exec $name psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/fixtures.sql
   Save "$name-fixtures.log" $o

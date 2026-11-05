@@ -27,6 +27,8 @@
  *   --no-wiki-recompile       skip the POST /recompile (testing/debug only)
  */
 
+import { inletConnection } from "./inlet-owner.ts";
+
 const SUPABASE_URL = (Deno.env.get("SUPABASE_URL") || "").replace(/\/+$/, "");
 const SUPABASE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "local-trust";
 const WIKI_URL = Deno.env.get("WIKI_RECOMPILE_URL") || "http://openbrain-wiki:8000/recompile";
@@ -104,7 +106,12 @@ interface Candidate {
 // who that is: it reads and deletes through the view `inlet_owner_mail` (the owner's gmail thoughts; the view's own role
 // alone reads the owner record, and no function anyone can call names the owner). No view (slot 440 not applied):
 // nothing is deleted. A row that arrived unowned since slot 440 last ran waits for its next run, then expires here.
-const OWNER_VIEW = "inlet_owner_mail";
+// rw-inlet-stamp (plan 08 PD2, slot 470): per inlet connection. The prune serves ONE connection (INLET_CONNECTION, the
+// same as the pull's) and deletes only the mail of that connection's owner, through the view `inlet_connection_mail`
+// (slot 470; a row the pull wrote before 470 names no connection and is the `gmail` connection's). With two connections
+// (PD4) one prune never deletes another owner's mail. No connection set = the run refuses and deletes nothing.
+const OWNER_VIEW = "inlet_connection_mail";
+let CONNECTION = "";
 
 export async function ownerViewReady(): Promise<boolean> {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${OWNER_VIEW}?select=id&limit=1`, { headers: pgrHeaders() });
@@ -119,6 +126,7 @@ async function previewCandidates(args: PruneArgs): Promise<Candidate[]> {
   // the cutoff. The label prefix-match runs client-side below.
   const url =
     `${SUPABASE_URL}/rest/v1/${OWNER_VIEW}?select=id,metadata,content` +
+    `&inlet_connection=eq.${encodeURIComponent(CONNECTION)}` +
     `&metadata->>source=eq.gmail` +
     `&metadata->>email_date=lt.${cutoffEnc}` +
     `&order=metadata->>email_date.asc&limit=10000`;
@@ -139,7 +147,7 @@ async function deleteByIds(ids: number[]): Promise<number> {
   for (let i = 0; i < ids.length; i += batchSize) {
     const batch = ids.slice(i, i + batchSize);
     const url =
-      `${SUPABASE_URL}/rest/v1/${OWNER_VIEW}?id=in.(${batch.join(",")})&select=id`;
+      `${SUPABASE_URL}/rest/v1/${OWNER_VIEW}?inlet_connection=eq.${encodeURIComponent(CONNECTION)}&id=in.(${batch.join(",")})&select=id`;
     const res = await fetch(url, {
       method: "DELETE",
       headers: pgrHeaders("return=representation"),
@@ -205,8 +213,10 @@ async function main(argsOverride?: Partial<PruneArgs>) {
   console.log(`  Mode:            ${args.dryRun ? "DRY RUN" : "LIVE"}`);
   console.log(`  Wiki trigger:    ${args.triggerWiki && !args.dryRun ? "yes" : "no"}\n`);
 
+  CONNECTION = inletConnection(); // throws (nothing deleted) when INLET_CONNECTION is not set
+  console.log(`  Inlet connection: ${CONNECTION}`);
   if (!(await ownerViewReady())) {
-    console.log(`No owner view for the personal data (slot 440 not applied yet): nothing is pruned.`);
+    console.log(`No per-connection owner view (slot 470 not applied yet): nothing is pruned.`);
     return;
   }
   const candidates = await previewCandidates(args);

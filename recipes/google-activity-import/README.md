@@ -45,6 +45,14 @@ FILE LOCATION
 
 ## Steps
 
+> **Owner (rw-inlet-stamp, plan 08 PD2):** every run needs `--owner <subject>` - the subject whose data this is
+> (in this stack, the Authentik subject of the person; the operator's is `WORKSPACE_DEFAULT_SUB`). Every thought is
+> written private to that owner (`thoughts.user_id`), and the database refuses an unowned one (slot 470). Without
+> `--owner`, or with a value that is not a subject (blank, a `service:` principal, the literal `operator`), the script
+> exits 2 before it reads the export and writes nothing. Through the REST door (slot 450) the script uses the import
+> caller's token, minted by the operator only when an import is needed.
+
+
 ### 1. Request your data from Google Takeout
 
 Go to [takeout.google.com](https://takeout.google.com):
@@ -96,7 +104,7 @@ All three values come from your credential tracker. You can also copy `.env.exam
 ### 4. Do a dry run first
 
 ```bash
-node import-google-activity.mjs ./path/to/Takeout/My\ Activity --dry-run --limit 5
+node import-google-activity.mjs ./path/to/Takeout/My\ Activity --owner <subject> --dry-run --limit 5
 ```
 
 This parses, filters, and summarizes 5 activity-days without writing anything to your database. Review the output to see what would be imported.
@@ -104,7 +112,7 @@ This parses, filters, and summarizes 5 activity-days without writing anything to
 ### 5. Run the full import
 
 ```bash
-node import-google-activity.mjs ./path/to/Takeout/My\ Activity
+node import-google-activity.mjs ./path/to/Takeout/My\ Activity --owner <subject>
 ```
 
 The script will:

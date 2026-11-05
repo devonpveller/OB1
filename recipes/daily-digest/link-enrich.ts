@@ -61,7 +61,7 @@ import { selectPOI } from "./src/enrich/poi.ts";
 import { extractTextFromHtml } from "./src/enrich/extract.ts";
 import { closeEgress, egressMode } from "./src/enrich/egress.ts";
 import { type Delivery, isModelDown, JobRecord, ResearchClient, ResearchDeadlineError, waitForAll } from "./src/enrich/research-client.ts";
-import { digestOwnerSub } from "./src/enrich/owner-sub.ts";
+import { digestOwner } from "./src/enrich/owner-sub.ts";
 import { realClock } from "./src/routine/clock.ts";
 import { probeModel, waitForModel } from "./src/routine/model-gate.ts";
 import { RoutineStore } from "./src/routine/store.ts";
@@ -147,7 +147,15 @@ const GAP_MAX_PER_ITEM = num("GAP_DIVE_MAX_PER_ITEM", 3); // cap gaps taken per 
 // Durable carryover ledger (deferred + unfinished dives; freshness-bounded).
 const LEDGER_PATH = `${REPORTS_DIR}/gap-dives-pending${COMMIT ? "" : "-dryrun"}.json`;
 
-const brain = new BrainClient({ baseUrl: env("BRAIN_REST_URL", "http://openbrain-rest") });
+// rw-inlet-stamp (plan 08 PD2, slot 470): whose run this is - the owner the database records for this chain's inlet
+// connection (INLET_CONNECTION; owner-sub.ts, the one owner source). Asked FIRST: no connection or no recorded owner =
+// the run stops here (exit 3) before it reads a mail, asks for research or writes an episode. It owns the private
+// hand-back of every research request and the daily episode; every thought this run reads is shared or theirs.
+const RUN_OWNER: string = await digestOwner(env("BRAIN_REST_URL", "http://openbrain-rest")).catch((e) => {
+  console.error(`[link-enrich] ${(e as Error).message}`);
+  return Deno.exit(3);
+});
+const brain = new BrainClient({ baseUrl: env("BRAIN_REST_URL", "http://openbrain-rest"), owner: () => Promise.resolve(RUN_OWNER) });
 const research = new ResearchClient({
   baseUrl: env("RESEARCH_URL", "http://openbrain-research:8000"),
   brainKey: RESEARCH_KEY,
@@ -189,15 +197,13 @@ const gapTriageChat = makeScriptChat({
 });
 
 // S4b — audio (research-workbench P7a). Opt-in with --audio. The script's HOST lines are voiced
-// by the team PODCAST_TEAM (a team id or name of PODCAST_OWNER_SUB in the presenter model,
+// by the team PODCAST_TEAM (a team id or name of RUN_OWNER in the presenter model,
 // init-podcasts.sql) through LiteLLM's /v1/audio/speech (route = each presenter's voice link,
 // key = PODCAST_TTS_KEY, this service's own virtual key) and archived on generation where the
 // configuration store's podcast.archive_destination says (read on every render from the
 // workbench). Nothing here talks to Open Notebook.
 const AUDIO = args.has("--audio");
-// rw-boundary-digest: the run's owner comes from ONE place (owner-sub.ts; WORKSPACE_DEFAULT_SUB until PD2/PD4). It owns
-// the private hand-back of every research request and the daily episode.
-const PODCAST_OWNER_SUB = digestOwnerSub();
+// the run's owner: RUN_OWNER above (rw-inlet-stamp; the inlet connection's recorded owner)
 const PODCAST_TEAM = env("PODCAST_TEAM", "").trim();
 const presenterStore = new PresenterStore(env("BRAIN_REST_URL", "http://openbrain-rest"));
 const segmentCache = new SegmentCache(
@@ -629,7 +635,7 @@ async function processLink(item: WorkItem) {
     try {
       const a = await research.submitDerived({
         item: {
-          kind: "gmail", id: inlet, owner_sub: PODCAST_OWNER_SUB, links: [link.url],
+          kind: "gmail", id: inlet, owner_sub: RUN_OWNER, links: [link.url],
           fields: {
             subject, from, label, labels: email.gmailLabels.join(" "), link_text: link.text ?? "",
             gmail_id: email.gmailId, gmail_thread_id: email.gmailThreadId,
@@ -767,7 +773,7 @@ async function submitDive(q: QueuedDive): Promise<string | null> {
     const links = /^https?:\/\//i.test(q.url) && !/^https?:\/\/mail\.google\./i.test(q.url) ? [q.url] : [];
     const a = await research.submitDerived({
       item: {
-        kind: "gmail", id: await inletId(q.gmailId || "carry", "gap", q.question), owner_sub: PODCAST_OWNER_SUB, links,
+        kind: "gmail", id: await inletId(q.gmailId || "carry", "gap", q.question), owner_sub: RUN_OWNER, links,
         fields: { question: q.question, title: q.title, label: q.label, ...(q.gmailId ? { gmail_id: q.gmailId } : {}) },
       },
       purpose: "digest-gap",
@@ -1012,16 +1018,16 @@ async function maybeRenderEpisode(team: Team | null): Promise<Episode | null> {
   return ep;
 }
 
-/** The team that voices the daily episode of PODCAST_OWNER_SUB: their podcast.team (rw-settings-store, read on
+/** The team that voices the daily episode of RUN_OWNER: their podcast.team (rw-settings-store, read on
  * every run), else PODCAST_TEAM - or null. */
 async function loadTeam(): Promise<Team | null> {
-  const teamName = await podcastTeamFor(new SettingReader(env("BRAIN_REST_URL", "http://openbrain-rest")), PODCAST_OWNER_SUB, PODCAST_TEAM);
+  const teamName = await podcastTeamFor(new SettingReader(env("BRAIN_REST_URL", "http://openbrain-rest")), RUN_OWNER, PODCAST_TEAM);
   if (!teamName) {
     if (AUDIO) console.warn("[link-enrich] no podcast team (podcast.team / PODCAST_TEAM): the script is written for unnamed hosts and no audio is voiced.");
     return null;
   }
   try {
-    const t = await presenterStore.team(PODCAST_OWNER_SUB, teamName);
+    const t = await presenterStore.team(RUN_OWNER, teamName);
     if (!t) console.warn(`[link-enrich] no team "${teamName}" in the presenter model: no audio is voiced.`);
     return t;
   } catch (err) {
@@ -1049,7 +1055,7 @@ async function generateAudio(ep: Episode, team: Team | null): Promise<Voiced | n
       const suffix = attempt > 1 ? ` (attempt ${attempt}/${AUDIO_ATTEMPTS})` : "";
       console.log(`[link-enrich] 🔊 voicing ${transcript.turns.length} turn(s) with team "${team.name}" (episode ${ep.name})${suffix}…`);
       const v = await voiceAndArchive(transcript, team, {
-        ownerSub: PODCAST_OWNER_SUB, requesterSub: PODCAST_OWNER_SUB, shared: false, slug: ep.name,
+        ownerSub: RUN_OWNER, requesterSub: RUN_OWNER, shared: false, slug: ep.name,
         meta: { source: "daily-digest", episode: ep.name, episode_number: ep.number, commit: COMMIT },
       }, { cache: segmentCache, concurrency: TTS_CONCURRENCY, ffmpeg: { bin: FFMPEG_BIN }, archive: archiveWriter, store: presenterStore });
       return { done: true, value: v };
@@ -1070,7 +1076,7 @@ async function closeLoop(ep: Episode | null, voiced: Voiced | null) {
   let episodeId: string | null = null;
   if (COMMIT && ep && voiced?.episodeRowId) {
     try {
-      if (await presenterStore.setTranscript(voiced.episodeRowId, PODCAST_OWNER_SUB, ep.script)) episodeId = voiced.episodeRowId;
+      if (await presenterStore.setTranscript(voiced.episodeRowId, RUN_OWNER, ep.script)) episodeId = voiced.episodeRowId;
       else console.warn(`[link-enrich] loop-close: the episode row ${voiced.episodeRowId.slice(0, 8)} took no transcript`);
     } catch (err) {
       console.warn(`[link-enrich] loop-close: storing the transcript failed (best-effort): ${err}`);
