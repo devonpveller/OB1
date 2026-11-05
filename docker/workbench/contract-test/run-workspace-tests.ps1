@@ -500,6 +500,7 @@ try {
       '-e', "PROBE_OWNER=$pa", '-e', "PROBE_OTHER=$pb", '-e', "PROBE_TEAM=$team",
       # rw-rest-door-auth: the digest's token names its run owner (sub); the podcast role reads the team and the thoughts
       '-e', "PROBE_TOKEN_OWNER=$(New-LabRestToken $door.Secret 'ob_rest_digest' $pa)", '-e', "PROBE_TOKEN_OTHER=$(New-LabRestToken $door.Secret 'ob_rest_digest' $pb)",
+      '-e', "PROBE_PODCAST_TOKEN_OWNER=$(New-LabRestToken $door.Secret 'ob_rest_podcast' $pa)", '-e', "PROBE_PODCAST_TOKEN_OTHER=$(New-LabRestToken $door.Secret 'ob_rest_podcast' $pb)",
       '-e', "OPEN_BRAIN_REST_TOKEN=$(New-LabRestToken $door.Secret 'ob_rest_podcast' $pa)",
       '--entrypoint', 'deno', $wbTag, 'run', '--no-config', '--allow-net', '--allow-env', '/recipes/daily-digest/lab/settings-probe.ts')
     Save 'settings-probe.log' $o
