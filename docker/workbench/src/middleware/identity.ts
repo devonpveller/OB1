@@ -37,6 +37,7 @@ import { type ForwardAuthConfig, forwardAuthConfig, isAdmin, TOKEN_HEADER, verif
 import { keyKind, keyRing, type KeyRing } from "../identity/keys.ts";
 import { audit, endImpersonation, impersonationOf, seeUser } from "../identity/store.ts";
 import { logRefusal } from "../identity/refusal_log.ts";
+import { type OidcConfig, parseOidc, verifyUserToken } from "../identity/mcp_identity.ts";
 
 export { flushRefusalLog } from "../identity/refusal_log.ts";
 
@@ -134,6 +135,7 @@ export interface SeamDeps {
   ring: KeyRing;
   cfg: IdentityConfig;
   defaultSet?: boolean; // WORKSPACE_DEFAULT_SUB is set (round 4: else an admin reads ownerless prompts, audited)
+  userTokens?: OidcConfig | null; // rw-mcp-identity round 2: the provider openbrain-mcp's x-ob-user-token is verified against
 }
 
 // round 4 (tester F2): the path the ROUTER will route - percent-decoding repeated until stable,
@@ -232,7 +234,10 @@ export function badHost(url: string, host: string | undefined): boolean {
 
 export function seamDeps(db: Db | null, env = (k: string) => Deno.env.get(k)): SeamDeps {
   const fa = forwardAuthConfig(env);
-  return { db, fa, ring: keyRing(env, fa !== null), cfg: identityConfig(env), defaultSet: !!(env("WORKSPACE_DEFAULT_SUB") ?? "").trim() };
+  return {
+    db, fa, ring: keyRing(env, fa !== null), cfg: identityConfig(env), defaultSet: !!(env("WORKSPACE_DEFAULT_SUB") ?? "").trim(),
+    userTokens: userTokenConfig(env),
+  };
 }
 
 // what a browser without a valid token may still reach: health, and who-am-I (the page asks first) -
@@ -258,6 +263,29 @@ export const JOB_READS = /^\/workbench\/(contract\/(sessions|jobs|timeline|trail
 export const ON_BEHALF_SERVICES: ReadonlySet<string> = new Set(["owui"]);
 const ON_BEHALF_ROUTES = /^\/workbench\/intake\/(add|jobs\/add\/[0-9a-fA-F-]{36})$/;
 const ON_BEHALF_HEADER = "x-on-behalf-of";
+
+// rw-mcp-identity round 2 (tester F1): openbrain-mcp's contract tools act for THEIR caller. Without forward-auth (as live)
+// WORKBENCH_KEY is the operator, so openbrain-mcp sends it only for the operator's own lane. For an Open WebUI user it sends
+// its own service key (WORKSPACE_SERVICE_KEYS mcp=<key>: service:mcp, which is nobody: shared material only) plus that
+// user's Authentik access token in x-ob-user-token - the same token openbrain-mcp verified - and the workbench verifies it
+// AGAIN, here, against the same static JWKS (MCP_OWUI_OIDC_ISSUER / _AUDIENCE / _JWKS, src/identity/mcp_identity.ts, a
+// byte-identical copy of openbrain-mcp's). Only then is the request that token's sub (kind on-behalf, actor service:mcp).
+// Trust: the key alone names nobody; a subject needs a live token Authentik signed for that user, so a holder of the mcp
+// key (or anything on its networks) cannot name a user it holds no token for. The header from any other key, on any
+// route other than the contract reads, together with x-on-behalf-of, or with no provider configured, is 403; a token that
+// fails a check is 401 - never a downgrade.
+export const USER_TOKEN_HEADER = "x-ob-user-token";
+export const USER_TOKEN_SERVICES: ReadonlySet<string> = new Set(["mcp"]);
+export function userTokenRoute(method: string, path: string): boolean {
+  return (method === "GET" && /^\/workbench\/contract\/[^?#]*$/.test(path)) || (method === "POST" && path === "/workbench/contract/diff-check");
+}
+export function userTokenConfig(env: (k: string) => string | undefined): OidcConfig | null {
+  const iss = (env("MCP_OWUI_OIDC_ISSUER") ?? "").trim(), aud = (env("MCP_OWUI_OIDC_AUDIENCE") ?? "").trim();
+  const jwks = (env("MCP_OWUI_OIDC_JWKS") ?? "").trim();
+  if (!iss && !aud && !jwks) return null;
+  if (!iss || !aud || !jwks) throw new Error("MCP_OWUI_OIDC_ISSUER / _AUDIENCE / _JWKS: set all three, or none");
+  return parseOidc(iss, aud, jwks);
+}
 export function onBehalfSubject(raw: string): string | null {
   const s = raw.trim();
   if (!s || s.length > 256 || /[\x00-\x1f\x7f]/.test(s) || /^(service|system|anonymous):/i.test(s)) return null;
@@ -311,6 +339,22 @@ export function identitySeam(deps: SeamDeps = seamDeps(null)) {
         console.error("[identity] the identity store failed, request refused:", (e as Error).message);
         return c.json({ error: "the identity store is not answering" }, 503);
       }
+    }
+    const userToken = c.req.header(USER_TOKEN_HEADER);
+    if (userToken !== undefined) {
+      const svc = who.kind === "service" ? who.sub.slice("service:".length) : "";
+      if (!USER_TOKEN_SERVICES.has(svc) || !deps.userTokens || !userTokenRoute(c.req.method, path) || c.req.header(ON_BEHALF_HEADER) !== undefined) {
+        return c.json({ error: "x-ob-user-token is accepted only from openbrain-mcp's service key, on the contract reads" }, 403);
+      }
+      if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(userToken)) return c.json({ error: "x-ob-user-token is not a JWT" }, 401);
+      let sub: string;
+      try {
+        sub = await verifyUserToken(userToken, deps.userTokens, Math.floor(Date.now() / 1000));
+      } catch (e) {
+        logRefusal(`user token refused: ${(e as Error).message}`, `[identity] openbrain-mcp's user token refused: ${(e as Error).message}`);
+        return c.json({ error: "the user token is not valid" }, 401);
+      }
+      who = { sub, actor: who.sub, name: sub, key: await ownerKey(sub), kind: "on-behalf", admin: false, impersonating: null };
     }
     const onBehalf = c.req.header(ON_BEHALF_HEADER);
     if (onBehalf !== undefined) {

@@ -16,6 +16,7 @@
  * metadata_filter is an object over MCP (the cloud gateway forces {share:"cloud"} into it) and
  * a JSON string on the HTTP route; the adapter serialises it.
  */
+import type { Caller } from "./mcp-identity.ts";
 import { z } from "zod";
 import manifest from "./contract-tools.json" with { type: "json" };
 
@@ -111,21 +112,49 @@ export function toRequest(spec: ContractToolSpec, args: Record<string, unknown>,
   return { url, method: spec.method, body };
 }
 
+/**
+ * rw-mcp-identity round 2 (tester F1): who the workbench serves for one contract call. The full lane (the operator's own
+ * clients) keeps MCP_ACCESS_KEY, which the workbench resolves to the operator. Every other caller goes with the workbench's
+ * service key for this server (`mcp` in WORKSPACE_SERVICE_KEYS: service:mcp, nobody), and a token-verified Open WebUI user
+ * adds their own token (x-ob-user-token) for the workbench to verify itself. No mcp key = refused (null).
+ */
+export function contractHeaders(caller: Caller | undefined, fullKey: string, mcpKey: string): Record<string, string> | null {
+  if (!caller) return null;
+  if (caller.lane === "full") return { "x-brain-key": fullKey };
+  if (!mcpKey) return null;
+  if (caller.via === "token" && caller.subject && caller.token) return { "x-brain-key": mcpKey, "x-ob-user-token": caller.token };
+  return { "x-brain-key": mcpKey };
+}
+
 type Registrar = { registerTool: (...a: never[]) => unknown };
 type ToolResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 
 export function registerContractTools(
   server: Registrar,
-  opts: { workbenchUrl: string; key: string; fetchImpl?: typeof fetch; tools?: ContractToolSpec[] },
+  opts: {
+    workbenchUrl: string;
+    key?: string;
+    /**
+     * rw-mcp-identity round 2 (tester F1): the headers that say WHO the workbench serves, per call - the caller's, never
+     * this server's own standing. null = the call is refused before anything is sent. Without it, `key` is sent (tests).
+     */
+    headers?: () => Record<string, string> | null;
+    fetchImpl?: typeof fetch;
+    tools?: ContractToolSpec[];
+  },
 ) {
   const doFetch = opts.fetchImpl ?? fetch;
   for (const spec of opts.tools ?? CONTRACT_TOOLS) {
     const handler = async (args: Record<string, unknown>): Promise<ToolResult> => {
       try {
+        const who = opts.headers ? opts.headers() : { "x-brain-key": opts.key ?? "" };
+        if (!who) {
+          return { content: [{ type: "text", text: "Refused: the research workspace is not configured for this lane (no workbench key for callers other than the operator); nothing was read." }], isError: true };
+        }
         const r = toRequest(spec, args ?? {}, opts.workbenchUrl);
         const res = await doFetch(r.url, {
           method: r.method,
-          headers: { "content-type": "application/json", "x-brain-key": opts.key },
+          headers: { "content-type": "application/json", ...who },
           body: r.body,
         });
         const text = await res.text();

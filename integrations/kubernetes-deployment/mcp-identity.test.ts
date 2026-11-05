@@ -187,3 +187,24 @@ Deno.test("openbrain-ext carries a byte-identical copy of this module", async ()
   const ext = norm(await Deno.readTextFile(new URL("../../docker/extensions-server/mcp-identity.ts", import.meta.url)));
   assertEquals(ext, here, "docker/extensions-server/mcp-identity.ts drifted from integrations/kubernetes-deployment/mcp-identity.ts");
 });
+
+Deno.test("the workbench carries a byte-identical copy too (it verifies openbrain-mcp's x-ob-user-token with it)", async () => {
+  const norm = (s: string) => s.replace(/\r\n/g, "\n");
+  const here = norm(await Deno.readTextFile(new URL("./mcp-identity.ts", import.meta.url)));
+  const wb = norm(await Deno.readTextFile(new URL("../../docker/workbench/src/identity/mcp_identity.ts", import.meta.url)));
+  assertEquals(wb, here, "docker/workbench/src/identity/mcp_identity.ts drifted");
+});
+
+Deno.test("round 2 (tester b): two DIFFERENT keys on one request are refused 403, the same key twice is fine", async () => {
+  const tb = await mint(rsa.priv, { alg: "RS256", kid: "k1" }, claims("ak-user-b"));
+  const r1 = await call({ "x-brain-key": OWUI, authorization: `Bearer ${tb}` }, CFG, FULL);
+  assertEquals(r1.ok ? 200 : r1.status, 403, "owui header + full ?key= + B token");
+  const r2 = await call({ "x-brain-key": FULL }, CFG, OWUI);
+  assertEquals(r2.ok ? 200 : r2.status, 403, "full header + owui ?key=");
+  const r3 = await call({ "x-brain-key": OWUI, "x-access-key": FULL });
+  assertEquals(r3.ok ? 200 : r3.status, 403, "x-brain-key + a different x-access-key");
+  const r4 = await call({ "x-brain-key": FULL }, CFG, FULL);
+  assertEquals(r4.ok && r4.caller.lane, "full", "the same key twice");
+  const r5 = await call({ "x-brain-key": OWUI, authorization: `Bearer ${tb}` });
+  assertEquals(r5.ok && r5.caller.token === tb, true, "the verified token is kept on the caller (for the workbench call)");
+});

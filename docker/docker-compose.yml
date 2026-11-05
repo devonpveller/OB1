@@ -267,6 +267,11 @@ services:
       # contract routes here, with MCP_ACCESS_KEY (= the workbench's WORKBENCH_KEY). The workbench
       # runs under the wiki profile; with it off, every contract tool answers an error, no crash.
       CONTRACT_WORKBENCH_URL: http://openbrain-workbench:8000
+      # rw-mcp-identity round 2 (tester F1): the workbench serves the CALLER of a contract tool. The full lane keeps
+      # MCP_ACCESS_KEY (the operator); every other caller goes with THIS key - the workbench's `mcp=<key>` entry in
+      # WORKSPACE_SERVICE_KEYS (service:mcp, nobody) - plus, for a verified Open WebUI user, their own token, which the
+      # workbench verifies itself. Blank = the contract tools answer the full lane only (fail closed).
+      CONTRACT_WORKBENCH_MCP_KEY: ${OB_WORKBENCH_MCP_KEY:-}
       # research-workbench rw-p8a4-ideas: the idea tools act for ONE owner subject - the workspace's default
       # identity (the subject capture_idea files ideas under); update_idea / research_idea / promote_idea refuse
       # any other owner's idea through the owner-checked SQL functions (slot 370). Blank = "operator", as the seam.
@@ -333,6 +338,8 @@ services:
       # Authentik token): the operator (WORKSPACE_DEFAULT_SUB) keeps DEFAULT_USER_ID's rows, any other user gets
       # their own. MCP_ACCESS_KEY (held only by openbrain-mcpo-ext, which carries no user) has NO identity here:
       # the wiki_* reads only. Same four OWUI variables as openbrain-mcp, all or none.
+      # round 2 (F6): the personal key is no identity here too, so openbrain-mcpo-ext can hold it instead of MCP_ACCESS_KEY.
+      MCP_PERSONAL_ACCESS_KEY: ${MCP_PERSONAL_ACCESS_KEY:-}
       WORKSPACE_DEFAULT_SUB: ${WORKSPACE_DEFAULT_SUB:-}
       MCP_OWUI_ACCESS_KEY: ${MCP_OWUI_ACCESS_KEY:-}
       MCP_OWUI_OIDC_ISSUER: ${MCP_OWUI_OIDC_ISSUER:-}
@@ -1497,6 +1504,12 @@ services:
       # the browser door's own key (required with sign-in; then WORKBENCH_KEY is an internal service)
       WORKSPACE_DOOR_KEY: ${WORKSPACE_DOOR_KEY:-}
       WORKSPACE_SERVICE_KEYS: ${WORKSPACE_SERVICE_KEYS:-}
+      # rw-mcp-identity round 2 (tester F1): with an `mcp=<OB_WORKBENCH_MCP_KEY>` entry above, openbrain-mcp's contract
+      # calls for an Open WebUI user carry that user's Authentik token (x-ob-user-token); the workbench verifies it HERE,
+      # against the same static provider config openbrain-mcp uses, and serves its sub. Blank = the header is refused (403).
+      MCP_OWUI_OIDC_ISSUER: ${MCP_OWUI_OIDC_ISSUER:-}
+      MCP_OWUI_OIDC_AUDIENCE: ${MCP_OWUI_OIDC_AUDIENCE:-}
+      MCP_OWUI_OIDC_JWKS: ${MCP_OWUI_OIDC_JWKS:-}
       # P2b's identity header: blank = off, ignored while forward-auth sign-in is configured;
       # set = the edge MUST strip a client-sent copy and set it itself (workbench/README.md "Sign-in (Authentik forward-auth)")
       WORKSPACE_IDENTITY_HEADER: ${WORKSPACE_IDENTITY_HEADER:-}

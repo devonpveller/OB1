@@ -380,3 +380,26 @@ Deno.test("a real MCP client call delivers the forced filter to the workbench fo
     await client.close();
   }
 });
+
+Deno.test("rw-mcp-identity round 2 (tester F1): the workbench is told the CALLER, never this server's standing", async () => {
+  const { contractHeaders } = await import("./contract-tools.ts");
+  const full = { lane: "full", subject: "ak-op", via: "operator-key", operator: true } as const;
+  const b = { lane: "owui", subject: "ak-b", via: "token", operator: false, token: "h.p.s" } as const;
+  const noid = { lane: "owui", subject: null, via: "none", operator: false } as const;
+  const pers = { lane: "personal", subject: null, via: "none", operator: false } as const;
+  const eq = (a: unknown, e: unknown, m: string) => { if (JSON.stringify(a) !== JSON.stringify(e)) throw new Error(`${m}: ${JSON.stringify(a)}`); };
+  eq(contractHeaders(full, "FULL", "MCP"), { "x-brain-key": "FULL" }, "the operator's lane keeps the full key");
+  eq(contractHeaders(b, "FULL", "MCP"), { "x-brain-key": "MCP", "x-ob-user-token": "h.p.s" }, "a verified user: the mcp key + their token");
+  eq(contractHeaders(noid, "FULL", "MCP"), { "x-brain-key": "MCP" }, "no identity: the mcp key alone (nobody)");
+  eq(contractHeaders(pers, "FULL", "MCP"), { "x-brain-key": "MCP" }, "the personal lane (mcpo): nobody");
+  eq(contractHeaders(b, "FULL", ""), null, "no mcp key configured: refused");
+  eq(contractHeaders(undefined, "FULL", "MCP"), null, "outside a request: refused");
+  for (const c of [b, noid, pers]) if (JSON.stringify(contractHeaders(c, "FULL", "MCP")).includes("FULL")) throw new Error("the full key left for a non-operator caller");
+});
+
+Deno.test("rw-mcp-identity round 2: index.ts sends no fixed key to the workbench (a source check)", async () => {
+  const src = (await Deno.readTextFile(new URL("./index.ts", import.meta.url))).replace(/\r\n/g, "\n");
+  const reg = src.slice(src.indexOf("registerContractTools(server, {"), src.indexOf("registerContractTools(server, {") + 400);
+  if (/\bkey:\s*MCP_ACCESS_KEY/.test(reg)) throw new Error("the contract tools are registered with a fixed MCP_ACCESS_KEY again");
+  if (!/headers: \(\) => contractHeaders\(callerStore\.getStore\(\), MCP_ACCESS_KEY, CONTRACT_WORKBENCH_MCP_KEY\)/.test(reg)) throw new Error("the per-call header resolver is missing");
+});

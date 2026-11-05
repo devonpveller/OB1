@@ -34,6 +34,7 @@ import { registerAgentMemory } from "./agent-memory.ts";
 import { registerContractTools } from "./contract-tools.ts";
 import { SUGGESTION_LIST_SQL } from "./suggestion-list.ts";
 import { personalLaneRefusal } from "./mcp-lanes.ts";
+import { contractHeaders } from "./contract-tools.ts";
 import { callerStore, loadIdentityConfig, NO_IDENTITY_WRITE, resolveCaller, type Caller } from "./mcp-identity.ts";
 import { captureIdea, promoteIdea, researchIdea, updateIdea } from "./idea-tools.ts";
 import { thoughtOwnerSql, thoughtReader, thoughtWriter } from "./thought-owner.ts";
@@ -2006,10 +2007,25 @@ server.registerTool(
 // One tool per read operation of the workbench's typed retrieval contract, registered through
 // server.registerTool so both lanes get them and every result is size-capped like any tool.
 // The schemas come from the workbench (contract-tools.json, generated); each call goes to the
-// workbench over HTTP with the same shared key the viewer's forwarder injects (WORKBENCH_KEY = MCP_ACCESS_KEY).
+// workbench over HTTP.
+// rw-mcp-identity round 2 (tester F1): the workbench serves the CALLER, never this server's standing. Without forward-auth
+// (as live) the workbench resolves MCP_ACCESS_KEY (= WORKBENCH_KEY) to WORKSPACE_DEFAULT_SUB, the operator - right for the
+// full lane (the operator's own clients) and wrong for everyone else. So per call (contractHeaders, in the request's scope):
+//   full lane                 -> x-brain-key: MCP_ACCESS_KEY (the operator, as before)
+//   owui lane + verified user -> x-brain-key: CONTRACT_WORKBENCH_MCP_KEY (the workbench's service key `mcp`, i.e. service:mcp
+//                                = nobody) + x-ob-user-token: the SAME user token, which the workbench verifies itself
+//                                against the same static JWKS and only then serves as that token's sub
+//   no identity (owui without a token, personal lane / mcpo)
+//                             -> x-brain-key: CONTRACT_WORKBENCH_MCP_KEY alone: service:mcp, shared material only
+//   CONTRACT_WORKBENCH_MCP_KEY unset -> every non-full-lane contract call is refused (fail closed)
+const CONTRACT_WORKBENCH_MCP_KEY = (Deno.env.get("CONTRACT_WORKBENCH_MCP_KEY") ?? "").trim();
+if (CONTRACT_WORKBENCH_MCP_KEY && CONTRACT_WORKBENCH_MCP_KEY === MCP_ACCESS_KEY) {
+  throw new Error("CONTRACT_WORKBENCH_MCP_KEY must differ from MCP_ACCESS_KEY (the workbench would serve it as the operator)");
+}
+if (!CONTRACT_WORKBENCH_MCP_KEY) console.error("[open-brain] CONTRACT_WORKBENCH_MCP_KEY is not set: the contract tools answer the full lane only");
 registerContractTools(server, {
   workbenchUrl: Deno.env.get("CONTRACT_WORKBENCH_URL") || "http://openbrain-workbench:8000",
-  key: MCP_ACCESS_KEY,
+  headers: () => contractHeaders(callerStore.getStore(), MCP_ACCESS_KEY, CONTRACT_WORKBENCH_MCP_KEY),
 });
 
 // --- Research persistence REST API (deep_research -> open-brain) ---

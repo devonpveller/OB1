@@ -42,6 +42,11 @@ export interface Caller {
   via: "operator-key" | "token" | "none";
   /** True when the subject is the operator's (WORKSPACE_DEFAULT_SUB). */
   operator: boolean;
+  /**
+   * The verified user token itself (owui lane only). Kept so an outbound call made FOR this caller (the contract tools ->
+   * the workbench) can hand the workbench the same token to verify on its own; never logged, never returned.
+   */
+  token?: string;
 }
 
 export interface OidcConfig {
@@ -120,18 +125,28 @@ export function loadIdentityConfig(get: (k: string) => string | undefined): Iden
       throw new Error("MCP_OWUI_ACCESS_KEY must differ from MCP_ACCESS_KEY and MCP_PERSONAL_ACCESS_KEY");
     }
     if (!operatorSub) throw new Error("the owui lane needs WORKSPACE_DEFAULT_SUB (the operator's subject) to tell the operator from other users");
-    if (!/^https:\/\//.test(issuer)) throw new Error("MCP_OWUI_OIDC_ISSUER must be an https URL");
-    let doc: unknown;
-    try { doc = JSON.parse(jwksRaw); } catch { throw new Error("MCP_OWUI_OIDC_JWKS is not JSON"); }
-    const all = (doc && typeof doc === "object" && Array.isArray((doc as { keys?: unknown }).keys))
-      ? (doc as { keys: JsonWebKey[] }).keys : [];
-    const keys = all.filter((k) => k && typeof k === "object" && (k.kty === "RSA" || (k.kty === "EC" && k.crv === "P-256")) &&
-      (!k.use || k.use === "sig") && !("d" in k));
-    if (!keys.length) throw new Error("MCP_OWUI_OIDC_JWKS has no usable public signing key (RSA, or EC P-256)");
-    oidc = { issuer, audience, keys };
+    oidc = parseOidc(issuer, audience, jwksRaw);
   }
   if (!fullKey) throw new Error("MCP_ACCESS_KEY is not set");
   return { fullKey, personalKey, owuiKey, operatorSub, oidc, warnings };
+}
+
+/**
+ * The provider configuration (MCP_OWUI_OIDC_ISSUER / _AUDIENCE / _JWKS): an https issuer, an audience, and at least one
+ * usable PUBLIC signing key (RSA, or EC P-256; a key carrying private material is dropped). Throws on anything else.
+ * Shared by openbrain-mcp, openbrain-ext and the workbench (which verifies the same token for openbrain-mcp's calls).
+ */
+export function parseOidc(issuer: string, audience: string, jwksRaw: string): OidcConfig {
+  if (!/^https:\/\//.test(issuer)) throw new Error("MCP_OWUI_OIDC_ISSUER must be an https URL");
+  if (!audience) throw new Error("MCP_OWUI_OIDC_AUDIENCE is not set");
+  let doc: unknown;
+  try { doc = JSON.parse(jwksRaw); } catch { throw new Error("MCP_OWUI_OIDC_JWKS is not JSON"); }
+  const all = (doc && typeof doc === "object" && Array.isArray((doc as { keys?: unknown }).keys))
+    ? (doc as { keys: JsonWebKey[] }).keys : [];
+  const keys = all.filter((k) => k && typeof k === "object" && (k.kty === "RSA" || (k.kty === "EC" && k.crv === "P-256")) &&
+    (!k.use || k.use === "sig") && !("d" in k));
+  if (!keys.length) throw new Error("MCP_OWUI_OIDC_JWKS has no usable public signing key (RSA, or EC P-256)");
+  return { issuer, audience, keys };
 }
 
 /** Which lane a key opens, or null (401). */
@@ -145,6 +160,8 @@ export function laneOf(provided: string | null | undefined, cfg: IdentityConfig)
 
 /** Headers that name a user. Only the owui lane's bearer token may; anything else carrying one is refused. */
 const IDENTITY_HEADER = /^(x-on-behalf-of|x-openwebui-user-.*|x-authentik-.*|x-ob-(user|subject|sub)(-.*)?|x-user-id|x-forwarded-user|x-remote-user|remote-user)$/i;
+// note: x-ob-user-token (the header openbrain-mcp sends the WORKBENCH) matches x-ob-user-* above, so a client can never
+// send it to openbrain-mcp or openbrain-ext either
 
 export type Resolution = { ok: true; caller: Caller } | { ok: false; status: 401 | 403; error: string };
 
@@ -159,7 +176,13 @@ export async function resolveCaller(
   cfg: IdentityConfig,
   nowSec: number = Math.floor(Date.now() / 1000),
 ): Promise<Resolution> {
-  const lane = laneOf(header("x-brain-key") || queryKey, cfg);
+  // round 2 (tester b, the odd combination): a request offering two DIFFERENT keys (the header and ?key=, or the header
+  // and x-access-key) is refused outright instead of one silently winning
+  const offered = [header("x-brain-key"), header("x-access-key"), queryKey].filter((k): k is string => !!k);
+  if (offered.some((k) => k !== offered[0])) {
+    return { ok: false, status: 403, error: "refused: this request offers two different access keys" };
+  }
+  const lane = laneOf(offered[0], cfg);
   if (!lane) return { ok: false, status: 401, error: "Invalid or missing access key" };
   const named = headerNames.filter((n) => IDENTITY_HEADER.test(n));
   if (named.length) {
@@ -181,7 +204,7 @@ export async function resolveCaller(
   try {
     const sub = await verifyUserToken(m[1], cfg.oidc!, nowSec);
     const operator = !!cfg.operatorSub && sub === cfg.operatorSub;
-    return { ok: true, caller: { lane, subject: sub, via: "token", operator } };
+    return { ok: true, caller: { lane, subject: sub, via: "token", operator, token: m[1] } };
   } catch (e) {
     return { ok: false, status: 401, error: `refused: the user token is not valid (${(e as Error).message})` };
   }

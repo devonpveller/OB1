@@ -111,6 +111,17 @@ async function insertRow(
   return rows[0];
 }
 
+/**
+ * rw-mcp-identity round 2 (tester F2): an id a write takes must name a row of the CALLER's own (user_id = uid()); a
+ * foreign id answers exactly like a missing one. Every id-bearing write calls this before it writes, and every nested join
+ * is owner-scoped too (`AND <joined>.user_id = <row>.user_id`), so neither a write nor a read can reach another owner's row.
+ */
+async function assertOwned(table: string, id: unknown, what: string): Promise<void> {
+  if (id === undefined || id === null || id === "") return;
+  const r = await q(`SELECT 1 FROM ${table} WHERE id = $1 AND user_id = $2`, [id, uid()]);
+  if (!r.length) throw new Error(`${what} not found or access denied`);
+}
+
 /** UPDATE ... SET ... WHERE id=$ [AND user_id=$] RETURNING * */
 async function updateById(
   table: string,
@@ -318,6 +329,7 @@ server.tool(
   },
   async (a) => {
     try {
+      await assertOwned("maintenance_tasks", a.task_id, "Maintenance task");
       const log = await insertRow("maintenance_logs", {
         task_id: a.task_id,
         user_id: uid(),
@@ -328,7 +340,7 @@ server.tool(
         next_action: a.next_action ?? null,
       });
       // DB trigger updates the parent task; fetch it back.
-      const task = (await q(`SELECT * FROM maintenance_tasks WHERE id = $1`, [a.task_id]))[0];
+      const task = (await q(`SELECT * FROM maintenance_tasks WHERE id = $1 AND user_id = $2`, [a.task_id, uid()]))[0];
       return ok({ success: true, message: "Maintenance logged successfully", log, updated_task: task });
     } catch (e) { return fail(e); }
   },
@@ -372,7 +384,7 @@ server.tool(
       const logs = await q(
         `SELECT l.*, jsonb_build_object('id', t.id, 'name', t.name, 'category', t.category) AS maintenance_tasks
          FROM maintenance_logs l
-         JOIN maintenance_tasks t ON t.id = l.task_id
+         JOIN maintenance_tasks t ON t.id = l.task_id AND t.user_id = l.user_id
          WHERE ${cond.join(" AND ")}
          ORDER BY l.completed_at DESC`,
         params,
@@ -429,6 +441,7 @@ server.tool(
   },
   async (a) => {
     try {
+      await assertOwned("family_members", a.family_member_id, "Family member");
       const row = await insertRow("activities", {
         user_id: uid(),
         family_member_id: a.family_member_id ?? null,
@@ -463,7 +476,7 @@ server.tool(
       let sql =
         `SELECT act.*, ${FM_JOIN}
          FROM activities act
-         LEFT JOIN family_members fm ON fm.id = act.family_member_id
+         LEFT JOIN family_members fm ON fm.id = act.family_member_id AND fm.user_id = act.user_id
          WHERE act.user_id = $1
            AND ((act.start_date <= $2 AND (act.end_date >= $3 OR act.end_date IS NULL))
                 OR act.day_of_week IS NOT NULL)`;
@@ -495,7 +508,7 @@ server.tool(
       const rows = await q(
         `SELECT act.*, ${FM_JOIN}
          FROM activities act
-         LEFT JOIN family_members fm ON fm.id = act.family_member_id
+         LEFT JOIN family_members fm ON fm.id = act.family_member_id AND fm.user_id = act.user_id
          WHERE ${cond.join(" AND ")}
          ORDER BY act.start_date DESC`,
         params,
@@ -518,6 +531,7 @@ server.tool(
   },
   async (a) => {
     try {
+      await assertOwned("family_members", a.family_member_id, "Family member");
       const row = await insertRow("important_dates", {
         user_id: uid(),
         family_member_id: a.family_member_id ?? null,
@@ -541,7 +555,7 @@ server.tool(
       const rows = await q(
         `SELECT idt.*, ${FM_JOIN}
          FROM important_dates idt
-         LEFT JOIN family_members fm ON fm.id = idt.family_member_id
+         LEFT JOIN family_members fm ON fm.id = idt.family_member_id AND fm.user_id = idt.user_id
          WHERE idt.user_id = $1
            AND idt.date_value >= CURRENT_DATE
            AND idt.date_value <= CURRENT_DATE + ($2 || ' days')::interval
@@ -672,6 +686,7 @@ server.tool(
   async (a) => {
     try {
       const out: Row[] = [];
+      for (const m of a.meals) await assertOwned("recipes", m.recipe_id, "Recipe");
       for (const m of a.meals) {
         out.push(await insertRow("meal_plans", {
           user_id: uid(),
@@ -702,7 +717,7 @@ server.tool(
                   'prep_time_minutes', r.prep_time_minutes,
                   'cook_time_minutes', r.cook_time_minutes) END AS recipes
          FROM meal_plans mp
-         LEFT JOIN recipes r ON r.id = mp.recipe_id
+         LEFT JOIN recipes r ON r.id = mp.recipe_id AND r.user_id = mp.user_id
          WHERE mp.user_id = $1 AND mp.week_start = $2
          ORDER BY mp.day_of_week, mp.meal_type`,
         [uid(), week_start],
@@ -721,7 +736,7 @@ server.tool(
       const meals = await q(
         `SELECT r.id AS recipe_id, r.ingredients AS ingredients
          FROM meal_plans mp
-         JOIN recipes r ON r.id = mp.recipe_id
+         JOIN recipes r ON r.id = mp.recipe_id AND r.user_id = mp.user_id
          WHERE mp.user_id = $1 AND mp.week_start = $2`,
         [uid(), week_start],
       );
@@ -836,6 +851,7 @@ server.tool(
   },
   async (a) => {
     try {
+      await assertOwned("professional_contacts", a.contact_id, "Contact");
       const interaction = await insertRow("contact_interactions", {
         user_id: uid(),
         contact_id: a.contact_id,
@@ -888,6 +904,7 @@ server.tool(
   },
   async (a) => {
     try {
+      await assertOwned("professional_contacts", a.contact_id, "Contact");
       const opportunity = await insertRow("opportunities", {
         user_id: uid(),
         contact_id: a.contact_id ?? null,
@@ -1055,6 +1072,7 @@ server.tool(
   },
   async (a) => {
     try {
+      await assertOwned("companies", a.company_id, "Company");
       const job_posting = await insertRow("job_postings", {
         user_id: uid(),
         company_id: a.company_id,
@@ -1091,6 +1109,7 @@ server.tool(
   },
   async (a) => {
     try {
+      await assertOwned("companies", a.company_id, "Company");
       const inserted = await insertRow("job_contacts", {
         user_id: uid(),
         company_id: a.company_id ?? null,
@@ -1105,7 +1124,7 @@ server.tool(
       });
       const job_contact = (await q(
         `SELECT jc.*, ${COMPANY_JOIN}
-         FROM job_contacts jc LEFT JOIN companies co ON co.id = jc.company_id
+         FROM job_contacts jc LEFT JOIN companies co ON co.id = jc.company_id AND co.user_id = jc.user_id
          WHERE jc.id = $1`,
         [inserted.id],
       ))[0];
@@ -1128,6 +1147,7 @@ server.tool(
   },
   async (a) => {
     try {
+      await assertOwned("job_postings", a.job_posting_id, "Job posting");
       const application = await insertRow("applications", {
         user_id: uid(),
         job_posting_id: a.job_posting_id,
@@ -1157,6 +1177,7 @@ server.tool(
   },
   async (a) => {
     try {
+      await assertOwned("applications", a.application_id, "Application");
       const interview = await insertRow("interviews", {
         user_id: uid(),
         application_id: a.application_id,
@@ -1198,9 +1219,9 @@ const INTERVIEW_NESTED =
       'job_postings', to_jsonb(jp) || jsonb_build_object('companies', to_jsonb(co))
    )) AS applications
    FROM interviews iv
-   JOIN applications ap ON ap.id = iv.application_id
-   JOIN job_postings jp ON jp.id = ap.job_posting_id
-   JOIN companies co ON co.id = jp.company_id
+   JOIN applications ap ON ap.id = iv.application_id AND ap.user_id = iv.user_id
+   JOIN job_postings jp ON jp.id = ap.job_posting_id AND jp.user_id = iv.user_id
+   JOIN companies co ON co.id = jp.company_id AND co.user_id = iv.user_id
    WHERE iv.user_id = $1 AND iv.status = 'scheduled'
      AND iv.scheduled_at >= now()
      AND iv.scheduled_at <= now() + ($2 || ' days')::interval
@@ -1268,7 +1289,7 @@ server.tool(
       if (a.only_unlinked) cond.push(`jc.professional_crm_contact_id IS NULL`);
       const contacts = await q(
         `SELECT jc.*, ${COMPANY_JOIN}
-         FROM job_contacts jc LEFT JOIN companies co ON co.id = jc.company_id
+         FROM job_contacts jc LEFT JOIN companies co ON co.id = jc.company_id AND co.user_id = jc.user_id
          WHERE ${cond.join(" AND ")}
          ORDER BY jc.created_at DESC`,
         params,
@@ -1299,7 +1320,7 @@ server.tool(
       }
       let companyName: string | null = null;
       if (jc.company_id) {
-        const co = (await q(`SELECT name FROM companies WHERE id = $1`, [jc.company_id]))[0];
+        const co = (await q(`SELECT name FROM companies WHERE id = $1 AND user_id = $2`, [jc.company_id, uid()]))[0];
         companyName = co?.name ?? null;
       }
       const professional_contact = await insertRow("professional_contacts", {
@@ -1574,12 +1595,13 @@ app.all("*", async (c) => {
   // rw-mcp-identity: the lane by key, forged user headers 403, a bad user token 401 (mcp-identity.ts)
   const names: string[] = [];
   for (const [n] of c.req.raw.headers) names.push(n);
-  const provided = c.req.header("x-brain-key") || c.req.header("x-access-key") || new URL(c.req.url).searchParams.get("key");
-  const r = await resolveCaller((n) => (n === "x-brain-key" ? provided ?? undefined : c.req.header(n)), names.filter((n) => n !== "x-access-key"), null, IDENTITY);
+  // x-brain-key, x-access-key and ?key= may each carry the key; two DIFFERENT ones are refused (mcp-identity.ts)
+  const r = await resolveCaller((n) => c.req.header(n), names, new URL(c.req.url).searchParams.get("key"), IDENTITY);
   if (!r.ok) return c.json({ error: r.error }, r.status, corsHeaders);
-  if (r.caller.lane === "personal") return c.json({ error: "Invalid or missing access key" }, 401, corsHeaders);
-  // the full key's one holder here is openbrain-mcpo-ext (no user): no identity on this server
-  const caller = r.caller.lane === "full" ? { ...r.caller, subject: null, via: "none" as const, operator: false } : r.caller;
+  // Neither the full key nor the personal key carries a user here: their holders are openbrain-mcpo-ext (the full key until
+  // the deploy step swaps it for the personal key, rw-mcp-identity round 2 F6) - so both mean NO identity on this server:
+  // the shared wiki reads only, every personal tool and every write refused.
+  const caller = r.caller.lane === "owui" ? r.caller : { ...r.caller, subject: null, via: "none" as const, operator: false };
   const rowOwner = caller.subject ? await extUserId(caller.subject, IDENTITY.operatorSub, DEFAULT_USER_ID) : undefined;
 
   if (!c.req.header("accept")?.includes("text/event-stream")) {
