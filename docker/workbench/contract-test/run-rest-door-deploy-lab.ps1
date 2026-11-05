@@ -25,7 +25,7 @@ param(
   [string]$Id = 'wt-rw-rest-door-auth',
   [string]$Subnet = '',
   [string]$Evidence = '',
-  [string]$BaseSha = '116b80e',
+  [string]$BaseSha = '5ca84f5',
   [string]$NewSha = 'HEAD',
   [string]$NodeImage = 'node:22-slim',
   [switch]$Red,

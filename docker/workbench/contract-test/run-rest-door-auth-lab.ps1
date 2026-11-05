@@ -27,7 +27,7 @@ param(
   [string]$PgrstImage = 'postgrest/postgrest:v12.2.3',
   [string]$CaddyImage = 'caddy:2-alpine',
   [string]$NodeImage = 'node:22-slim',
-  [string]$BaseSha = '116b80e',
+  [string]$BaseSha = '5ca84f5',
   [switch]$Red,
   [switch]$Keep
 )
@@ -165,7 +165,7 @@ try {
   $slot450 = @($chain | Where-Object { $_[1] -eq '450-init-rest-door-auth.sql' })
   if (-not $Red) { Check ($slot450.Count -eq 1) "the compose chain mounts 450-init-rest-door-auth.sql ($($chain.Count) migrations)" }
   # the live database is at the chain WITHOUT slot 450; 450 is applied by psql below, as the deploy does
-  foreach ($m in $chain) { if ($m[1] -ne '450-init-rest-door-auth.sql') { Copy-Item (Join-Path $chainDir $m[0]) (Join-Path $stage $m[1]) } }
+  foreach ($m in $chain) { if ($m[1] -notin @('450-init-rest-door-auth.sql', '990-init-rest-door-auth-final.sql')) { Copy-Item (Join-Path $chainDir $m[0]) (Join-Path $stage $m[1]) } }
 
   # ------------------------------------------------------------ 2. network + database
   Write-Host '[2] the internal network and the database'
@@ -283,6 +283,7 @@ SELECT json_build_object(
                   'research_private_report_claims', 'user_document_listings', 'workspace_rooms', 'workspace_room_entries',
                   'workspace_users', 'workspace_impersonation', 'refinery_user_sources', 'idea_thought_archive', 'idea_wiki_archive',
                   'admin_audit', 'held_sources']))),
+  'hasTranscript', EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('public.podcast_episodes') AND attname = 'transcript' AND NOT attisdropped),
   'settingKeys', (SELECT COALESCE(json_agg(json_build_object('key', key, 'tier', tier) ORDER BY key), '[]') FROM public.settings_keys),
   'allowed', (SELECT COALESCE(json_object_agg(d.rolname, json_build_object(
                 'relations', (SELECT COALESCE(json_agg(relname ORDER BY relname), '[]') FROM rels WHERE has_table_privilege(d.rolname, ('public.' || quote_ident(relname))::regclass, 'SELECT')),
@@ -296,6 +297,15 @@ SELECT json_build_object(
   $cat = $catJson | ConvertFrom-Json
   Check ($cat.relations.Count -gt 100 -and $cat.functions.Count -gt 50) "the generated list: $($cat.relations.Count) relations, $($cat.functions.Count) functions, $($cat.ownerFns.Count) owner-argument functions, $($cat.privateRels.Count) private relations"
 
+  if (-not $Red) {
+    $tc = (Psql @"
+SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('public.podcast_episodes') AND attname = 'transcript' AND NOT attisdropped) THEN 'no-column'
+  ELSE (SELECT string_agg(r.rolname || ':' || has_column_privilege(r.rolname, 'public.podcast_episodes', 'transcript', 'SELECT')::text || '/' ||
+                          has_column_privilege(r.rolname, 'public.podcast_episodes', 'transcript', 'UPDATE')::text, ' ' ORDER BY r.rolname)
+          FROM pg_roles r WHERE r.rolname ~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune)$') END;
+"@).Trim()
+    Check ($tc -eq 'no-column' -or ($tc -match 'ob_rest_podcast:true/true' -and ($tc -replace 'ob_rest_podcast:true/true', '') -notmatch 'true')) "[2-least] podcast_episodes.transcript: only ob_rest_podcast reads / updates it ($tc)"
+  }
   # ------------------------------------------------------------ 8. the probe: cases 1, 2, 3, 4, 6
   Write-Host '[8] the probe'
   $expected = [ordered]@{
@@ -303,7 +313,7 @@ SELECT json_build_object(
     ob_rest_viewer = @('wiki_pages')
     ob_rest_entity = @('edges', 'entities', 'entity_extraction_queue', 'source_entities', 'source_extraction_queue', 'sources', 'thought_entities', 'thoughts')
     ob_rest_digest = @('thoughts')
-    ob_rest_podcast = @('podcast_episodes', 'podcast_presenters', 'podcast_render_requests', 'podcast_team_members', 'podcast_teams', 'podcast_voice_links', 'source_tombstones', 'sources', 'thoughts', 'thread_sources')
+    ob_rest_podcast = @('podcast_episodes', 'podcast_presenters', 'podcast_render_requests', 'podcast_team_members', 'podcast_teams', 'podcast_voice_links', 'thoughts')
     ob_rest_gmail_pull = @('thoughts')
     ob_rest_gmail_prune = @('entities', 'thought_entities', 'thoughts')
   }
@@ -315,7 +325,7 @@ SELECT json_build_object(
       owner = 'lab-operator'; other = 'lab-other'; operatorWindow = 48; otherWindow = 6
       entityId = [int64]$seed.entity_id; entity2Id = [int64]$seed.entity2_id; thoughtId = [int64]$seed.thought_id; pruneThoughtId = [int64]$seed.prune_thought_id
       sourceId = $seed.source_id; threadId = $seed.thread_id; teamId = $seed.team_id; renderId = $seed.render_id; wikiSlug = $seed.wiki_slug
-      notifyClass = $seed.notify_class; transcriptType = $seed.transcript_type
+      notifyClass = $seed.notify_class; transcriptType = $seed.transcript_type; episodeId = $seed.episode_id
     }
   }
   [System.IO.File]::WriteAllText((Join-Path $work 'probe.json'), ($cfg | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding $false))

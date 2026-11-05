@@ -164,10 +164,8 @@ async function casePositive() {
     ["episode", "POST", "/podcast_episodes", { owner_sub: S.owner, title: "Lab episode", team_id: S.teamId, audio_format: "mp3", archive_dir: "/lab/ep" }, { prefer: "return=representation" }],
     ["episode read", "GET", `/podcast_episodes?owner_sub=eq.${S.owner}&select=archive_dir&limit=1`],
     ["gmail thoughts", "GET", "/thoughts?metadata->>gmail_id=eq.lab-gmail-1&limit=200"],
-    ["source meta", "GET", `/sources?id=eq.${S.sourceId}&select=metadata`],
-    ["source meta merge", "PATCH", `/sources?id=eq.${S.sourceId}`, { metadata: { lab: "merged" } }, { prefer: "return=minimal" }],
-    ["close loop source", "POST", "/rpc/find_or_create_source", { p_url: `https://lab.invalid/podcast/${Date.now()}`, p_content: "lab transcript", p_title: "Lab transcript", p_content_type: S.transcriptType, p_metadata: {} }],
-    ["close loop link", "POST", "/rpc/link_source_to_thread", { p_thread_id: S.threadId, p_source_id: S.sourceId, p_link_type: "deliberate", p_reason: "lab", p_status: "confirmed" }],
+    // rw-boundary-digest (slot 460): the loop-close stores the transcript on the owner's episode row (setTranscript)
+    ...(cat.hasTranscript ? [["transcript", "PATCH", `/podcast_episodes?id=eq.${S.episodeId}&owner_sub=eq.${S.owner}&select=id`, { transcript: "lab transcript" }, { prefer: "return=representation" }]] : []),
     ...(RED ? [] : [["setting", "POST", "/rpc/rest_setting_get", { p_key: "podcast.team" }]]),
   ]);
   report("2-caller-PODCAST", "openbrain-podcast with its own token: every inventoried request answers 2xx");

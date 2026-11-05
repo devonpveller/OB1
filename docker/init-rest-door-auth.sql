@@ -274,15 +274,13 @@ INSERT INTO _rda_door VALUES
   ('ob_rest_podcast', 'table', 'thoughts',                'SELECT'),
   ('ob_rest_podcast', 'function', 'rest_setting_get', NULL),
   ('ob_rest_podcast', 'setting', 'podcast.', NULL),
-  -- link-enrich's loop-close (closeLoop): the metadata merge, find_or_create_source and link_source_to_thread (both
-  -- SECURITY INVOKER: they find or insert the transcript's source and upsert its thread link as the caller), and the
-  -- sources insert's tombstone gate (trg_sources_tombstone_gate, SECURITY INVOKER) reading the tombstones.
-  -- rw-boundary-digest (slot 460) retires this loop-close: these five lines go with it.
-  ('ob_rest_podcast', 'table', 'sources',           'SELECT, INSERT, UPDATE'),
-  ('ob_rest_podcast', 'table', 'thread_sources',    'SELECT, INSERT, UPDATE'),
-  ('ob_rest_podcast', 'table', 'source_tombstones', 'SELECT'),
-  ('ob_rest_podcast', 'function', 'find_or_create_source', NULL),
-  ('ob_rest_podcast', 'function', 'link_source_to_thread', NULL),
+  -- rw-boundary-digest (slot 460): link-enrich's loop-close stores the transcript on the owner's own episode row
+  -- (PresenterStore.setTranscript: PATCH podcast_episodes?id=eq.&owner_sub=eq.&select=id, {transcript}) instead of a
+  -- shared sources row + thread link - so UPDATE of that one column (the filter and the returned id are read under the
+  -- table SELECT above), and none of the old loop-close grants (sources writes, thread_sources, source_tombstones,
+  -- find_or_create_source, link_source_to_thread). The column exists only once slot 460 ran: the grant is skipped
+  -- (NOTICE) until then, and the chain's slot 990 re-run applies it on a fresh volume.
+  ('ob_rest_podcast', 'column', 'podcast_episodes.transcript', 'UPDATE'),
 
   -- == openbrain-gmail-pull ============================================================================
   -- inserts ops-plane thoughts (return=representation reads the row back)
@@ -298,8 +296,9 @@ INSERT INTO _rda_door VALUES
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM _rda_door WHERE role_name !~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune)$'
-                                       OR kind NOT IN ('table', 'function', 'extension', 'setting')
-                                       OR (kind = 'table') <> (privs IS NOT NULL)) THEN
+                                       OR kind NOT IN ('table', 'column', 'function', 'extension', 'setting')
+                                       OR (kind IN ('table', 'column')) <> (privs IS NOT NULL)
+                                       OR (kind = 'column' AND object !~ '^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$')) THEN
     RAISE EXCEPTION 'rest door: a door map line has an unknown role or kind, or privileges on a non-table' USING ERRCODE = '55000';
   END IF;
 END $$;
@@ -340,6 +339,16 @@ BEGIN
              JOIN pg_depend d ON d.refclassid = 'pg_extension'::regclass AND d.refobjid = e.oid AND d.classid = 'pg_proc'::regclass AND d.deptype = 'e'
              JOIN pg_proc p ON p.oid = d.objid LOOP
     EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', f.sig, f.role_name);
+  END LOOP;
+  -- column grants, each guarded on its column existing (a later slot may add it; see the podcast block)
+  FOR m IN SELECT role_name, split_part(object, '.', 1) AS rel, split_part(object, '.', 2) AS col, privs
+             FROM _rda_door WHERE kind = 'column' LOOP
+    IF EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = to_regclass('public.' || quote_ident(m.rel))
+                AND a.attname = m.col AND a.attnum > 0 AND NOT a.attisdropped) THEN
+      EXECUTE format('GRANT %s (%I) ON public.%I TO %I', m.privs, m.col, m.rel, m.role_name);
+    ELSE
+      RAISE NOTICE 'rest door: column %.% does not exist (yet): % of it NOT granted to %', m.rel, m.col, m.privs, m.role_name;
+    END IF;
   END LOOP;
 END $$;
 

@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS lab.seed (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 
 DO $$
 DECLARE
-  e1 BIGINT; e2 BIGINT; t1 BIGINT; tp BIGINT; s1 UUID; th UUID; rr UUID;
+  e1 BIGINT; e2 BIGINT; t1 BIGINT; tp BIGINT; s1 UUID; th UUID; rr UUID; ep UUID;
 BEGIN
   INSERT INTO public.entities (entity_type, canonical_name, normalized_name) VALUES ('tool', 'Lab Entity', 'lab entity') RETURNING id INTO e1;
   INSERT INTO public.entities (entity_type, canonical_name, normalized_name) VALUES ('tool', 'Lab Entity Two', 'lab entity two') RETURNING id INTO e2;
@@ -29,6 +29,8 @@ BEGIN
   INSERT INTO public.podcast_render_requests (requester_sub, actor_sub, team_id, title, input)
     VALUES ('lab-operator', 'lab-operator', 'lab-team', 'Lab render', '{"lab":true}') RETURNING id INTO rr;
 
+  INSERT INTO public.podcast_episodes (owner_sub, title, team_id, audio_format, archive_dir)
+    VALUES ('lab-operator', 'Lab episode (seed)', 'lab-team', 'mp3', '/lab/seed') RETURNING id INTO ep;
   -- the operator's and the second user's settings; an idea of the operator's
   PERFORM public.user_setting_set('lab-operator', 'digest.window_hours', '48'::jsonb, 'lab-operator', NULL);
   PERFORM public.user_setting_set('lab-other', 'digest.window_hours', '6'::jsonb, 'lab-other', NULL);
@@ -37,6 +39,6 @@ BEGIN
 
   INSERT INTO lab.seed VALUES ('entity_id', e1), ('entity2_id', e2), ('thought_id', t1), ('prune_thought_id', tp),
     ('source_id', s1), ('thread_id', th), ('team_id', 'lab-team'), ('render_id', rr), ('wiki_slug', 'content/tool/lab-wiki-page'),
-    ('notify_class', 'informational'), ('transcript_type', 'podcast_transcript')
+    ('notify_class', 'informational'), ('transcript_type', 'podcast_transcript'), ('episode_id', ep)
   ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v;
 END $$;
