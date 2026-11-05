@@ -298,15 +298,21 @@ def main():
 
     # ---- T7: concurrent users never get each other's answers ---------------------------------------------------------------
     if sel("T7"):
+        tok = {w: user_token(w) for w in ("a", "b")}
+
         def one(i):
             who = "a" if i % 2 == 0 else "b"
-            st, t = mcp(MCP, {"x-brain-key": K["owui"], "authorization": f"Bearer {user_token(who)}"}, "search_thoughts",
-                        {"query": "lab marker", "limit": 50, "threshold": 0.0}, rid=i)
+            try:
+                st, t = mcp(MCP, {"x-brain-key": K["owui"], "authorization": f"Bearer {tok[who]}"}, "search_thoughts",
+                            {"query": "lab marker", "limit": 50, "threshold": 0.0}, rid=i)
+            except Exception as e:  # a hung or dropped answer is a wrong answer (the base's shared server can lose one)
+                st, t = 0, type(e).__name__
             return who, st, t
         with ThreadPoolExecutor(16) as ex:
             out = list(ex.map(one, range(48)))
         bad = [i for i, (who, st, t) in enumerate(out) if st != 200 or (who == "b" and found(t, ALL_A)) or (who == "a" and not found(t, ["a_thought"]))]
-        check("T7 48 interleaved A/B calls", not bad, f"each answer is its own caller's ({len(bad)} wrong)")
+        lost = sum(1 for (_, st, _) in out if st == 0)
+        check("T7 48 interleaved A/B calls", not bad, f"each answer is its own caller's ({len(bad)} wrong, of them {lost} lost or timed out)")
 
     reds = [r for r in results if r[3]]
     if MODE == "red":
