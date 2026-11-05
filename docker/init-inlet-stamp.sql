@@ -22,9 +22,7 @@
 --      * sources: a shared source may never be personal - an email body (url mail.google.com), a podcast transcript, or a
 --        row carrying a Gmail id / thread / labels (440's predicate; they belong in 440's owner-private stores).
 --      * owner columns: podcast_episodes.owner_sub, research_handbacks.owner_sub and 440's private stores' owner columns
---        must be a subject's shape and no service principal (inlet_owner_column_ok; CHECK, added NOT VALID then
---        validated). The literal 'operator' is refused by the inlet writers and on thoughts / the record, not here (the
---        workbench's single-user labs name their user 'operator').
+--        must pass inlet_subject_ok (CHECK, added NOT VALID then validated) - the literal 'operator' included.
 --      Triggers, not CHECKs, on thoughts and sources: the rule reads the connection record (another table), exempts one
 --      shaped writer, and treats INSERT and UPDATE differently; a CHECK on thoughts would also fire on every UPDATE of a
 --      legacy row (the entity worker, intake) and break writers instead of refusing new unowned rows. The triggers run
@@ -335,19 +333,8 @@ CREATE OR REPLACE TRIGGER trg_inlet_stamp_sources
     FOR EACH ROW EXECUTE FUNCTION public.inlet_stamp_sources_guard();
 ALTER TABLE public.sources ENABLE ALWAYS TRIGGER trg_inlet_stamp_sources;
 
--- the owner columns. Their rule is the subject SHAPE and no service principal (inlet_owner_column_ok): the literal
--- 'operator' is refused at the inlet writers (their code, thoughts.user_id, the record), but these columns are also
--- written by the workbench for its signed-in user, and its single-user labs and fixtures name that user 'operator'.
-CREATE OR REPLACE FUNCTION public.inlet_owner_column_ok(p_subject TEXT) RETURNS BOOLEAN
-LANGUAGE sql IMMUTABLE PARALLEL SAFE
-SET search_path = pg_catalog
-AS $$
-    SELECT p_subject IS NOT NULL
-       AND p_subject ~ '^[A-Za-z0-9][A-Za-z0-9._@|+=:/-]{0,254}$'
-       AND p_subject !~* '^(service|system|anonymous):'
-$$;
-REVOKE ALL ON FUNCTION public.inlet_owner_column_ok(TEXT) FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION public.inlet_owner_column_ok(TEXT) TO service_role;
+-- the owner columns: the same rule as every owner (inlet_subject_ok) - never blank, never a service principal, never
+-- the literal 'operator' (coordinator 2026-11-05: not even for a lab convenience; the labs use a real-shaped subject)
 DO $$
 DECLARE c TEXT[];
 BEGIN
@@ -358,7 +345,7 @@ BEGIN
         ARRAY['inlet_private_jobs', 'owner_sub'], ARRAY['inlet_private_job_events', 'owner_sub']] LOOP
         IF to_regclass('public.' || c[1]) IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = ('public.' || c[1])::regclass AND conname = c[1] || '_inlet_stamp_owner_ok') THEN
-            EXECUTE format('ALTER TABLE public.%I ADD CONSTRAINT %I CHECK (public.inlet_owner_column_ok(%I)) NOT VALID', c[1], c[1] || '_inlet_stamp_owner_ok', c[2]);
+            EXECUTE format('ALTER TABLE public.%I ADD CONSTRAINT %I CHECK (public.inlet_subject_ok(%I)) NOT VALID', c[1], c[1] || '_inlet_stamp_owner_ok', c[2]);
             EXECUTE format('ALTER TABLE public.%I VALIDATE CONSTRAINT %I', c[1], c[1] || '_inlet_stamp_owner_ok');
         END IF;
     END LOOP;

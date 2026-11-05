@@ -347,15 +347,15 @@ try {
     $refusedCases = @('pull shape, no owner', 'pull shape, owner but no connection', "pull shape, A's row naming B's connection", 'pull shape, unknown connection',
       'pull shape, the literal operator', 'pull shape, a service principal', 'pull shape, blank owner', 'import shape, no owner', 'note shape, no owner',
       'note shape, B on the vault', 'dossier look-alike, unowned', 'source, an email body', 'source, a podcast transcript', 'source, a Gmail id',
-      'episode, a service principal', "import token for A, a row with B's user_id", "import token for A, a row naming B's connection")
+      'episode, the literal operator', 'episode, a service principal', "import token for A, a row with B's user_id", "import token for A, a row naming B's connection")
     $okCases = @('pull shape, owned right (control)', 'import shape, owned (control)', 'note shape, the vault''s owner (control)', 'dossier, unowned (control)',
-      'source, a public article (control)', 'episode, A (control)', 'episode, the literal operator (allowed on the column: the workbench labs'' user)', "import token for A, A's own row (control)")
+      'source, a public article (control)', 'episode, A (control)', "import token for A, A's own row (control)")
     $refusedOk = @($refusedCases | Where-Object { $wr.$_.status -ge 400 -and $wr.$_.refused }).Count
     $acceptedBad = @($refusedCases | Where-Object { $wr.$_.status -lt 300 }).Count
     $controlsOk = @($okCases | Where-Object { $wr.$_.status -ge 200 -and $wr.$_.status -lt 300 }).Count
     if ($Red) {
-      $redUnowned = @('pull shape, no owner', 'import shape, no owner', 'note shape, no owner', 'dossier look-alike, unowned', 'source, an email body', 'source, a podcast transcript', 'source, a Gmail id', 'episode, a service principal') | Where-Object { $wr.$_.status -lt 300 }
-      Check (@($redUnowned).Count -eq 8) "RED: through PostgREST the base accepts every unowned or personal shape - the pull's, the imports', the note's, a dossier look-alike, an email-body / transcript / Gmail-id source, an episode owned by a service principal ($(@($redUnowned).Count) of 8)"
+      $redUnowned = @('pull shape, no owner', 'import shape, no owner', 'note shape, no owner', 'dossier look-alike, unowned', 'source, an email body', 'source, a podcast transcript', 'source, a Gmail id', 'episode, the literal operator') | Where-Object { $wr.$_.status -lt 300 }
+      Check (@($redUnowned).Count -eq 8) "RED: through PostgREST the base accepts every unowned or personal shape - the pull's, the imports', the note's, a dossier look-alike, an email-body / transcript / Gmail-id source, an episode owned by the literal operator ($(@($redUnowned).Count) of 8)"
       Check (-not $m1.refused -and $m1.rc -eq 0 -and -not $m2.refused -and $m2.rc -eq 0) 'RED: direct PG as ob_app_memory, the MCP lanes'' unstamped capture_thought and agent-memory inserts are accepted'
       Check (-not $clrRefused) 'RED: an owner can be cleared again by an app role'
       Check ($wr."import token for A, a row with B's user_id".status -lt 300) "RED: a door caller (the import role, verified subject A) writes a row owned by B ($($wr."import token for A, a row with B's user_id".status))"

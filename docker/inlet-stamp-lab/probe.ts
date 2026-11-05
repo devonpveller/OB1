@@ -69,7 +69,7 @@ await w("source, a Gmail id", "sources", src({ url: `https://example.org/${TAG}/
 await w("source, a public article (control)", "sources", src({ url: `https://example.org/${TAG}/article` }));
 // the podcast episode's owner
 const ep = (owner: string, n: string) => ({ owner_sub: owner, shared: false, origin: "render", title: `probe ${TAG} ${n}`, team_id: null, audio_format: "mp3", seconds: 1, archive_dir: `/tmp/${TAG}-${n}` });
-await w("episode, the literal operator (allowed on the column: the workbench labs' user)", "podcast_episodes", ep("operator", "op"));
+await w("episode, the literal operator", "podcast_episodes", ep("operator", "op"));
 await w("episode, a service principal", "podcast_episodes", ep("service:podcast", "svc"));
 await w("episode, A (control)", "podcast_episodes", ep(A, "a"));
 

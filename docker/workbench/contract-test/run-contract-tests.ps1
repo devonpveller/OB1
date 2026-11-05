@@ -326,7 +326,7 @@ try {
   $o = Dk run -d --name $wbName --label $label --network $net -e PORT=8000 -e "WORKBENCH_KEY=$key" `
     -e "DB_HOST=$dbB" -e DB_USER=ob_app_memory -e "DB_PASSWORD=$appPw" -e OPEN_BRAIN_URL=http://unreachable.invalid `
     -e "EMBEDDING_API_BASE=http://${embName}:8080/v1" -e WIKI_GIT_DIR=/tmp/wiki -e WIKI_ASSETS_DIR=/tmp/wiki/assets `
-    -e CONTRACT_MOUNTS_ROOT=/mounts -v "$(Join-Path $ob1 'recipes'):/recipes:ro" $tag
+    -e CONTRACT_MOUNTS_ROOT=/mounts -e WORKSPACE_IDENTITY_HEADER=X-Test-Sub -v "$(Join-Path $ob1 'recipes'):/recipes:ro" $tag
   Check ($script:rc -eq 0) "workbench $wbName started"
   if ($script:rc -eq 0) { $made.containers += $wbName }
   $up = $false
@@ -400,6 +400,8 @@ try {
   $o = Dk run --rm --label $label --network $net -v "${gen}:/spec:ro" -v "${ct}:/ct:ro" $dreddTag `
     /spec/openapi.json "http://${wbName}:8000" --header "X-Brain-Key: $key" --hookfiles=/ct/dredd-hooks.js
   Save 'dredd.log' ($o -replace $key, '***')
+  # the failing transactions alone (dredd.log can exceed the capture cap)
+  Save 'dredd-failures.log' ((((($o -replace $key, '***') -replace '\x1b\[[0-9;]*m', '') -split "`n") | Where-Object { $_ -match '^(fail|error):|statusCode|expected|real' } | Select-Object -First 60) -join "`n")
   $clean = $o -replace '\x1b\[[0-9;]*m', ''
   $dm = ([regex]'complete: (\d+) passing, (\d+) failing, (\d+) errors, (\d+) skipped, (\d+) total').Match($clean)
   # Every operation's success (or typed 501) example must pass; the documented error shapes are
