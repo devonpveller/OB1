@@ -111,7 +111,12 @@ BEGIN
                        anchor = CASE WHEN a.row_data ? 'anchor' THEN a.row_data ->> 'anchor' ELSE j.anchor END,
                        topic_estimate = CASE WHEN a.row_data ? 'topic_estimate' THEN a.row_data ->> 'topic_estimate' ELSE j.topic_estimate END,
                        tree_report = CASE WHEN NOT (a.row_data ? 'tree_report') THEN j.tree_report
-                                          WHEN jsonb_typeof(a.row_data -> 'tree_report') = 'null' THEN NULL ELSE a.row_data -> 'tree_report' END
+                                          WHEN jsonb_typeof(a.row_data -> 'tree_report') = 'null' THEN NULL ELSE a.row_data -> 'tree_report' END,
+                       -- round 3: the seeded trees' progress, error and gap reference
+                       progress = CASE WHEN NOT (a.row_data ? 'progress') THEN j.progress
+                                       WHEN jsonb_typeof(a.row_data -> 'progress') = 'null' THEN NULL ELSE a.row_data -> 'progress' END,
+                       error = CASE WHEN a.row_data ? 'error' THEN a.row_data ->> 'error' ELSE j.error END,
+                       gap_ref = CASE WHEN a.row_data ? 'gap_ref' THEN a.row_data ->> 'gap_ref' ELSE j.gap_ref END
                   FROM public.inlet_owner_archive a
                  WHERE a.batch = v_batch AND a.action = 'j' AND (a.row_data ->> 'id')::uuid = j.id;
                 GET DIAGNOSTICS v_n = ROW_COUNT;
@@ -158,6 +163,10 @@ BEGIN
             DELETE FROM public.inlet_owner_withheld_pages p USING public.inlet_owner_archive a WHERE a.batch = v_batch AND a.action = 'w' AND p.page_ref = a.id;
         END IF;
         DELETE FROM public.inlet_private_claim_links WHERE batch = v_batch;
+        IF to_regclass('public.inlet_private_jobs') IS NOT NULL THEN
+            DELETE FROM public.inlet_private_jobs WHERE batch = v_batch;
+            DELETE FROM public.inlet_private_job_events WHERE batch = v_batch;
+        END IF;
         DELETE FROM public.inlet_private_source_chunks WHERE inlet_batch = v_batch;
         DELETE FROM public.inlet_private_claims WHERE inlet_batch = v_batch;
         DELETE FROM public.inlet_private_sources WHERE inlet_batch = v_batch;
@@ -178,6 +187,7 @@ DROP FUNCTION IF EXISTS public.inlet_owner_text_withheld(TEXT);
 DROP FUNCTION IF EXISTS public.inlet_owner_linked_source_ids(TEXT, TEXT, TEXT, JSONB);
 DROP FUNCTION IF EXISTS public.inlet_owner_norm(TEXT);
 DROP FUNCTION IF EXISTS public.inlet_private_source(UUID, TEXT);
+DROP FUNCTION IF EXISTS public.inlet_private_job(UUID, TEXT);
 DROP FUNCTION IF EXISTS public.inlet_owner_default();
 -- the prune's view and its role (the gmail prune then deletes nothing until 440 runs again)
 DROP VIEW IF EXISTS public.inlet_owner_mail;

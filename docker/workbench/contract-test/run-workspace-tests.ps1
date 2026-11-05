@@ -92,7 +92,9 @@ param(
   # rw-inlet-owner [5r]: the base whose prune-short-term.ts is the prune's RED (the development pin before slot 410)
   [string]$InletBaseSha = '8241755',
   # rw-inlet-owner round 2: round 1's migration and recipes (the RED of the round-2 cases)
-  [string]$InletPrevSha = '2e0768e'
+  [string]$InletPrevSha = '2e0768e',
+  # rw-inlet-owner round 3: round 2's migration (the RED of the seed-body case)
+  [string]$InletPrev2Sha = '6d79704'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -974,6 +976,22 @@ try {
       $pvRevRc = & $inPsql $pvR "round 1 revert ($InletPrevSha)" @()
       $s = & $inPhase 'reverted' 'inlet-after-round1-revert.log'
       Check ($pvRevRc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] round 1's revert brings the planted state back byte-identical ($($s.Value))"
+      # round 3: RED with round 2's migration ($InletPrev2Sha): the seed-body case fails on it (the derived text of a tree
+      # seeded with an email body or a podcast transcript survives in the shared rows), the round-2 cases pass; its revert
+      # brings the planted state back byte-identical
+      $p2I = Join-Path $env:TEMP "$P-440-prev2-init.sql"; $p2R = Join-Path $env:TEMP "$P-440-prev2-revert.sql"
+      $script:made.dirs += @($p2I, $p2R)
+      [System.IO.File]::WriteAllText($p2I, ((& git -C $ob1 show "${InletPrev2Sha}:docker/init-inlet-owner.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+      [System.IO.File]::WriteAllText($p2R, ((& git -C $ob1 show "${InletPrev2Sha}:docker/revert-inlet-owner.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+      $p2Rc = & $inPsql $p2I "round 2 init ($InletPrev2Sha)" @('-v', "owner_sub=$inA")
+      $null = & $inOut
+      $s = & $inPhase 'migrated' 'inlet-red-round2.log'
+      $redR2 = [string]$script:lastInlet
+      Check ($p2Rc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'FAILED' -and $redR2 -match 'round 3 \(tester attempt 2, P1b\)[^\n]*\.\.\. FAILED' -and $redR2 -match 'round 2 \(tester 2, 5\)[^\n]*\.\.\. ok' -and $redR2 -match 'round 2 \(tester 4, 6\)[^\n]*\.\.\. ok' -and $redR2 -match "B's reads with a personal marker: [1-9][^\n]*body-seeded") "[5r] RED: round 2's migration ($InletPrev2Sha) - the derived text of a tree seeded with an email body or a podcast transcript survives where B reads it (the seed-body case fails; the round-2 cases pass) ($($s.Value))"
+      $null = & $inBack
+      $p2RevRc = & $inPsql $p2R "round 2 revert ($InletPrev2Sha)" @()
+      $s = & $inPhase 'reverted' 'inlet-after-round2-revert.log'
+      Check ($p2RevRc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] round 2's revert brings the planted state back byte-identical ($($s.Value))"
       $rcs = @((& $inPsql $inInit 'init' @('-v', "owner_sub=$inA")), (& $inPsql $inInit 'init again' @()))
       Check (@($rcs | Where-Object { $_ -ne 0 }).Count -eq 0 -and $script:p410['init'] -match 'thought\(s\) now the owner' -and $script:p410['init again'] -match 'nothing to do') '[5r] init-inlet-owner.sql makes the personal data private; a second run (the recorded owner) has nothing to do'
       $orc = & $inPsql $inInit 'init naming another owner' @('-v', "owner_sub=$inB")
@@ -983,7 +1001,7 @@ try {
       Write-Host "    [reconcile --repair, files present] exit $($script:rc)"
       $moved = & $inOut
       $s = & $inPhase 'migrated' 'inlet-migrated.log'
-      Check ($moved -ge 4 -and $s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 8 -and [int]$s.Groups[3].Value -eq 0) "[5r] after 440 (+ the reconcile repair, + the deploy step): B reads nothing personal anywhere (the service-owned job included), the mixed claim keeps only its shared source, A reads as before, the guard holds (every link form, the text come back, the marker, the note), no function answers the anon role, the manifest counts shared links only, the stores are closed ($($s.Value))"
+      Check ($moved -ge 4 -and $s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 9 -and [int]$s.Groups[3].Value -eq 0) "[5r] after 440 (+ the reconcile repair, + the deploy step): B reads nothing personal anywhere (the service-owned job included), the mixed claim keeps only its shared source, A reads as before, the guard holds (every link form, the text come back, the marker, the note), no function answers the anon role, the manifest counts shared links only, the stores are closed ($($s.Value))"
       # the REAL entity-wiki compile over the two withheld entity pages: the one with shared evidence (the article) is
       # rebuilt from shared material only, through the gateway alias (a stand-in that keeps every prompt); the private-only
       # one (round 2, tester 3: its only material left is a TYPED EDGE) gets no model call and no page. RED: round 1's

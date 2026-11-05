@@ -53,6 +53,7 @@ if (idea && priv) {
 // 2. every slot-440 function through PostgREST, no credentials
 const calls = {
   inlet_private_source: { p_id: src || "00000000-0000-4000-8000-000000000000", p_sub: "anyone" },
+  inlet_private_job: { p_job: "00000000-0000-4000-8000-000000000000", p_sub: "anyone" },
   inlet_owner_page_private: { p_slug: "x", p_title: "x", p_body: "x", p_links: [] },
   inlet_owner_page_links_private: { p_slug: "x", p_title: "x", p_body: "x", p_links: [] },
   inlet_owner_text_withheld: { p_body: "x" },
@@ -70,7 +71,7 @@ for (const [door, base] of [["postgrest", PGRST], ["rest", `${OB}/rest/v1`]]) {
     out.rpc[`${door}:${fn}`] = r.status;
   }
   // the private tables and the owner record, read directly
-  for (const tb of ["inlet_owner", "inlet_private_sources", "inlet_owner_archive", "inlet_owner_withheld_chunks"]) {
+  for (const tb of ["inlet_owner", "inlet_private_sources", "inlet_owner_archive", "inlet_owner_withheld_chunks", "inlet_private_jobs", "inlet_private_job_events"]) {
     const r = await fetch(`${base}/${tb}?select=*&limit=1`, { headers: { apikey: "local-trust" } });
     const t = await r.text();
     out.rpc[`${door}:table:${tb}`] = r.status === 200 ? (t.trim() === "[]" ? 200 : 299) : r.status;   // 299 = rows returned

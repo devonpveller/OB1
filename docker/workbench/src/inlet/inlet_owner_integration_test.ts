@@ -136,6 +136,15 @@ async function secondUserReads(p: Record<string, any>): Promise<string[]> {
     ["contract report credibility (service-owned)", `${W}/reports/${j.svc}/credibility`],
     ["contract jobs (every kind)", `${W}/jobs?kinds=research,import`],
     ["contract timeline (service-owned)", `${W}/timeline?session_id=${j.svc}`],
+    // round 3 (tester attempt 2, P1b): the marker only in the seed BODY and in the text derived from it
+    ["contract session (body-seeded digest job)", `${W}/sessions/${j.body}`],
+    ["contract session flow (body-seeded)", `${W}/sessions/${j.body}/flow`],
+    ["contract session coverage (body-seeded)", `${W}/sessions/${j.body}/coverage`],
+    ["contract session (its branch)", `${W}/sessions/${j.bodybranch}`],
+    ["contract session flow (its branch)", `${W}/sessions/${j.bodybranch}/flow`],
+    ["contract report credibility (body-seeded)", `${W}/reports/${j.body}/credibility`],
+    ["contract session (transcript-seeded)", `${W}/sessions/${j.pod}`],
+    ["contract session flow (transcript-seeded)", `${W}/sessions/${j.pod}/flow`],
     ["sources search", `/workbench/sources?q=${m}`],
     ["source read (email body)", `/workbench/sources/${s.mail}`],
     ["source read (podcast)", `/workbench/sources/${s.pod}`],
@@ -382,6 +391,40 @@ t("migrated", "round 2 (tester 3): the wiki-service manifest and the compile cou
   }
   const edges = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.edges WHERE from_entity_id = $1`, [p.entities.priv]))[0].n;
   assertEquals(edges, 1, "the entity keeps its typed edge (the runner's compile step proves no page is built from it)");
+});
+
+t("migrated", "round 3 (tester attempt 2, P1b): a tree seeded with an email body or a podcast transcript - the marker only in the seed body and the text derived from it - carries no personal text in ANY shared row any reader reads (jobs, branches, events, prompts: what the workbench and the research service read); its owner reads the original through the session read", async () => {
+  const p = await plant();
+  const m = p.mark as string;
+  const ids = [p.jobs.body, p.jobs.bodybranch, p.jobs.pod];
+  // every column of the shared rows (the research service's /research/jobs/{id}, /tree, /events and the workbench read these)
+  const rows = await sql<{ t: string }>(
+    `SELECT to_jsonb(j)::text AS t FROM public.research_jobs j WHERE j.id = ANY($1::uuid[])
+     UNION ALL SELECT to_jsonb(e)::text FROM public.research_job_events e WHERE e.job_id = ANY($1::uuid[]) OR e.root_job_id = ANY($1::uuid[])
+     UNION ALL SELECT to_jsonb(r)::text FROM public.research_prompts r WHERE r.job_id = ANY($1::uuid[])`, [ids]);
+  const hit = rows.filter((r) => leaks(r.t, m)).length;
+  console.log(`inlet privacy: seeded-tree shared rows carrying the seed body's text: ${hit} of ${rows.length}`);
+  assertEquals(hit, 0);
+  assert(rows.length >= 6, "the planted jobs, branch, events and prompts are all there");
+  // B reads the neutral text; A, the owner, reads the original through the session read
+  const b = await get(BASE, `/workbench/contract/sessions/${p.jobs.body}`, B);
+  const a = await get(BASE, `/workbench/contract/sessions/${p.jobs.body}`, A);
+  assertEquals([b.status, a.status], [200, 200]);
+  assert(!leaks(b.text, m), "B's session read carries no seed-body text");
+  assert(a.text.includes(`${m}b`), "A (the owner) reads the job's own text as before");
+  // the owner-only store: the originals, readable by no app role directly
+  const kept = (await sql<{ n: number }>(`SELECT count(DISTINCT job_id)::int AS n FROM public.inlet_private_jobs WHERE job_id = ANY($1::uuid[])`, [ids]))[0].n;
+  assertEquals(kept, 3, "the three jobs' own text is kept for their owner");
+  for (const tb of ["inlet_private_jobs", "inlet_private_job_events"]) {
+    assertEquals(await errCode(() => asApp(`SELECT count(*) FROM public.${tb}`)), "42501", `${tb} is refused to the app role`);
+  }
+  // the owner read: EXECUTE for ob_app_memory only (never PostgREST's anon role), and no row for another subject
+  const g = await sql<{ r: string }>(
+    `SELECT r FROM unnest(ARRAY['service_role','anon','authenticated','public','ob_app_memory']) r
+      WHERE (r = 'public' OR EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r)) AND has_function_privilege(r, 'public.inlet_private_job(uuid,text)', 'EXECUTE')`);
+  assertEquals(g.map((x) => x.r), ["ob_app_memory"]);
+  const other = await asApp(`SELECT count(*)::int AS n FROM public.inlet_private_job($1::uuid, $2)`, [p.jobs.body, B]);
+  assertEquals((other[0] as { n: number }).n, 0, "the owner read answers no row for another subject");
 });
 
 t("rerun", "a second run stamps and isolates exactly the rows that arrived unowned since the first", async () => {

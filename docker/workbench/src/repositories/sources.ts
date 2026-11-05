@@ -19,7 +19,7 @@ export async function getSource(id: string): Promise<Source | null> {
   return rows[0] ?? null;
 }
 
-// rw-inlet-owner (slot 410): an email-body or podcast-transcript source moved out of the shared sources into its
+// rw-inlet-owner (slot 440): an email-body or podcast-transcript source moved out of the shared sources into its
 // owner's private store. Only its owner reads it (the database function answers no row for anyone else, or when
 // slot 410 is not applied); a service subject is never an owner. Never listed or searched: a read by id only.
 export async function getPrivateSource(id: string, sub: string): Promise<(Partial<Source> & { private: true }) | null> {
@@ -31,8 +31,10 @@ export async function getPrivateSource(id: string, sub: string): Promise<(Partia
     );
     return rows[0] ? { ...rows[0], private: true } : null;
   } catch (e) {
-    // 42883: slot 410 is not applied (the function does not exist) - nothing is private yet
-    if ((e as { fields?: { code?: string } }).fields?.code === "42883") return null;
+    // 42883: slot 440 is not applied (the function does not exist); 42501: this role may not read the owner-only store -
+    // either way the source reads as absent: fail closed
+    const code = (e as { fields?: { code?: string } }).fields?.code;
+    if (code === "42883" || code === "42501") return null;
     throw e;
   }
 }

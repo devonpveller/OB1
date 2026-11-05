@@ -25,7 +25,7 @@ DECLARE
     s_mail UUID; s_pod UUID; s_art UUID; s_art2 UUID; s_late UUID;
     c_priv UUID; c_mixed UUID; c_chain UUID; c_shared UUID;
     e_priv BIGINT; e_mixed BIGINT; e_clean BIGINT;
-    j_seed UUID; j_ctl UUID; th UUID; j_svc UUID; j_svcb UUID;
+    j_seed UUID; j_ctl UUID; th UUID; j_svc UUID; j_svcb UUID; j_body UUID; j_bodyb UUID; j_pod UUID;
     mail_url TEXT;
 BEGIN
     v  := '[' || array_to_string(array_fill('0.02'::text, ARRAY[greatest(dim, 1)]), ',') || ']';
@@ -153,6 +153,38 @@ BEGIN
          jsonb_build_object('sources', jsonb_build_array(jsonb_build_object('url', mail_url, 'title', 'Subject ' || m)), 'count', 1)),
       (j_svc, j_svc, NULL, 'topic', 'due_process', NULL, jsonb_build_object('topic', 'Subject ' || m, 'anchor', 'Subject ' || m)),
       (j_svcb, j_svc, NULL, 'topic', 'due_process', NULL, jsonb_build_object('topic', 'the topic of Subject ' || m));
+    -- round 3 (tester attempt 2, P1b): the marker ONLY in the seed BODY and in the text a model derived from it - the
+    -- question, the subject, the url and every id are clean (the url is a Gmail url WITHOUT the marker). A daily-digest job
+    -- (service-owned), its branch, and a podcast-transcript-seeded job (the moved transcript as its seed)
+    INSERT INTO public.research_jobs (status, origin, query, options, result, progress, error)
+    VALUES ('done', 'manual', 'Daily digest: a newsletter',
+            jsonb_build_object('seed_sources', jsonb_build_array(jsonb_build_object(
+                'url', 'https://mail.google.com/mail/u/0/#inbox/' || left(md5(m || 'body'), 12), 'title', 'A newsletter',
+                'content', 'the newsletter body says ' || m || 'b about the merger and the new office'))),
+            jsonb_build_object('outcome', 'ok', 'report_type', 'digest', 'synthesis', 'The merger ' || m || 'b was announced this week.',
+                'claims', jsonb_build_array(), 'cited_sources', jsonb_build_array(),
+                'gaps', jsonb_build_array(jsonb_build_object('query', 'what about ' || m || 'b', 'score', 0.4))),
+            jsonb_build_object('phase', 'done', 'message', 'read the newsletter about ' || m || 'b'),
+            'stopped after reading ' || m || 'b')
+    RETURNING id INTO j_body;
+    INSERT INTO public.research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES (j_body, 'service:daily-digest', 'service:daily-digest', 'Daily digest: a newsletter');
+    INSERT INTO public.research_jobs (status, origin, query, anchor, root_job_id, parent_job_id, rooted_step_id, branch_kind, tree_report, progress)
+    VALUES ('done', 'manual', 'Daily digest: a newsletter', 'Daily digest: a newsletter', j_body, j_body, 's1', 'gap',
+            jsonb_build_object('summary', 'a summary of ' || m || 'b and its people', 'branches', 1),
+            jsonb_build_object('phase', 'done', 'message', 'the branch read ' || m || 'b'))
+    RETURNING id INTO j_bodyb;
+    INSERT INTO public.research_job_events (job_id, root_job_id, step_id, type, kind, trail, payload) VALUES
+      (j_body, j_body, 's1', 'stage', 'due_process', NULL, jsonb_build_object('stage', 'synth', 'note', 'the body mentions ' || m || 'b')),
+      (j_bodyb, j_body, 's2', 'stage', 'due_process', NULL, jsonb_build_object('stage', 'synth', 'note', 'the branch quotes ' || m || 'b'));
+    INSERT INTO public.research_jobs (status, origin, query, options, result, progress)
+    VALUES ('done', 'manual', 'Podcast: the daily episode',
+            jsonb_build_object('seed_sources', jsonb_build_array(jsonb_build_object(
+                'url', 'https://podcast.example/episode/p' || m, 'title', 'The daily episode', 'content', 'the transcript says ' || m || 'q twice'))),
+            jsonb_build_object('outcome', 'ok', 'synthesis', 'The episode discussed ' || m || 'q at length.', 'cited_sources', jsonb_build_array()),
+            jsonb_build_object('phase', 'done', 'message', 'listened to ' || m || 'q'))
+    RETURNING id INTO j_pod;
+    INSERT INTO public.research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES (j_pod, 'service:podcast', 'service:podcast', 'Podcast: the daily episode');
+
     -- round 2 (tester 3): a typed edge from the private-only entity (the entity worker writes them from the mail it read)
     INSERT INTO public.edges (from_entity_id, to_entity_id, relation, support_count, confidence, metadata)
     VALUES (e_priv, e_clean, 'works_with', 1, 0.8, jsonb_build_object('thought_id', t_gmail));
@@ -172,7 +204,7 @@ BEGIN
         'sources', jsonb_build_object('mail', s_mail, 'pod', s_pod, 'art', s_art, 'art2', s_art2),
         'claims', jsonb_build_object('priv', c_priv, 'mixed', c_mixed, 'chain', c_chain, 'shared', c_shared),
         'entities', jsonb_build_object('priv', e_priv, 'mixed', e_mixed, 'clean', e_clean),
-        'jobs', jsonb_build_object('seed', j_seed, 'ctl', j_ctl, 'svc', j_svc, 'svcbranch', j_svcb), 'thread', th,
+        'jobs', jsonb_build_object('seed', j_seed, 'ctl', j_ctl, 'svc', j_svc, 'svcbranch', j_svcb, 'body', j_body, 'bodybranch', j_bodyb, 'pod', j_pod), 'thread', th,
         'pages', jsonb_build_object('leaf', 'content/thought/' || t_gmail, 'linking', 'content/topic/priv-' || left(md5(m || 'p'), 10),
                                     'srcleaf', 'content/source/' || s_mail, 'evidence', 'content/topic/mixed-' || left(md5(m || 'x'), 10),
                                     'note', 'notes/note-' || left(md5(m || 'n'), 10), 'clean', 'content/topic/clean-' || left(md5(m || 'c'), 10))))

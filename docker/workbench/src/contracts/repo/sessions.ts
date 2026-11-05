@@ -98,7 +98,31 @@ export async function session(db: Db, id: string, who: Viewer) {
       WHERE j.id = $1`,
     [id, who.sub, who.key, (who as Who).actor ?? who.sub],
   );
-  return rows[0] ? shapeSession(rows[0]) : null;
+  const row = rows[0];
+  if (!row) return null;
+  return shapeSession(await withOwnText(db, row, who.sub));
+}
+
+// rw-inlet-owner (slot 440, round 3): a research tree seeded with private mail or a podcast transcript carries neutral
+// text in its shared rows; its own text (the synthesis, progress messages, the error) is its owner's, kept in an
+// owner-only store. The owner reads it here as before; the database answers no row for anyone else (or when slot 440 is
+// not applied, or the subject is a service). The QUESTION stays the neutral one even for the owner: a job's question is
+// read through the one rule (OWN_QUERY) only, and the owner-only store keeps the original.
+async function withOwnText(db: Db, row: JobRow, sub: string): Promise<JobRow> {
+  if (!sub || sub.startsWith("service:")) return row;
+  try {
+    const own = await db.query<{ result: Record<string, unknown> | null; progress: Record<string, unknown> | null; error: string | null }>(
+      `SELECT result, progress, error FROM public.inlet_private_job($1::uuid, $2)`, [row.id, sub]);
+    const o = own[0];
+    if (!o) return row;
+    return { ...row, result: o.result ?? row.result, progress: o.progress ?? row.progress, error: o.error ?? row.error };
+  } catch (e) {
+    // 42883: slot 440 is not applied (no such function); 42501: this role may not read the owner-only store - either way
+    // the shared (neutral) text is what is shown: fail closed
+    const code = (e as { fields?: { code?: string } }).fields?.code;
+    if (code === "42883" || code === "42501") return row;
+    throw e;
+  }
 }
 
 // The kinds a caller gets when it names none (the two queues P0 shipped). The kinds P2b registered
