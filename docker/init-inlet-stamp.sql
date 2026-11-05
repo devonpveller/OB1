@@ -41,9 +41,8 @@
 -- Refused (nothing changed) unless 440 is applied AND 440's own predicate finds nothing left to make private: run 440
 -- first. From then on these triggers keep that at 0, so a 440 re-run has nothing to do. Re-runnable (nothing to do the
 -- second time). Revert: revert-inlet-stamp.sql, BEFORE 440's (revert order 470, 460, 450, 440, 430, 390, 380).
--- Slot 450 (rw-rest-door-auth): when its door roles exist, the ones that read an owner (gmail_pull, digest, podcast,
--- wiki, import) get EXECUTE on inlet_connection_owner and gmail_prune the view; 450's door map lists the same lines,
--- so a 450 re-run keeps them.
+-- Slot 450 (rw-rest-door-auth): this slot grants nothing to its door roles; the lines they need are in 450's door map
+-- (inlet_connection_owner for the stamping writers, the view for the prune, the import role).
 -- ============================================================
 \if :{?owner_sub}
 \else
@@ -63,14 +62,14 @@ END $$;
 LOCK TABLE public.thoughts, public.sources IN SHARE ROW EXCLUSIVE MODE;
 
 -- ── 2. what an owner may be ───────────────────────────────────────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION public.inlet_subject_ok(p_sub TEXT) RETURNS BOOLEAN
+CREATE OR REPLACE FUNCTION public.inlet_subject_ok(p_subject TEXT) RETURNS BOOLEAN
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
 SET search_path = pg_catalog
 AS $$
-    SELECT p_sub IS NOT NULL
-       AND p_sub ~ '^[A-Za-z0-9][A-Za-z0-9._@|+=:/-]{0,254}$'
-       AND p_sub !~* '^(service|system|anonymous):'
-       AND lower(p_sub) <> 'operator'
+    SELECT p_subject IS NOT NULL
+       AND p_subject ~ '^[A-Za-z0-9][A-Za-z0-9._@|+=:/-]{0,254}$'
+       AND p_subject !~* '^(service|system|anonymous):'
+       AND lower(p_subject) <> 'operator'
 $$;
 -- a pure predicate; the owner CHECKs below call it as the writing role, so the writers' roles may execute it
 REVOKE ALL ON FUNCTION public.inlet_subject_ok(TEXT) FROM PUBLIC;
@@ -317,13 +316,13 @@ CREATE OR REPLACE TRIGGER trg_inlet_stamp_sources
 -- the owner columns. Their rule is the subject SHAPE and no service principal (inlet_owner_column_ok): the literal
 -- 'operator' is refused at the inlet writers (their code, thoughts.user_id, the record), but these columns are also
 -- written by the workbench for its signed-in user, and its single-user labs and fixtures name that user 'operator'.
-CREATE OR REPLACE FUNCTION public.inlet_owner_column_ok(p_sub TEXT) RETURNS BOOLEAN
+CREATE OR REPLACE FUNCTION public.inlet_owner_column_ok(p_subject TEXT) RETURNS BOOLEAN
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
 SET search_path = pg_catalog
 AS $$
-    SELECT p_sub IS NOT NULL
-       AND p_sub ~ '^[A-Za-z0-9][A-Za-z0-9._@|+=:/-]{0,254}$'
-       AND p_sub !~* '^(service|system|anonymous):'
+    SELECT p_subject IS NOT NULL
+       AND p_subject ~ '^[A-Za-z0-9][A-Za-z0-9._@|+=:/-]{0,254}$'
+       AND p_subject !~* '^(service|system|anonymous):'
 $$;
 REVOKE ALL ON FUNCTION public.inlet_owner_column_ok(TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.inlet_owner_column_ok(TEXT) TO service_role;
@@ -343,21 +342,8 @@ BEGIN
     END LOOP;
 END $$;
 
--- ── slot 450's door roles (when they exist) ────────────────────────────────────────────────────────────────────────
-DO $$
-DECLARE r TEXT;
-BEGIN
-    FOREACH r IN ARRAY ARRAY['ob_rest_gmail_pull', 'ob_rest_digest', 'ob_rest_podcast', 'ob_rest_wiki', 'ob_rest_import'] LOOP
-        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
-            EXECUTE format('GRANT EXECUTE ON FUNCTION public.inlet_connection_owner(TEXT) TO %I', r);
-            EXECUTE format('GRANT EXECUTE ON FUNCTION public.inlet_subject_ok(TEXT) TO %I', r);
-            EXECUTE format('GRANT EXECUTE ON FUNCTION public.inlet_owner_column_ok(TEXT) TO %I', r);
-        END IF;
-    END LOOP;
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_rest_gmail_prune') THEN
-        GRANT SELECT, DELETE ON public.inlet_connection_mail TO ob_rest_gmail_prune;
-    END IF;
-END $$;
+-- ── slot 450's door roles: NOT granted here. A 450 re-run takes every grant from its door roles and grants again from
+-- its door map, so the door lines this slot needs live in 450's map (findings, "Door grants for 450's map").
 
 SET LOCAL client_min_messages = notice;
 DO $$ BEGIN RAISE NOTICE 'inlet stamp: the owner record, the thoughts and sources guards and the owner checks are in place'; END $$;
