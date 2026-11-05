@@ -22,7 +22,7 @@ src, out, subnet, owner, node_image, project = sys.argv[1:7]
 if not project.startswith('rda-deploy-'):
     print(f'REFUSED: lab project {project!r} must start with rda-deploy-')
     sys.exit(2)
-d = json.load(open(src, encoding="utf-8"))
+d = json.load(open(src, encoding="utf-8-sig"))
 DOOR = ["openbrain-db", "openbrain-postgrest", "openbrain-rest"]
 CALLERS = ["openbrain-wiki", "openbrain-wiki-viewer", "openbrain-entity-worker", "openbrain-digest", "openbrain-podcast",
            "openbrain-gmail-pull", "openbrain-gmail-prune"]

@@ -196,7 +196,7 @@ try {
   $newResolved = (& git -C $ob1 rev-parse $NewSha).Trim()
   # ------------------------------------------------------------ A. the pre-change stack
   Place $BaseSha 'base'
-  [System.IO.File]::WriteAllText((Join-Path $liveDocker '.env'), "POSTGRES_PASSWORD=$pw`nWORKSPACE_DEFAULT_SUB=lab-operator`nMCP_ACCESS_KEY=lab-mcp-key-not-a-secret`n", (New-Object System.Text.UTF8Encoding $false))
+  [System.IO.File]::WriteAllText((Join-Path $liveDocker '.env'), "POSTGRES_PASSWORD=$pw`nWORKSPACE_DEFAULT_SUB=lab-operator`nMCP_ACCESS_KEY=lab-mcp-key-not-a-secret`nOPS_GATEWAY_KEY=lab-ops-key-not-a-secret`n", (New-Object System.Text.UTF8Encoding $false))
   if (-not (Render 'base')) { throw 'render base' }
   Save 'lab-compose-base.json' ([System.IO.File]::ReadAllText($labFile))
   Write-Host '[A] the pre-change stack: up -d (everything, from the base files)'
