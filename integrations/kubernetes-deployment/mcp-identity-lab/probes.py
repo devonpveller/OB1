@@ -658,7 +658,7 @@ def p_cross_user():
             lk = a_leaks(txt, a)
             if lk:
                 print(f"INFO workbench context {tool} {who}: {leak_detail(txt, a)!r}", flush=True)
-            rec(f"e.workbench {tool} as {who}", not lk, r2=tool in ("contract_ideas", "contract_idea", "contract_jobs"), what= f"status {st}; A material: {sorted(set(lk)) or 'none'}; answer head: {re.sub(r'[0-9a-f-]{36}', '<uuid>', result_text(txt)[1])[:160]!r}")
+            rec(f"e.workbench {tool} as {who}", not lk, r2=tool in ("contract_ideas", "contract_idea", "contract_jobs", "contract_session"), what= f"status {st}; A material: {sorted(set(lk)) or 'none'}; answer head: {re.sub(r'[0-9a-f-]{36}', '<uuid>', result_text(txt)[1])[:160]!r}")
     st, txt = call(MCP, HB(tb), "contract_ideas", {})
     # B's idea from the driver's T2 (a second capture here is a near-duplicate of it under the lab's one embedding)
     rec("e.workbench contract_ideas as B shows B's own idea", (M["b_idea"] in txt or B_STRINGS["idea"] in txt) and "A lab marker idea" not in txt, f"status {st}", r2=True)
@@ -683,7 +683,8 @@ def p_cross_user():
             ("mcp key + B's token + x-on-behalf-of A", {"x-brain-key": E["wb_mcp_key"], "x-ob-user-token": tb, "x-on-behalf-of": SUB_A}, 403),
         ]:
             st, t = wbget(h)
-            rec(f"e.workbench direct: {name}", st == want and not a_leaks(t), f"status {st} (want {want}); A material {a_leaks(t) or 'none'}", r2=True)
+            # x-on-behalf-of from the mcp key was 403 on round 1 too (only owui's key may send it): a regression check, not R2
+            rec(f"e.workbench direct: {name}", st == want and not a_leaks(t), f"status {st} (want {want}); A material {a_leaks(t) or 'none'}", r2="x-on-behalf-of" not in name)
         st, t = wbget({"x-brain-key": E["wb_mcp_key"]})
         rec("e.workbench direct: the mcp key alone is nobody", st == 200 and not a_leaks(t), f"status {st}; A material {a_leaks(t) or 'none'}")
 
