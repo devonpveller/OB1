@@ -3,7 +3,8 @@
  *
  * Instead of an ad-hoc local synthesis, each newsletter article is submitted to
  * the shared research harness (`openbrain-research`) in **article mode**:
- *   - the article is the SEED source (already fetched through Tor by S3),
+ *   - the article is the SEED source - since rw-boundary-digest the research service fetches it itself through the
+ *     request boundary (POST /research/derived); the digest sends no content,
  *   - web search is DISABLED — corroboration comes ONLY from OB's existing
  *     grounded claims (the harness reuse pass), not the open web,
  *   - the harness writes grounded claims + resolves the thread via the curator.
@@ -13,7 +14,8 @@
  * the podcast: we never read a job's result until its status is `done`.
  *
  * Contract (OB1/integrations/research-service/index.ts):
- *   POST /research                -> { job_id, status }      (x-brain-key)
+ *   POST /research/derived        -> 202 { job_id } | 200 { refused, handback_id } (x-brain-key)
+ *   POST /research/derived/delivered -> { delivered }          (x-brain-key)
  *   GET  /research/jobs/:id        -> { id, status, result } (x-brain-key)
  *   POST /research/jobs/:id/cancel -> { status }             (x-brain-key)
  *   terminal status ∈ { done, error, cancelled }
@@ -27,22 +29,31 @@
  * when its deadline passed while paused. Use `isModelDown(job)`.
  */
 
-export interface ResearchSeed { url: string; title: string; content: string }
+/**
+ * rw-boundary-digest (plan 09 PD0c): the digest asks for research ONLY through the request boundary,
+ * POST /research/derived. It sends the PERSONAL item (the email's subject, sender, label, ids, the link text - kept
+ * by the research service only long enough to form a public question, never stored) and its candidate links; the
+ * boundary forms the public question (an article: the title template; a gap dive: the local model's question, gated),
+ * fetches the public links itself (no seed content leaves the digest) and writes one derived job, plus the private
+ * hand-back that remembers which email it served (`deliver`). A refusal starts no job.
+ */
+export interface DerivedItem {
+  kind: "gmail";
+  /** The private inlet id (hand-back only): unique per email + link / per dive. */
+  id: string;
+  owner_sub: string;
+  fields: Record<string, string>;
+  links: string[];
+}
 
-export interface SubmitArgs {
-  /** Free-text query — the article's title/topic (drives recall + thread hint). */
-  query: string;
-  /**
-   * Pre-fetched seed sources. Article mode requires them (the article IS the
-   * seed). A gap dive OMITS them: topic mode gathers from the open web, so the
-   * research question in `query` is the whole input. Optional for that reason.
-   */
-  seedSources?: ResearchSeed[];
-  /** article-primary synthesis prompt. Omit for a full topic (gap-dive) run. */
+export interface DerivedSubmit {
+  item: DerivedItem;
+  purpose: "digest-article" | "digest-gap";
+  /** Where the result goes (the private hand-back's deliver record): the digest's own segment record. */
+  deliver: Record<string, unknown>;
+  /** article-primary synthesis (the article IS the subject); omit for a full topic run (a gap dive). */
   mode?: "article";
-  /** seed-only: no web search at all; corroborate from OB claims only. */
-  disableWebSearch?: boolean;
-  /** "preliminary" → bounded tentative web research on the article's open gaps. */
+  /** "preliminary" -> bounded tentative web research on the article's open gaps. */
   gapResearch?: "none" | "preliminary";
   /** run synthesis but write NOTHING canonical (preview). */
   dryRun?: boolean;
@@ -52,9 +63,11 @@ export interface SubmitArgs {
    * the moment this caller stops waiting.
    */
   deadlineAt?: Date | string | number;
-  origin?: string; // "owui" | "agent" | "notebook" | "manual"
-  threadId?: string;
 }
+
+export type DerivedAnswer = { jobId: string } | { refused: string; handbackId: string | null };
+
+export interface Delivery { jobId: string; ok: boolean; episodeId?: string | null; threadId?: string | null }
 
 export interface CuratorEcho {
   thread_id?: string;
@@ -155,30 +168,47 @@ export class ResearchClient {
     this.baseUrl = opts.baseUrl.replace(/\/$/, "");
   }
 
-  /** Submit a research job. Returns the job id. */
-  async submit(args: SubmitArgs): Promise<string> {
-    const res = await fetch(`${this.baseUrl}/research`, {
+  /** Ask the request boundary for a derived job. A refusal is an answer, not an error (no job was made). */
+  async submitDerived(args: DerivedSubmit): Promise<DerivedAnswer> {
+    const run: Record<string, unknown> = {};
+    if (args.mode) run.mode = args.mode;
+    if (args.gapResearch) run.gap_research = args.gapResearch;
+    if (args.dryRun) run.dry_run = true;
+    if (args.deadlineAt !== undefined) run.deadline_at = deadlineIso(args.deadlineAt);
+    const res = await fetch(`${this.baseUrl}/research/derived`, {
+      method: "POST",
+      headers: { "x-brain-key": this.opts.brainKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ item: args.item, purpose: args.purpose, deliver: args.deliver, run }),
+      signal: AbortSignal.timeout(this.opts.timeoutMs ?? 180_000), // the boundary may ask the local model (bounded there)
+    });
+    if (!res.ok) {
+      // the door answers fixed codes; never echo our own request back into a log
+      throw new Error(`research derived submit failed: ${res.status} ${(await res.text().catch(() => "")).slice(0, 120)}`);
+    }
+    const d = await res.json() as { job_id?: string; refused?: string; handback_id?: string | null };
+    if (d.job_id) return { jobId: d.job_id };
+    if (d.refused) return { refused: d.refused, handbackId: d.handback_id ?? null };
+    throw new Error("research derived submit: neither job_id nor refused in the response");
+  }
+
+  /** Record on the private hand-backs that the digest used (or gave up on) its derived jobs. Returns how many the
+   *  research service recorded (only the hand-backs this caller opened, still queued). */
+  async delivered(deliveries: Delivery[]): Promise<number> {
+    if (!deliveries.length) return 0;
+    const res = await fetch(`${this.baseUrl}/research/derived/delivered`, {
       method: "POST",
       headers: { "x-brain-key": this.opts.brainKey, "Content-Type": "application/json" },
       body: JSON.stringify({
-        query: args.query,
-        seed_sources: args.seedSources,
-        mode: args.mode,
-        disable_web_search: args.disableWebSearch,
-        gap_research: args.gapResearch,
-        dry_run: args.dryRun,
-        origin: args.origin ?? "notebook",
-        thread_id: args.threadId,
-        deadline_at: args.deadlineAt === undefined ? undefined : deadlineIso(args.deadlineAt),
+        deliveries: deliveries.map((d) => ({
+          job_id: d.jobId, ok: d.ok,
+          ...(d.episodeId ? { episode_id: d.episodeId } : {}),
+          ...(d.threadId ? { thread_id: d.threadId } : {}),
+        })),
       }),
       signal: AbortSignal.timeout(this.opts.timeoutMs ?? 30_000),
     });
-    if (!res.ok) {
-      throw new Error(`research submit failed: ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
-    }
-    const d = await res.json() as { job_id?: string };
-    if (!d.job_id) throw new Error("research submit: no job_id in response");
-    return d.job_id;
+    if (!res.ok) throw new Error(`research delivered failed: ${res.status}`);
+    return Number((await res.json() as { delivered?: number }).delivered ?? 0);
   }
 
   /**

@@ -261,9 +261,12 @@ try {
   $allowed = @('docker/init-request-boundary.sql', 'docker/revert-request-boundary.sql', 'integrations/research-service/boundary.ts',
     'integrations/research-service/boundary.e2e.test.ts', 'integrations/research-service/fixtures/boundary-sweep.ts',
     'integrations/research-service/fixtures/boundary-drill-check.sql', 'integrations/research-service/run-boundary-e2e.ps1', 'integrations/research-service/README.md', 'docker/docker-compose.yml',
-    'docker/workbench/src/documents/isolation_sweep_test.ts', 'integrations/research-service/fixtures/boundary-pgrst-probe.ts')
+    'docker/workbench/src/documents/isolation_sweep_test.ts', 'integrations/research-service/fixtures/boundary-pgrst-probe.ts',
+    # rw-boundary-digest (slot 460): the migration that adds handback_deliver, and the digest lab's tests
+    'docker/init-boundary-digest.sql', 'docker/revert-boundary-digest.sql', 'integrations/research-service/boundary-digest.e2e.test.ts',
+    'recipes/daily-digest/lab/boundary-digest-460-check.sql', 'recipes/daily-digest/lab/run-digest-boundary-lab.ps1')
   $names = @(Get-ChildItem -Path $ob1 -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\(node_modules|\.git|archive)\\' -and $_.Length -lt 5MB } |
-    Where-Object { Select-String -Path $_.FullName -Pattern 'research_handbacks|handback_(open|pending|claim|deliverables|delivered|owned)' -Quiet } |
+    Where-Object { Select-String -Path $_.FullName -Pattern 'research_handbacks|handback_(open|pending|claim|deliverables|delivered|owned|deliver)' -Quiet } |
     ForEach-Object { $_.FullName.Substring($ob1.Length + 1).Replace('\', '/') })
   $stray = @($names | Where-Object { $allowed -notcontains $_ })
   Save 'handback-readers.txt' (($names | Sort-Object) -join "`n")
