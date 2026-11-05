@@ -818,7 +818,11 @@ def main():
     if mode == "red-r2":
         print(f"== RED: non-R2 probes failing (must be none on 27504ae): {others_failing[:20]}", flush=True)
         sys.exit(0 if R2 and not r2_passing and not others_failing else 1)
-    sys.exit(0 if R2 and not r2_passing else 1)
+    # red-r1 (51f00ea, before this item): B IS the operator there, so a probe that needs two owners' rows ("no cross-owner
+    # row") cannot fail; every other R2 probe must
+    single_user = [p for p in r2_passing if p.startswith("e.no cross-owner row")]
+    print(f"== RED: R2 probes that need two owners and hold trivially on a one-subject base: {single_user}", flush=True)
+    sys.exit(0 if R2 and not [p for p in r2_passing if p not in single_user] else 1)
 
 
 if __name__ == "__main__":
