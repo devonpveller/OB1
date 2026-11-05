@@ -3,10 +3,19 @@
 #
 #   powershell -NoProfile -File OB1\integrations\kubernetes-deployment\mcp-identity-lab\run-mcp-identity-lab.ps1 -Subnet <x.y.z.0/24> [-Evidence <dir>] [-Red] [-BaseSha 69a04a5] [-Cases T1,T4]
 #
-# -Red builds openbrain-mcp and openbrain-ext from -BaseSha (PD1's tree before this item) and wires Open WebUI the way the
-# base allows (its native MCP connection holds the personal key; the extensions connection the full key, as mcpo-ext
-# does today): every check that states the item's bar must FAIL there. Without -Red the images come from this working tree
-# and every check must pass.
+# -Red builds openbrain-mcp, openbrain-ext and openbrain-workbench from -BaseSha:
+#   51f00ea (PD1's tree before this item: no OWUI lane) - Open WebUI is wired the only way that base allows (its native MCP
+#     connection holds the personal key; the extensions connection the full key, as mcpo-ext does today); every driver
+#     check that states the item's bar must FAIL, and every round-2 (R2) probe must FAIL;
+#   27504ae (round 1 of this item) - wired as GREEN; the driver passes (round 1's bar) and exactly the R2 probes FAIL
+#     (tester attempt 1's F1 / F2 / the two-key combination), every other probe passes.
+# Without -Red the images come from this working tree and every check and every probe must pass.
+#
+# round 2 (tester attempt 1, F3): the REAL openbrain-workbench sits behind the contract tools, configured as live (no
+# forward-auth, WORKBENCH_KEY = MCP_ACCESS_KEY, WORKSPACE_DEFAULT_SUB = A; plus the `mcp` / `owui` service keys and the
+# provider config this item adds); the tester's probes.py (a-i, plus the R2 cases) runs after the driver; and the lab
+# makes openbrain-ext's RLS-blocked tables testable (lab-only permissive policies for service_role, so the app-layer owner
+# checks are the only guard and the foreign-id probes run on every table).
 #
 # Lab rules (as run-workspace-tests.ps1): one --internal network on the pinned subnet; images built only as
 # :wt-rw-mcp-identity[-suffix] and labelled; no published port; no :local image (the shim refuses one - mcpo is built from
@@ -57,6 +66,8 @@ $net = "$P-net"
 function Rnd([int]$n) { -join (1..$n | ForEach-Object { '0123456789abcdef'[(Get-Random -Maximum 16)] }) }
 $pw = Rnd 16; $appPw = Rnd 16
 $K = @{ full = "full-$(Rnd 40)"; personal = "pers-$(Rnd 40)"; owui = "owui-$(Rnd 40)"; mcpo = "mcpo-$(Rnd 24)" }
+$wbMcpKey = "wbmcp-$(Rnd 32)"; $wbOwuiKey = "wbowui-$(Rnd 32)"
+
 $subs = @{ a = "ak-op-$(Rnd 12)"; b = "ak-b-$(Rnd 12)"; c = "ak-c-$(Rnd 12)" }
 $defaultUser = [guid]::NewGuid().ToString()
 $iss = 'https://auth.lab.invalid/application/o/open-webui/'
@@ -76,7 +87,7 @@ function Pass([string]$m) { Write-Host "  PASS  $m" }
 function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
 function Save([string]$name, [string]$text) { [System.IO.File]::WriteAllText((Join-Path $Evidence $name), $text, (New-Object System.Text.UTF8Encoding $false)) }
-function Redact([string]$t) { $o = $t; foreach ($v in @($K.full, $K.personal, $K.owui, $K.mcpo, $pw, $appPw, $clientSecret)) { $o = $o.Replace($v, '<redacted>') }; return ($o -replace 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*', '<jwt>') }
+function Redact([string]$t) { $o = $t; foreach ($v in @($K.full, $K.personal, $K.owui, $K.mcpo, $wbMcpKey, $wbOwuiKey, $pw, $appPw, $clientSecret)) { $o = $o.Replace($v, '<redacted>') }; return ($o -replace 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*', '<jwt>') }
 
 # -- the lab docker shim -----------------------------------------------------------------------------------------------
 function Test-LabDockerArgs([string[]]$a) {
@@ -133,7 +144,7 @@ function Build([string]$image, [string]$ctx, [string]$file = '') {
   $a = @('build', '-t', $image, '--label', $label)
   if ($file) { $a += @('-f', $file) }
   $a += $ctx
-  $o = Lab-Docker 1200 $a
+  $o = Lab-Docker 3000 $a
   Save "build-$($image -replace '[:/]','_').log" (Redact $o)
   $script:made.images += $image
   Check ($script:rc -eq 0) "built $image"
@@ -144,7 +155,7 @@ function Tree-At([string]$sha) {
   New-Item -ItemType Directory -Force $tree | Out-Null
   $script:made.dirs += $tree
   $tar = Join-Path $env:TEMP "$P-$sha.tar"
-  & git -C $ob1 archive --format=tar -o $tar $sha docker/extensions-server integrations/kubernetes-deployment
+  & git -C $ob1 archive --format=tar -o $tar $sha docker/extensions-server docker/workbench integrations/kubernetes-deployment
   & (Join-Path $env:SystemRoot 'System32\tar.exe') -xf $tar -C $tree
   Remove-Item -Force $tar
   return $tree
@@ -172,11 +183,17 @@ try {
   Check (@($chain | Where-Object { $_[1] -eq '440-init-inlet-owner.sql' }).Count -eq 1) "the chain mounts PD1's 440 ($($chain.Count) migrations)"
 
   Write-Host '[2] images'
-  if ($Red) { $tree = Tree-At $BaseSha; $mcpCtx = Join-Path $tree 'integrations\kubernetes-deployment'; $extCtx = Join-Path $tree 'docker\extensions-server'; $sfx = '-base' }
-  else { $mcpCtx = $kd; $extCtx = Join-Path $dockerDir 'extensions-server'; $sfx = '' }
-  $imgMcp = "openbrain-mcp-server:$tag$sfx"; $imgExt = "openbrain-ext-server:$tag$sfx"; $imgMcpo = "openbrain-mcpo:$tag-mcpo"
+  # does the base carry this item's OWUI lane (27504ae: yes, 51f00ea: no)? It decides the wiring and the RED expectations.
+  $baseHasLane = $false
+  if ($Red) { $null = & git -C $ob1 cat-file -e "${BaseSha}:integrations/kubernetes-deployment/mcp-identity.ts" 2>$null; $baseHasLane = ($LASTEXITCODE -eq 0) }
+  $laneWired = (-not $Red) -or $baseHasLane
+  if ($Red) { $tree = Tree-At $BaseSha; $mcpCtx = Join-Path $tree 'integrations\kubernetes-deployment'; $extCtx = Join-Path $tree 'docker\extensions-server'; $wbCtx = Join-Path $tree 'docker\workbench'; $sfx = '-base' }
+  else { $mcpCtx = $kd; $extCtx = Join-Path $dockerDir 'extensions-server'; $wbCtx = Join-Path $dockerDir 'workbench'; $sfx = '' }
+  $imgMcp = "openbrain-mcp-server:$tag$sfx"; $imgExt = "openbrain-ext-server:$tag$sfx"; $imgMcpo = "openbrain-mcpo:$tag-mcpo"; $imgWb = "openbrain-workbench:$tag-wb$sfx"
+  Save 'run-mode.txt' "red=$([bool]$Red) base=$BaseSha baseHasLane=$baseHasLane laneWired=$laneWired"
   if (-not (Build $imgMcp $mcpCtx)) { throw 'build mcp' }
   if (-not (Build $imgExt $extCtx)) { throw 'build ext' }
+  if (-not (Build $imgWb $wbCtx)) { throw 'build workbench' }
   if (-not (Build $imgMcpo (Join-Path $dockerDir 'mcpo'))) { throw 'build mcpo' }
 
   Write-Host '[3] the internal network, the database and the seed'
@@ -208,6 +225,19 @@ INSERT INTO thoughts (content, embedding, metadata, exposure) VALUES ('lab marke
 INSERT INTO thoughts (content, embedding, metadata, exposure, user_id) VALUES ('lab marker A private $($markers.a_thought)', ($vec)::vector, '{"source":"lab"}', 'ops', '$($subs.a)');
 SELECT public.idea_capture('$($subs.a)', 'service:lab', 'A lab marker idea', 'lab marker idea A $($markers.a_idea)', NULL, $vec);
 INSERT INTO important_dates (user_id, title, date_value) VALUES ('$defaultUser', 'A date $($markers.a_ext)', current_date + 10);
+-- A's idea gets a research job (the workbench's contract_jobs / contract_session show it to its owner only)
+SELECT public.idea_research((SELECT id FROM ideas WHERE owner_sub = '$($subs.a)' LIMIT 1), '$($subs.a)', 'service:lab');
+-- LAB ONLY (round 2, F3): openbrain-ext's RLS tables check auth.uid() = user_id against a NULL stub, so ob_app_memory
+-- reads them empty and writes nothing (the known live state). A permissive service_role policy here leaves the server's
+-- own owner checks as the only guard, so the foreign-id probes run on every table. Never applied anywhere else.
+DO `$`$ DECLARE t text; BEGIN
+  FOREACH t IN ARRAY ARRAY['household_items','household_vendors','maintenance_tasks','maintenance_logs','recipes','meal_plans','shopping_lists',
+    'professional_contacts','contact_interactions','opportunities','companies','job_postings','applications','interviews','job_contacts'] LOOP
+    EXECUTE format('CREATE POLICY lab_ext_service_all ON public.%I AS PERMISSIVE FOR ALL TO service_role USING (true) WITH CHECK (true)', t);
+    EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON public.%I TO service_role', t);
+  END LOOP;
+END `$`$;
+GRANT SELECT, INSERT, UPDATE, DELETE ON family_members, activities, important_dates TO service_role;
 SELECT 'seeded';
 "@
   $o = Sql $seed 'seed'
@@ -233,8 +263,16 @@ SELECT 'seeded';
   $null = Run-Detached $mcp (@('--network-alias', 'openbrain-mcp') + $common + $owuiLane + @('-e', "MCP_PERSONAL_ACCESS_KEY=$($K.personal)",
       '-e', 'EMBEDDING_API_BASE=http://llama-cpp-embed:8080/v1', '-e', 'EMBEDDING_API_KEY=lab', '-e', 'EMBEDDING_MODEL=local-embed',
       '-e', 'CHAT_API_BASE=http://llama-cpp:8080/v1', '-e', 'CHAT_API_KEY=lab', '-e', 'CHAT_MODEL=local-small', '-e', 'FETCH_PROXY_URL=',
-      '-e', 'CONTRACT_WORKBENCH_URL=http://openbrain-workbench:8080', $imgMcp))
-  $null = Run-Detached $ext (@('--network-alias', 'openbrain-ext') + $common + $owuiLane + @('-e', "DEFAULT_USER_ID=$defaultUser", '-e', 'WIKI_DIR=/wiki/content', $imgExt))
+      '-e', 'CONTRACT_WORKBENCH_URL=http://openbrain-workbench-real:8000', '-e', "CONTRACT_WORKBENCH_MCP_KEY=$wbMcpKey", $imgMcp))
+  $null = Run-Detached $ext (@('--network-alias', 'openbrain-ext') + $common + $owuiLane + @('-e', "DEFAULT_USER_ID=$defaultUser", '-e', 'WIKI_DIR=/wiki/content', '-e', "MCP_PERSONAL_ACCESS_KEY=$($K.personal)", $imgExt))
+  # the REAL workbench, configured as live: no forward-auth, WORKBENCH_KEY = MCP_ACCESS_KEY (so that key is the default
+  # subject, A), WORKSPACE_DEFAULT_SUB = A; plus this item's `mcp` service key and the provider config (the base ignores them)
+  $wbReal = "$P-wbreal"
+  $null = Run-Detached $wbReal @('--network-alias', 'openbrain-workbench-real', '-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$($K.full)",
+      '-e', 'DB_HOST=openbrain-db', '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw", '-e', "WORKSPACE_DEFAULT_SUB=$($subs.a)",
+      '-e', "WORKSPACE_SERVICE_KEYS=mcp=$wbMcpKey;owui=$wbOwuiKey", '-e', "MCP_OWUI_OIDC_ISSUER=$iss", '-e', "MCP_OWUI_OIDC_AUDIENCE=$clientId", '-e', "MCP_OWUI_OIDC_JWKS=$jwks",
+      '-e', 'OPEN_BRAIN_URL=http://stub-llm:8080', '-e', 'EMBEDDING_API_BASE=http://llama-cpp-embed:8080/v1',
+      '--tmpfs', '/wiki', '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro", $imgWb)
   $probe = "const r = await fetch('http://127.0.0.1:8000/', {method: 'POST', headers: {'content-type': 'application/json', 'accept': 'application/json, text/event-stream', 'x-brain-key': Deno.env.get('MCP_ACCESS_KEY') ?? ''}, body: JSON.stringify({jsonrpc: '2.0', id: 1, method: 'initialize', params: {protocolVersion: '2025-03-26', capabilities: {}, clientInfo: {name: 'lab', version: '1'}}})}); Deno.exit(r.ok ? 0 : 1)"
   foreach ($c in @($mcp, $ext)) {
     $ok = $false
@@ -249,8 +287,8 @@ SELECT 'seeded';
   Write-Host '[6] Open WebUI (v0.11.0) with SSO through the stub and the native MCP connections'
   # GREEN: the item's wiring (system_oauth + the OWUI lane key on both). RED: the base has no OWUI lane, so the native
   # connection holds the personal key and the extensions one the full key (what openbrain-mcpo-ext holds today).
-  $kMcp = if ($Red) { $K.personal } else { $K.owui }
-  $kExt = if ($Red) { $K.full } else { $K.owui }
+  $kMcp = if (-not $laneWired) { $K.personal } else { $K.owui }
+  $kExt = if (-not $laneWired) { $K.full } else { $K.owui }
   $grants = @(@{ principal_type = 'user'; principal_id = '*'; permission = 'read' })
   $conns = @(
     @{ type = 'mcp'; url = 'http://openbrain-mcp:8000/'; path = ''; auth_type = 'system_oauth'; key = ''; headers = @{ 'x-brain-key' = $kMcp }; config = @{ enable = $true; access_grants = $grants }; info = @{ id = 'open-brain'; name = 'Open Brain'; description = 'lab' } },
@@ -274,7 +312,9 @@ SELECT 'seeded';
     owui = 'http://owui:8080'; mcp = 'http://openbrain-mcp:8000/'; ext = 'http://openbrain-ext:8000/'; mcpo = 'http://openbrain-mcpo:8000'
     keys = @{ full = $K.full; personal = $K.personal; owui = $kMcp; ext = $kExt; mcpo = $K.mcpo }; markers = $markers; subs = $subs; default_user_id = $defaultUser
     iss = $iss; aud = $clientId; client_secret = $clientSecret; kid = $kid; oidc_base = 'http://stub-oidc:8080/application/o/open-webui'
-    db_dsn = "postgresql://postgres:$pw@openbrain-db:5432/openbrain"; mode = $(if ($Red) { 'red' } else { 'green' }); cases = $Cases
+    db_dsn = "postgresql://postgres:$pw@openbrain-db:5432/openbrain"; mode = $(if (-not $laneWired) { 'red' } else { 'green' }); cases = $Cases
+    probe_mode = $(if (-not $Red) { 'green' } elseif ($baseHasLane) { 'red-r2' } else { 'red-r1' })
+    workbench = 'http://openbrain-workbench-real:8000'; wb_mcp_key = $wbMcpKey; wb_owui_key = $wbOwuiKey
   } | ConvertTo-Json -Depth 5
   [System.IO.File]::WriteAllText((Join-Path $state 'cfg.json'), $cfg, (New-Object System.Text.UTF8Encoding $false))
   $drv = @('run', '--rm', '--label', $label, '--network', $net, '-v', "${here}:/lab:ro", '-v', "${state}:/state", '--entrypoint', 'python', $OwuiImage, '/lab/driver.py')
@@ -290,8 +330,20 @@ SELECT 'seeded';
   Save 'driver.log' (Redact $o)
   Write-Host (Redact $o)
   $drvRc = $script:rc
-  if ($Red) { Check ($drvRc -eq 0) 'RED: every bar check FAILED on the base' } else { Check ($drvRc -eq 0) 'GREEN: every driver check passed' }
-  foreach ($c in @($mcp, $ext, $mcpo, $owui, $stub)) { Save "$c.log" (Redact (Dk logs $c)) }
+  if (-not $laneWired) { Check ($drvRc -eq 0) 'RED (no OWUI lane on the base): every driver bar check FAILED' } else { Check ($drvRc -eq 0) "driver: every check passed$(if ($Red) { ' (round 1''s bar holds on the base)' })" }
+  # the probes (tester attempt 1's a-i plus the round-2 R2 cases)
+  $wbOk = $false
+  for ($i = 0; $i -lt 60; $i++) { $null = Dk exec $mcp deno eval "const r = await fetch('http://openbrain-workbench-real:8000/health'); Deno.exit(r.ok ? 0 : 1)"; if ($script:rc -eq 0) { $wbOk = $true; break }; Start-Sleep -Seconds 2 }
+  Check $wbOk 'the real workbench answers /health'
+  $prb = @('run', '--rm', '--label', $label, '--network', $net, '-v', "${here}:/lab:ro", '-v', "${state}:/state", '-e', 'PYTHONPATH=/lab', '--entrypoint', 'python', $OwuiImage, '/lab/probes.py')
+  $o = Lab-Docker 3000 $prb
+  Save 'probes.log' (Redact $o)
+  Write-Host (Redact (($o -split "`n") | Where-Object { $_ -match '^(FAIL|== )' } | Out-String))
+  $prbRc = $script:rc
+  if (-not $Red) { Check ($prbRc -eq 0) 'probes: every probe passed' }
+  elseif ($baseHasLane) { Check ($prbRc -eq 0) 'RED (round 1 on the base): exactly the R2 probes FAILED, every other probe passed' }
+  else { Check ($prbRc -eq 0) 'RED (no OWUI lane on the base): every R2 probe FAILED' }
+  foreach ($c in @($mcp, $ext, $mcpo, $owui, $stub, $wbReal)) { Save "$c.log" (Redact (Dk logs $c)) }
 }
 catch { Fail "the run stopped: $($_.Exception.Message)" }
 finally {

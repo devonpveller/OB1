@@ -283,11 +283,10 @@ def main():
         row = q1("SELECT t.user_id FROM thoughts t WHERE t.content LIKE %s", (f"%{M['op_memory']}%",))
         why = "" if row else f"; the tool answered {st}: {re.sub(r'eyJ[A-Za-z0-9_.-]+', '<jwt>', t)[:400]}"
         check("T5 agent memory thought is the operator's", row is not None and row[0] == E["subs"]["a"], f"the agent memory's thought is stamped with the operator ({'ok' if row and row[0] == E['subs']['a'] else ('NULL' if row else 'not written')}){why}")
-        st, t = mcp(MCP, {"x-brain-key": K["full"]}, "contract_search", {"q": "lab"})
-        st2, t2 = mcp(MCP, {"x-brain-key": K["owui"], "authorization": f"Bearer {user_token('b')}"}, "contract_search", {"q": "lab"})
-        flat = (t + t2).lower()
-        check("T5 contract tools send no user identity", "lab_workbench" in flat and "x-on-behalf-of" not in flat and "x-openwebui" not in flat and "authorization" not in flat,
-              "the workbench calls (full lane and B) carry the service key and no user header: the workbench serves them its service view", red=False)
+        # the contract tools against the REAL workbench (round 2: the probes' e.workbench cases hold the per-user bar)
+        st, t = mcp(MCP, {"x-brain-key": K["full"]}, "contract_ideas", {})
+        check("T5 contract tools on the full lane read the operator's workbench view", st == 200 and "A lab marker idea" in t,
+              f"the full key's contract_ideas shows A's idea ({st})", red=False)
 
     # ---- T6: the old mcpo path is inert (shared only, no writes) -----------------------------------------------------------
     if sel("T6"):
