@@ -21,6 +21,7 @@ import { PodcastBriefSection } from "./sections/podcast-brief.ts";
 import { HtmlRenderer } from "./renderers/html.ts";
 import { MarkdownRenderer } from "./renderers/markdown.ts";
 import { DigestOrchestrator } from "./digest.ts";
+import { digestOwnerSub } from "./enrich/owner-sub.ts";
 import type { Section } from "./sections/section.ts";
 import { Clock, realClock } from "./routine/clock.ts";
 import { probeModel } from "./routine/model-gate.ts";
@@ -57,8 +58,8 @@ export function buildDigestApp(d: DigestAppDeps): { routine: MorningRoutine; orc
   // ─── Clients ──────────────────────────────────────────────────────────────
   const brain = new BrainClient({ baseUrl: env("OPEN_BRAIN_URL", "http://openbrain-rest") });
   const settings = new SettingReader(env("OPEN_BRAIN_URL", "http://openbrain-rest"), d.fetchFn);
-  // whose digest this is (rw-settings-store): the workbench's default subject, blank -> its fallback "operator"
-  const DIGEST_OWNER_SUB = env("DIGEST_OWNER_SUB").trim() || "operator";
+  // whose digest this is (rw-settings-store): rw-boundary-digest round 2 (F6) - the one owner source, owner-sub.ts
+  const DIGEST_OWNER_SUB = digestOwnerSub((k) => env(k));
   const llm = new LlmClient({
     chatBase: env("LOCAL_LLM_BASE", "http://llama-cpp:8080/v1"),
     chatModel: env("LOCAL_LLM_MODEL", "local-small"),

@@ -55,6 +55,8 @@ export interface PlannedDive {
   title: string;
   url: string;
   threadId?: string;
+  /** The owning email (rw-boundary-digest: the private inlet of the dive's hand-back; never sent to a shared row). */
+  gmailId?: string;
 }
 
 // ── durable, freshness-bounded carryover ledger ──────────────────────────────
@@ -66,6 +68,8 @@ export interface LedgerEntry {
   title: string;
   url: string;
   threadId?: string;
+  /** The owning email (private: this ledger is a file in the digest's own reports folder). */
+  gmailId?: string;
   attempts: number; // resubmission count (capped by GAP_DIVE_MAX_ATTEMPTS)
   /** When this gap was first vetted-relevant (ISO) — drives the freshness gate. */
   firstSeen: string;
@@ -77,6 +81,8 @@ export interface DiveLedger {
 
 /** A carried-over dive that finished with grounded material → follow-ups segment. */
 export interface ResolvedDive {
+  /** The finished job (rw-boundary-digest: its hand-back is recorded delivered by this run). */
+  jobId: string;
   question: string;
   label: string;
   title: string;
@@ -214,7 +220,7 @@ export async function planDives(
     if (!question || usedRef.has(ref)) continue;
     usedRef.add(ref);
     const c = pool[ref];
-    out.push({ question, label: c.label, title: c.title, url: c.url, threadId: c.threadId });
+    out.push({ question, label: c.label, title: c.title, url: c.url, threadId: c.threadId, gmailId: c.gmailId });
   }
   return out;
 }
@@ -296,7 +302,7 @@ export async function resolveLedger(
     if (status === "done") {
       const synthesis = job?.result?.synthesis ?? "";
       if (hasGroundedMaterial(synthesis)) {
-        resolved.push({ question: e.question, label: e.label, title: e.title, url: e.url, synthesis, threadName: job?.result?.curator?.thread_name });
+        resolved.push({ jobId: e.jobId, question: e.question, label: e.label, title: e.title, url: e.url, synthesis, threadName: job?.result?.curator?.thread_name });
       } else {
         dropped.push(e); // answered with nothing groundable → stays unfilled (D0)
       }

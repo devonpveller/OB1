@@ -31,6 +31,9 @@ import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
   gatherAnchors,
   interstitialTarget,
+  decodeParamRedirect,
+  isCalendarInvite,
+  isPersonalLink,
   isPubliclyRoutableUrl,
   isResearchable,
   unwrapRedirect,
@@ -850,4 +853,38 @@ Deno.test("an UNRESOLVED wrapper is marked but NOT dropped from research", async
   } finally {
     await article.stop();
   }
+});
+
+// rw-boundary-digest round 2 (tester F1): the digest drops meeting / calendar / share links before the boundary
+Deno.test("isPersonalLink / isResearchable: meeting, calendar and share links never leave the digest; articles do", () => {
+  for (const u of ["http://meet.google.com/qzw-xkvj-pmr", "https://drive.google.com/file/d/AbcDef/view", "https://docs.google.com/document/d/x/edit",
+    "https://sites.google.com/view/reunion", "https://www.google.com/calendar/event?eid=x", "https://us02web.zoom.us/j/845123",
+    "https://teams.microsoft.com/l/meetup-join/19%3a", "https://acme.webex.com/meet/dana", "https://whereby.com/room",
+    "https://www.dropbox.com/scl/fi/abc/x.pdf", "https://1drv.ms/w/s!A", "https://acme.sharepoint.com/sites/x", "https://app.box.com/s/abc",
+    "https://we.tl/t-abc", "https://calendly.com/dana/30", "https://dana.notion.site/x", "https://events.example.com/x.ics",
+    "https://meet.example.org/room", "https://x.example.com/qzw-xkvj-pmr"]) {
+    assertEquals(isPersonalLink(u), true, u);
+    assertEquals(isResearchable({ rawUrl: u, url: u, domain: new URL(u).hostname, text: "" }), false, u);
+  }
+  for (const u of ["https://www.nytimes.com/2024/05/01/climate/solar.html", "https://zoom.us/pricing", "https://www.dropbox.com/features", "https://arxiv.org/abs/2401.00001"]) {
+    assertEquals(isPersonalLink(u), false, u);
+  }
+  for (const s of ["Invitation: Standup @ Wed Nov 5", "Updated invitation with note: Review", "Accepted: Lunch", "Canceled event: Sync"]) assertEquals(isCalendarInvite(s), true, s);
+  for (const s of ["The weekly AI roundup", "An invitation to rethink solar"]) assertEquals(isCalendarInvite(s), false, s);
+});
+
+// rw-boundary-digest round 2 (tester F7): a tracker that names its destination in a parameter is unwrapped without a fetch
+Deno.test("decodeParamRedirect: the destination from the wrapper's own parameter, no fetch; an opaque tracker is not decoded", async () => {
+  assertEquals(decodeParamRedirect("https://click.example-tracker.com/c?url=https%3A%2F%2Fnews.example.org%2Fa&rcpt=dana%40example.net"), "https://news.example.org/a");
+  assertEquals(decodeParamRedirect("https://www.google.com/url?q=https://news.example.org/b&sa=D"), "https://news.example.org/b");
+  assertEquals(decodeParamRedirect("https://list-manage.example.com/track/click?u=4be19c0a4be19c0a&id=abc&e=1f2e3d"), null);
+  // gatherAnchors takes the decoded destination and never asks the tracker (a fetch here would fail the guard)
+  const real = globalThis.fetch;
+  let fetched = 0;
+  globalThis.fetch = ((..._a: unknown[]) => { fetched++; return Promise.reject(new Error("no fetch expected")); }) as typeof fetch;
+  try {
+    const got = await gatherAnchors([{ url: "https://click.convertkit-mail.com/x?url=https%3A%2F%2Fnews.example.org%2Fc&recipient=dana", text: "story" }]);
+    assertEquals(got.map((c) => c.url), ["https://news.example.org/c"]);
+    assertEquals(fetched, 0);
+  } finally { globalThis.fetch = real; }
 });
