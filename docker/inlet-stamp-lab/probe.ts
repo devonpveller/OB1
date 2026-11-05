@@ -4,6 +4,8 @@
 //   reads:  { <case>: <number of rows carrying a marker> }
 // Env: REST (http://openbrain-rest), OWNER_A, OWNER_B, MARK_A, MARK_B, LABTAG (a per-run tag on every row it writes).
 const REST = (Deno.env.get("REST") ?? "http://openbrain-rest").replace(/\/+$/, "") + "/rest/v1";
+// a token request goes to PostgREST itself: today's Caddyfile strips Authorization (slot 450's passes it on)
+const REST_DIRECT = (Deno.env.get("REST_DIRECT") ?? "http://openbrain-postgrest:3000").replace(/\/+$/, "");
 const A = Deno.env.get("OWNER_A") ?? "", B = Deno.env.get("OWNER_B") ?? "";
 const MA = Deno.env.get("MARK_A") ?? "", MB = Deno.env.get("MARK_B") ?? "";
 const TAG = Deno.env.get("LABTAG") ?? "probe";
@@ -20,7 +22,7 @@ async function jwt(claims: Record<string, unknown>): Promise<string> {
   return `${head}.${body}.${b64u(sig)}`;
 }
 async function post(path: string, body: unknown, token?: string) {
-  const r = await fetch(`${REST}/${path}`, { method: "POST", headers: token ? { ...H, Authorization: `Bearer ${token}` } : H, body: JSON.stringify(body) });
+  const r = await fetch(`${token ? REST_DIRECT : REST}/${path}`, { method: "POST", headers: token ? { ...H, Authorization: `Bearer ${token}` } : H, body: JSON.stringify(body) });
   const t = await r.text();
   return { status: r.status, refused: /inlet stamp|inlet_stamp_owner_ok|inlet_subject_ok/.test(t), text: t };
 }
