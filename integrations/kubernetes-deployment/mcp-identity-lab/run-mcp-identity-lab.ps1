@@ -198,6 +198,12 @@ CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROL
 -- chain grants them only to roles created before it ran
 GRANT SELECT, INSERT, UPDATE, DELETE ON agent_memories, agent_memory_artifacts, agent_memory_audit_events, agent_memory_recall_items,
   agent_memory_recall_traces, agent_memory_relations, agent_memory_review_actions, agent_memory_source_refs TO service_role;
+DO `$`$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_policy WHERE polrelid = 'agent_memory_audit_events'::regclass) THEN
+    -- live parity: live carries agent_memory_audit_events_service_role_all (ALL, service_role, true / true)
+    CREATE POLICY agent_memory_audit_events_service_role_all ON agent_memory_audit_events AS PERMISSIVE FOR ALL TO service_role USING (true) WITH CHECK (true);
+  END IF;
+END `$`$;
 INSERT INTO thoughts (content, embedding, metadata, exposure) VALUES ('lab marker shared row $($markers.shared)', ($vec)::vector, '{"source":"lab"}', 'ops');
 INSERT INTO thoughts (content, embedding, metadata, exposure, user_id) VALUES ('lab marker A private $($markers.a_thought)', ($vec)::vector, '{"source":"lab"}', 'ops', '$($subs.a)');
 SELECT public.idea_capture('$($subs.a)', 'service:lab', 'A lab marker idea', 'lab marker idea A $($markers.a_idea)', NULL, $vec);
@@ -266,7 +272,7 @@ SELECT 'seeded';
   Write-Host '[7] the driver: sign-in, then the cases'
   $cfg = [ordered]@{
     owui = 'http://owui:8080'; mcp = 'http://openbrain-mcp:8000/'; ext = 'http://openbrain-ext:8000/'; mcpo = 'http://openbrain-mcpo:8000'
-    keys = @{ full = $K.full; personal = $K.personal; owui = $kMcp; mcpo = $K.mcpo }; markers = $markers; subs = $subs; default_user_id = $defaultUser
+    keys = @{ full = $K.full; personal = $K.personal; owui = $kMcp; ext = $kExt; mcpo = $K.mcpo }; markers = $markers; subs = $subs; default_user_id = $defaultUser
     iss = $iss; aud = $clientId; client_secret = $clientSecret; kid = $kid; oidc_base = 'http://stub-oidc:8080/application/o/open-webui'
     db_dsn = "postgresql://postgres:$pw@openbrain-db:5432/openbrain"; mode = $(if ($Red) { 'red' } else { 'green' }); cases = $Cases
   } | ConvertTo-Json -Depth 5

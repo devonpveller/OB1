@@ -223,7 +223,7 @@ def main():
         row = q1("SELECT owner_sub FROM ideas WHERE summary LIKE %s", (f"%{M['b_idea']}%",))
         check("T2 capture_idea owner", row is not None and row[0] == E["subs"]["b"], "B's idea is owned by B")
         _, ta = chat(a, f"CALL find_idea {json.dumps({'query': 'B idea text', 'threshold': 0.0, 'limit': 20})}", ["open-brain"])
-        check("T2 A cannot find B's idea", not found(ta, ["b_idea"]), "A's find_idea does not show B's idea")
+        check("T2 A cannot find B's idea", row is not None and not found(ta, ["b_idea"]), "B's idea exists and A's find_idea does not show it")
         _, tb = chat(b, f"CALL add_important_date {json.dumps({'title': 'B date ' + M['b_ext'], 'date_value': time.strftime('%Y-%m-%d', time.gmtime(time.time() + 86400 * 5))})}", ["open-brain-ext"])
         row = q1("SELECT user_id::text FROM important_dates WHERE title LIKE %s", (f"%{M['b_ext']}%",))
         check("T2 ext owner", row is not None and row[0] == E["ext_b"], f"B's household date is B's own row ({'B' if row and row[0] == E['ext_b'] else ('A' if row and row[0] == E['ext_a'] else 'missing')})")
@@ -253,7 +253,7 @@ def main():
             ("full + X-OpenWebUI-User-Id", MCP, {"x-brain-key": K["full"], "X-OpenWebUI-User-Id": me_b["id"]}),
             ("personal + bearer of B", MCP, {"x-brain-key": K["personal"], "authorization": f"Bearer {user_token('b')}"}),
             ("owui + x-on-behalf-of A", MCP, {"x-brain-key": K["owui"], "authorization": f"Bearer {user_token('b')}", "x-on-behalf-of": E["subs"]["a"]}),
-            ("ext owui + x-ob-user", EXT, {"x-brain-key": K["owui"], "x-ob-user": E["subs"]["a"]}),
+            ("ext owui + x-ob-user", EXT, {"x-brain-key": K["ext"], "x-ob-user": E["subs"]["a"]}),
         ]:
             st, t = mcp(url, h, "search_thoughts" if url == MCP else "get_upcoming_dates", args if url == MCP else {"days_ahead": 400})
             check(f"T4 forged header ({name})", st == 403 and not found(t, ALL_A), f"refused 403 (got {st}; A's markers {found(t, ALL_A) or 'none'})")
@@ -264,7 +264,7 @@ def main():
             ("A's token for another audience", resign_claims(user_token("a"), aud="another-client")),
         ]:
             for url in (MCP, EXT):
-                st, t = mcp(url, {"x-brain-key": K["owui"], "authorization": f"Bearer {tok}"},
+                st, t = mcp(url, {"x-brain-key": K["owui"] if url == MCP else K["ext"], "authorization": f"Bearer {tok}"},
                             "search_thoughts" if url == MCP else "get_upcoming_dates", args if url == MCP else {"days_ahead": 400})
                 check(f"T4 forged token ({name}) @{'mcp' if url == MCP else 'ext'}", st == 401 and not found(t, ALL_A), f"refused 401 (got {st})")
         # B claiming A through Open WebUI: B's session can only ever send B's own token
