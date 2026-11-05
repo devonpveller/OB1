@@ -5,6 +5,7 @@
 #   -Generate                  fill OB_REST_JWT_SECRET and OB_REST_AUTHENTICATOR_PASSWORD when blank (never
 #                              overwrites a set value - rotation is the key-rotation map's job), then mint
 #   (default)                  mint OB_REST_TOKEN_<CALLER> from the secret already in the file
+#   -Import                    also mint OB_REST_TOKEN_IMPORT (role ob_rest_import: the host import CLIs; slot 470)
 #   -SetAuthenticatorPassword  set ob_rest_authenticator's password in the database from the file's value, piped
 #                              to psql on stdin inside -Container (never on a command line, never echoed)
 # Tokens are HS256 JWTs: {role: ob_rest_<caller>, aud: openbrain-rest, caller: <caller>} - the digest's and the
@@ -19,7 +20,8 @@ param(
   [switch]$Generate,
   [switch]$SetAuthenticatorPassword,
   [string]$Container = 'openbrain-db',
-  [switch]$NoMint
+  [switch]$NoMint,
+  [switch]$Import
 )
 $ErrorActionPreference = 'Stop'
 
@@ -31,7 +33,9 @@ $Callers = @(
   @{ Key = 'OB_REST_TOKEN_DIGEST';      Role = 'ob_rest_digest';      Caller = 'digest';      WithSub = $true },
   @{ Key = 'OB_REST_TOKEN_PODCAST';     Role = 'ob_rest_podcast';     Caller = 'podcast';     WithSub = $true },
   @{ Key = 'OB_REST_TOKEN_GMAIL_PULL';  Role = 'ob_rest_gmail_pull';  Caller = 'gmail_pull';  WithSub = $false },
-  @{ Key = 'OB_REST_TOKEN_GMAIL_PRUNE'; Role = 'ob_rest_gmail_prune'; Caller = 'gmail_prune'; WithSub = $false }
+  @{ Key = 'OB_REST_TOKEN_GMAIL_PRUNE'; Role = 'ob_rest_gmail_prune'; Caller = 'gmail_prune'; WithSub = $false },
+  # the host import CLIs (rw-inlet-stamp, slot 470): minted only with -Import, when an import is to be run
+  @{ Key = 'OB_REST_TOKEN_IMPORT';      Role = 'ob_rest_import';      Caller = 'import';      WithSub = $false; OnlyWith = 'Import' }
 )
 
 if (-not (Test-Path -LiteralPath $EnvFile)) { throw "no env file at $EnvFile (copy .env.example first)" }
@@ -101,6 +105,7 @@ if (-not $NoMint) {
     if ($sub -match '[\s"\\]' -or $sub -match '[^\x20-\x7e]') { throw 'WORKSPACE_DEFAULT_SUB has whitespace, a quote, a backslash or a non-ASCII character: use the plain Authentik subject' }
   }
   foreach ($c in $Callers) {
+    if ($c.OnlyWith -eq 'Import' -and -not $Import) { continue }
     $claims = New-Object System.Collections.Specialized.OrderedDictionary
     $claims['role'] = $c.Role; $claims['aud'] = 'openbrain-rest'; $claims['caller'] = $c.Caller
     if ($c.WithSub) {

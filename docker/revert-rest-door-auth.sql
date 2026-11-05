@@ -50,7 +50,7 @@ BEGIN
   END LOOP;
   DROP FUNCTION IF EXISTS public.rest_setting_get(TEXT);
   FOREACH r IN ARRAY ARRAY['ob_rest_wiki', 'ob_rest_viewer', 'ob_rest_entity', 'ob_rest_digest', 'ob_rest_podcast',
-                           'ob_rest_gmail_pull', 'ob_rest_gmail_prune', 'ob_rest_authenticator'] LOOP
+                           'ob_rest_gmail_pull', 'ob_rest_gmail_prune', 'ob_rest_import', 'ob_rest_authenticator'] LOOP
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
       EXECUTE format('DROP OWNED BY %I', r);   -- privileges only: the door roles own nothing
       EXECUTE format('DROP ROLE %I', r);

@@ -178,6 +178,11 @@ async function casePositive() {
     ["delete", "DELETE", `/thoughts?id=in.(${S.pruneThoughtId})&select=id`, undefined, { prefer: "return=representation" }],
   ]);
   report("2-caller-GMAIL_PRUNE", "openbrain-gmail-prune with its own token: preview and delete answer 2xx");
+  await asCaller("IMPORT", [
+    ["insert", "POST", "/thoughts", { content: `lab import ${Date.now()}`, metadata: { source: "chatgpt", exposure: "ops" }, exposure: "ops" }, { prefer: "return=minimal" }],
+    ["dedup", "POST", "/rpc/match_thoughts", { query_embedding: zeros, match_threshold: 0.0, match_count: 3, filter: {} }],
+  ]);
+  report("2-caller-IMPORT", "the host import CLIs' token (slot 470's ob_rest_import): the insert and the dedup answer 2xx");
 }
 
 // what a caller does not use: every relation it holds no SELECT on and every function it holds no EXECUTE on

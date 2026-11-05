@@ -43,7 +43,7 @@ function Start-LabRestDoor([string]$Db, [string]$Pw, [string]$Sub = 'lab-operato
     $script:made.dirs += $envDir
     $envFile = Join-Path $envDir 'lab.env'
     [System.IO.File]::WriteAllText($envFile, "WORKSPACE_DEFAULT_SUB=$Sub`nOB_REST_JWT_SECRET=`nOB_REST_AUTHENTICATOR_PASSWORD=`n", (New-Object System.Text.UTF8Encoding $false))
-    $o = & powershell -NoProfile -ExecutionPolicy Bypass -File $mint -EnvFile $envFile -Generate -SetAuthenticatorPassword -Container $Db 2>&1 | Out-String
+    $o = & powershell -NoProfile -ExecutionPolicy Bypass -File $mint -EnvFile $envFile -Generate -Import -SetAuthenticatorPassword -Container $Db 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { Fail "rest door: the mint script failed: $o"; return $res }
     $vals = @{}
     foreach ($l in [System.IO.File]::ReadAllLines($envFile)) { if ($l -match '^([A-Z0-9_]+)=(.*)$') { $vals[$Matches[1]] = $Matches[2] } }

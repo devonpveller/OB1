@@ -248,7 +248,7 @@ DROP FUNCTION public.lab_after_450();
     $pgr = [regex]::Match($compose, '(?s)  openbrain-postgrest:.*?environment:\s*\n(.*?)\n    networks:').Groups[1].Value
     Check ($pgr -notmatch 'PGRST_DB_ANON_ROLE' -and $pgr -match 'ob_rest_authenticator' -and $pgr -match 'PGRST_JWT_SECRET' -and $pgr -match 'PGRST_JWT_AUD: openbrain-rest') 'compose: openbrain-postgrest logs in as ob_rest_authenticator, has the JWT secret and audience, and no anonymous role'
     $door = Start-LabRestDoor -Db $db -Pw $pw
-    Check ($door.Door -eq 'auth' -and $door.Tokens.Count -eq 7) "the REAL mint script made the lab secret, the authenticator password and $($door.Tokens.Count) caller tokens (values not shown)"
+    Check ($door.Door -eq 'auth' -and $door.Tokens.Count -eq 8) "the REAL mint script made the lab secret, the authenticator password and $($door.Tokens.Count) caller tokens (values not shown)"
   }
   $null = Psql "NOTIFY pgrst, 'reload schema';"
   Start-Sleep -Seconds 4
@@ -267,7 +267,7 @@ fns AS (
     FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prokind = 'f'
      AND p.prorettype <> 'trigger'::regtype
    ORDER BY p.proname, p.pronargs DESC),
-door AS (SELECT rolname FROM pg_roles WHERE rolname ~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune)$')
+door AS (SELECT rolname FROM pg_roles WHERE rolname ~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune|import)$')
 SELECT json_build_object(
   'relations', (SELECT json_agg(relname ORDER BY relname) FROM rels),
   'functions', (SELECT json_agg(json_build_object('name', proname, 'args', args, 'nargs', nargs) ORDER BY proname) FROM fns),
@@ -316,11 +316,12 @@ SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regc
     ob_rest_podcast = @('podcast_episodes', 'podcast_presenters', 'podcast_render_requests', 'podcast_team_members', 'podcast_teams', 'podcast_voice_links', 'thoughts')
     ob_rest_gmail_pull = @('thoughts')
     ob_rest_gmail_prune = @('entities', 'thought_entities', 'thoughts')
+    ob_rest_import = @('thoughts')
   }
   $cfg = [ordered]@{
     rest = 'http://openbrain-rest'; pgrst = 'http://openbrain-postgrest:3000'; red = [bool]$Red; secret = $door.Secret
     tokens = $door.Tokens; catalogFile = '/work/catalog.json'; expectedMap = $expected; out = '/work/probe-result.json'
-    roles = [ordered]@{ WIKI = 'ob_rest_wiki'; VIEWER = 'ob_rest_viewer'; ENTITY = 'ob_rest_entity'; DIGEST = 'ob_rest_digest'; PODCAST = 'ob_rest_podcast'; GMAIL_PULL = 'ob_rest_gmail_pull'; GMAIL_PRUNE = 'ob_rest_gmail_prune' }
+    roles = [ordered]@{ WIKI = 'ob_rest_wiki'; VIEWER = 'ob_rest_viewer'; ENTITY = 'ob_rest_entity'; DIGEST = 'ob_rest_digest'; PODCAST = 'ob_rest_podcast'; GMAIL_PULL = 'ob_rest_gmail_pull'; GMAIL_PRUNE = 'ob_rest_gmail_prune'; IMPORT = 'ob_rest_import' }
     seed = [ordered]@{
       owner = 'lab-operator'; other = 'lab-other'; operatorWindow = 48; otherWindow = 6
       entityId = [int64]$seed.entity_id; entity2Id = [int64]$seed.entity2_id; thoughtId = [int64]$seed.thought_id; pruneThoughtId = [int64]$seed.prune_thought_id
@@ -360,6 +361,81 @@ SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regc
     Check ($rr2 -eq 0 -and $r2 -match 'no archive') '[7-revert] a second revert says no archive and changes nothing'
     Check ($rr3 -eq 0 -and $aclAgain -eq $aclMid) "[7-revert] slot 450 again gives the same ACLs as the first time ($aclAgain)"
     $summary['7-revert'] = if ($ok7) { 'GREEN' } else { 'FAIL' }
+
+    # ---------------------------------------------------------- 10. case 9: a restore without ACLs, then the re-apply (R1)
+    # documentation/runbooks/restore-from-snapshot.md: pg_dump -Fc, then pg_restore --clean --if-exists --no-owner --no-acl
+    # INTO the existing database, then the grant slots again with 450 last (init-grants.sql, init-pantry.sql, then
+    # init-rest-door-auth.sql).
+    # Every (role, function) pair a non-door role could execute before 450 (case 5's list) must still be executable.
+    Write-Host '[10] case 9 - restore without ACLs (the runbook), then init-grants + init-pantry + 450 again'
+    $d1 = Dk exec $db pg_dump -U postgres -d openbrain -Fc -f /tmp/r450.dump; $rd = $script:rc
+    $d2 = Dk exec $db pg_restore -U postgres -d openbrain --clean --if-exists --no-owner --no-acl /tmp/r450.dump
+    Save 'restore.log' (($d2 -split "`n") | Select-Object -Last 40 | Out-String)
+    $execRestored = @((Psql $execSql) -split "`n" | Where-Object { $_ })
+    $lostRestored = @($execBefore | Where-Object { $execRestored -notcontains $_ })
+    $g1 = PsqlFile (Join-Path $dockerDir 'init-grants.sql'); Save 'restore-init-grants.log' $g1
+    $g2 = PsqlFile (Join-Path $dockerDir 'init-pantry.sql'); Save 'restore-init-pantry.log' $g2   # its own explicit grants (ob_pantry)
+    $o9 = PsqlFile (Join-Path $dockerDir 'init-rest-door-auth.sql'); $rr9 = $script:rc; Save 'restore-450.log' $o9
+    $execReapplied = @((Psql $execSql) -split "`n" | Where-Object { $_ })
+    $lost9 = @($execBefore | Where-Object { $execReapplied -notcontains $_ })
+    Save 'restore-exec-lost.txt' ($lost9 -join "`n")
+    $pub9 = (Psql "SELECT count(*) FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND has_function_privilege('public', p.oid, 'EXECUTE')").Trim()
+    Write-Host "    dump exit $rd; after the restore (before the re-apply) $($lostRestored.Count) of $($execBefore.Count) pair(s) missing; 450 again: exit $rr9, $((($o9 -split "`n") | Where-Object { $_ -match 'NOTICE:  rest door: .*(archived|in place of)' } | ForEach-Object { ($_ -split 'NOTICE:  ')[1] }) -join ' | ')"
+    $ok9 = ($rd -eq 0) -and ($rr9 -eq 0) -and ($lost9.Count -eq 0) -and ($pub9 -eq '0')
+    Check ($rr9 -eq 0 -and $lost9.Count -eq 0) "[9-restore] after the runbook's restore and the re-apply every (role, function) pair of case 5 is executable again ($($execBefore.Count) pairs; lost $($lost9.Count): $((($lost9 | Select-Object -First 4) -join '; ')))"
+    Check ($pub9 -eq '0') "[9-restore] PUBLIC runs nothing after the re-apply ($pub9)"
+    $summary['9-restore'] = if ($ok9) { 'GREEN' } else { 'FAIL' }
+
+    # ---------------------------------------------------------- 11. case 10: the fresh volume = the live order (R2)
+    # The compose chain as initdb runs it on a FRESH volume (450 in its slot, every later slot, then 990 = 450 again)
+    # must complete with no ERROR, and give the door roles exactly the grants the live order gives (every slot by psql,
+    # 450 last - the main database above, after one more 450 run). A map line of a later slot that exists in this
+    # tree is granted in both.
+    Write-Host '[11] case 10 - a fresh volume (the whole chain, 990 last) gives the door the grants the live order gives'
+    $stageFull = Join-Path $env:TEMP "$P-initdb-full"
+    New-Item -ItemType Directory -Force $stageFull | Out-Null; $script:made.dirs += $stageFull
+    foreach ($m in $chain) { Copy-Item (Join-Path $chainDir $m[0]) (Join-Path $stageFull $m[1]) }
+    $fullHas990 = @($chain | Where-Object { $_[1] -eq '990-init-rest-door-auth-final.sql' }).Count -eq 1
+    $o10 = PsqlFile (Join-Path $dockerDir 'init-rest-door-auth.sql'); $rr10 = $script:rc
+    $db2 = "$P-db2"
+    $null = Run-Detached $db2 @('-e', "POSTGRES_PASSWORD=$pw", '-e', 'POSTGRES_DB=openbrain', '-v', "${stageFull}:/docker-entrypoint-initdb.d:ro", $PgImage)
+    for ($i = 0; $i -lt 150; $i++) { $l2 = Dk logs $db2; if ($l2 -match 'PostgreSQL init process complete' -or $l2 -match 'exited with exit code|FATAL') { break }; Start-Sleep -Seconds 2 }
+    for ($i = 0; $i -lt 60; $i++) { $null = Dk exec $db2 pg_isready -h 127.0.0.1 -U postgres -d openbrain; if ($script:rc -eq 0) { break }; Start-Sleep -Seconds 2 }
+    $l2 = Dk logs $db2
+    $err2 = @(($l2 -split "`n") | Where-Object { $_ -match 'ERROR:' })
+    Save 'fresh-initdb.log' ((($l2 -split "`n") | Where-Object { $_ -match 'ERROR|NOTICE:  rest door|init process|running /docker-entrypoint' }) -join "`n")
+    $fpSql = @"
+WITH door AS (SELECT rolname FROM pg_roles WHERE rolname ~ '^ob_rest_')
+SELECT md5(COALESCE(string_agg(x, E'\n' ORDER BY x), '')) || ' ' || count(*) FROM (
+  SELECT d.rolname || ' T ' || c.relname || ' ' || pr AS x FROM door d CROSS JOIN pg_class c
+    CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) pr
+   WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r','v','m','p') AND has_table_privilege(d.rolname, c.oid, pr)
+  UNION ALL
+  SELECT grantee || ' C ' || table_name || '.' || column_name || ' ' || privilege_type FROM information_schema.column_privileges
+   WHERE table_schema = 'public' AND grantee ~ '^ob_rest_'
+  UNION ALL
+  SELECT d.rolname || ' F ' || p.oid::regprocedure::text FROM door d CROSS JOIN pg_proc p
+   WHERE p.pronamespace = 'public'::regnamespace AND has_function_privilege(d.rolname, p.oid, 'EXECUTE')) s;
+"@
+    $fpLive = (Psql $fpSql).Trim()
+    $f2 = Join-Path $work 'fp.sql'; [System.IO.File]::WriteAllText($f2, $fpSql, (New-Object System.Text.UTF8Encoding $false))
+    $null = Dk cp $f2 "${db2}:/tmp/fp.sql"
+    $fpFresh = ((Dk exec $db2 psql -U postgres -d openbrain -X -q -tA -f /tmp/fp.sql) -split "`n" | Where-Object { $_ -match '^[0-9a-f]{32} ' } | Select-Object -First 1)
+    $has470 = (Psql "SELECT count(*) FROM pg_proc WHERE proname = 'inlet_connection_owner' AND pronamespace = 'public'::regnamespace").Trim()
+    $g470 = ''
+    if ($has470 -ne '0') {
+      $g470 = (Psql @"
+SELECT string_agg(r || ':' || has_function_privilege(r, 'public.inlet_connection_owner(text)', 'EXECUTE')::text, ' ' ORDER BY r)
+  FROM unnest(ARRAY['ob_rest_gmail_pull','ob_rest_digest','ob_rest_podcast','ob_rest_wiki']) r;
+SELECT 'prune-mail:' || has_table_privilege('ob_rest_gmail_prune', 'public.inlet_connection_mail', 'SELECT')::text || '/' || has_table_privilege('ob_rest_gmail_prune', 'public.inlet_connection_mail', 'DELETE')::text;
+"@).Trim() -replace "`n", ' '
+    }
+    Write-Host "    fresh chain: $($chain.Count) migrations (990 last: $fullHas990), initdb ERROR lines $($err2.Count); door fingerprint fresh $fpFresh / live order $fpLive; slot 470 in the tree: $has470 $g470"
+    $ok10 = $fullHas990 -and ($rr10 -eq 0) -and ($l2 -match 'PostgreSQL init process complete') -and ($err2.Count -eq 0) -and $fpFresh -and ($fpFresh -eq $fpLive) -and ($has470 -eq '0' -or $g470 -notmatch 'false')
+    Check ($l2 -match 'PostgreSQL init process complete' -and $err2.Count -eq 0) "[10-fresh] a fresh volume runs the whole chain (450 ... 990) with no ERROR ($($err2.Count))"
+    Check ($fpFresh -and $fpFresh -eq $fpLive) "[10-fresh] the fresh volume gives the door roles exactly the live order's grants ($fpFresh vs $fpLive)"
+    if ($has470 -ne '0') { Check ($g470 -notmatch 'false') "[10-fresh] slot 470's door lines are granted after the live-order 450 re-run ($g470)" }
+    $summary['10-fresh'] = if ($ok10) { 'GREEN' } else { 'FAIL' }
   }
 }
 catch { Fail "lab aborted: $($_.Exception.Message)" }

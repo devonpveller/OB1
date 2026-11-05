@@ -21,6 +21,17 @@
 -- service_role keeps every privilege it has (ob_app_memory and ob_plane_personal reach it over direct
 -- Postgres: the workbench, research, refinery, curator, workers, MCP). Nothing here reads or moves a row.
 --
+-- LATER SLOTS AND THE DOOR (rw-rest-door-auth review R2). A slot after 450 adds what a door caller needs to THE DOOR
+-- MAP below (section 4) - never by its own GRANT to an ob_rest_* role: every run of this file takes each door role's
+-- grants away and grants again from the map, so a direct grant does not survive a re-run. A map line for an object a
+-- later slot creates carries that slot's number (`slot` column): it is skipped (NOTICE) until the object exists, and
+-- the chain's last mount (990, this file again) grants it on a fresh volume; on live, re-run this file after the slot.
+--
+-- OWNER ARGUMENTS (section 5). No door role may run a function that takes an owner (an argument named p_owner /
+-- owner_sub / p_sub / p_user_id / p_requester, or the named owner functions) - EXCEPT a pure predicate: a function that
+-- returns boolean, is IMMUTABLE (it may not read a table), and is not SECURITY DEFINER. Such a function answers a
+-- question about the value it is given (a CHECK's "is this owner well formed") and can read or write nothing for an owner.
+--
 -- The authenticator's password is not in this file: it is set out of band from OB_REST_AUTHENTICATOR_PASSWORD
 -- (OB1/docker/rest-door/mint-rest-tokens.ps1 -SetAuthenticatorPassword; the ob_pantry / ob_app_memory way).
 -- Idempotent: a re-run recomputes the door grants and re-grants nothing new. Fresh volume: slot 450. Live:
@@ -75,7 +86,7 @@ BEGIN
   END IF;
   ALTER ROLE ob_rest_authenticator LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION;
   FOREACH r IN ARRAY ARRAY['ob_rest_wiki', 'ob_rest_viewer', 'ob_rest_entity', 'ob_rest_digest', 'ob_rest_podcast',
-                           'ob_rest_gmail_pull', 'ob_rest_gmail_prune'] LOOP
+                           'ob_rest_gmail_pull', 'ob_rest_gmail_prune', 'ob_rest_import'] LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
       EXECUTE format('CREATE ROLE %I NOLOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS NOREPLICATION', r);
     END IF;
@@ -90,11 +101,12 @@ DECLARE
   m RECORD;
 BEGIN
   FOR m IN SELECT r.rolname FROM pg_auth_members a JOIN pg_roles r ON r.oid = a.roleid
-            WHERE a.member = 'ob_rest_authenticator'::regrole::oid AND r.rolname !~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune)$' LOOP
+            WHERE a.member = 'ob_rest_authenticator'::regrole::oid AND r.rolname !~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune|import)$' LOOP
     EXECUTE format('REVOKE %I FROM ob_rest_authenticator', m.rolname);
   END LOOP;
 END $$;
-GRANT ob_rest_wiki, ob_rest_viewer, ob_rest_entity, ob_rest_digest, ob_rest_podcast, ob_rest_gmail_pull, ob_rest_gmail_prune
+GRANT ob_rest_wiki, ob_rest_viewer, ob_rest_entity, ob_rest_digest, ob_rest_podcast, ob_rest_gmail_pull, ob_rest_gmail_prune,
+      ob_rest_import
    TO ob_rest_authenticator;
 
 -- ------------------------------------------------------------
@@ -181,6 +193,22 @@ BEGIN
 END $$;
 INSERT INTO rest_door.regrants (signature, role_name) SELECT signature, role_name FROM _rda_regrant
 ON CONFLICT DO NOTHING;
+-- R1 (the review): a restore with --no-acl (the runbook's) recreates every function under the CURRENT default ACLs -
+-- PUBLIC no longer holds them, so the query above finds nothing - and drops the stand-in grants, while
+-- rest_door.regrants comes back as data. Every archived stand-in whose function and role exist is granted again.
+DO $$
+DECLARE
+  g RECORD;
+  n INT := 0;
+BEGIN
+  FOR g IN SELECT to_regprocedure(x.signature) AS fn, x.role_name FROM rest_door.regrants x
+            WHERE to_regprocedure(x.signature) IS NOT NULL AND EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname = x.role_name)
+              AND NOT has_function_privilege(x.role_name, to_regprocedure(x.signature), 'EXECUTE') LOOP
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', g.fn, g.role_name);
+    n := n + 1;
+  END LOOP;
+  RAISE NOTICE 'rest door: % archived stand-in grant(s) given back (after a restore without ACLs; 0 otherwise)', n;
+END $$;
 -- a function created after the first run (440 landing second) that PUBLIC could run: archive its before-state too
 INSERT INTO rest_door.fn_acl_before (signature, public_had, proacl)
 SELECT p.oid::regprocedure::text, true, p.proacl::text
@@ -205,7 +233,7 @@ DECLARE
   p RECORD;
 BEGIN
   FOREACH r IN ARRAY ARRAY['ob_rest_wiki', 'ob_rest_viewer', 'ob_rest_entity', 'ob_rest_digest', 'ob_rest_podcast',
-                           'ob_rest_gmail_pull', 'ob_rest_gmail_prune'] LOOP
+                           'ob_rest_gmail_pull', 'ob_rest_gmail_prune', 'ob_rest_import'] LOOP
     EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA public FROM %I', r);
     EXECUTE format('REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM %I', r);
     EXECUTE format('REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM %I', r);
@@ -221,10 +249,13 @@ END $$;
 -- functions, whole extensions, and the setting-key prefixes rest_setting_get lets it read. Everything else a
 -- role gets (sequences, functions in defaults / CHECKs / copied policies, the call closure) is generated from
 -- these lines below. To change what a caller may do, change its block and nothing else.
---   kind: table (object = relation, privs = privileges) | function (object = name, every overload) |
---         extension (object = extension name: all its functions) | setting (object = key prefix, e.g. 'digest.')
-CREATE TEMP TABLE _rda_door (role_name TEXT, kind TEXT, object TEXT, privs TEXT) ON COMMIT DROP;
-INSERT INTO _rda_door VALUES
+--   kind: table (object = relation, privs = privileges) | column (object = relation.column, privs) |
+--         function (object = name, every overload) | extension (object = extension name: all its functions) |
+--         setting (object = key prefix, e.g. 'digest.')
+--   slot (5th column): NULL = the object must exist (a missing one is a broken map: the file refuses); a number = a
+--         LATER slot creates it - skipped with a NOTICE until it exists (see the header, LATER SLOTS AND THE DOOR)
+CREATE TEMP TABLE _rda_door (role_name TEXT, kind TEXT, object TEXT, privs TEXT, slot INT) ON COMMIT DROP;
+INSERT INTO _rda_door (role_name, kind, object, privs) VALUES
   -- == openbrain-wiki ==================================================================================
   -- wiki-service.mjs, the shared wiki-pages / reconcile / compile-notify modules, and the two children it spawns
   -- (entity-wiki/generate-wiki.mjs, wiki-synthesis/scripts/synthesize-notebooks.mjs)
@@ -293,14 +324,48 @@ INSERT INTO _rda_door VALUES
   ('ob_rest_gmail_prune', 'table', 'thought_entities', 'SELECT'),
   ('ob_rest_gmail_prune', 'table', 'entities',         'SELECT, UPDATE');
 
+-- == objects of LATER slots (the 5th column), each in its caller's block's spirit ===========================
+INSERT INTO _rda_door (role_name, kind, object, privs, slot) VALUES
+  -- rw-inlet-stamp (slot 470): every writer that stamps an owner reads it from the connection record
+  ('ob_rest_gmail_pull',  'function', 'inlet_connection_owner', NULL, 470),   -- pull-gmail.ts (inlet-owner.ts)
+  ('ob_rest_digest',      'function', 'inlet_connection_owner', NULL, 470),   -- src/app.ts (owner-sub.ts digestOwnerResolver)
+  ('ob_rest_podcast',     'function', 'inlet_connection_owner', NULL, 470),   -- link-enrich.ts (owner-sub.ts digestOwner)
+  ('ob_rest_wiki',        'function', 'inlet_connection_owner', NULL, 470),   -- wiki-service.mjs noteOwner (the vault)
+  ('ob_rest_gmail_prune', 'table',    'inlet_connection_mail',  'SELECT, DELETE', 470),  -- prune-short-term.ts (per connection)
+
+-- == the import scripts (google-activity-import, chatgpt-conversation-import: host CLIs the operator runs; slot 470) ====
+  ('ob_rest_import', 'table',     'thoughts',       'SELECT, INSERT', NULL),   -- SELECT: match_thoughts (SECURITY INVOKER) reads them (ops plane by policy)
+  ('ob_rest_import', 'function',  'match_thoughts', NULL,     NULL),   -- the ChatGPT import's dedup (filter.owner_scope)
+  ('ob_rest_import', 'extension', 'vector',         NULL,     NULL);   -- match_thoughts orders by pgvector's distance
+
 DO $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM _rda_door WHERE role_name !~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune)$'
+  IF EXISTS (SELECT 1 FROM _rda_door WHERE role_name !~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune|import)$'
+                                       OR (slot IS NOT NULL AND slot <= 450)
                                        OR kind NOT IN ('table', 'column', 'function', 'extension', 'setting')
                                        OR (kind IN ('table', 'column')) <> (privs IS NOT NULL)
                                        OR (kind = 'column' AND object !~ '^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$')) THEN
     RAISE EXCEPTION 'rest door: a door map line has an unknown role or kind, or privileges on a non-table' USING ERRCODE = '55000';
   END IF;
+END $$;
+-- a later slot's object that does not exist yet: skipped, said
+DO $$
+DECLARE
+  g RECORD;
+BEGIN
+  FOR g IN SELECT * FROM _rda_door d
+            WHERE d.slot IS NOT NULL
+              AND ((d.kind IN ('table', 'column') AND to_regclass('public.' || quote_ident(split_part(d.object, '.', 1))) IS NULL)
+                OR (d.kind = 'function' AND NOT EXISTS (SELECT 1 FROM pg_proc p WHERE p.proname = d.object AND p.pronamespace = 'public'::regnamespace))
+                OR (d.kind = 'extension' AND NOT EXISTS (SELECT 1 FROM pg_extension e WHERE e.extname = d.object))) LOOP
+    RAISE NOTICE 'rest door: % % of slot % does not exist yet - not granted to % (a re-run after slot % grants it)',
+      g.kind, g.object, g.slot, g.role_name, g.slot;
+  END LOOP;
+  DELETE FROM _rda_door d
+   WHERE d.slot IS NOT NULL
+     AND ((d.kind IN ('table', 'column') AND to_regclass('public.' || quote_ident(split_part(d.object, '.', 1))) IS NULL)
+       OR (d.kind = 'function' AND NOT EXISTS (SELECT 1 FROM pg_proc p WHERE p.proname = d.object AND p.pronamespace = 'public'::regnamespace))
+       OR (d.kind = 'extension' AND NOT EXISTS (SELECT 1 FROM pg_extension e WHERE e.extname = d.object)));
 END $$;
 -- the views of the map the generators below read
 CREATE TEMP TABLE _rda_map ON COMMIT DROP AS SELECT role_name, object AS rel, privs FROM _rda_door WHERE kind = 'table';
@@ -436,7 +501,7 @@ BEGIN
   -- roots: what the role may execute now, the trigger functions of the tables it writes, the CHECK functions there
   INSERT INTO _rda_run
   SELECT DISTINCT r.rolname, p.oid FROM pg_roles r JOIN pg_proc p ON p.pronamespace = 'public'::regnamespace
-   WHERE r.rolname ~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune)$' AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
+   WHERE r.rolname ~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune|import)$' AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
   ON CONFLICT DO NOTHING;
   INSERT INTO _rda_run
   SELECT DISTINCT m.role_name, t.tgfoid FROM _rda_map m
@@ -484,7 +549,10 @@ BEGIN
    WHERE p.pronamespace = 'public'::regnamespace AND (r.rolname ~ '^ob_rest_')
      AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
      AND (pg_get_function_identity_arguments(p.oid) ~* '\m(p_owner|p_owner_sub|owner_sub|p_sub|p_user_id|p_requester)\M'
-          OR p.proname IN ('research_job_report_owner', 'setting_get', 'setting_problem', 'user_setting_set'));
+          OR p.proname IN ('research_job_report_owner', 'setting_get', 'setting_problem', 'user_setting_set'))
+     -- a pure predicate is not an owner argument (header, OWNER ARGUMENTS): boolean, IMMUTABLE, not SECURITY DEFINER
+     AND NOT (p.prorettype = 'boolean'::regtype AND p.provolatile = 'i' AND NOT p.prosecdef AND p.proretset = false
+              AND p.proname NOT IN ('research_job_report_owner', 'setting_get', 'setting_problem', 'user_setting_set'));
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION 'rest door: a door role can run an owner-argument function: %', bad USING ERRCODE = '55000';
   END IF;
@@ -497,12 +565,12 @@ BEGIN
   SELECT string_agg(r.rolname, ', ') INTO bad
     FROM pg_roles r
    WHERE pg_has_role('ob_rest_authenticator', r.oid, 'MEMBER') AND r.rolname <> 'ob_rest_authenticator'
-     AND (r.rolname !~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune)$' OR r.rolsuper OR r.rolbypassrls);
+     AND (r.rolname !~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune|import)$' OR r.rolsuper OR r.rolbypassrls);
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION 'rest door: the authenticator reaches a role that is not a door role: %', bad USING ERRCODE = '55000';
   END IF;
   SELECT count(*) INTO n_regrant FROM _rda_regrant;
-  RAISE NOTICE 'rest door: % function grant(s) made in place of PUBLIC''s this run (% recorded in all); 7 door roles',
+  RAISE NOTICE 'rest door: % function grant(s) made in place of PUBLIC''s this run (% recorded in all); 8 door roles',
     n_regrant, (SELECT count(*) FROM rest_door.regrants);
 END $$;
 
