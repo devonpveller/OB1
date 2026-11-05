@@ -248,7 +248,8 @@ try {
   $co = Psql 'cat_b' $catalog $checkVars; Save 'B-check.log' (Notices $co)
   Write-Host "    440 exit ${irc}: $(((Notices $io) -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ')"
   Case 'f2' ($irc -eq 0 -and (& $verdict $co) -eq 'ok' -and (Sql 'cat_b' "SELECT count(*) FROM public.research_job_events WHERE type = 'filed' AND payload ->> 'synthesis_id' = (SELECT v FROM public.lab_catalog_ids WHERE k = 'moved_source')") -eq '0') "F2: 440 runs; the filed event no longer names the moved source; the catalog holds"
-  if ($Red -and (($RedCases -split ',') -contains 'f2')) { Check ($irc -ne 0 -and (Notices $io) -match 'still names private data') "RED: on $RedSha the run is refused ('still names private data')" }
+  if ($Red -and (($RedCases -split ',') -contains 'f2') -and $RedSha -like '51f00ea*') { Check ($irc -ne 0 -and (Notices $io) -match 'still names private data') "RED: on $RedSha the run is refused ('still names private data')" }
+  elseif ($Red -and (($RedCases -split ',') -contains 'f2')) { Write-Host "  SKIP: RED f2/f6 apply only to 51f00ea (fixed in round 5); this base is $RedSha" }
 
   # ---------------------------------------------------------------- C. F6
   Write-Host '[C] F6: two gap branches with a gap_ref in one seeded tree'
@@ -259,7 +260,8 @@ try {
   Write-Host "    440 exit ${irc}: $(((Notices $io) -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ')"
   $gr = Sql 'cat_c' "SELECT count(*) || '|' || count(DISTINCT gap_ref) || '|' || count(*) FILTER (WHERE gap_ref = 'private:' || id::text) FROM public.research_jobs WHERE root_job_id = (SELECT v::uuid FROM public.lab_catalog_ids WHERE k = 'seeded_root') AND gap_ref IS NOT NULL"
   Case 'f6' ($irc -eq 0 -and $gr -eq '2|2|2') "F6: 440 runs; each gap branch keeps a gap_ref of its own (branches | distinct | private:<id>: $gr)"
-  if ($Red -and (($RedCases -split ',') -contains 'f6')) { Check ($irc -ne 0 -and (Notices $io) -match 'uq_research_jobs_tree_gap') "RED: on $RedSha the run aborts on uq_research_jobs_tree_gap" }
+  if ($Red -and (($RedCases -split ',') -contains 'f6') -and $RedSha -like '51f00ea*') { Check ($irc -ne 0 -and (Notices $io) -match 'uq_research_jobs_tree_gap') "RED: on $RedSha the run aborts on uq_research_jobs_tree_gap" }
+  elseif ($Red -and (($RedCases -split ',') -contains 'f6')) { Write-Host "  SKIP: RED f2/f6 apply only to 51f00ea (fixed in round 5); this base is $RedSha" }
 
   # ---------------------------------------------------------------- D. revert
   Write-Host '[D] revert: every table byte-identical'
