@@ -30,5 +30,12 @@ DROP FUNCTION IF EXISTS public.inlet_stamp_maintenance();
 DROP FUNCTION IF EXISTS public.inlet_connection_owner(TEXT);
 DROP TABLE IF EXISTS public.inlet_connections;
 DROP FUNCTION IF EXISTS public.inlet_subject_ok(TEXT);
+DROP FUNCTION IF EXISTS public.inlet_owner_column_ok(TEXT);
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_inlet_stamp_view') THEN
+        DROP ROLE ob_inlet_stamp_view;
+    END IF;
+END $$;
 DO $$ BEGIN RAISE NOTICE 'inlet stamp: reverted (slot 470 objects removed)'; END $$;
 COMMIT;

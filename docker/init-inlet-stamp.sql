@@ -22,7 +22,9 @@
 --      * sources: a shared source may never be personal - an email body (url mail.google.com), a podcast transcript, or a
 --        row carrying a Gmail id / thread / labels (440's predicate; they belong in 440's owner-private stores).
 --      * owner columns: podcast_episodes.owner_sub, research_handbacks.owner_sub and 440's private stores' owner columns
---        must pass inlet_subject_ok (CHECK, added NOT VALID then validated).
+--        must be a subject's shape and no service principal (inlet_owner_column_ok; CHECK, added NOT VALID then
+--        validated). The literal 'operator' is refused by the inlet writers and on thoughts / the record, not here (the
+--        workbench's single-user labs name their user 'operator').
 --      Triggers, not CHECKs, on thoughts and sources: the rule reads the connection record (another table), exempts one
 --      shaped writer, and treats INSERT and UPDATE differently; a CHECK on thoughts would also fire on every UPDATE of a
 --      legacy row (the entity worker, intake) and break writers instead of refusing new unowned rows. The triggers run
@@ -99,10 +101,18 @@ BEGIN
         EXECUTE format('REVOKE ALL ON public.inlet_connections FROM %I', r.grantee);
     END LOOP;
 END $$;
--- 440's view role (NOLOGIN) reads the record for the prune's view, and nothing else does
-GRANT SELECT ON public.inlet_connections TO ob_inlet_owner_view;
+-- this slot's own view role (NOLOGIN) reads the record for the prune's view, and nothing else does. Its own, not 440's
+-- ob_inlet_owner_view: 440's revert drops that role, and must not be blocked by an object of this slot.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_inlet_stamp_view') THEN
+        CREATE ROLE ob_inlet_stamp_view NOLOGIN NOBYPASSRLS;
+    END IF;
+END $$;
+GRANT service_role TO ob_inlet_stamp_view;   -- the ops plane's policy on thoughts, and its table grants
+GRANT SELECT ON public.inlet_connections TO ob_inlet_stamp_view;
 DROP POLICY IF EXISTS inlet_connections_view_read ON public.inlet_connections;
-CREATE POLICY inlet_connections_view_read ON public.inlet_connections AS PERMISSIVE FOR SELECT TO ob_inlet_owner_view USING (true);
+CREATE POLICY inlet_connections_view_read ON public.inlet_connections AS PERMISSIVE FOR SELECT TO ob_inlet_stamp_view USING (true);
 
 -- the seed
 SET LOCAL client_min_messages = notice;
@@ -162,7 +172,7 @@ COMMENT ON FUNCTION public.inlet_connection_owner(TEXT) IS
 
 -- ── 4. the prune's view, per connection ───────────────────────────────────────────────────────────────────────────
 -- the gmail thoughts of a connection's owner; a row that names no connection is the 'gmail' connection's (every mail
--- row before this slot came from that one mailbox). Owned by 440's view role, the only reader of the record.
+-- row before this slot came from that one mailbox). Owned by this slot's view role, the only reader of the record.
 CREATE OR REPLACE VIEW public.inlet_connection_mail WITH (security_barrier = true) AS
     SELECT t.id, t.content, t.metadata, t.created_at,
            coalesce(t.metadata ->> 'inlet_connection', 'gmail') AS inlet_connection
@@ -170,11 +180,11 @@ CREATE OR REPLACE VIEW public.inlet_connection_mail WITH (security_barrier = tru
      WHERE t.metadata ->> 'source' = 'gmail'
        AND t.user_id = (SELECT c.owner_sub FROM public.inlet_connections c
                          WHERE c.id = coalesce(t.metadata ->> 'inlet_connection', 'gmail'));
-ALTER VIEW public.inlet_connection_mail OWNER TO ob_inlet_owner_view;
+ALTER VIEW public.inlet_connection_mail OWNER TO ob_inlet_stamp_view;
 REVOKE ALL ON public.inlet_connection_mail FROM PUBLIC;
 GRANT SELECT, DELETE ON public.inlet_connection_mail TO service_role;
 COMMENT ON VIEW public.inlet_connection_mail IS
-  'rw-inlet-stamp (slot 470): a connection''s owner''s gmail thoughts, for prune-short-term.ts (filters inlet_connection, deletes by owner). Owned by ob_inlet_owner_view.';
+  'rw-inlet-stamp (slot 470): a connection''s owner''s gmail thoughts, for prune-short-term.ts (filters inlet_connection, deletes by owner). Owned by ob_inlet_stamp_view.';
 
 -- ── 3. the database fails closed ──────────────────────────────────────────────────────────────────────────────────
 -- maintenance (see the header): the session asked for it AND its EFFECTIVE role is a superuser. The guards are SECURITY
@@ -304,7 +314,19 @@ CREATE OR REPLACE TRIGGER trg_inlet_stamp_sources
     BEFORE INSERT OR UPDATE OF url, content_type, metadata ON public.sources
     FOR EACH ROW EXECUTE FUNCTION public.inlet_stamp_sources_guard();
 
--- the owner columns
+-- the owner columns. Their rule is the subject SHAPE and no service principal (inlet_owner_column_ok): the literal
+-- 'operator' is refused at the inlet writers (their code, thoughts.user_id, the record), but these columns are also
+-- written by the workbench for its signed-in user, and its single-user labs and fixtures name that user 'operator'.
+CREATE OR REPLACE FUNCTION public.inlet_owner_column_ok(p_sub TEXT) RETURNS BOOLEAN
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+    SELECT p_sub IS NOT NULL
+       AND p_sub ~ '^[A-Za-z0-9][A-Za-z0-9._@|+=:/-]{0,254}$'
+       AND p_sub !~* '^(service|system|anonymous):'
+$$;
+REVOKE ALL ON FUNCTION public.inlet_owner_column_ok(TEXT) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.inlet_owner_column_ok(TEXT) TO service_role;
 DO $$
 DECLARE c TEXT[];
 BEGIN
@@ -315,7 +337,7 @@ BEGIN
         ARRAY['inlet_private_jobs', 'owner_sub'], ARRAY['inlet_private_job_events', 'owner_sub']] LOOP
         IF to_regclass('public.' || c[1]) IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = ('public.' || c[1])::regclass AND conname = c[1] || '_inlet_stamp_owner_ok') THEN
-            EXECUTE format('ALTER TABLE public.%I ADD CONSTRAINT %I CHECK (public.inlet_subject_ok(%I)) NOT VALID', c[1], c[1] || '_inlet_stamp_owner_ok', c[2]);
+            EXECUTE format('ALTER TABLE public.%I ADD CONSTRAINT %I CHECK (public.inlet_owner_column_ok(%I)) NOT VALID', c[1], c[1] || '_inlet_stamp_owner_ok', c[2]);
             EXECUTE format('ALTER TABLE public.%I VALIDATE CONSTRAINT %I', c[1], c[1] || '_inlet_stamp_owner_ok');
         END IF;
     END LOOP;
@@ -329,6 +351,7 @@ BEGIN
         IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
             EXECUTE format('GRANT EXECUTE ON FUNCTION public.inlet_connection_owner(TEXT) TO %I', r);
             EXECUTE format('GRANT EXECUTE ON FUNCTION public.inlet_subject_ok(TEXT) TO %I', r);
+            EXECUTE format('GRANT EXECUTE ON FUNCTION public.inlet_owner_column_ok(TEXT) TO %I', r);
         END IF;
     END LOOP;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_rest_gmail_prune') THEN
