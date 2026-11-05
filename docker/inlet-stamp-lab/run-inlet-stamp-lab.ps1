@@ -176,6 +176,9 @@ try {
   Save '440-init.log' $r.out
   Check ($r.rc -eq 0 -and $r.out -match 'now the owner') "slot 440 with owner A: the existing personal data is A's"
   if (-not $Red) {
+    # the restore cases ([8b], [8c]) need a dump taken BEFORE 470 (the backup a live database has from before PD2)
+    $null = Dk exec $db pg_dump -U postgres -d openbrain -Fc -f /tmp/pre470.dump
+    Check ($script:rc -eq 0) 'a pg_dump of the database before 470 (for the restore cases)'
     $r = PsqlFile (Join-Path $dockerDir 'init-inlet-stamp.sql') @('-v', "owner_sub=$B")
     Check ($r.rc -ne 0 -and $r.out -match 'belongs to the subject slot 440 recorded' -and (Q "SELECT to_regclass('public.inlet_connections') IS NULL") -eq 't') '470 naming a subject other than 440''s record is refused, nothing changed'
     $r = PsqlFile (Join-Path $dockerDir 'init-inlet-stamp.sql') @()
@@ -398,6 +401,34 @@ try {
     Check ($r.rc -eq 0 -and $r.out -match 'nothing to do' -and $crossedAfter -eq '0') "after the stamped runs, 440's re-run has nothing to stamp ('nothing to do'; B rows stamped as A: $crossedAfter)"
   }
 
+  # the restore runbook (documentation/runbooks/restore-from-snapshot.md): pg_restore --clean --if-exists --no-owner
+  # --no-acl, then the slot re-apply (440, 470: --no-acl drops every grant and --no-owner the view's owner)
+  $snapSql = "SELECT (SELECT count(*) FROM public.thoughts) || '|' || (SELECT md5(coalesce(string_agg(id::text || ':' || coalesce(user_id, '-'), ',' ORDER BY id), '')) FROM public.thoughts) || '|' || (SELECT count(*) FROM public.sources) || '|' || (SELECT md5(coalesce(string_agg(id::text, ',' ORDER BY id), '')) FROM public.sources)"
+  $guardSql = "SELECT (SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_inlet_stamp_thoughts', 'trg_inlet_stamp_sources') AND tgenabled = 'A') || '|' || coalesce((SELECT string_agg(id || '=' || owner_sub, ',' ORDER BY id) FROM public.inlet_connections), '-') || '|' || coalesce((SELECT pg_get_userbyid(c.relowner) FROM pg_class c WHERE c.oid = to_regclass('public.inlet_connection_mail')), '-')"
+  $restore = { param($dump) $o = Dk exec $db pg_restore -U postgres -d openbrain --clean --if-exists --no-owner --no-acl $dump; @{ rc = $script:rc; out = $o } }
+  $reapply = {
+    $a1 = PsqlFile (Join-Path $dockerDir 'init-inlet-owner.sql') @()
+    $a2 = PsqlFile (Join-Path $dockerDir 'init-inlet-stamp.sql') @()
+    @{ rc = [Math]::Max($a1.rc, $a2.rc); out = "$($a1.out)`n$($a2.out)" }
+  }
+  if (-not $Red) {
+    Write-Host '[8b] the restore runbook: a dump taken after 440 + 470, restored in place into the 470 database'
+    $null = Dk stop $pgrst $caddy   # the runbook stops every user of the database first
+    $null = Dk exec $db pg_dump -U postgres -d openbrain -Fc -f /tmp/post470.dump
+    $before = Q $snapSql; $gBefore = Q $guardSql
+    $rr = & $restore '/tmp/post470.dump'
+    $after = Q $snapSql; $gMid = Q $guardSql
+    $ra = & $reapply
+    $gAfter = Q $guardSql
+    $probeIns = Dk exec $db psql -U postgres -d openbrain -X -A -t -c "INSERT INTO thoughts (content, metadata, exposure) VALUES ('restore probe $rand', jsonb_build_object('source', 'mcp', 'exposure', 'ops'), 'ops') RETURNING 'landed'"
+    Save 'restore-post470.log' ("pg_restore exit $($rr.rc)`n$($rr.out)`n--- re-apply exit $($ra.rc)`n$($ra.out)`n--- rows before $before / after $after`n--- guards+record+view owner: before $gBefore / after the restore $gMid / after the re-apply $gAfter`n--- unowned insert after: $probeIns")
+    Write-Host "    pg_restore exit $($rr.rc); rows $before -> $after; guards/record/view owner: $gBefore -> $gMid -> $gAfter"
+    Check ($rr.rc -eq 0 -and $after -eq $before) "the post-470 dump restores in place with every row (thoughts and sources: count + md5 of id/owner equal: $after)"
+    Check ($ra.rc -eq 0 -and $gAfter -eq $gBefore -and ($gAfter -split '\|')[0] -eq '2') "after the runbook's slot re-apply the guards are ALWAYS-enabled, the record is intact and the view is owned by its role again ($gAfter)"
+    Check ($probeIns -match 'inlet stamp' -and $probeIns -notmatch 'landed') 'after the restore the guard refuses an unowned personal row'
+    $null = Dk start $pgrst $caddy
+    Start-Sleep -Seconds 4
+  }
   if (-not $Red) {
     Write-Host '[8] the 470 drill: init again, a subject check, 440''s revert first (refused), revert 470 x2, 440''s revert, init before 440 (refused), 440, init (re-seeded)'
     $r = PsqlFile (Join-Path $dockerDir 'init-inlet-stamp.sql') @()
@@ -424,6 +455,33 @@ try {
     $r2 = PsqlFile (Join-Path $dockerDir 'init-inlet-stamp.sql') @()
     $conns = Q "SELECT string_agg(id, ',' ORDER BY id) FROM public.inlet_connections"
     Check ($r.rc -eq 0 -and $r2.rc -eq 0 -and $conns -eq 'gmail,vault' -and (Q "SELECT count(*) FROM public.thoughts WHERE user_id IS NULL AND content LIKE 'drill unowned%'") -eq '0') "440 stamps it, then 470 applies and re-seeds the record from 440's ($conns; a PD4 connection is recorded again by its flow)"
+
+    Write-Host '[8c] the restore runbook with a dump taken BEFORE 470, into the 470 database: as the runbook says, and the documented order'
+    $null = Dk stop $pgrst $caddy
+    # what the dump holds (restored into a scratch database, the reference for "every row")
+    $null = Q "DROP DATABASE IF EXISTS lab_pre470_ref"
+    $null = Q "CREATE DATABASE lab_pre470_ref"
+    $null = Dk exec $db pg_restore -U postgres -d lab_pre470_ref --no-owner --no-acl /tmp/pre470.dump
+    $want = "$(Dk exec $db psql -U postgres -d lab_pre470_ref -X -A -t -c $snapSql)".Trim()
+    # (1) the runbook as written, straight into the 470 database
+    $rr = & $restore '/tmp/pre470.dump'
+    $got = Q $snapSql; $gNow = Q $guardSql
+    $errLines = @(($rr.out -split "`n") | Where-Object { $_ -match 'error' })
+    Save 'restore-pre470-naive.log' ("pg_restore exit $($rr.rc)`n$($rr.out)`n--- want $want / got $got / guards $gNow")
+    Write-Host "    as written: pg_restore exit $($rr.rc), $($errLines.Count) error line(s); rows want $want got $got; guards $gNow"
+    Check ($rr.rc -ne 0 -and $errLines.Count -ge 1) "a PRE-470 dump restored with the runbook as written into a 470 database is NOT silent: pg_restore exits non-zero and names the errors ($($errLines.Count))"
+    # (2) the documented order: take 470 off, restore, then re-apply (440 stamps the dump's unowned rows, then 470)
+    $rv = PsqlFile (Join-Path $dockerDir 'revert-inlet-stamp.sql') @()
+    $rr2 = & $restore '/tmp/pre470.dump'
+    $got2 = Q $snapSql
+    $ra2 = & $reapply
+    $g2 = Q $guardSql
+    $unowned2 = Q "SELECT count(*) FROM public.thoughts WHERE user_id IS NULL"
+    Save 'restore-pre470-ordered.log' ("revert 470 exit $($rv.rc)`npg_restore exit $($rr2.rc)`n$($rr2.out)`n--- want $want / got $got2`n--- re-apply exit $($ra2.rc)`n$($ra2.out)`n--- guards $g2; unowned after $unowned2")
+    Write-Host "    documented order: revert 470 $($rv.rc), pg_restore $($rr2.rc), rows want $want got $got2, re-apply $($ra2.rc), guards $g2, unowned $unowned2"
+    Check ($rv.rc -eq 0 -and $rr2.rc -eq 0 -and $got2 -eq $want) "the documented order (revert 470, restore the pre-470 dump) restores every row of it ($got2)"
+    Check ($ra2.rc -eq 0 -and ($g2 -split '\|')[0] -eq '2' -and $unowned2 -eq '0') "then the re-apply (440 stamps the dump's unowned rows, 470 seeds its record) leaves the guards ALWAYS-enabled ($g2; unowned $unowned2)"
+    $null = Q "DROP DATABASE IF EXISTS lab_pre470_ref"
   }
 } catch {
   Fail "the lab stopped: $($_.Exception.Message) at line $($_.InvocationInfo.ScriptLineNumber)"
