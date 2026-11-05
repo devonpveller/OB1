@@ -244,6 +244,8 @@ try {
   if ($Red) { Pass "RED base: the chain is this tree's (the room tables exist; the base workbench has no routes over them): $tables" }
   else { Check ($tables -eq 'workspace_room_entries:true,workspace_rooms:true') "the room store exists with row-level security on ($tables)" }
   $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
+  # rw-inlet-stamp (slot 470): this lab's fixtures are legacy-shaped (unowned thoughts, as before PD1); its SUPERUSER sessions may write them (the maintenance setting - no app role and no PostgREST request can)
+  $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF to_regprocedure('public.inlet_stamp_maintenance()') IS NOT NULL THEN ALTER DATABASE openbrain SET inlet_stamp.allow_unowned = 'on'; END IF; END `$`$"
   Check ($script:rc -eq 0) 'ob_app_memory (non-superuser, service_role) - the production shape'
   $null = Dk cp (Join-Path $ct 'fixtures.sql') "${db}:/tmp/fixtures.sql"
   $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/fixtures.sql
