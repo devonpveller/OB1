@@ -67,7 +67,7 @@ function Note([string]$m) { Write-Host "    $m"; $stepLog.Add($m) }
 function Save([string]$name, [string]$text) { [System.IO.File]::WriteAllText((Join-Path $evStage $name), $text, (New-Object System.Text.UTF8Encoding $false)) }
 
 # -- docker: the lab project only ----------------------------------------------------------------------------
-function Run-Proc([int]$TimeoutSec, [string]$exe, [string[]]$a, [string]$stdin = $null) {
+function Run-Proc([int]$TimeoutSec, [string]$exe, [string[]]$a, [string]$stdin = $null, [switch]$StdoutOnly) {
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $exe
   $psi.Arguments = ($a | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join ' '
@@ -78,6 +78,7 @@ function Run-Proc([int]$TimeoutSec, [string]$exe, [string[]]$a, [string]$stdin =
   $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
   if (-not $p.WaitForExit($TimeoutSec * 1000)) { try { $p.Kill() } catch { }; $script:rc = 124; return "TIMEOUT after ${TimeoutSec}s" }
   $p.WaitForExit(); $script:rc = $p.ExitCode
+  if ($StdoutOnly) { $script:lastErr = $err.Result; return (($out.Result) -replace "`r", '').TrimEnd() }
   return (($out.Result + $err.Result) -replace "`r", '').TrimEnd()
 }
 function Dk { $a = [string[]]$args
@@ -91,9 +92,9 @@ function LabCompose { $a = [string[]]$args
 function Render([string]$what) {
   # the live files of the lab directory, rendered as compose renders the live checkout, then made a lab project
   $raw = Join-Path $work "rendered-$what.json"
-  $o = Run-Proc 300 'docker' @('compose', '--project-directory', $liveDocker, '-f', (Join-Path $liveDocker 'docker-compose.yml'), '--profile', 'wiki', 'config', '--format', 'json')
-  if ($script:rc -ne 0) { Fail "render ($what) failed: $(($o -split "`n" | Select-Object -Last 3) -join ' ')"; return $false }
-  $json = ($o -split "`n" | Where-Object { $_ -notmatch '^(time=|WARN|level=)' }) -join "`n"
+  $o = Run-Proc 300 'docker' @('compose', '--project-directory', $liveDocker, '-f', (Join-Path $liveDocker 'docker-compose.yml'), '--profile', 'wiki', 'config', '--format', 'json') -StdoutOnly
+  if ($script:rc -ne 0) { Fail "render ($what) failed: $((($script:lastErr -split "`n") | Where-Object { $_ -notmatch 'level=warning' } | Select-Object -Last 3) -join ' ')"; return $false }
+  $json = $o
   [System.IO.File]::WriteAllText($raw, $json, (New-Object System.Text.UTF8Encoding $false))
   $t = Run-Proc 120 'python' @('-I', (Join-Path $ct 'rest-door-deploy-compose.py'), $raw, $labFile, (Split-HarnessSubnet $Subnet).run, $Id, $NodeImage, $proj)
   Note "render ($what): $t"
