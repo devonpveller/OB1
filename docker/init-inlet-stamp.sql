@@ -195,14 +195,34 @@ AS $$
        AND coalesce(p_meta ->> 'generated_by', '') = 'recipes/entity-wiki/generate-wiki.mjs'
 $$;
 
+-- the verified token of a door request (slot 450): PostgREST sets request.jwt.claims from the JWT it checked; a client
+-- cannot set it. NULL outside a door request (direct PG, PostgREST's anonymous role). This is the caller's IDENTITY, read
+-- to refuse more - it switches nothing off.
+CREATE OR REPLACE FUNCTION public.inlet_stamp_door_claims() RETURNS JSONB
+LANGUAGE plpgsql STABLE
+SET search_path = pg_catalog
+AS $$
+DECLARE v TEXT := NULLIF(btrim(coalesce(current_setting('request.jwt.claims', true), '')), '');
+BEGIN
+    IF v IS NULL OR left(v, 1) <> '{' THEN
+        RETURN NULL;
+    END IF;
+    RETURN v::jsonb;
+EXCEPTION WHEN others THEN
+    RETURN NULL;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.inlet_stamp_door_claims() FROM PUBLIC;
+
 -- SECURITY DEFINER: the record is readable by no app role, and the helpers it calls need no grant to the writer
 CREATE OR REPLACE FUNCTION public.inlet_stamp_thoughts_guard() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-    v_conn  TEXT := NEW.metadata ->> 'inlet_connection';
-    v_owner TEXT;
+    v_conn   TEXT := NEW.metadata ->> 'inlet_connection';
+    v_owner  TEXT;
+    v_claims JSONB;
 BEGIN
     IF TG_OP = 'UPDATE' THEN
         IF OLD.user_id IS NOT NULL AND NEW.user_id IS DISTINCT FROM OLD.user_id THEN
@@ -213,6 +233,12 @@ BEGIN
         END IF;
         IF NEW.user_id IS DISTINCT FROM OLD.user_id AND NOT public.inlet_subject_ok(NEW.user_id) THEN
             RAISE EXCEPTION 'inlet stamp: a thought''s owner must be a valid subject' USING ERRCODE = '23514';
+        END IF;
+        -- a door request may give a legacy row an owner only as it may write one (its verified subject, or its connection's)
+        v_claims := public.inlet_stamp_door_claims();
+        IF NEW.user_id IS DISTINCT FROM OLD.user_id AND coalesce(v_claims ->> 'role', '') LIKE 'ob\_rest\_%'
+           AND v_conn IS NULL AND NEW.user_id IS DISTINCT FROM (v_claims ->> 'sub') THEN
+            RAISE EXCEPTION 'inlet stamp: a door caller may write only rows owned by its verified subject or by its inlet connection''s recorded owner' USING ERRCODE = '23514';
         END IF;
         IF v_conn IS NULL OR v_conn IS NOT DISTINCT FROM (OLD.metadata ->> 'inlet_connection') THEN
             RETURN NEW;
@@ -226,6 +252,18 @@ BEGIN
         END IF;
         IF NOT public.inlet_subject_ok(NEW.user_id) THEN
             RAISE EXCEPTION 'inlet stamp: a thought''s owner must be a valid subject (never blank, a service principal or the literal operator)' USING ERRCODE = '23514';
+        END IF;
+        -- a door request (slot 450: PostgREST verified the caller's token): the owner is the inlet connection's record
+        -- (checked below) or, for a row that names no connection, the token's own verified subject - never a user_id
+        -- the caller chose for someone else. The import role names no connection at all (imports are not inlets).
+        v_claims := public.inlet_stamp_door_claims();
+        IF coalesce(v_claims ->> 'role', '') LIKE 'ob\_rest\_%' THEN
+            IF v_claims ->> 'role' = 'ob_rest_import' AND v_conn IS NOT NULL THEN
+                RAISE EXCEPTION 'inlet stamp: an import names no inlet connection' USING ERRCODE = '23514';
+            END IF;
+            IF v_conn IS NULL AND NEW.user_id IS DISTINCT FROM (v_claims ->> 'sub') THEN
+                RAISE EXCEPTION 'inlet stamp: a door caller may write only rows owned by its verified subject or by its inlet connection''s recorded owner' USING ERRCODE = '23514';
+            END IF;
         END IF;
         IF v_conn IS NULL THEN
             IF NEW.metadata ->> 'source' = 'gmail' THEN

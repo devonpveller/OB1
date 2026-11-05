@@ -50,6 +50,7 @@ $short = ($Id -replace '^wt-', '')
 $pyTag = "openbrain-inlet-stamp-py:wt-$short"
 if ($pyTag -match ':local$') { throw 'refusing a :local tag' }
 $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+$jwtSecret = -join ((48..57 + 97..122) | Get-Random -Count 40 | ForEach-Object { [char]$_ })   # the lab PostgREST's, per run
 $mode = if ($Red) { 'red' } else { 'green' }
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "rwis-evidence-$mode-$rand" }
 New-Item -ItemType Directory -Force $Evidence | Out-Null
@@ -184,10 +185,14 @@ try {
     $null = Q "INSERT INTO public.inlet_connections (id, kind, owner_sub) VALUES ('gmail-b', 'gmail', '$B')"
     Check ((Q "SELECT owner_sub = '$B' FROM public.inlet_connections WHERE id = 'gmail-b'") -eq 't') 'a second inlet connection, gmail-b, owned by B (the PD4 stand-in: two seeded inlet owners)'
   }
+  # a lab stand-in for slot 450's import door role (450 is not in this chain): a NOLOGIN role PostgREST switches to
+  # from a verified token; it writes thoughts as the ops plane allows (service_role)
+  $null = Q "DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_rest_import') THEN CREATE ROLE ob_rest_import NOLOGIN NOBYPASSRLS IN ROLE service_role; END IF; END `$`$"
+  Check ((Q "SELECT count(*) FROM pg_roles WHERE rolname = 'ob_rest_import'") -eq '1') 'a lab stand-in for 450''s import door role (ob_rest_import, a member of service_role)'
   $t0 = Q "SELECT max(id) FROM public.thoughts"
 
   Write-Host '[4] PostgREST behind the real Caddyfile, and the stubs (Gmail API, the gateway aliases)'
-  $o = Dk run -d --name $pgrst --label $label --network $net --network-alias openbrain-postgrest -e "PGRST_DB_URI=postgres://postgres:$pw@${db}:5432/openbrain" -e PGRST_DB_SCHEMAS=public -e PGRST_DB_ANON_ROLE=service_role -e PGRST_SERVER_PORT=3000 $PgrstImage
+  $o = Dk run -d --name $pgrst --label $label --network $net --network-alias openbrain-postgrest -e "PGRST_DB_URI=postgres://postgres:$pw@${db}:5432/openbrain" -e PGRST_DB_SCHEMAS=public -e PGRST_DB_ANON_ROLE=service_role -e PGRST_SERVER_PORT=3000 -e "PGRST_JWT_SECRET=$jwtSecret" $PgrstImage
   if ($script:rc -eq 0) { $made.containers += $pgrst } else { Fail "PostgREST did not start" }
   $o = Dk run -d --name $caddy --label $label --network $net --network-alias openbrain-rest -v "$(Join-Path $dockerDir 'Caddyfile'):/etc/caddy/Caddyfile:ro" $CaddyImage
   if ($script:rc -eq 0) { $made.containers += $caddy } else { Fail "Caddy did not start: $o" }
@@ -303,7 +308,7 @@ try {
   }
 
   Write-Host '[6] the database''s refusal per writer shape: PostgREST (probe.ts) and direct PG as ob_app_memory (the MCP lanes)'
-  $r = Run 120 (@('-v', "${labDir}:/lab:ro", '-e', 'REST=http://openbrain-rest', '-e', "OWNER_A=$A", '-e', "OWNER_B=$B", '-e', "MARK_A=$MA", '-e', "MARK_B=$MB", '-e', "LABTAG=$mode$rand",
+  $r = Run 120 (@('-v', "${labDir}:/lab:ro", '-e', 'REST=http://openbrain-rest', '-e', "OWNER_A=$A", '-e', "OWNER_B=$B", '-e', "MARK_A=$MA", '-e', "MARK_B=$MB", '-e', "LABTAG=$mode$rand", '-e', "JWT_SECRET=$jwtSecret",
     '--entrypoint', 'deno', $DenoImage, 'run', '--allow-net', '--allow-env', '/lab/probe.ts'))
   Save 'probe.log' $r.out
   $pm = ([regex]'(?m)^PROBE (.+)$').Match($r.out)
@@ -324,9 +329,10 @@ try {
   $su2 = & $mx "SET session_replication_role = replica;"   # what 440's init / revert do for parts of themselves
   $alwaysOn = Q "SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_inlet_stamp_thoughts', 'trg_inlet_stamp_sources') AND tgenabled = 'A'"
   $null = Q "DELETE FROM public.thoughts WHERE content LIKE 'escape probe%'"
-  $guardDefs = Q "SELECT string_agg(pg_get_functiondef(p.oid), ' ') FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('inlet_stamp_thoughts_guard', 'inlet_stamp_sources_guard', 'inlet_stamp_is_dossier', 'inlet_stamp_source_personal', 'inlet_subject_ok', 'inlet_owner_column_ok')"
+  $guardDefs = Q "SELECT string_agg(pg_get_functiondef(p.oid), ' ') FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('inlet_stamp_thoughts_guard', 'inlet_stamp_sources_guard', 'inlet_stamp_is_dossier', 'inlet_stamp_source_personal', 'inlet_subject_ok', 'inlet_owner_column_ok', 'inlet_stamp_door_claims')"
   $sqlText = if (Test-Path (Join-Path $dockerDir 'init-inlet-stamp.sql')) { [IO.File]::ReadAllText((Join-Path $dockerDir 'init-inlet-stamp.sql')) } else { '' }
-  $escRx = 'current_setting\s*\(|session_user|current_user|rolsuper|pg_has_role|allow_unowned|session_replication_role'
+  # the one setting the guard path reads is PostgREST's verified token (the caller's identity, read to refuse more)
+  $escRx = "current_setting\s*\(\s*'(?!request\.jwt\.claims')|session_user|current_user|rolsuper|pg_has_role|allow_unowned|session_replication_role"
   $escInDb = [regex]::Matches($guardDefs, $escRx, 'IgnoreCase').Count
   $sqlNoComments = (($sqlText -split "`n") | ForEach-Object { $_ -replace '--.*$', '' }) -join "`n"
   $escInFile = [regex]::Matches($sqlNoComments, 'allow_unowned|session_replication_role|DISABLE\s+TRIGGER|rolsuper\s+THEN', 'IgnoreCase').Count
@@ -338,9 +344,9 @@ try {
     $refusedCases = @('pull shape, no owner', 'pull shape, owner but no connection', "pull shape, A's row naming B's connection", 'pull shape, unknown connection',
       'pull shape, the literal operator', 'pull shape, a service principal', 'pull shape, blank owner', 'import shape, no owner', 'note shape, no owner',
       'note shape, B on the vault', 'dossier look-alike, unowned', 'source, an email body', 'source, a podcast transcript', 'source, a Gmail id',
-      'episode, a service principal')
+      'episode, a service principal', "import token for A, a row with B's user_id", "import token for A, a row naming B's connection")
     $okCases = @('pull shape, owned right (control)', 'import shape, owned (control)', 'note shape, the vault''s owner (control)', 'dossier, unowned (control)',
-      'source, a public article (control)', 'episode, A (control)', 'episode, the literal operator (allowed on the column: the workbench labs'' user)')
+      'source, a public article (control)', 'episode, A (control)', 'episode, the literal operator (allowed on the column: the workbench labs'' user)', "import token for A, A's own row (control)")
     $refusedOk = @($refusedCases | Where-Object { $wr.$_.status -ge 400 -and $wr.$_.refused }).Count
     $acceptedBad = @($refusedCases | Where-Object { $wr.$_.status -lt 300 }).Count
     $controlsOk = @($okCases | Where-Object { $wr.$_.status -ge 200 -and $wr.$_.status -lt 300 }).Count
@@ -349,6 +355,7 @@ try {
       Check (@($redUnowned).Count -eq 8) "RED: through PostgREST the base accepts every unowned or personal shape - the pull's, the imports', the note's, a dossier look-alike, an email-body / transcript / Gmail-id source, an episode owned by a service principal ($(@($redUnowned).Count) of 8)"
       Check (-not $m1.refused -and $m1.rc -eq 0 -and -not $m2.refused -and $m2.rc -eq 0) 'RED: direct PG as ob_app_memory, the MCP lanes'' unstamped capture_thought and agent-memory inserts are accepted'
       Check (-not $clrRefused) 'RED: an owner can be cleared again by an app role'
+      Check ($wr."import token for A, a row with B's user_id".status -lt 300) "RED: a door caller (the import role, verified subject A) writes a row owned by B ($($wr."import token for A, a row with B's user_id".status))"
     } else {
       Check ($refusedOk -eq $refusedCases.Count -and $acceptedBad -eq 0) "PostgREST: every unowned or wrongly owned shape is refused by the database, naming the guard ($refusedOk of $($refusedCases.Count); accepted $acceptedBad)"
       Check ($controlsOk -eq $okCases.Count) "PostgREST: the correctly owned controls land, and the compile's dossier stays shared ($controlsOk of $($okCases.Count))"

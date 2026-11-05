@@ -10,8 +10,17 @@ const TAG = Deno.env.get("LABTAG") ?? "probe";
 const H = { "Content-Type": "application/json", Accept: "application/json", apikey: "local-trust", Prefer: "return=representation" };
 const VEC = (() => { const v = new Array(1024).fill(0); v[0] = 1; return v; })();
 
-async function post(path: string, body: unknown) {
-  const r = await fetch(`${REST}/${path}`, { method: "POST", headers: H, body: JSON.stringify(body) });
+// a door token (slot 450's shape: role + verified sub), signed with the lab PostgREST's secret
+const SECRET = Deno.env.get("JWT_SECRET") ?? "";
+const b64u = (b: Uint8Array | string) => btoa(typeof b === "string" ? b : String.fromCharCode(...b)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+async function jwt(claims: Record<string, unknown>): Promise<string> {
+  const head = b64u(JSON.stringify({ alg: "HS256", typ: "JWT" })), body = b64u(JSON.stringify({ ...claims, exp: Math.floor(Date.now() / 1000) + 600 }));
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${head}.${body}`)));
+  return `${head}.${body}.${b64u(sig)}`;
+}
+async function post(path: string, body: unknown, token?: string) {
+  const r = await fetch(`${REST}/${path}`, { method: "POST", headers: token ? { ...H, Authorization: `Bearer ${token}` } : H, body: JSON.stringify(body) });
   const t = await r.text();
   return { status: r.status, refused: /inlet stamp|inlet_stamp_owner_ok|inlet_subject_ok/.test(t), text: t };
 }
@@ -21,8 +30,8 @@ const thought = (extra: Record<string, unknown>, meta: Record<string, unknown>) 
 });
 
 const writes: Record<string, { status: number; refused: boolean; why?: string }> = {};
-const w = async (name: string, path: string, body: unknown) => {
-  const r = await post(path, body);
+const w = async (name: string, path: string, body: unknown, token?: string) => {
+  const r = await post(path, body, token);
   // the database's own message (never row content) for any answer that is not a 2xx
   writes[name] = { status: r.status, refused: r.refused, ...(r.status >= 300 ? { why: r.text.replace(/[^ -~]/g, "").slice(0, 160) } : {}) };
 };
@@ -38,6 +47,11 @@ await w("pull shape, owned right (control)", "thoughts", thought({ user_id: A },
 // the import scripts' shape (google-activity / chatgpt): no owner
 await w("import shape, no owner", "thoughts", thought({}, { source: "google_activity" }));
 await w("import shape, owned (control)", "thoughts", thought({ user_id: B }, { source: "chatgpt" }));
+// a door caller (slot 450's import role, its token's verified subject A) - the stamp is never a caller-chosen other owner
+const importA = await jwt({ role: "ob_rest_import", sub: A });
+await w("import token for A, a row with B's user_id", "thoughts", thought({ user_id: B }, { source: "chatgpt" }), importA);
+await w("import token for A, a row naming B's connection", "thoughts", thought({ user_id: B }, { source: "gmail", gmail_id: `p-${TAG}-9`, inlet_connection: "gmail-b" }), importA);
+await w("import token for A, A's own row (control)", "thoughts", thought({ user_id: A }, { source: "chatgpt" }), importA);
 // the wiki note mirror's shape (wiki-service.mjs)
 await w("note shape, no owner", "thoughts", thought({}, { source: "user_note", note_path: `notes/notebooks/lab/${TAG}.md` }));
 await w("note shape, the vault's owner (control)", "thoughts", thought({ user_id: A }, { source: "user_note", note_path: `notes/notebooks/lab/${TAG}-2.md`, inlet_connection: "vault" }));
