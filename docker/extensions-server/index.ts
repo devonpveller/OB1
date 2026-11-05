@@ -26,8 +26,7 @@ import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
 import { z } from "zod";
 import { Pool } from "postgres";
-import { AsyncLocalStorage } from "node:async_hooks";
-import { callerStore, extUserId, loadIdentityConfig, NO_IDENTITY_WRITE, resolveCaller, writerSubject } from "./mcp-identity.ts";
+import { callerStore, extUserId, newRequestStore, loadIdentityConfig, NO_IDENTITY_WRITE, resolveCaller, writerSubject } from "./mcp-identity.ts";
 
 const pool = new Pool({
   hostname: Deno.env.get("DB_HOST") || "openbrain-db",
@@ -43,7 +42,7 @@ const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 const IDENTITY = loadIdentityConfig((k) => Deno.env.get(k));
 for (const w of IDENTITY.warnings) console.error(`[open-brain-extensions] ${w}`);
 // the request's row owner (user_id), set by the identity middleware for a request with a verified subject
-const extUserStore = new AsyncLocalStorage<string>();
+const extUserStore = newRequestStore<string>();
 /** The row owner of the request being served; throws the refusal when it has no verified identity. */
 function uid(): string {
   const u = extUserStore.getStore();

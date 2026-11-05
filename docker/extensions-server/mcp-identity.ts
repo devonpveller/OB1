@@ -25,7 +25,12 @@
 // THE SUBJECT IS HELD PER REQUEST in an AsyncLocalStorage (callerStore.run around the request); currentCaller() throws
 // outside a request, so no code path can fall back to a default subject by accident.
 
-import { AsyncLocalStorage } from "node:async_hooks";
+// AsyncLocalStorage through a NON-literal specifier: a literal "node:async_hooks" import makes a type check resolve
+// @types/node, which a cache-only consumer (the contract lab's d5 binding test runs index.ts offline) does not hold.
+// The runtime module is Deno's built-in node compat; the shape used here is typed below.
+export interface Als<T> { run<R>(store: T, fn: () => R): R; getStore(): T | undefined }
+const ASYNC_HOOKS = ["node", "async_hooks"].join(":");
+const { AsyncLocalStorage } = (await import(ASYNC_HOOKS)) as { AsyncLocalStorage: new <T>() => Als<T> };
 
 export type Lane = "full" | "personal" | "owui";
 
@@ -245,7 +250,12 @@ export async function verifyUserToken(token: string, oidc: OidcConfig, nowSec: n
   return sub;
 }
 
-export const callerStore = new AsyncLocalStorage<Caller>();
+export const callerStore: Als<Caller> = new AsyncLocalStorage<Caller>();
+
+/** Another per-request store (openbrain-ext keeps its row owner in one). */
+export function newRequestStore<T>(): Als<T> {
+  return new AsyncLocalStorage<T>();
+}
 
 /** The caller of the request being served. Throws outside a request: there is no default subject. */
 export function currentCaller(): Caller {
