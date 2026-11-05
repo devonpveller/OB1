@@ -299,6 +299,28 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     [`The sweep report claim ${rnd()} held in 12 trials.`]))[0].id;
   await sql(`SELECT public.link_claim_to_source($1::uuid, $2::uuid, 'states', 1.0)`, [bReportClaim, FX_ACTIVE]);
   await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2)`, [bReport, bReportClaim]);
+  // rw-boundary-core (plan 09 PD0a; slot 420): B's private hand-back (the inlet id, the delivery target and the owner's
+  // review of a refused question, each a marker) - no route may read it; a service:shared-key prompt on an unclassified
+  // job (the 88 live ones' shape: hidden from every non-admin, D5) - A must not read it; and a DERIVED job, whose
+  // question is public: A must read it (the positive control). Skipped on a base without slot 420.
+  const bnd = { inlet: `HandbackInlet${rnd()}`, deliver: `HandbackDeliver${rnd()}`, view: `HandbackView${rnd()}`, svc: `SvcPromptSecret${rnd()}`, pub: `DerivedPublic${rnd()}` };
+  const has420 = (await sql<{ ok: boolean }>(`SELECT to_regclass('public.research_handbacks') IS NOT NULL AS ok`))[0].ok;
+  let bHandback = "", derivedJob = "";
+  if (has420) {
+    bHandback = (await sql<{ id: string }>(
+      `SELECT public.handback_open($1, 'idea', $2, 1, 'idea-research', NULL, 'awaiting_owner', '{}'::jsonb, jsonb_build_object('candidate', $3::text), jsonb_build_object('idea_id', $4::text))::text AS id`,
+      [bSub, bnd.inlet, bnd.view, bnd.deliver]))[0].id;
+    derivedJob = (await sql<{ id: string }>(
+      `INSERT INTO public.research_jobs (status, origin, caller, query, anchor, request_kind, boundary, options, finished_at)
+       VALUES ('done', 'manual', 'boundary', $1, $1, 'derived', '{"version":"pd0a-2","lexicon":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","verdict_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}'::jsonb, '{"public_links":[]}'::jsonb, now())
+       RETURNING id::text AS id`, [`What is publicly known about ${bnd.pub}?`]))[0].id;
+  }
+  const svcJob = (await sql<{ id: string }>(
+    `INSERT INTO public.research_jobs (status, origin, caller, query, finished_at) VALUES ('done', 'manual', 'shared-key', $1, now()) RETURNING id::text AS id`,
+    [`What does the shared key ask about ${bnd.svc}?`]))[0].id;
+  await sql(`INSERT INTO public.research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES ($1::uuid, 'service:shared-key', 'service:shared-key', $2)`,
+    [svcJob, `What does the shared key ask about ${bnd.svc}?`]);
+  console.log(`sweep: slot 420 ${has420 ? "present: B's hand-back, a derived job" : "absent (base): skipped the hand-back"}; a service:shared-key prompt on an unclassified job planted`);
   const bIdeaBefore = (await sql(`SELECT summary, title, status, current_revision FROM public.ideas WHERE id = $1`, [bRefinery]))[0];
   const bRoomEntriesBefore = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.workspace_room_entries WHERE room_id IN ($1::uuid, $2::uuid)`, [bRoom, bSessRoom]))[0].n;
   const bMembersBefore = await sql(`SELECT member_kind, member_ref FROM public.refinery_members WHERE refinery_id = $1 ORDER BY member_kind, member_ref`, [bRefinery]);
@@ -365,6 +387,8 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
     exportSecret, leadSecret, ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])),
     privReport: privMk.text, privTitle: privMk.title, privKey: privMk.key, privReportId: bReport,
+    ...(bHandback ? { handbackInlet: bnd.inlet, handbackDeliver: bnd.deliver, handbackView: bnd.view, handbackId: bHandback } : {}),
+    ...(!aIsAdmin ? { svcPrompt: bnd.svc } : {}),
     roomEntry: room.entry, roomDraft: room.draft, roomId: bRoom, ideaEdit: ideaMk.edit, ideaDossier: ideaMk.dossier, ideaDraft: ideaMk.draft, sessionRoomId: bSessRoom, ...(bChat.status === 201 ? { roomChat: room.chat } : {}) };
   const doorName = (d: string) => d === BASE ? "workbench" : "viewer";
   const hits: string[] = [];
@@ -543,6 +567,13 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     assertEquals(a.text, b.text, `${p}: shared knowledge reads the same for both users`);
   }
   assertEquals((await wb("GET", `/workbench/contract/search?q=fixture`)).status, 200, "shared search answers");
+  // rw-boundary-core: a derived job's question is public - A reads it on its session (the positive control of the
+  // reader rule: the zero above is not the reader hiding every question)
+  if (derivedJob) {
+    const d = await call(VIEWER, "GET", `/workbench/contract/sessions/${derivedJob}`);
+    assert(d.status === 200 && d.text.includes(bnd.pub), `A reads a derived job's question: ${d.status}`);
+    console.log("sweep: A reads a derived job's (public) question; B's hand-back and a service:shared-key prompt stay unread");
+  }
   // B's document is B's: unchanged by A's calls, and B still reads it
   assertEquals(await Deno.readTextFile(`${VAULT}/${bPath}`), before, "user A's calls left B's document unchanged");
   assertEquals((await wb("GET", `/workbench/documents/file?path=${encodeURIComponent(bPath)}`, undefined, B)).status, 200);

@@ -79,3 +79,31 @@ export function derivedQuestion(needs: string[], subject: string, prompt: string
 export function scrubList(xs: unknown, prompt: string): string[] {
   return (Array.isArray(xs) ? xs : []).map((x) => withoutPromptSpans(String(x ?? ""), prompt).trim()).filter(meaningful);
 }
+
+/** rw-boundary-core (plan 09 2.6): `withoutPromptSpans` that keeps the text's LINE STRUCTURE - a withheld span that
+ *  crossed a line break keeps its line breaks ("…" then the same newlines), so a report's line N is still line N (the
+ *  curator copy's line-to-verdict mapping, harness.ts scoreCuratorPackage, reads lines by index). */
+export function withoutPromptSpansKeepLines(text: string, prompt: string, n = SPAN): string {
+  if (!text) return text;
+  const { k, set } = grams(prompt, n);
+  if (!k) return text;
+  const t = text.normalize("NFKC");
+  const toks = tokens(t);
+  const marked = new Array(toks.length).fill(false);
+  for (let i = 0; i + k <= toks.length; i++) {
+    if (set.has(toks.slice(i, i + k).map((x) => x.w).join(" "))) for (let j = i; j < i + k; j++) marked[j] = true;
+  }
+  if (!marked.some(Boolean)) return t;
+  let out = "";
+  let pos = 0;
+  for (let i = 0; i < toks.length; i++) {
+    if (!marked[i]) continue;
+    let j = i;
+    while (j + 1 < toks.length && marked[j + 1]) j++;
+    const breaks = (t.slice(toks[i].start, toks[j].end).match(/\n/g) ?? []).join("");
+    out += t.slice(pos, toks[i].start) + "…" + breaks;
+    pos = toks[j].end;
+    i = j;
+  }
+  return out + t.slice(pos);
+}

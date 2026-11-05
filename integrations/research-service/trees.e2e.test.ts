@@ -266,7 +266,7 @@ Deno.test({ name: "T3 D3: with a gap branch and an inter-hub branch queued first
     // dedupe: the same gap again opens nothing
     assertEquals((await openGapBranches(c, root, "s1", [{ kind: "gap", text: "compost raises pH", query: "q", ref: "claim:x", gap: { claim_id: "x", score: 0.2, threshold: 0.5 } }], 5, resolveContract)).length, 0);
     await sleep(50);
-    const s = await createSteer(c, { parentId: root, stepId: "s1", text: "look at watering instead" }, resolveContract);
+    const s = await createSteer(c, { parentId: root, stepId: "s1", text: "look at watering instead", actorSub: "user-tester" }, resolveContract); // rw-boundary-core: rw-p4b-sessions made actor_sub required; this call predated it (red on 8241755 too)
     const first = await claimNext(c);
     assertEquals(first?.jobId, s.child_job_id, "the human steer's branch is claimed ahead of the older gap work");
     assertEquals(first?.branch_kind, "steer");

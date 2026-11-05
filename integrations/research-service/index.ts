@@ -31,7 +31,9 @@ import { screenSources } from "./injection.ts";
 import { resolveContract } from "./contract.ts";
 import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
 import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, SlotGate, type ClaimedJob } from "./jobs.ts";
-import { type Caller, callerFor, inletRef, MismatchLog, onBehalfOf, parseCallers, promptOwner, resolveOrigin } from "./origin.ts";
+import { type Caller, callerFor, inletRef, MismatchLog, onBehalfOf, parseCallers, parseServiceCallers, promptOwner, requestKindOf, resolveOrigin } from "./origin.ts";
+import { formDerivedRequest, insertDerivedJob, openHandback, parseDoorBody, parseProposals, PROPOSER_SYSTEM, proposerUser, publicAddress, sha256Hex } from "./boundary.ts";
+import { canonicalLink } from "./boundary-gate.ts";
 import { actorOf, FOREIGN_PROMPTS_SQL, HIDDEN_STEER_TEXTS_SQL, nonActorView, LISTED_FOR, MAY_ACT_SQL, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
 import { assess } from "./admission.ts";
@@ -107,6 +109,12 @@ try {
   CALLERS = parseCallers("", MCP_ACCESS_KEY, SHARED_KEY_ORIGIN);
 }
 const originMismatch = new MismatchLog();
+// rw-boundary-core (plan 09 2.4): the callers whose research carries no personal data (request_kind 'service': only
+// their prompts keep the service: exemption in the readers). Names of RESEARCH_CALLERS entries; never the shared key.
+const SERVICE_CALLERS = parseServiceCallers(env("RESEARCH_SERVICE_CALLERS"));
+// the boundary's proposer call (the local model): bounded - the door answers its caller, a slow model means the
+// title template decides
+const BOUNDARY_PROPOSE_TIMEOUT_MS = parseInt(env("BOUNDARY_PROPOSE_TIMEOUT_MS", "120000"), 10);
 // Open WebUI async completion callback. A research job outlives the tool call
 // that submitted it, so the finished report is POSTed back into the originating
 // chat message instead of the caller blocking on a poll loop.
@@ -828,9 +836,30 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal, gate: SlotGate =
     // contract throws ContractError → the catch below writes status='error', so
     // the job never runs wide-open).
     const contract = resolveContract(options);
-    const seedSources = Array.isArray(options?.seed_sources)
+    let seedSources = Array.isArray(options?.seed_sources)
       ? (options.seed_sources as Array<{ url: string; title: string; content: string }>)
       : undefined;
+    // rw-boundary-core: the job's request kind (slot 420). A derived job carries no seed content - the service
+    // fetches its public links itself, now (plan 09 2.3); a missing column / row reads as non-derived (span filter on).
+    const kindRow = (await client.queryObject<{ request_kind: string; boundary: Record<string, unknown> | null }>(
+      `SELECT request_kind, boundary FROM research_jobs WHERE id = $1`, [jobId]).catch(() => ({ rows: [] as { request_kind: string; boundary: null }[] }))).rows[0];
+    const requestKind = kindRow?.request_kind ?? "unclassified";
+    if (requestKind === "derived" && Array.isArray(options?.public_links) && !seedSources?.length) {
+      // round 2 (TF4): the run uses a page only if it is still the page the gate judged - the final URL is public again
+      // (canonical, not a private host or token path, a public address) and its hash equals the gate-time snapshot's
+      const snap = new Map(((kindRow?.boundary?.evidence ?? []) as Array<{ url?: string; sha256?: string }>).map((e) => [String(e.url), String(e.sha256)]));
+      const fetched: Array<{ url: string; title: string; content: string }> = [];
+      for (const u of (options.public_links as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 5)) {
+        const r = await realDeps.fetchPage(u).catch(() => null);
+        if (!r?.page) continue;
+        const fin = canonicalLink(r.finalUrl ?? u);
+        if (!("url" in fin) || !(await publicAddress(fin.url, { resolve: intakeResolve }))) { console.warn(`[job ${jobId}] a public link left the public web at run time - not used`); continue; }
+        if (snap.get(u) !== await sha256Hex(`${r.page.title}
+${r.page.content}`)) { console.warn(`[job ${jobId}] a public link changed since the gate judged it - not used`); continue; }
+        fetched.push({ url: u, title: r.page.title, content: r.page.content });
+      }
+      if (fetched.length) seedSources = fetched;
+    }
     // Per-origin queue attribution: only the overnight digest/podcast lane gets the
     // generous `ob-research` budget; OWUI/agent/manual keep the default lane (their
     // own tuning). All origins still get chat()'s 429 backpressure retry.
@@ -868,7 +897,7 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal, gate: SlotGate =
       gapResearch: options?.gap_research === "preliminary" ? "preliminary" : undefined,
       dryRun: options?.dry_run === true,
       contract: contract ?? undefined,
-      jobId, refineryId: refinery_id ?? null,
+      jobId, refineryId: refinery_id ?? null, requestKind,
       onEvent: async (ev) => {
         await appendEvent(client, jobId, rootId, ev)
           .catch((e) => console.error(`[job ${jobId}] ${ev.type} event not recorded: ${(e as Error).message}`));
@@ -1303,6 +1332,70 @@ Deno.serve({ port: PORT }, async (req) => {
     }
   }
 
+  // rw-boundary-core (plan 09 2.2-2.5, PD0a): THE DOOR for research formed from personal data. The caller sends the
+  // personal item (transient: never stored here), the purpose and where the result goes; the boundary forms a public
+  // question (the local model proposes, the pure gate decides, the title template is the fallback) and writes ONE
+  // derived job plus the private hand-back, in one transaction. Seed content, callbacks, inlet refs, on-behalf
+  // subjects, a query or options are refused (400): the service fetches the public links itself.
+  // -> 202 {job_id} | 200 {refused, handback_id} (a refusal starts no job; handback_id null when there is no owner).
+  if (req.method === "POST" && url.pathname === "/research/derived") {
+    if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
+    let raw: unknown;
+    try { raw = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
+    const parsed = parseDoorBody(raw);
+    if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+    const { item, purpose, deliver } = parsed;
+    // round 2 (TF5): whatever the item holds, the door answers a fixed code - never an unhandled 500
+    let verdict: Awaited<ReturnType<typeof formDerivedRequest>>;
+    try {
+    verdict = await formDerivedRequest(item, purpose, {
+      propose: async (it, ev) => parseProposals(await chat(PROPOSER_SYSTEM, proposerUser(it, ev),
+        { json: true, nothink: true, tags: ["request-boundary"], signal: AbortSignal.timeout(BOUNDARY_PROPOSE_TIMEOUT_MS) })),
+      fetchPublic: async (u) => {
+        const r = await fetchPage(u);
+        if (!r.page) return null;
+        // a redirect onto a private host or a token path is not a public page
+        if (r.finalUrl && !("url" in canonicalLink(r.finalUrl))) return null;
+        return { title: r.page.title, text: r.page.content };
+      },
+      identity: async (sub) => {
+        const c = await pool.connect();
+        try {
+          const r = await c.queryObject<{ name: string; email: string }>(`SELECT name, email FROM public.workspace_users WHERE sub = $1`, [sub]);
+          return r.rows.flatMap((x) => [x.name ?? "", x.email ?? ""]);
+        } catch { return []; } finally { c.release(); }
+      },
+      // round 2 (TF6): the same resolver the intake fetch uses (DoH through the proxy, or the system resolver on direct egress)
+      resolve: intakeResolve,
+    });
+    } catch (e) {
+      console.error(`[boundary] forming the request failed (${(e as Error).name})`);
+      return Response.json({ error: "boundary_failed" }, { status: 422 });
+    }
+    if (!verdict.ok && verdict.refusal === "no_owner") return Response.json({ refused: "no_owner", handback_id: null }, { status: 200 });
+    const c = await pool.connect();
+    try {
+      await c.queryObject("BEGIN");
+      const jobId = verdict.ok ? await insertDerivedJob(c, verdict.request) : null;
+      const state = verdict.ok ? "queued" : purpose === "idea-research" ? "awaiting_owner" : "refused";
+      const handbackId = await openHandback(c, {
+        item, purpose, jobId, state, record: verdict.record, verdictId: verdict.verdict_id,
+        ownerView: !verdict.ok && state === "awaiting_owner" ? verdict.owner_view : null, deliver,
+      });
+      await c.queryObject("COMMIT");
+      if (jobId) {
+        wake();
+        return Response.json({ job_id: jobId, status: "queued" }, { status: 202 });
+      }
+      return Response.json({ refused: (verdict as { refusal: string }).refusal, handback_id: handbackId }, { status: 200 });
+    } catch (e) {
+      await c.queryObject("ROLLBACK").catch(() => {});
+      // the error's own text may quote a value: log its class only, answer a fixed code
+      console.error(`[boundary] the derived door failed (${(e as { fields?: { code?: string } }).fields?.code ?? (e as Error).name})`);
+      return Response.json({ error: "boundary_failed" }, { status: 500 });
+    } finally { c.release(); }
+  }
+
   if (req.method === "POST" && url.pathname === "/research") {
     if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
     let body: {
@@ -1351,6 +1444,9 @@ Deno.serve({ port: PORT }, async (req) => {
     const onBehalf = onBehalfOf(caller, body as Record<string, unknown>);
     if ("error" in onBehalf) return Response.json({ error: onBehalf.error }, { status: onBehalf.status });
     const owner = promptOwner(caller, onBehalf.sub);
+    // rw-boundary-core: direct (a signed-in user's own question), service (a declared no-personal-data caller) or
+    // unclassified (everything else - its prompt is hidden from other readers). Never 'derived': that is the door's.
+    const requestKind = requestKindOf(caller, onBehalf.sub, SERVICE_CALLERS);
     const options = {
       ...callerOptions,
       ...(deadlineAt ? { deadline_at: deadlineAt } : {}),
@@ -1368,10 +1464,10 @@ Deno.serve({ port: PORT }, async (req) => {
     try {
       await c.queryObject("BEGIN");
       const r = await c.queryObject<{ id: string }>(
-        `INSERT INTO research_jobs (status, origin, query, thread_id, options, caller, origin_claimed, inlet_ref)
-         VALUES ('queued', $1, $2, $3, $4::jsonb, $5, $6, $7::jsonb) RETURNING id`,
+        `INSERT INTO research_jobs (status, origin, query, thread_id, options, caller, origin_claimed, inlet_ref, request_kind)
+         VALUES ('queued', $1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8) RETURNING id`,
         [resolved.origin, query, body.thread_id || null, JSON.stringify(options), caller.name, resolved.claimed,
-         inlet ? JSON.stringify(inlet) : null],
+         inlet ? JSON.stringify(inlet) : null, requestKind],
       );
       jobId = r.rows[0].id;
       // rw-identity: whose original prompt this is (research_prompts, init-documents.sql), in the
@@ -1600,7 +1696,7 @@ Deno.serve({ port: PORT }, async (req) => {
            FROM research_jobs j WHERE j.id=$1`, [id]);
         const row = r.rows[0] as Record<string, unknown> | undefined;
         if (!row) return null;
-        return scope.foreign ? omitPrompts(sharedJobView(row, { privateReport: scope.privateReport }), scope.prompts) : steer.hide ? nonActorView(row, steer.texts) : row;
+        return scope.foreign ? omitPrompts(sharedJobView(row, { privateReport: scope.privateReport, prompts: scope.prompts }), scope.prompts) : steer.hide ? nonActorView(row, steer.texts) : row;
       } finally { c.release(); }
     };
     if (!stream) {

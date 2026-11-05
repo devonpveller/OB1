@@ -38,12 +38,21 @@ export function adminSeesOwnerless(who: unknown): boolean {
 }
 const lit = (s: string) => `'${s.replace(/'/g, "''")}'`;
 const ROOT = (j: string) => `coalesce(${j}.root_job_id, ${j}.id)`;
-// job `j` has no recorded owner (its root has no research_prompts row) and that owner is not `sub`
+// job `j` has no recorded owner (its root has no research_prompts row) and that owner is not `sub`.
+// rw-boundary-core (plan 09 2.7): a DERIVED job is nobody's - the request boundary formed its question from public
+// words only (slot 420 refuses it a prompt row), so it is shown to everyone, never "ownerless foreign".
 export const OWNERLESS_FOREIGN = (j: string, sub: string, adminSees = false) => {
   const o = ownerlessOwner();
   const notMine = adminSees ? "false" : o === null ? "true" : `(${sub} <> ${lit(o)})`;
-  return `(NOT EXISTS (SELECT 1 FROM public.research_prompts own_r WHERE own_r.job_id IN (${j}.id, ${ROOT(j)})) AND ${notMine})`;
+  return `(${j}.request_kind <> 'derived' AND NOT EXISTS (SELECT 1 FROM public.research_prompts own_r WHERE own_r.job_id IN (${j}.id, ${ROOT(j)})) AND ${notMine})`;
 };
+
+// rw-boundary-core (plan 09 2.7, decision D5): a SERVICE's prompt (owner_sub service:<caller>) is shared only on a
+// job the research service recorded as request_kind 'service' (a RESEARCH_SERVICE_CALLERS caller: no personal data),
+// or to an admin (the signed-in admin flag the identity seam records in workspace_users; an admin impersonating
+// someone reads as that someone). Every other service:-owned prompt - the shared key's above all - is hidden.
+export const SERVICE_PROMPT_SHARED = (j: string, sub: string) =>
+  `(${j}.request_kind = 'service' OR EXISTS (SELECT 1 FROM public.workspace_users own_u WHERE own_u.sub = ${sub} AND own_u.is_admin))`;
 
 // The caller as the SQL needs it: the subject (owner_sub) and its directory key in documents/.
 export interface Viewer {
@@ -68,7 +77,7 @@ export const FOREIGN_IDEA = (id: string, sub: string) =>
 // the idea's private report. An idea job whose idea has no owner is no one's (foreign to all).
 export const FOREIGN_JOB = (j: string, sub: string, key: string, adminSees = false) =>
   `(EXISTS (SELECT 1 FROM public.research_prompts own_p WHERE own_p.job_id IN (${j}.id, ${ROOT(j)}) AND own_p.owner_sub <> ${sub}
-             AND own_p.owner_sub NOT LIKE 'service:%')
+             AND NOT (own_p.owner_sub LIKE 'service:%' AND ${SERVICE_PROMPT_SHARED(j, sub)}))
      OR ${OWNERLESS_FOREIGN(j, sub, adminSees)}
      OR ${FOREIGN_IDEA(`${j}.refinery_id`, sub)}
      OR EXISTS (SELECT 1 FROM public.research_job_report_owner(${j}.id) own_f WHERE own_f.owner_sub IS DISTINCT FROM ${sub})
