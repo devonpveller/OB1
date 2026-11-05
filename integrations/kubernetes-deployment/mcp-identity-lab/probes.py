@@ -627,7 +627,6 @@ def p_cross_user():
         n = q(sql)[0][0]
         rec(f"e.no cross-owner row in {name}", n == 0, f"{n} row(s) referencing another owner's row", r2=True)
     # link_thought_to_contact: B links A's thought to B's own contact
-    bid = {}
     seed_ext(tb, "BX", B_STRINGS, None)
     st, txt = call(EXT, HB(tb), "add_professional_contact", {"name": "B contact for link"})
     _, body = ok_json(txt)
@@ -726,10 +725,20 @@ def p_cross_user():
             st, txt = call(MCP, {"x-brain-key": K["full"]}, "contract_timeline", {})
             rec("e.r3 OWN_QUERY: B's idea job (no prompt row) hidden from the operator's timeline", mark not in txt and st == 200,
                 f"status {st}; marker {'SHOWN' if mark in txt else 'hidden'}", r3=True)
-            st, txt = call(MCP, HB(tb), "contract_timeline", {})
-            rec("e.r3 OWN_QUERY: B's idea job shows its query to B", mark in txt, f"status {st}; marker {'shown' if mark in txt else 'MISSING'}")
         finally:
             q("DELETE FROM research_jobs WHERE id = %s::uuid", (jid,))
+        # the control: the same shape WITHOUT a refinery_id (an ownerless job) IS shown to the ownerless owner, so what
+        # hides the job above is the foreign-idea arm, not the timeline or the insert (B, not the ownerless owner, reads
+        # neither: the ownerless rule hides an unrecorded job from everyone else)
+        mark2 = f"MKR3PLAINJOB{random.randrange(16**6):06x}"
+        jid2 = q("INSERT INTO research_jobs (query) VALUES (%s) RETURNING id::text", (f"plain job {mark2}",))[0][0]
+        q("DELETE FROM research_prompts WHERE job_id = %s::uuid", (jid2,))
+        try:
+            st, txt = call(MCP, {"x-brain-key": K["full"]}, "contract_timeline", {})
+            rec("e.r3 OWN_QUERY control: an ownerless job (no idea) shows its query to the operator", mark2 in txt,
+                f"status {st}; marker {'shown' if mark2 in txt else 'MISSING'}")
+        finally:
+            q("DELETE FROM research_jobs WHERE id = %s::uuid", (jid2,))
 
 
 def p_concurrency():
