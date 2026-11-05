@@ -4,6 +4,8 @@
  * about sections, rendering, or HTTP servers.
  */
 
+
+import { restAuthHeaders } from "./rest-auth.ts";
 export interface Thought {
   id: number;
   content: string;
@@ -119,7 +121,7 @@ export class BrainClient {
   }): Promise<Array<{ id: number; content: string; metadata: Record<string, unknown> | null; similarity: number }>> {
     const res = await fetch(`${this.baseUrl}/rest/v1/rpc/match_thoughts`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...restAuthHeaders() },
       body: JSON.stringify({
         query_embedding: opts.embedding,
         match_threshold: opts.threshold ?? 0.5,
@@ -148,7 +150,7 @@ export class BrainClient {
   ): Promise<boolean> {
     const sel = await fetch(
       `${this.baseUrl}/rest/v1/sources?id=eq.${encodeURIComponent(sourceId)}&select=metadata`,
-      { headers: { Accept: "application/json" } },
+      { headers: { Accept: "application/json", ...restAuthHeaders() } },
     );
     if (!sel.ok) return false;
     const rows = await sel.json() as Array<{ metadata: Record<string, unknown> | null }>;
@@ -159,7 +161,7 @@ export class BrainClient {
       `${this.baseUrl}/rest/v1/sources?id=eq.${encodeURIComponent(sourceId)}`,
       {
         method: "PATCH",
-        headers: { "Content-Type": "application/json", Prefer: "return=minimal" },
+        headers: { "Content-Type": "application/json", Prefer: "return=minimal", ...restAuthHeaders() },
         body: JSON.stringify({ metadata: merged }),
       },
     );
@@ -170,12 +172,12 @@ export class BrainClient {
    * Call a PostgREST-exposed SQL function (`/rest/v1/rpc/<fn>`). Arg keys must
    * match the function's parameter names (e.g. `p_url`). Used for loop-close:
    * `find_or_create_source` + `link_source_to_thread` (both service_role-granted).
-   * The openbrain-rest proxy strips Authorization → anon=service_role.
+   * Sent with this service's own token (rest-auth.ts; rw-rest-door-auth).
    */
   async rpc<T>(fn: string, args: Record<string, unknown>): Promise<T> {
     const res = await fetch(`${this.baseUrl}/rest/v1/rpc/${fn}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      headers: { "Content-Type": "application/json", Accept: "application/json", ...restAuthHeaders() },
       body: JSON.stringify(args),
     });
     if (!res.ok) {
@@ -187,7 +189,7 @@ export class BrainClient {
 
   private async getJson<T>(path: string): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", ...restAuthHeaders() },
     });
     if (!res.ok) {
       const msg = await res.text().catch(() => "");

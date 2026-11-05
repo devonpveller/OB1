@@ -157,9 +157,11 @@ try {
   Check ($logs -match 'PostgreSQL init process complete') 'the database ran the initdb chain'
   $errs = @(($logs -split "`n") | Where-Object { $_ -match 'ERROR:' })
   Check ($errs.Count -eq 0) "initdb logged no ERROR ($($errs.Count))"
-  $null = Run-Detached "$P-postgrest" @('--network-alias', 'openbrain-postgrest', '-e', "PGRST_DB_URI=postgres://postgres:$pw@openbrain-db:5432/openbrain",
-      '-e', 'PGRST_DB_SCHEMAS=public', '-e', 'PGRST_DB_ANON_ROLE=service_role', '-e', 'PGRST_DB_POOL=4', '-e', 'PGRST_SERVER_PORT=3000', $PgrstImage)
-  $null = Run-Detached "$P-rest" @('--network-alias', 'openbrain-rest', '-v', "$(Join-Path $dockerDir 'Caddyfile'):/etc/caddy/Caddyfile:ro", $CaddyImage)
+  # rw-rest-door-auth: the REST door as compose stands it up (slot 450: per-caller tokens, no anonymous role); -Red runs
+  # the base's writer, which sends no token, so it gets the old posture (anon = service_role, credentials stripped)
+  . (Join-Path $PSScriptRoot 'rest-door-lab.ps1')
+  $door = if ($Red) { Start-LabRestDoor -Db $db -Pw $pw -Legacy } else { Start-LabRestDoor -Db $db -Pw $pw }
+  $restWikiToken = if ($door.Tokens.ContainsKey('WIKI')) { $door.Tokens['WIKI'] } else { '' }
 
   function Sql([string]$text, [string]$name = 'q.sql') {
     $f = Join-Path $env:TEMP "$P-$name"
@@ -323,7 +325,7 @@ SELECT md5(string_agg(x, '|' ORDER BY x)) FROM (
   for ($i = 0; $i -lt 40; $i++) { $r = Dk run --rm --label $label --network $net --entrypoint node $NodeImage -e "fetch('http://openbrain-rest/rest/v1/wiki_pages?select=slug&limit=1').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"; if ($script:rc -eq 0) { break }; Start-Sleep -Seconds 2 }
   Check ($script:rc -eq 0) 'the lab PostgREST answers through the Caddy proxy'
   $probeOut = Dk run --rm --label $label --network $net -v "${recDir}/_shared:/shared:ro" -v "${ct}:/ct:ro" -v "${vault}:/vault" -e SHARED=/shared -e WIKI_GIT_DIR=/vault `
-      -e OPEN_BRAIN_URL=http://openbrain-rest -e "IDEA_THOUGHT=$($ids.tha)" -e "REPORT_SOURCE=$($ids.src)" -e "TAG=$K" $NodeImage node /ct/privacy-hardening-probe.mjs
+      -e OPEN_BRAIN_URL=http://openbrain-rest -e "OPEN_BRAIN_REST_TOKEN=$restWikiToken" -e "IDEA_THOUGHT=$($ids.tha)" -e "REPORT_SOURCE=$($ids.src)" -e "TAG=$K" $NodeImage node /ct/privacy-hardening-probe.mjs
   Save 'probe.log' $probeOut
   $pj = $null
   $pm = [regex]::Match($probeOut, 'PROBE (\{.*\})')

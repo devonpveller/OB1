@@ -126,8 +126,8 @@ export function parseWikiPage(relPath, markdown) {
 }
 
 // ── I/O ────────────────────────────────────────────────────────────────────
-// Speaks PostgREST like the rest of the recipe layer (openbrain-rest strips
-// auth; PostgREST's anon role is service_role, so the apikey is nominal).
+// Speaks PostgREST like the rest of the recipe layer, through openbrain-rest with the caller's own token
+// (restAuth(), end of file; rw-rest-door-auth).
 const OB_URL = () => (process.env.OPEN_BRAIN_URL || "http://openbrain-rest").replace(/\/+$/, "");
 const TIMEOUT_MS = () => Math.max(1000, Number(process.env.WIKI_PAGES_SYNC_TIMEOUT_MS || "10000"));
 const BATCH = () => Math.max(1, Number(process.env.WIKI_PAGES_BATCH || "25"));
@@ -144,7 +144,7 @@ function warnOnce(what, e) {
 async function obFetch(method, pathq, body, headers = {}) {
   const r = await fetch(`${OB_URL()}/rest/v1/${pathq}`, {
     method,
-    headers: { "content-type": "application/json", apikey: "local-trust", prefer: "return=minimal", ...headers },
+    headers: { "content-type": "application/json", ...restAuth(), prefer: "return=minimal", ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(TIMEOUT_MS()),
   });
@@ -202,7 +202,7 @@ export async function upsertWikiPagesReport(rows) {
   const now = new Date().toISOString();
   const r = await fetch(`${OB_URL()}/rest/v1/wiki_pages?on_conflict=slug&select=slug`, {
     method: "POST",
-    headers: { "content-type": "application/json", apikey: "local-trust", prefer: "resolution=merge-duplicates,return=representation" },
+    headers: { "content-type": "application/json", ...restAuth(), prefer: "resolution=merge-duplicates,return=representation" },
     body: JSON.stringify(list.map((x) => toRestRow(x, now))),
     signal: AbortSignal.timeout(TIMEOUT_MS()),
   });
@@ -241,7 +241,7 @@ async function leaveOutWithheld(slugs) {
   try {
     const inList = [...paths.keys()].map((s) => `"${s.replace(/"/g, '\\"')}"`).join(",");
     const r = await fetch(`${OB_URL()}/rest/v1/wiki_pages?select=slug&slug=in.(${encodeURIComponent(inList)})`, {
-      headers: { apikey: "local-trust" }, signal: AbortSignal.timeout(TIMEOUT_MS()),
+      headers: { ...restAuth() }, signal: AbortSignal.timeout(TIMEOUT_MS()),
     });
     if (r.ok) hasRow = new Set((await r.json()).map((x) => x.slug));
   } catch { /* unknown: only the files this run created go */ }
@@ -702,7 +702,7 @@ export async function deleteWikiPagesUnder(prefixes) {
   try {
     const r = await fetch(`${OB_URL()}/rest/v1/wiki_pages?or=(${encodeURIComponent(or)})&select=slug`, {
       method: "DELETE",
-      headers: { apikey: "local-trust", prefer: "return=representation" },
+      headers: { ...restAuth(), prefer: "return=representation" },
       signal: AbortSignal.timeout(TIMEOUT_MS()),
     });
     if (!r.ok) throw new Error(`DELETE wiki_pages: ${r.status} ${(await r.text()).slice(0, 200)}`);
@@ -721,7 +721,7 @@ export async function countWikiPages(pageClass) {
   try {
     const r = await fetch(`${OB_URL()}/rest/v1/wiki_pages?select=slug&limit=1${filter}`, {
       method: "HEAD",
-      headers: { apikey: "local-trust", prefer: "count=exact" },
+      headers: { ...restAuth(), prefer: "count=exact" },
       signal: AbortSignal.timeout(TIMEOUT_MS()),
     });
     const cr = r.headers.get("content-range");
@@ -731,4 +731,12 @@ export async function countWikiPages(pageClass) {
     warnOnce("count", e);
     return null;
   }
+}
+
+// rw-rest-door-auth: the REST door (openbrain-rest -> PostgREST) refuses a request that does not carry this caller's own
+// token - a JWT minted per caller whose role holds only what the caller uses. OPEN_BRAIN_REST_TOKEN, or
+// OPEN_BRAIN_SERVICE_KEY (the name the wiki compile hands its child scripts). No token = no header = 401 at the door.
+function restAuth() {
+  const t = String(process.env.OPEN_BRAIN_REST_TOKEN || process.env.OPEN_BRAIN_SERVICE_KEY || "").trim();
+  return t && t !== "local-trust" ? { authorization: `Bearer ${t}` } : {};
 }

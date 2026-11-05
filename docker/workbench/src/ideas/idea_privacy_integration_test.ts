@@ -25,6 +25,8 @@ const APP_ROLE = Deno.env.get("IDEAS_TEST_APP_ROLE") ?? "ob_app_memory";
 const VAULT = (Deno.env.get("PRIVACY_VAULT") ?? "").replace(/\/+$/, "");
 const VIEWER = (Deno.env.get("PRIVACY_VIEWER") ?? "").replace(/\/+$/, "");
 const REST = (Deno.env.get("OPEN_BRAIN_URL") ?? "http://openbrain-rest").replace(/\/+$/, "");
+// rw-rest-door-auth: the door refuses a request without a caller token; the lab hands this test the wiki compile's
+const REST_AUTH: Record<string, string> = (Deno.env.get("OPEN_BRAIN_REST_TOKEN") ?? "").trim() ? { authorization: `Bearer ${(Deno.env.get("OPEN_BRAIN_REST_TOKEN") ?? "").trim()}` } : {};
 const off = !BASE || !HOST || !PHASE;
 const pool = !off
   ? new Pool({
@@ -289,7 +291,7 @@ t("migrated", "the wiki: the idea's presentation (its leaf, pages linking it) is
   }
   // the guard, on the write path the compile and the viewer's reconcile repair use (PostgREST upsert on slug)
   const rest = async (method: string, path: string, body: unknown, prefer: string) =>
-    await fetch(`${REST}/rest/v1/${path}`, { method, headers: { "content-type": "application/json", apikey: "local-trust", prefer }, body: JSON.stringify(body) });
+    await fetch(`${REST}/rest/v1/${path}`, { method, headers: { "content-type": "application/json", apikey: "local-trust", ...REST_AUTH, prefer }, body: JSON.stringify(body) });
   const r2 = (w.withheld as string[]).filter((s) => w.pages[s]);   // the round-2 leaf and linking entity page
   const up = await rest("POST", "wiki_pages?on_conflict=slug", r2.map((s) => ({ slug: s, ...w.pages[s], tags: [], frontmatter: {}, updated_at: new Date().toISOString() })),
     "resolution=merge-duplicates,return=minimal");
@@ -466,7 +468,7 @@ t("migrated", "round 4: the idea's leaf and every link form are withheld (bare /
       assertEquals(await row(), clean, `the guard let an app-role UPDATE through: ${name}`);
     }
     const patch = await fetch(`${REST}/rest/v1/wiki_pages?slug=eq.${encodeURIComponent(g)}`, {
-      method: "PATCH", headers: { "content-type": "application/json", apikey: "local-trust", prefer: "return=minimal" }, body: JSON.stringify({ title: `See thought/${t1}` }),
+      method: "PATCH", headers: { "content-type": "application/json", apikey: "local-trust", ...REST_AUTH, prefer: "return=minimal" }, body: JSON.stringify({ title: `See thought/${t1}` }),
     });
     await patch.body?.cancel();
     assertEquals(await row(), clean, "the guard let a PostgREST PATCH adding a link through");

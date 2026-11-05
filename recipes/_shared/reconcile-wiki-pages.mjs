@@ -148,7 +148,7 @@ async function keysetWalk(fetchImpl, select, extra, onPage) {
     const q = [`select=${select}`, "order=slug.asc", "limit=5000", ...extra];
     if (cursor) q.push(`slug=gt.${encodeURIComponent(cursor)}`);
     const r = await fetchImpl(`${OB_URL()}/rest/v1/wiki_pages?${q.join("&")}`, {
-      headers: { apikey: "local-trust" }, signal: AbortSignal.timeout(30_000),
+      headers: { ...restAuth() }, signal: AbortSignal.timeout(30_000),
     });
     if (!r.ok) throw new Error(`wiki_pages ${r.status} ${(await r.text()).slice(0, 160)}`);
     const page = await r.json();
@@ -307,7 +307,7 @@ export async function recheckMissing({ rows, missing, fetchImpl = fetch, delayMs
     try {
       const list = ask.slice(i, i + RECHECK_CHUNK).map((s) => `"${String(s).replace(/["\\]/g, (c) => "\\" + c)}"`).join(",");
       const r = await fetchImpl(`${OB_URL()}/rest/v1/wiki_pages?select=slug,page_class,updated_at,links,body&slug=in.(${encodeURIComponent(list)})`, {
-        headers: { apikey: "local-trust" }, signal: AbortSignal.timeout(10_000),
+        headers: { ...restAuth() }, signal: AbortSignal.timeout(10_000),
       });
       if (!r.ok) throw new Error(`wiki_pages ${r.status}`);
       for (const x of await r.json()) {
@@ -420,4 +420,12 @@ if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
       console.error(`[reconcile] CANNOT CHECK: ${e?.message || e}`);
       process.exitCode = 2;
     });
+}
+
+// rw-rest-door-auth: the REST door (openbrain-rest -> PostgREST) refuses a request that does not carry this caller's own
+// token - a JWT minted per caller whose role holds only what the caller uses. OPEN_BRAIN_REST_TOKEN, or
+// OPEN_BRAIN_SERVICE_KEY (the name the wiki compile hands its child scripts). No token = no header = 401 at the door.
+function restAuth() {
+  const t = String(process.env.OPEN_BRAIN_REST_TOKEN || process.env.OPEN_BRAIN_SERVICE_KEY || "").trim();
+  return t && t !== "local-trust" ? { authorization: `Bearer ${t}` } : {};
 }

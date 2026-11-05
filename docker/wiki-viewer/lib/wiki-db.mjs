@@ -116,7 +116,7 @@ async function restGet(pathq) {
   let r;
   try {
     r = await fetch(`${OB_URL()}/rest/v1/${pathq}`, {
-      headers: { apikey: "local-trust" },
+      headers: { ...restAuth() },
       signal: AbortSignal.timeout(TIMEOUT_MS()),
     });
   } catch (e) {
@@ -205,4 +205,12 @@ export function _resetForTests() {
   Object.assign(_state, { state: "connecting", since: Date.now(), failingSince: null, lastOkAt: null, lastError: null, everUp: false });
   _onConnect.length = 0;
   _select = SELECT_FULL;
+}
+
+// rw-rest-door-auth: the REST door (openbrain-rest -> PostgREST) refuses a request that does not carry this caller's own
+// token - a JWT minted per caller whose role holds only what the caller uses. OPEN_BRAIN_REST_TOKEN, or
+// OPEN_BRAIN_SERVICE_KEY (the name the wiki compile hands its child scripts). No token = no header = 401 at the door.
+function restAuth() {
+  const t = String(process.env.OPEN_BRAIN_REST_TOKEN || process.env.OPEN_BRAIN_SERVICE_KEY || "").trim();
+  return t && t !== "local-trust" ? { authorization: `Bearer ${t}` } : {};
 }
