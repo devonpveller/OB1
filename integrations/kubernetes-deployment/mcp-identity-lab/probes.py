@@ -578,7 +578,7 @@ def p_cross_user():
             lk = a_leaks(txt, a)
             if lk:
                 leaks.append(name)
-                rec(f"e.B leak @{lbl} {name}", False, r2=True, what= f"status {st}; A material in B's answer: {sorted(set(lk))}; context: {leak_detail(txt, a)!r}")
+                rec(f"e.B leak @{lbl} {name}", False, r2=True, what=f"status {st}; A material in B's answer: {sorted(set(lk))}; context: {leak_detail(txt, a)!r}")
         rec(f"e.B over every tool @{lbl}", not leaks, f"{len(ts)} tools; leaking: {leaks or 'none'}", r2=True)
     # A's idea untouched by B's id-bearing writes
     r = q("SELECT status, (SELECT count(*) FROM idea_revisions WHERE idea_id = i.id) FROM ideas i WHERE id = %s", (a_iid,))
@@ -658,7 +658,7 @@ def p_cross_user():
             lk = a_leaks(txt, a)
             if lk:
                 print(f"INFO workbench context {tool} {who}: {leak_detail(txt, a)!r}", flush=True)
-            rec(f"e.workbench {tool} as {who}", not lk, r2=tool in ("contract_ideas", "contract_idea", "contract_jobs"), what= f"status {st}; A material: {sorted(set(lk)) or 'none'}; answer head: {re.sub(r'[0-9a-f-]{36}', '<uuid>', result_text(txt)[1])[:160]!r}", r2=True)
+            rec(f"e.workbench {tool} as {who}", not lk, r2=tool in ("contract_ideas", "contract_idea", "contract_jobs"), what= f"status {st}; A material: {sorted(set(lk)) or 'none'}; answer head: {re.sub(r'[0-9a-f-]{36}', '<uuid>', result_text(txt)[1])[:160]!r}")
     st, txt = call(MCP, HB(tb), "contract_ideas", {})
     # B's idea from the driver's T2 (a second capture here is a near-duplicate of it under the lab's one embedding)
     rec("e.workbench contract_ideas as B shows B's own idea", (M["b_idea"] in txt or B_STRINGS["idea"] in txt) and "A lab marker idea" not in txt, f"status {st}", r2=True)
