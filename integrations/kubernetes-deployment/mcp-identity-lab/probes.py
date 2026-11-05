@@ -707,7 +707,8 @@ def p_cross_user():
             ("mcp key POST a non-contract write (/workbench/notes)", "POST", "/workbench/notes", mk, 403),
         ]:
             st = wbreq(m, path, h, {"text": "r3 probe", "query": "r3 probe"})
-            rec(f"e.r3 workbench direct: {name}", st == want, f"status {st} (want {want})", r3=True)
+            # the token case was already 403 on 7b302ed (a user token only on the contract reads): a regression check, not R3
+            rec(f"e.r3 workbench direct: {name}", st == want, f"status {st} (want {want})", r3="B's token" not in name)
         for name, m, path in [("mcp key GET contract ideas", "GET", "/workbench/contract/ideas"),
                               ("mcp key POST contract diff-check", "POST", "/workbench/contract/diff-check")]:
             st = wbreq(m, path, mk, {"a": "x", "b": "y"})
