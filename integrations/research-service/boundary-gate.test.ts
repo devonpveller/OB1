@@ -136,5 +136,44 @@ Deno.test("the template: a fetched title with DENY removed; it passes the gate b
   assertEquals(t.question, `What is publicly known about "hello community solar roofs cut winter bills"?`);
   assert(gate(t.question, EV, deny, lex, personal).ok);
   assertEquals(templateQuestion("Dana Quillfeather", deny), null);
-  assertEquals(BOUNDARY_VERSION, "pd0a-2");
+  assertEquals(BOUNDARY_VERSION, "pd0c-1");
+});
+
+// ── rw-boundary-digest round 2 (tester F1): meeting, invite and share links are never public ──────────────────
+Deno.test("links: meeting, calendar, file-share and personal-page links are refused (private_host); ordinary articles pass", () => {
+  const refused = [
+    // the tester's two (attempt 1, Case 6a): a calendar invite's Meet code and a Drive file with a letters-only id
+    "http://meet.google.com/qzw-xkvj-pmr", "https://drive.google.com/file/d/AbcDefGhiJklMnoPqr/view",
+    "https://docs.google.com/document/d/abcdefgh/edit", "https://sites.google.com/view/our-family-reunion",
+    "https://drive.google.com/open", "https://www.google.com/calendar/event", "https://calendar.google.com/calendar/r",
+    // other meeting hosts
+    "https://us02web.zoom.us/j/84512345678", "https://zoom.us/my/danasroom", "https://zoom.us/rec/share/abcdef",
+    "https://teams.microsoft.com/l/meetup-join/19%3ameeting/0", "https://teams.live.com/meet/9876",
+    "https://acme.webex.com/meet/dana", "https://acme.my.webex.com/join/x", "https://whereby.com/danas-room",
+    "https://global.gotomeeting.com/join/123456789", "https://meet.goto.com/123456789", "https://meet.jit.si/OurStandup",
+    "https://meet.example.org/room", "https://join.example.com/abc",
+    // file shares and personal pages
+    "https://www.dropbox.com/s/abc/plan.pdf", "https://www.dropbox.com/scl/fi/abc/plan.pdf", "https://1drv.ms/w/s!Abc",
+    "https://onedrive.live.com/redir", "https://acme.sharepoint.com/sites/team/Shared%20Documents/plan.docx",
+    "https://app.box.com/s/abcdef", "https://wetransfer.com/downloads/abc/def", "https://we.tl/t-abcdef",
+    "https://docs.zoho.com/file/abc", "https://workdrive.zoho.com/file/abc", "https://dana.notion.site/Plans-abc",
+    "https://www.notion.so/dana/Plans", "https://airtable.com/shrAbcdef", "https://airtable.com/appAbc/shrDef",
+    "https://calendly.com/dana/30min", "https://cal.com/dana", "https://www.figma.com/file/abc/Plan",
+    "https://www.loom.com/share/abc", "https://forms.gle/abc", "https://docsend.com/view/abc", "https://mega.nz/file/abc",
+    "https://www.icloud.com/iclouddrive/abc", "https://forms.office.com/r/abc", "https://discord.gg/abcdef",
+    // the generic rules: a share / invite / join segment followed by more, a Meet-shaped code, a calendar file
+    "https://files.example.org/share/abcdef", "https://app.example.com/invite/team", "https://events.example.com/x/abc-defg-hij",
+    "https://events.example.com/cal/meeting.ics",
+  ];
+  for (const u of refused) {
+    const c = canonicalLink(u);
+    assert("refused" in c && c.refused === "private_host", `${u}: ${JSON.stringify(c)}`);
+  }
+  const passed = [
+    "https://www.nytimes.com/2024/05/01/climate/solar-roofs.html", "https://en.wikipedia.org/wiki/Solar_power",
+    "https://blog.google/technology/ai/solar-roofs/", "https://www.zoom.com/en/blog/hybrid-work/", "https://zoom.us/pricing",
+    "https://www.dropbox.com/features", "https://news.example.org/solar-roofs", "https://www.theverge.com/2024/5/1/share-prices",
+    "https://www.example.com/sharing-economy-explained", "https://techcrunch.com/2024/05/01/meeting-room-startup-raises/",
+  ];
+  for (const u of passed) assert("url" in canonicalLink(u), `${u} should stay public`);
 });

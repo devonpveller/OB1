@@ -32,7 +32,7 @@ import { resolveContract } from "./contract.ts";
 import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
 import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, SlotGate, type ClaimedJob } from "./jobs.ts";
 import { type Caller, callerFor, inletRef, MismatchLog, onBehalfOf, parseCallers, parseServiceCallers, promptOwner, requestKindOf, resolveOrigin } from "./origin.ts";
-import { formDerivedRequest, insertDerivedJob, openHandback, parseDoorBody, parseProposals, PROPOSER_SYSTEM, proposerUser, publicAddress, sha256Hex } from "./boundary.ts";
+import { formDerivedRequest, insertDerivedJob, openHandback, parseDeliveries, parseDoorBody, recordDelivery, parseProposals, PROPOSER_SYSTEM, proposerUser, publicAddress, sha256Hex } from "./boundary.ts";
 import { canonicalLink } from "./boundary-gate.ts";
 import { actorOf, FOREIGN_PROMPTS_SQL, HIDDEN_STEER_TEXTS_SQL, nonActorView, LISTED_FOR, MAY_ACT_SQL, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
@@ -1344,7 +1344,10 @@ Deno.serve({ port: PORT }, async (req) => {
     try { raw = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
     const parsed = parseDoorBody(raw);
     if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
-    const { item, purpose, deliver } = parsed;
+    const { item, purpose, run } = parsed;
+    // rw-boundary-digest: the hand-back remembers which caller opened it (server-side, never the caller's word), so
+    // only that caller can record its delivery (POST /research/derived/delivered)
+    const deliver = { ...parsed.deliver, caller: callerOf(req, url)?.name ?? "unknown" };
     // round 2 (TF5): whatever the item holds, the door answers a fixed code - never an unhandled 500
     let verdict: Awaited<ReturnType<typeof formDerivedRequest>>;
     try {
@@ -1376,7 +1379,7 @@ Deno.serve({ port: PORT }, async (req) => {
     const c = await pool.connect();
     try {
       await c.queryObject("BEGIN");
-      const jobId = verdict.ok ? await insertDerivedJob(c, verdict.request) : null;
+      const jobId = verdict.ok ? await insertDerivedJob(c, verdict.request, run) : null;
       const state = verdict.ok ? "queued" : purpose === "idea-research" ? "awaiting_owner" : "refused";
       const handbackId = await openHandback(c, {
         item, purpose, jobId, state, record: verdict.record, verdictId: verdict.verdict_id,
@@ -1394,6 +1397,30 @@ Deno.serve({ port: PORT }, async (req) => {
       console.error(`[boundary] the derived door failed (${(e as { fields?: { code?: string } }).fields?.code ?? (e as Error).name})`);
       return Response.json({ error: "boundary_failed" }, { status: 500 });
     } finally { c.release(); }
+  }
+
+  // rw-boundary-digest (plan 09 2.5 P6, slot 460): a delivering caller records that it used its derived jobs - the
+  // digest after the day's episode: {deliveries: [{job_id, ok, episode_id?, thread_id?}]}. Each goes to the private
+  // hand-back (boundary.ts recordDelivery: the caller that opened it only, a queued row only, the two ids only) - the episode's
+  // thread links live there, never as a shared sources row. -> 200 {delivered: n}
+  if (req.method === "POST" && url.pathname === "/research/derived/delivered") {
+    if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
+    let raw: unknown;
+    try { raw = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
+    const parsed = parseDeliveries(raw);
+    if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+    const caller = callerOf(req, url)?.name ?? "unknown";
+    const c = await pool.connect();
+    let delivered = 0;
+    try {
+      for (const d of parsed.deliveries) {
+        if (await recordDelivery(c, d, caller)) delivered++;
+      }
+    } catch (e) {
+      console.error(`[boundary] recording a delivery failed (${(e as { fields?: { code?: string } }).fields?.code ?? (e as Error).name})`);
+      return Response.json({ error: "delivery_failed", delivered }, { status: 500 });
+    } finally { c.release(); }
+    return Response.json({ delivered }, { status: 200 });
   }
 
   if (req.method === "POST" && url.pathname === "/research") {

@@ -95,6 +95,14 @@ export class PresenterStore {
     return String(rows[0].id);
   }
 
+  /** rw-boundary-digest (slot 460, plan 09 P6): the episode's script on the OWNER's own episode row (owner_sub
+   *  filter: never another user's row). Returns whether a row took it. */
+  async setTranscript(id: string, owner: string, transcript: string): Promise<boolean> {
+    const rows = await this.#req<Row[]>("PATCH",
+      `podcast_episodes?id=eq.${encodeURIComponent(id)}&owner_sub=eq.${encodeURIComponent(owner)}&select=id`, { transcript });
+    return Array.isArray(rows) && rows.length === 1;
+  }
+
   async request(id: string): Promise<Row | null> {
     return (await this.#req<Row[]>("GET", `podcast_render_requests?id=eq.${encodeURIComponent(id)}&select=*`))[0] ?? null;
   }

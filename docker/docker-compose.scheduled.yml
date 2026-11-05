@@ -328,6 +328,10 @@ services:
       GAP_DIVE_MAX_ATTEMPTS: ${GAP_DIVE_MAX_ATTEMPTS:-2} # resubmits before drop
       GAP_DIVE_MAX_AGE_DAYS: ${GAP_DIVE_MAX_AGE_DAYS:-3} # freshness: never dive staler
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
+      # rw-boundary-digest round 2: the digest's OWN research caller key (link-enrich asks POST /research/derived with
+      # it; the shared MCP_ACCESS_KEY is never used for research). Declare the same key on the research service in
+      # RESEARCH_CALLERS as digest=notebook:<key>. BLANK AS SHIPPED = no research: every link email-only, no gap dive.
+      RESEARCH_DIGEST_KEY: ${OB_RESEARCH_DIGEST_KEY:-}
     volumes:
       - ../recipes/daily-digest:/app
       # Readonly Gmail token (same as the pull) — re-fetch raw email HTML so every

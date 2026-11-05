@@ -12,7 +12,8 @@
 
 import { GoogleOAuth } from "../clients/google-oauth.ts";
 
-const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
+// GMAIL_API_BASE: the labs' Gmail stub (rw-boundary-digest: seeded emails only, never the real mailbox). Unset = Google.
+const GMAIL_API = `${(Deno.env.get("GMAIL_API_BASE") || "https://gmail.googleapis.com").replace(/\/+$/, "")}/gmail/v1/users/me`;
 
 interface GmailPart {
   mimeType?: string;

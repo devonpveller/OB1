@@ -32,6 +32,7 @@ import { gatewaySpeech } from "./src/podcast/tts-client.ts";
 import { mapOn, type OnRecord, profileCounts } from "./src/on-capture/on-mapping.ts";
 import { byClass, classify, CLEAN_MIGRATION_TEST } from "./src/on-capture/migration.ts";
 import { SurrealReader } from "./src/on-capture/surreal-read.ts";
+import { digestOwnerSub } from "./src/enrich/owner-sub.ts";
 import { canon, changed, fingerprint as fp } from "./src/on-capture/fingerprint.ts";
 
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
@@ -43,7 +44,7 @@ const surreal = new SurrealReader({
   url: env("SURREAL_URL", "http://surrealdb:8000"), ns: env("SURREAL_NS", "open_notebook"), db: env("SURREAL_DB", "open_notebook"),
   user: env("SURREAL_USER"), pass: env("SURREAL_PASSWORD"),
 });
-const OWNER = env("WORKSPACE_DEFAULT_SUB").trim() || "operator";
+const OWNER = digestOwnerSub(); // rw-boundary-digest round 2 (F6): the one owner source
 const destination = storeDestination({ workbenchUrl: env("WORKBENCH_URL", "http://openbrain-workbench:8000"), key: env("MCP_ACCESS_KEY") });
 const archive = new ArchiveWriter(destination);
 const store = new PresenterStore(env("BRAIN_REST_URL", "http://openbrain-rest"));
