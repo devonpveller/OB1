@@ -116,7 +116,12 @@ BEGIN
                        progress = CASE WHEN NOT (a.row_data ? 'progress') THEN j.progress
                                        WHEN jsonb_typeof(a.row_data -> 'progress') = 'null' THEN NULL ELSE a.row_data -> 'progress' END,
                        error = CASE WHEN a.row_data ? 'error' THEN a.row_data ->> 'error' ELSE j.error END,
-                       gap_ref = CASE WHEN a.row_data ? 'gap_ref' THEN a.row_data ->> 'gap_ref' ELSE j.gap_ref END
+                       gap_ref = CASE WHEN a.row_data ? 'gap_ref' THEN a.row_data ->> 'gap_ref' ELSE j.gap_ref END,
+                       -- round 4: the metrics and the inlet reference
+                       metrics = CASE WHEN NOT (a.row_data ? 'metrics') THEN j.metrics
+                                      WHEN jsonb_typeof(a.row_data -> 'metrics') = 'null' THEN NULL ELSE a.row_data -> 'metrics' END,
+                       inlet_ref = CASE WHEN NOT (a.row_data ? 'inlet_ref') THEN j.inlet_ref
+                                        WHEN jsonb_typeof(a.row_data -> 'inlet_ref') = 'null' THEN NULL ELSE a.row_data -> 'inlet_ref' END
                   FROM public.inlet_owner_archive a
                  WHERE a.batch = v_batch AND a.action = 'j' AND (a.row_data ->> 'id')::uuid = j.id;
                 GET DIAGNOSTICS v_n = ROW_COUNT;
