@@ -375,6 +375,7 @@ UPDATE thoughts SET metadata = jsonb_build_object('exposure', 'ops', 'source', '
       'pull shape, the literal operator', 'pull shape, a service principal', 'pull shape, blank owner', 'import shape, no owner', 'note shape, no owner',
       'note shape, B on the vault', 'dossier look-alike, unowned', 'source, an email body', 'source, a podcast transcript', 'source, a Gmail id',
       'source, a nested Gmail id', 'source, a Gmail_Id key', 'source, a Gmail URL in metadata', 'source, a Gmail URL in content',
+      'R1 source, a Gmail-Id key', 'R1 source, a gmail id key', 'R1 anon: an unowned dossier with a Gmail-Id key',
       'episode, the literal operator', 'episode, a service principal', 'F8 import token for A: an unowned dossier-shaped row',
       'F8 anon: an unowned dossier carrying source gmail + gmail_id', 'F8 anon: an unowned dossier with a nested gmailId', 'F8 anon: an unowned dossier with a Gmail URL in its text',
       "import token for A, a row with B's user_id", "import token for A, a row naming B's connection")
@@ -420,7 +421,8 @@ WITH s(url, content_type, metadata, content) AS (VALUES
   ('https://example.org/d', 'web_article', jsonb_build_object('gmail_thread_id', 'x'), 'x'), ('https://example.org/e', 'web_article', jsonb_build_object('gmail_labels', jsonb_build_array('x')), 'x'),
   ('https://example.org/f', 'web_article', jsonb_build_object('via', 'https://mail.google.com/x'), 'x'), ('https://example.org/g', 'web_article', '{}'::jsonb, 'see https://Mail.Google.com/y'),
   ('https://example.org/h', 'web_article', jsonb_build_object('n', jsonb_build_object('gmail_id', 'x')), 'x'), ('https://example.org/i', 'web_article', jsonb_build_object('Gmail_Id', 'x'), 'x'),
-  ('https://example.org/j', 'web_article', '{}'::jsonb, 'an ordinary article'))
+  ('https://example.org/j', 'web_article', '{}'::jsonb, 'an ordinary article'),
+  ('https://example.org/k', 'web_article', jsonb_build_object('Gmail-Id', 'x'), 'x'), ('https://example.org/l', 'web_article', jsonb_build_object('n', jsonb_build_object('gmail id', 'x')), 'x'))
 SELECT count(*) FILTER (WHERE (($($m1.Groups[1].Value)) OR ($($m2.Groups[1].Value)))) || '|' ||
        count(*) FILTER (WHERE (($($m1.Groups[1].Value)) OR ($($m2.Groups[1].Value))) AND NOT public.inlet_stamp_source_personal(s.url, s.content_type, s.metadata, s.content)) || '|' ||
        count(*) FILTER (WHERE public.inlet_stamp_source_personal(s.url, s.content_type, s.metadata, s.content)) FROM s
@@ -430,7 +432,7 @@ SELECT count(*) FILTER (WHERE (($($m1.Groups[1].Value)) OR ($($m2.Groups[1].Valu
       $null = Dk cp $driftFile "${db}:/tmp/f2-drift.sql"
       $drift = "$(Dk exec $db psql -U postgres -d openbrain -X -A -t -f /tmp/f2-drift.sql)".Trim()
       Save 'f2-drift.txt' "440 move scope: $($m1.Groups[1].Value)`n440 strip check: $($m2.Groups[1].Value)`nselected by 440 | by 440 but not by 470 | by 470: $drift"
-      Check ($m1.Success -and $m2.Success -and $drift -eq '8|0|10') "F2: 470's personal-source predicate selects every candidate 440's own predicates select (read from init-inlet-owner.sql), plus a nested and a case-variant Gmail id ($drift = 440 | 440-not-470 | 470)"
+      Check ($m1.Success -and $m2.Success -and $drift -eq '8|0|12') "F2: 470's personal-source predicate selects every candidate 440's own predicates select (read from init-inlet-owner.sql), plus a nested, a case-variant, a Gmail-Id and a 'gmail id' key ($drift = 440 | 440-not-470 | 470)"
       Check ($chk -match 'inlet stamp' -and $clm -match 'inlet stamp' -and $chkOk -match 'landed') "round 3 (low): a source chunk and a claim carrying a Gmail URL are refused (440's fail-closed text check); an ordinary chunk lands"
       Check ($escInDb -eq 0 -and $escInFile -eq 0 -and $guardDefs.Length -gt 500) "no setting- or role-based escape in the guard path: the guards' definitions read no setting and no role ($escInDb), slot 470's file switches off nothing ($escInFile)"
       $rec = $pj.record

@@ -127,6 +127,10 @@ await w("source, a Gmail id", "sources", src({ url: `https://example.org/${TAG}/
 await w("source, a nested Gmail id", "sources", src({ url: `https://example.org/${TAG}/n`, metadata: { origin: { gmail_id: "abc" } } }));
 await w("source, a Gmail_Id key", "sources", src({ url: `https://example.org/${TAG}/c`, metadata: { Gmail_Id: "abc" } }));
 await w("source, a Gmail URL in metadata", "sources", src({ url: `https://example.org/${TAG}/m`, metadata: { via: "https://MAIL.google.com/mail/u/0/#inbox/x" } }));
+// round 5 (review R1): any key containing gmail, in any case and spelling
+await w("R1 source, a Gmail-Id key", "sources", src({ url: `https://example.org/${TAG}/r1a`, metadata: { "Gmail-Id": "abc" } }));
+await w("R1 source, a gmail id key", "sources", src({ url: `https://example.org/${TAG}/r1b`, metadata: { x: { "gmail id": "abc" } } }));
+await w("R1 anon: an unowned dossier with a Gmail-Id key", "thoughts", thought({}, { ...DOSSIER, "Gmail-Id": "x" }));
 await w("source, a Gmail URL in content", "sources", src({ url: `https://example.org/${TAG}/t2`, content: `read https://mail.google.com/mail/u/0/#inbox/${TAG}` }));
 await w("source, a public article (control)", "sources", src({ url: `https://example.org/${TAG}/article` }));
 // the podcast episode's owner
