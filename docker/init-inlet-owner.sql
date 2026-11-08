@@ -871,13 +871,37 @@ BEGIN
     v_spat := (SELECT '(' || string_agg(slug, '|' ORDER BY length(slug) DESC) || ')' FROM _io_qn WHERE length(slug) >= 12);
     PERFORM set_config('inlet_owner.pat', coalesce(v_pat, ''), true), set_config('inlet_owner.spat', coalesce(v_spat, ''), true);
     -- the prefilter (the full pattern costs about 2 ms a row on live): a text can carry a 12+ seed text only if it holds
-    -- that text's longest word (an alphanumeric run, any case); a short one only as the whole field. Every text is split
-    -- into its words once and joined against these, and only a hit pays for the pattern.
+    -- EVERY word of it, so it is enough to look for ONE word per seed text; a short one only as the whole field. Every
+    -- text is split into its words once and joined against these, and only a hit pays for the pattern.
+    -- round 7 (the deploy blocker: a shared longest word let almost every row through): the word chosen is the RAREST of
+    -- the seed text's words (3+ characters) by term frequency in a sample of the very columns the sweep reads (TABLESAMPLE
+    -- SYSTEM 5 %, repeatable); ties go to the longer word. The choice changes only how fast the sweep is, never what it
+    -- finds: a row that carries the seed text carries all its words.
+    CREATE TEMP TABLE _io_qwords ON COMMIT DROP AS
+    SELECT DISTINCT q.n, w FROM _io_qn q, regexp_split_to_table(q.n, '[^[:alnum:]]+') w WHERE length(q.n) >= 12 AND w <> '';
+    CREATE TEMP TABLE _io_df (w TEXT PRIMARY KEY, df BIGINT NOT NULL DEFAULT 0) ON COMMIT DROP;
+    INSERT INTO _io_df (w) SELECT DISTINCT w FROM _io_qwords WHERE length(w) >= 3 ON CONFLICT DO NOTHING;
+    IF EXISTS (SELECT 1 FROM _io_df) THEN
+        FOR r IN SELECT format('%I.%I', ns.nspname, c.relname) AS tbl, a.attname AS col
+                   FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace JOIN pg_attribute a ON a.attrelid = c.oid
+                  WHERE ns.nspname = 'public' AND c.relkind = 'r' AND NOT c.relforcerowsecurity
+                    AND c.relname NOT LIKE 'lab\_%' AND c.relname NOT LIKE 'inlet\_%' AND c.relname NOT IN ('thoughts', 'entities')
+                    AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = ''
+                    AND (format_type(a.atttypid, a.atttypmod) IN ('text', 'jsonb', 'text[]') OR format_type(a.atttypid, a.atttypmod) LIKE 'character varying%')
+                    AND NOT ((c.relname = 'sources' AND a.attname = 'content') OR (c.relname = 'source_chunks' AND a.attname = 'content')
+                             OR (c.relname = 'wiki_pages' AND a.attname NOT IN ('title', 'slug'))) LOOP
+            EXECUTE format('UPDATE _io_df d SET df = d.df + x.c FROM (SELECT sw.w, count(*) AS c FROM %s t TABLESAMPLE SYSTEM (5) REPEATABLE (440),
+                                   regexp_split_to_table(lower(t.%I::text), ''[^[:alnum:]]+'') AS sw(w)
+                             WHERE sw.w IN (SELECT w FROM _io_df) GROUP BY sw.w) x WHERE x.w = d.w', r.tbl, r.col);
+        END LOOP;
+    END IF;
     CREATE TEMP TABLE _io_qw (w TEXT PRIMARY KEY) ON COMMIT DROP;
     INSERT INTO _io_qw
-    SELECT DISTINCT ON (q.n) w FROM _io_qn q, regexp_split_to_table(q.n, '[^[:alnum:]]+') w
-     WHERE length(q.n) >= 12 AND w <> '' ORDER BY q.n, length(w) DESC, w
+    SELECT DISTINCT ON (q.n) q.w FROM _io_qwords q LEFT JOIN _io_df dfx ON dfx.w = q.w
+     ORDER BY q.n, (length(q.w) >= 3) DESC, coalesce(dfx.df, 0), length(q.w) DESC, q.w
     ON CONFLICT DO NOTHING;
+    RAISE NOTICE 'inlet owner timing: the seed texts and their prefilter words (% seed text(s), % word(s)) at % s',
+        (SELECT count(*) FROM _io_qn), (SELECT count(*) FROM _io_qw), round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
     CREATE FUNCTION pg_temp.io_pre(p TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE AS $f$
         SELECT p IS NOT NULL AND (
                    EXISTS (SELECT 1 FROM regexp_split_to_table(lower(p), '[^[:alnum:]]+') AS sw(word) JOIN pg_temp._io_qw q ON q.w = sw.word)
@@ -936,67 +960,100 @@ BEGIN
     --   * the bodies sources.content and source_chunks.content: the shared report (D4) and public articles;
     --   * a key or foreign-key column, a generated column.
     -- A table without a primary key that carries seed text refuses the run (its row could not be restored byte-identical).
-    CREATE FUNCTION pg_temp.io_sweep(p_apply BOOLEAN, p_batch UUID DEFAULT NULL, p_owner TEXT DEFAULT NULL) RETURNS BIGINT LANGUAGE plpgsql AS $f$
+    -- round 7 (the deploy blocker): the filter runs ONCE per table. 'collect' (before anything changes) stores the hit
+    -- rows' primary keys in _io_sw and refuses a hit table without a primary key; 'apply' archives, copies and cuts exactly
+    -- those rows, joined by key (an earlier step's archive image of a row is found by one hash join, not a lookup per
+    -- row), then re-checks only those rows: every other row was not a hit, and nothing in between writes seed text.
+    CREATE TEMP TABLE _io_sw (tbl TEXT NOT NULL, pk JSONB NOT NULL, PRIMARY KEY (tbl, pk)) ON COMMIT DROP;
+    CREATE FUNCTION pg_temp.io_sweep_tables() RETURNS TABLE (oid OID, tbl TEXT, cols NAME[], typs TEXT[], pkcols NAME[]) LANGUAGE sql STABLE AS $f$
+        SELECT c.oid, format('%I.%I', ns.nspname, c.relname),
+               array_agg(a.attname ORDER BY a.attnum), array_agg(format_type(a.atttypid, a.atttypmod) ORDER BY a.attnum),
+               (SELECT array_agg(at.attname ORDER BY at.attnum) FROM pg_index i JOIN pg_attribute at ON at.attrelid = i.indrelid AND at.attnum = ANY (i.indkey)
+                 WHERE i.indrelid = c.oid AND i.indisprimary)
+          FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace JOIN pg_attribute a ON a.attrelid = c.oid
+         WHERE ns.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relforcerowsecurity
+           AND c.relname NOT LIKE 'lab\_%' AND c.relname NOT LIKE 'inlet\_%' AND c.relname NOT IN ('thoughts', 'wiki_pages', 'entities')
+           AND (has_table_privilege('service_role', c.oid, 'SELECT')
+                OR (EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') AND has_table_privilege('ob_app_memory', c.oid, 'SELECT')))
+           AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = ''
+           AND (format_type(a.atttypid, a.atttypmod) IN ('text', 'jsonb', 'text[]') OR format_type(a.atttypid, a.atttypmod) LIKE 'character varying%')
+           AND NOT ((c.relname = 'sources' AND a.attname = 'content') OR (c.relname = 'source_chunks' AND a.attname = 'content'))
+           AND NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = c.oid AND k.contype IN ('p', 'f') AND a.attnum = ANY (k.conkey))
+         GROUP BY c.oid, ns.nspname, c.relname
+    $f$;
+    -- the per-table expressions: a row is a hit when a column's cut value differs (the word prefilter first)
+    CREATE FUNCTION pg_temp.io_sweep_where(p_cols NAME[], p_typs TEXT[]) RETURNS TEXT LANGUAGE sql STABLE AS $f$
+        SELECT string_agg(CASE WHEN typ = 'jsonb' THEN
+                              format('(pg_temp.io_pre(t.%1$I::text) AND pg_temp.io_cut_json(t.%1$I) IS DISTINCT FROM t.%1$I)', col)
+                          WHEN typ = 'text[]' THEN
+                              format('(pg_temp.io_pre(array_to_string(t.%1$I, '' '')) AND (SELECT array_agg(pg_temp.io_cut(x) ORDER BY i) FROM unnest(t.%1$I) WITH ORDINALITY u(x, i)) IS DISTINCT FROM t.%1$I)', col)
+                          WHEN col = 'slug' THEN
+                              format('(t.%1$I IS NOT NULL AND %2$L <> '''' AND pg_temp.io_pre(t.%1$I) AND t.%1$I ~* %2$L)', col, coalesce(current_setting('inlet_owner.spat', true), ''))
+                          ELSE format('(pg_temp.io_pre(t.%1$I) AND pg_temp.io_cut(t.%1$I) IS DISTINCT FROM t.%1$I)', col) END, ' OR ')
+          FROM unnest(p_cols, p_typs) u(col, typ)
+    $f$;
+    CREATE FUNCTION pg_temp.io_sweep(p_mode TEXT, p_batch UUID DEFAULT NULL, p_owner TEXT DEFAULT NULL) RETURNS BIGINT LANGUAGE plpgsql AS $f$
     DECLARE
-        r RECORD; v_where TEXT; v_set TEXT; v_pk TEXT; v_pkjson TEXT; v_n BIGINT; v_total BIGINT := 0;
-        pat TEXT := current_setting('inlet_owner.pat', true); spat TEXT := current_setting('inlet_owner.spat', true);
-        app BOOLEAN := EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory');
+        r RECORD; v_where TEXT; v_set TEXT; v_pkjson TEXT; v_apk TEXT; v_n BIGINT; v_total BIGINT := 0;
+        pat TEXT := current_setting('inlet_owner.pat', true);
     BEGIN
-        IF coalesce(pat, '') = '' AND NOT EXISTS (SELECT 1 FROM pg_temp._io_qn WHERE length(n) < 12) THEN RETURN 0; END IF;
-        FOR r IN
-            SELECT c.oid, format('%I.%I', ns.nspname, c.relname) AS tbl,
-                   array_agg(a.attname ORDER BY a.attnum) AS cols, array_agg(format_type(a.atttypid, a.atttypmod) ORDER BY a.attnum) AS typs
-              FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace JOIN pg_attribute a ON a.attrelid = c.oid
-             WHERE ns.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relforcerowsecurity
-               AND c.relname NOT LIKE 'lab\_%' AND c.relname NOT LIKE 'inlet\_%' AND c.relname NOT IN ('thoughts', 'wiki_pages', 'entities')
-               AND (has_table_privilege('service_role', c.oid, 'SELECT') OR (app AND has_table_privilege('ob_app_memory', c.oid, 'SELECT')))
-               AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = ''
-               AND (format_type(a.atttypid, a.atttypmod) IN ('text', 'jsonb', 'text[]') OR format_type(a.atttypid, a.atttypmod) LIKE 'character varying%')
-               AND NOT ((c.relname = 'sources' AND a.attname = 'content') OR (c.relname = 'source_chunks' AND a.attname = 'content'))
-               AND NOT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = c.oid AND k.contype IN ('p', 'f') AND a.attnum = ANY (k.conkey))
-             GROUP BY c.oid, ns.nspname, c.relname
-        LOOP
-            -- a row is hit when a column's cut value differs; a cheap text prefilter first
-            SELECT string_agg(CASE WHEN typ = 'jsonb' THEN
-                                  format('(pg_temp.io_pre(t.%1$I::text) AND pg_temp.io_cut_json(t.%1$I) IS DISTINCT FROM t.%1$I)', col)
-                              WHEN typ = 'text[]' THEN
-                                  format('(pg_temp.io_pre(array_to_string(t.%1$I, '' '')) AND (SELECT array_agg(pg_temp.io_cut(x) ORDER BY i) FROM unnest(t.%1$I) WITH ORDINALITY u(x, i)) IS DISTINCT FROM t.%1$I)', col)
-                              WHEN col = 'slug' THEN
-                                  format('(t.%1$I IS NOT NULL AND %2$L <> '''' AND t.%1$I ~* %2$L)', col, coalesce(spat, ''))
-                              ELSE format('(pg_temp.io_pre(t.%1$I) AND pg_temp.io_cut(t.%1$I) IS DISTINCT FROM t.%1$I)', col) END, ' OR '),
-                   string_agg(CASE WHEN typ = 'jsonb' THEN format('%1$I = pg_temp.io_cut_json(t.%1$I)', col)
-                              WHEN typ = 'text[]' THEN format('%1$I = (SELECT array_agg(pg_temp.io_cut(x) ORDER BY i) FROM unnest(t.%1$I) WITH ORDINALITY u(x, i))', col)
-                              WHEN col = 'slug' THEN format('%1$I = pg_temp.io_cut_slug(t.%1$I)', col)
-                              ELSE format('%1$I = pg_temp.io_cut(t.%1$I)', col) END, ', ')
-              INTO v_where, v_set
-              FROM unnest(r.cols, r.typs) u(col, typ);
-            EXECUTE format('SELECT count(*) FROM %s t WHERE %s', r.tbl, v_where) INTO v_n;
-            IF v_n = 0 THEN CONTINUE; END IF;
-            v_total := v_total + v_n;
-            IF NOT p_apply THEN CONTINUE; END IF;
-            SELECT string_agg(format('a.row_data -> %L = to_jsonb(t) -> %L', at.attname, at.attname), ' AND '),
-                   'jsonb_build_object(' || string_agg(format('%L, t.%I', at.attname, at.attname), ', ') || ')::text'
-              INTO v_pk, v_pkjson
-              FROM pg_index i JOIN pg_attribute at ON at.attrelid = i.indrelid AND at.attnum = ANY (i.indkey)
-             WHERE i.indrelid = r.oid AND i.indisprimary;
-            IF v_pk IS NULL THEN
-                RAISE EXCEPTION 'inlet owner: refused, nothing changed - % row(s) of % carry seed text and the table has no primary key to restore them by', v_n, r.tbl USING ERRCODE = '55000';
+        IF p_mode = 'collect' THEN
+            IF coalesce(pat, '') = '' AND NOT EXISTS (SELECT 1 FROM pg_temp._io_qn WHERE length(n) < 12) THEN RETURN 0; END IF;
+            FOR r IN SELECT * FROM pg_temp.io_sweep_tables() LOOP
+                v_where := pg_temp.io_sweep_where(r.cols, r.typs);
+                IF r.pkcols IS NULL THEN
+                    EXECUTE format('SELECT count(*) FROM %s t WHERE %s', r.tbl, v_where) INTO v_n;
+                    IF v_n > 0 THEN
+                        RAISE EXCEPTION 'inlet owner: refused, nothing changed - % row(s) of % carry seed text and the table has no primary key to restore them by', v_n, r.tbl USING ERRCODE = '55000';
+                    END IF;
+                    CONTINUE;
+                END IF;
+                v_pkjson := 'jsonb_build_object(' || (SELECT string_agg(format('%L, t.%I', k, k), ', ') FROM unnest(r.pkcols) k) || ')';
+                EXECUTE format('INSERT INTO pg_temp._io_sw (tbl, pk) SELECT %L, %s FROM %s t WHERE %s ON CONFLICT DO NOTHING', r.tbl, v_pkjson, r.tbl, v_where);
+                GET DIAGNOSTICS v_n = ROW_COUNT;
+                v_total := v_total + v_n;
+            END LOOP;
+            RETURN v_total;
+        END IF;
+        -- p_mode 'apply' / 'recheck': only the tables and rows 'collect' found
+        FOR r IN SELECT x.* FROM pg_temp.io_sweep_tables() x WHERE x.tbl IN (SELECT DISTINCT tbl FROM pg_temp._io_sw) LOOP
+            v_where := pg_temp.io_sweep_where(r.cols, r.typs);
+            v_pkjson := 'jsonb_build_object(' || (SELECT string_agg(format('%L, t.%I', k, k), ', ') FROM unnest(r.pkcols) k) || ')';
+            v_apk := 'jsonb_build_object(' || (SELECT string_agg(format('%L, a.row_data -> %L', k, k), ', ') FROM unnest(r.pkcols) k) || ')';
+            IF p_mode = 'recheck' THEN
+                EXECUTE format('SELECT count(*) FROM %s t JOIN pg_temp._io_sw s ON s.tbl = %L AND s.pk = %s WHERE %s', r.tbl, r.tbl, v_pkjson, v_where) INTO v_n;
+                v_total := v_total + v_n;
+                CONTINUE;
             END IF;
+            v_set := (SELECT string_agg(CASE WHEN typ = 'jsonb' THEN format('%1$I = pg_temp.io_cut_json(t.%1$I)', col)
+                                        WHEN typ = 'text[]' THEN format('%1$I = (SELECT array_agg(pg_temp.io_cut(x) ORDER BY i) FROM unnest(t.%1$I) WITH ORDINALITY u(x, i))', col)
+                                        WHEN col = 'slug' THEN format('%1$I = pg_temp.io_cut_slug(t.%1$I)', col)
+                                        ELSE format('%1$I = pg_temp.io_cut(t.%1$I)', col) END, ', ')
+                        FROM unnest(r.cols, r.typs) u(col, typ));
+            -- the keys an earlier step of this batch already archived (one image per row and batch: theirs is the original)
+            CREATE TEMP TABLE IF NOT EXISTS _io_sw_arch (pk JSONB PRIMARY KEY) ON COMMIT DROP;
+            TRUNCATE _io_sw_arch;
+            EXECUTE format('INSERT INTO _io_sw_arch SELECT DISTINCT %s FROM public.inlet_owner_archive a WHERE a.batch = $1 AND a.action = ''m'' AND a.tbl = %L
+                             ON CONFLICT DO NOTHING', v_apk, r.tbl) USING p_batch;
             -- [archive-sweep]
             EXECUTE format('INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
-                            SELECT $1, %L, ''*'', ''m'', %s, to_jsonb(t) FROM %s t
-                             WHERE (%s) AND NOT EXISTS (SELECT 1 FROM public.inlet_owner_archive a WHERE a.batch = $1 AND a.action = ''m'' AND a.tbl = %L AND %s)',
-                           r.tbl, v_pkjson, r.tbl, v_where, r.tbl, v_pk) USING p_batch;
+                            SELECT $1, %L, ''*'', ''m'', s.pk::text, to_jsonb(t) FROM %s t JOIN pg_temp._io_sw s ON s.tbl = %L AND s.pk = %s
+                             WHERE (%s) AND NOT EXISTS (SELECT 1 FROM _io_sw_arch x WHERE x.pk = s.pk)',
+                           r.tbl, r.tbl, r.tbl, v_pkjson, v_where) USING p_batch;
             -- [/archive-sweep]
+            -- (the keys archived now: the same scan again, so a cut needs an archive image whoever wrote it)
+            EXECUTE format('INSERT INTO _io_sw_arch SELECT DISTINCT %s FROM public.inlet_owner_archive a WHERE a.batch = $1 AND a.action = ''m'' AND a.tbl = %L
+                             ON CONFLICT DO NOTHING', v_apk, r.tbl) USING p_batch;
             EXECUTE format('INSERT INTO public.inlet_private_rows (tbl, ref, batch, owner_sub, row_data)
-                            SELECT %L, %s, $1, $2, a.row_data FROM %s t JOIN public.inlet_owner_archive a
-                                ON a.batch = $1 AND a.action = ''m'' AND a.tbl = %L AND %s
-                             WHERE (%s) ON CONFLICT DO NOTHING', r.tbl, v_pkjson, r.tbl, r.tbl, v_pk, v_where) USING p_batch, p_owner;
+                            SELECT %L, a.pk::text, $1, $2, a.row_data FROM (SELECT %s AS pk, a.row_data FROM public.inlet_owner_archive a
+                                     WHERE a.batch = $1 AND a.action = ''m'' AND a.tbl = %L) a
+                              JOIN pg_temp._io_sw s ON s.tbl = %L AND s.pk = a.pk
+                            ON CONFLICT DO NOTHING', r.tbl, v_apk, r.tbl, r.tbl) USING p_batch, p_owner;
             PERFORM set_config('session_replication_role', 'replica', true);
-            EXECUTE format('UPDATE %s t SET %s WHERE (%s)
-                              AND EXISTS (SELECT 1 FROM public.inlet_owner_archive a WHERE a.batch = $1 AND a.action = ''m'' AND a.tbl = %L AND %s)',
-                           r.tbl, v_set, v_where, r.tbl, v_pk) USING p_batch;
+            EXECUTE format('UPDATE %s t SET %s FROM pg_temp._io_sw s, _io_sw_arch x
+                             WHERE s.tbl = %L AND s.pk = %s AND x.pk = s.pk AND (%s)', r.tbl, v_set, r.tbl, v_pkjson, v_where);
             GET DIAGNOSTICS v_n = ROW_COUNT;
+            v_total := v_total + v_n;
             PERFORM set_config('session_replication_role', 'origin', true);
         END LOOP;
         RETURN v_total;
@@ -1095,7 +1152,7 @@ BEGIN
            pg_temp.io_cut(t.description) AS description, pg_temp.io_cut_slug(t.slug) AS slug
       FROM public.threads t
      WHERE pg_temp.io_pre(t.name) OR pg_temp.io_pre(t.description)
-        OR (coalesce(current_setting('inlet_owner.spat', true), '') <> '' AND t.slug ~* current_setting('inlet_owner.spat', true));
+        OR (coalesce(current_setting('inlet_owner.spat', true), '') <> '' AND pg_temp.io_pre(t.slug) AND t.slug ~* current_setting('inlet_owner.spat', true));
     DELETE FROM _io_threads_new n USING public.threads t
      WHERE t.id = n.id AND n.name IS NOT DISTINCT FROM t.name AND n.description IS NOT DISTINCT FROM t.description AND n.slug IS NOT DISTINCT FROM t.slug;
     -- a thread link of a tree's synthesis carries no reason text (a suggestion's reason was written from the report's question)
@@ -1156,7 +1213,8 @@ BEGIN
         UPDATE _io_leaf SET n = v_n WHERE tbl = r.tbl AND col = r.col;
     END LOOP;
     -- round 6 (F1): the content sweep, counted now (applied after step 5): any shared row that still carries seed text
-    n_sweep := pg_temp.io_sweep(false);
+    n_sweep := pg_temp.io_sweep('collect');
+    RAISE NOTICE 'inlet owner timing: the scopes and the sweep''s hits (% row(s)) at % s', n_sweep, round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
 
     IF NOT EXISTS (SELECT 1 FROM _io_thoughts) AND v_src IS NULL AND NOT EXISTS (SELECT 1 FROM _io_jobs)
        AND NOT EXISTS (SELECT 1 FROM _io_steers_new) AND NOT EXISTS (SELECT 1 FROM _io_sess_new) AND NOT EXISTS (SELECT 1 FROM _io_stamp_new)
@@ -1193,6 +1251,7 @@ BEGIN
         RAISE EXCEPTION 'inlet owner: refused, nothing changed - % unowned thought(s) in scope, % archived and stamped', (SELECT count(*) FROM _io_thoughts), n_thoughts
             USING ERRCODE = '55000';
     END IF;
+    RAISE NOTICE 'inlet owner timing: step 1 (thoughts) at % s', round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
 
     -- 4 (before the sources go: the jobs are matched by their ids and urls). the jobs, their prompts and their events:
     --    the new values computed first; every row that changes is archived whole (j: the job's changed columns; m: a prompt
@@ -1405,6 +1464,7 @@ BEGIN
                  OR e.step_id IS DISTINCT FROM pg_temp.io_step(e.root_job_id, e.step_id))) THEN
         RAISE EXCEPTION 'inlet owner: refused, nothing changed - a research job, prompt or event still names private data after the strip' USING ERRCODE = '55000';
     END IF;
+    RAISE NOTICE 'inlet owner timing: step 4 (jobs, prompts, events) at % s', round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
     -- round 5, fail closed: every steer of a seeded tree is its rebuild and no steer names private data; every session
     -- tied to a tree is its rebuild; no row hangs on a tree job outside the tree's own tables
     IF EXISTS (SELECT 1 FROM public.research_steers s JOIN _io_tree t ON t.id = s.child_job_id
@@ -1425,6 +1485,7 @@ BEGIN
             RAISE EXCEPTION 'inlet owner: refused, nothing changed - % row(s) of % still hang on a seeded tree or a moved source', v_n, r.tbl USING ERRCODE = '55000';
         END IF;
     END LOOP;
+    RAISE NOTICE 'inlet owner timing: round 5 rows (steers, sessions, stamped sources, threads, moved job / source / session rows) at % s', round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
 
     IF v_src IS NOT NULL THEN
         SELECT count(*) FILTER (WHERE mail), count(*) FILTER (WHERE NOT mail) INTO n_src_mail, n_src_pod FROM _io_src;
@@ -1527,6 +1588,7 @@ BEGIN
                 USING ERRCODE = '55000';
         END IF;
     END IF;
+    RAISE NOTICE 'inlet owner timing: steps 2-3 (sources, chunks, claims) at % s', round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
 
     -- 5. Gmail ids and URLs out of the shared rows (whole rows archived first; triggers off: nothing else moves)
     INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
@@ -1555,14 +1617,16 @@ BEGIN
        THEN
         RAISE EXCEPTION 'inlet owner: refused, nothing changed - a Gmail id or URL is still in a shared row after the strip' USING ERRCODE = '55000';
     END IF;
+    RAISE NOTICE 'inlet owner timing: step 5 (Gmail ids) at % s', round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
 
     -- round 6 (F1): the content sweep, applied - every shared row that still carries a seed text (any table service_role
     -- reads; io_sweep above says which are not swept and why); archived first, the original to inlet_private_rows
-    n_sweep := pg_temp.io_sweep(true, v_batch, v_owner);
-    IF pg_temp.io_sweep(false) <> 0 THEN
+    n_sweep := pg_temp.io_sweep('apply', v_batch, v_owner);
+    IF pg_temp.io_sweep('recheck') <> 0 THEN
         RAISE EXCEPTION 'inlet owner: refused, nothing changed - a shared row still carries a seed text after the sweep' USING ERRCODE = '55000';
     END IF;
     INSERT INTO public.inlet_owner_seed_text (n, batch) SELECT n, v_batch FROM _io_qn WHERE length(n) >= 12 ON CONFLICT DO NOTHING;
+    RAISE NOTICE 'inlet owner timing: the content sweep applied at % s', round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
 
     -- 6. the wiki. Withheld: a thought leaf whose thought is not in the shared corpus (private now, or gone); any page
     --    the guard's predicate matches (links a private thought or a moved source); an entity page whose evidence holds
@@ -1587,7 +1651,7 @@ BEGIN
     INSERT INTO _io_pages (slug, retitle_only)
     SELECT w.slug, true FROM public.wiki_pages w
      WHERE pg_temp.io_hit(w.title)
-        OR (coalesce(current_setting('inlet_owner.spat', true), '') <> '' AND w.slug ~* current_setting('inlet_owner.spat', true))
+        OR (coalesce(current_setting('inlet_owner.spat', true), '') <> '' AND pg_temp.io_pre(w.slug) AND w.slug ~* current_setting('inlet_owner.spat', true))
     ON CONFLICT (slug) DO NOTHING;
     GET DIAGNOSTICS v_n = ROW_COUNT; n_retitle := n_retitle + v_n;
     IF EXISTS (SELECT 1 FROM _io_retitled) THEN
@@ -1617,6 +1681,7 @@ BEGIN
         RAISE EXCEPTION 'inlet owner: refused, nothing changed - % wiki page(s) present private data, % archived and withheld', (SELECT count(*) FROM _io_pages), n_pages
             USING ERRCODE = '55000';
     END IF;
+    RAISE NOTICE 'inlet owner timing: step 6 (wiki pages withheld) at % s', round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
     -- the withheld pages' text, for the guard's "came back" rule (at any slug): the normalised body as 8-word chunks
     CREATE TEMP TABLE _io_norm ON COMMIT DROP AS
     SELECT a.id AS page_ref, string_to_array(NULLIF(public.inlet_owner_norm(a.row_data ->> 'body'), ''), ' ') AS w,
@@ -1636,6 +1701,7 @@ BEGIN
     SELECT n.page_ref, (SELECT count(*) FROM public.inlet_owner_withheld_chunks c WHERE c.page_ref = n.page_ref), n.whole FROM _io_norm n
     ON CONFLICT (page_ref) DO NOTHING;
     GET DIAGNOSTICS n_chunk_pages = ROW_COUNT;
+    RAISE NOTICE 'inlet owner timing: step 6 (the withheld text kept as chunks) at % s', round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
     -- the entities of the withheld entity pages and of the moved sources: bumped (old updated_at archived), so the next
     -- compile rebuilds the ones that still have shared evidence, from shared material only
     INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data)
