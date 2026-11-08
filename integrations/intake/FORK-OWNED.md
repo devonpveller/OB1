@@ -83,4 +83,9 @@ reviewed-upstream: e90f78649567389b6804690b7158a0ce33be76a6
 # onto a8b65b9 (rw-p8a2-cleanup landed) as work/rw-p5a-intake-int2. The hits are the same metadata.intake.fetched_by
 # test line and this file's own round-3 entry above; nothing of the list above changes.
 reviewed-upstream: 63fd32f338f417e3c2200fbc83c84ef6b8f22339
+# rw-mcp-identity round 4 (2026-11-08): reviewed. Not upstream - the fork's own work/rw-inlet-owner (PD1 final, 54e34e4)
+# merged into work/rw-mcp-identity as the merge's second parent. The one hit is init-inlet-owner.sql's pg_temp.io_code_name
+# list of code-like column NAMES its sweep skips (screen_verdict among them): a read-only name match, the same hit
+# rw-inlet-stamp reviewed; not the intake schema, role or service; nothing of the list above changes.
+reviewed-upstream: 54e34e4eed076f13e52d647a9051f19bb30b359b
 ```
