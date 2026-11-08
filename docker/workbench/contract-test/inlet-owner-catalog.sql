@@ -69,6 +69,7 @@ INSERT INTO public.lab_catalog_not_tree VALUES
   ('public.podcast_team_members', 'podcast configuration'),
   ('public.podcast_presenters', 'podcast configuration'),
   ('public.podcast_voice_links', 'podcast configuration'),
+  ('public.podcast_formats', 'podcast configuration (the podcast stores write it through this.#req("POST", ...))'),
   ('public.podcast_render_requests', 'the owner''s render requests (owner-keyed)'),
   ('public.podcast_episodes', 'the owner''s episode (owner_sub; 460 keeps the script there, readers filter by owner)'),
   ('public.research_private_reports', 'an IDEA job''s private report (slot 390''s store); a seeded tree is not an idea job'),
@@ -345,6 +346,30 @@ BEGIN
     INSERT INTO public.wiki_pages (slug, page_class, title, body, links)
     VALUES ('research/free-' || substr(md5(m), 1, 8), 'research', q, 'The report.', '[]'::jsonb);
     INSERT INTO public.lab_catalog_ids VALUES ('free_page', 'research/free-' || substr(md5(m), 1, 8));
+    -- round 8 (tester attempt 6 F1): a SHARED article whose title carries the seeded question and whose tags are the
+    -- default empty array (NOT NULL): the sweep cuts the title, the tags stay '{}' exactly
+    IF current_setting('lab.r8_no_f1', true) IS DISTINCT FROM 'on' THEN
+        INSERT INTO public.sources (url, title, content, content_type)
+        VALUES ('https://shared.example/fwd/' || substr(md5(m), 1, 8), 'Fwd: RE: ' || upper(q) || '  follow-up', 'a public page', 'web_article') RETURNING id INTO x;
+        INSERT INTO public.lab_catalog_ids VALUES ('r8_empty_tags', x::text);
+    END IF;
+    -- round 8 (F2): the seeded question inside an UNRELATED job's event payload, every space a newline (one) or a tab
+    -- (the other), so the JSON text glues 'n' / 't' onto every word
+    INSERT INTO public.research_jobs (status, origin, query) VALUES ('done', 'manual', 'an unrelated job ' || substr(md5(m), 1, 6)) RETURNING id INTO x;
+    INSERT INTO public.research_job_events (job_id, root_job_id, step_id, type, kind, payload) VALUES
+      (x, x, 's1', 'stage', 'due_process', jsonb_build_object('note', 'Summary: ' || replace(q, ' ', chr(10)) || ' went well')),
+      (x, x, 's2', 'stage', 'due_process', jsonb_build_object('note', 'Summary: ' || replace(q, ' ', chr(9)) || ' went well'));
+    INSERT INTO public.lab_catalog_ids VALUES ('r8_json_job', x::text);
+    -- round 8 (F4): a 5-character TOPIC of a seeded-tree job, reused as a whole thread name, a whole jsonb string and a
+    -- whole text[] element in shared rows
+    INSERT INTO public.research_jobs (status, origin, query, anchor, topic_estimate, root_job_id, parent_job_id, rooted_step_id, branch_kind)
+    SELECT 'done', 'manual', 'Verify: short topic', 'x', 'Pyxis', v::uuid, v::uuid, 's1', 'gap' FROM public.lab_catalog_ids WHERE k = 'seeded_root';
+    INSERT INTO public.threads (name, description) VALUES ('Pyxis', 'a short-topic thread') RETURNING id INTO x;
+    INSERT INTO public.lab_catalog_ids VALUES ('r8_short_thread', x::text);
+    INSERT INTO public.sources (url, title, content, content_type, tags, metadata)
+    VALUES ('https://shared.example/short/' || substr(md5(m), 1, 8), 'An ordinary page', 'a public page', 'web_article',
+            ARRAY['misc', 'Pyxis', NULL], jsonb_build_object('subject', 'Pyxis', 'n', 1)) RETURNING id INTO x;
+    INSERT INTO public.lab_catalog_ids VALUES ('r8_short_source', x::text);
     -- the short subject: an email body titled with it (moved), and a thread named exactly it
     INSERT INTO public.sources (url, title, content, content_type)
     VALUES ('https://mail.google.com/mail/u/0/#inbox/' || substr(md5(m || 'short'), 1, 16), 'Acme layoff', 'a short mail ' || m, 'web_article');
@@ -501,6 +526,21 @@ BEGIN
     SELECT count(*) INTO n FROM public.wiki_pages w, public.lab_catalog_ids i WHERE i.k = 'free_page' AND w.slug = i.v;
     RAISE NOTICE 'CATALOG PAGE the page titled with the seeded question still served: % (want 0)', n;
     IF n <> 0 THEN fails := fails + 1; END IF;
+    -- 10. (round 8) F1: the cut article's empty tags stay '{}'; F4: the 5-character topic replaced as a whole thread name,
+    -- a whole jsonb string and a whole text[] element (the NULL element and the other element kept)
+    SELECT count(*) INTO n FROM public.sources s, public.lab_catalog_ids i WHERE i.k = 'r8_empty_tags' AND s.id = i.v::uuid AND s.tags = '{}'::text[]
+       AND s.title NOT ILIKE '%' || m || '%';
+    IF EXISTS (SELECT 1 FROM public.lab_catalog_ids WHERE k = 'r8_empty_tags') THEN
+        RAISE NOTICE 'CATALOG EMPTY-TAGS the article whose title carried the question: cut, tags still ''{}'': % (want 1)', n;
+        IF n <> 1 THEN fails := fails + 1; END IF;
+    END IF;
+    SELECT count(*) INTO n FROM public.threads t, public.lab_catalog_ids i WHERE i.k = 'r8_short_thread' AND t.id = i.v::uuid AND lower(t.name) = 'pyxis';
+    RAISE NOTICE 'CATALOG SHORT-TOPIC a thread named exactly a 5-character topic: % still so named (want 0)', n;
+    IF n <> 0 THEN fails := fails + 1; END IF;
+    SELECT count(*) INTO n FROM public.sources s, public.lab_catalog_ids i WHERE i.k = 'r8_short_source' AND s.id = i.v::uuid
+       AND s.tags IS NOT DISTINCT FROM ARRAY['misc', 'private-text', NULL]::text[] AND s.metadata = jsonb_build_object('subject', 'private-text', 'n', 1);
+    RAISE NOTICE 'CATALOG SHORT-TOPIC the whole text[] element and the whole jsonb string replaced, the rest kept: % (want 1)', n;
+    IF n <> 1 THEN fails := fails + 1; END IF;
     RAISE NOTICE 'CATALOG SUMMARY columns with the seed marker: % (declared %, leaks %); tables % (planted %, declared %, unplanted %)',
         hits, allowed, hits - allowed, (SELECT count(*) FROM public.lab_catalog_tables),
         (SELECT count(*) FROM public.lab_catalog_tables WHERE status = 'planted'), (SELECT count(*) FROM public.lab_catalog_tables WHERE status = 'declared'),

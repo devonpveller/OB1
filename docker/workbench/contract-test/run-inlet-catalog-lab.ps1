@@ -161,7 +161,9 @@ try {
   # INSERT / UPDATE / DELETE / upsert or a PostgREST path is in the case.
   $writerDirs = @('integrations\research-service', 'integrations\research-curator', 'integrations\grounding-backfiller', 'integrations\suggestion-worker',
                   'integrations\openbrain-idea-refinery', 'integrations\entity-extraction-worker', 'integrations\chunk-embedding-worker',
-                  'recipes\daily-digest', 'recipes\entity-wiki', 'docker\wiki-service', 'docker\workbench\src')
+                  'recipes\daily-digest', 'recipes\entity-wiki', 'docker\wiki-service', 'docker\workbench\src',
+                  # round 8 (tester attempt 6, X4): openbrain-mcp writes outside the persist route too
+                  'integrations\kubernetes-deployment')
   function Get-WriteSet([string[]]$roots) {
     $fs = @()
     foreach ($r in $roots) {
@@ -176,6 +178,8 @@ try {
       foreach ($m in [regex]::Matches($t, '(?i)\b(insert\s+into|update|delete\s+from|upsert\s+into)\s+(public\.)?([a-z_][a-z0-9_]*)')) { [void]$set.Add($m.Groups[3].Value.ToLower()) }
       foreach ($m in [regex]::Matches($t, 'rest/v1/([a-z_][a-z0-9_]*)')) { [void]$set.Add($m.Groups[1].Value.ToLower()) }
       foreach ($m in [regex]::Matches($t, '\.from\(\s*[''"]([a-z_][a-z0-9_]*)[''"]\s*\)\s*\.(insert|update|upsert|delete)')) { [void]$set.Add($m.Groups[1].Value.ToLower()) }
+      # round 8 (tester attempt 6, X3): a request helper, this.#req("POST", "<table>", ...) (the podcast stores)
+      foreach ($m in [regex]::Matches($t, '(?i)\breq\(\s*[''"](POST|PATCH|PUT|DELETE)[''"]\s*,\s*[''"`]/?(rest/v1/)?([a-z_][a-z0-9_]*)')) { [void]$set.Add($m.Groups[3].Value.ToLower()) }
     }
     return @{ files = $fs.Count; names = $set }
   }
@@ -332,10 +336,17 @@ try {
   # planted or declared: the case must report every one UNPLANTED. Judged in both modes (it tests the case, not 440).
   Write-Host '[G] the case finds tables nobody planted (a tools/ writer, a grounding-backfiller writer, job / session keys by name)'
   $st = Join-Path $work 'selftest'
-  New-Item -ItemType Directory -Force (Join-Path $st 'integrations\research-service\tools'), (Join-Path $st 'integrations\grounding-backfiller') | Out-Null
+  New-Item -ItemType Directory -Force (Join-Path $st 'integrations\research-service\tools'), (Join-Path $st 'integrations\grounding-backfiller'),
+    (Join-Path $st 'integrations\research-service\extras'), (Join-Path $st 'recipes\daily-digest\src\podcast'), (Join-Path $st 'integrations\kubernetes-deployment') | Out-Null
+  # round 8: the tester's attack tables - X1 a foreign key onto research_steers, written from research-service/extras/;
+  # X2 a digest .from().insert(); X3 a podcast store's this.#req("POST", ...); X4 openbrain-mcp outside the persist route
+  Write-Utf8 (Join-Path $st 'integrations\research-service\extras\steer-notes.ts') "await c.queryObject(``INSERT INTO public.research_steer_notes (steer_id, note) VALUES (`$1, `$2)``, [s, n]);`n"
+  Write-Utf8 (Join-Path $st 'recipes\daily-digest\src\podcast\x.ts') "await sb.from(""digest_extra_notes"").insert({ note });`nawait this.#req(""POST"", ""podcast_extra_notes"", rows, ""return=minimal"");`n"
+  Write-Utf8 (Join-Path $st 'integrations\kubernetes-deployment\mcp-notes.ts') "await client.queryObject(``INSERT INTO mcp_extra_notes (note) VALUES (`$1)``, [n]);`n"
   Write-Utf8 (Join-Path $st 'integrations\research-service\tools\notes.ts') "await c.queryObject(``INSERT INTO public.research_tools_notes (note) VALUES (`$1)``, [n]);`n"
   Write-Utf8 (Join-Path $st 'integrations\grounding-backfiller\notes.ts') "await c.queryObject(``INSERT INTO grounding_notes (note) VALUES (`$1)``, [n]);`n"
-  $ws2 = Get-WriteSet (@($writerDirs | ForEach-Object { Join-Path $ob1 $_ }) + @((Join-Path $st 'integrations\research-service'), (Join-Path $st 'integrations\grounding-backfiller')))
+  $ws2 = Get-WriteSet (@($writerDirs | ForEach-Object { Join-Path $ob1 $_ }) + @((Join-Path $st 'integrations\research-service'), (Join-Path $st 'integrations\grounding-backfiller'),
+    (Join-Path $st 'recipes\daily-digest'), (Join-Path $st 'integrations\kubernetes-deployment')))
   $null = Fresh 'cat_g'
   $ddl = Join-Path $work 'selftest-tables.sql'
   Write-Utf8 $ddl ("CREATE TABLE public.research_tools_notes (id serial PRIMARY KEY, note text);`n" +
@@ -343,11 +354,17 @@ try {
     "CREATE TABLE public.research_job_notes (id serial PRIMARY KEY, job_ref uuid, note text);`n" +
     "CREATE TABLE public.digest_job_text (id serial PRIMARY KEY, job_id text, note text);`n" +
     "CREATE TABLE public.research_session_notes (id serial PRIMARY KEY, session_id uuid REFERENCES public.sessions(id), note text);`n" +
-    "GRANT SELECT ON public.research_tools_notes, public.grounding_notes, public.research_job_notes, public.digest_job_text, public.research_session_notes TO service_role;`n")
+    "CREATE TABLE public.research_steer_notes (id serial PRIMARY KEY, steer_id uuid REFERENCES public.research_steers(id), note text);`n" +
+    "CREATE TABLE public.digest_extra_notes (id serial PRIMARY KEY, note text);`n" +
+    "CREATE TABLE public.podcast_extra_notes (id serial PRIMARY KEY, note text);`n" +
+    "CREATE TABLE public.mcp_extra_notes (id serial PRIMARY KEY, note text);`n" +
+    "GRANT SELECT ON public.research_tools_notes, public.grounding_notes, public.research_job_notes, public.digest_job_text, public.research_session_notes,
+       public.research_steer_notes, public.digest_extra_notes, public.podcast_extra_notes, public.mcp_extra_notes TO service_role;`n")
   $null = Psql 'cat_g' $ddl @()
   $go = Psql 'cat_g' $catalog @('-v', 'phase=plant', '-v', "mark=$mk", '-v', "ctl=$cm", '-v', "write_set=$($ws2.names -join ',')")
   Save 'G-plant.log' $go
-  $want = @('research_tools_notes', 'grounding_notes', 'research_job_notes', 'digest_job_text', 'research_session_notes')
+  $want = @('research_tools_notes', 'grounding_notes', 'research_job_notes', 'digest_job_text', 'research_session_notes',
+            'research_steer_notes', 'digest_extra_notes', 'podcast_extra_notes', 'mcp_extra_notes')
   $found = @($want | Where-Object { $go -match "CATALOG TABLE public\.$_ UNPLANTED" })
   Check ($found.Count -eq $want.Count) "[selftest] the case reports every unplanted new table UNPLANTED ($($found -join ', '); missing: $(@($want | Where-Object { $found -notcontains $_ }) -join ', '))"
 }

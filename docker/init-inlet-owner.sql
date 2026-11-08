@@ -781,7 +781,7 @@ BEGIN
     SELECT DISTINCT coalesce(j.root_job_id, j.id) FROM public.research_jobs j JOIN public.inlet_private_jobs p ON p.job_id = j.id;
     CREATE TEMP TABLE _io_tree ON COMMIT DROP AS
     SELECT j.id, rr.root, 'Research job ' || left(rr.root::text, 8) AS neutral,
-           (SELECT array_agg(DISTINCT x) FILTER (WHERE length(coalesce(x, '')) >= 6) FROM (
+           (SELECT array_agg(DISTINCT x) FILTER (WHERE length(coalesce(x, '')) >= 4) FROM (   -- (round 8: 4+, was 6; io_scrub keeps its own 6+ guard)
                 SELECT rj.query AS x FROM public.research_jobs rj WHERE rj.id = rr.root
                 UNION ALL SELECT rj.anchor FROM public.research_jobs rj WHERE coalesce(rj.root_job_id, rj.id) = rr.root
                 UNION ALL SELECT rj.topic_estimate FROM public.research_jobs rj WHERE coalesce(rj.root_job_id, rj.id) = rr.root
@@ -842,7 +842,7 @@ BEGIN
         UNION SELECT p.row_data ->> k FROM public.inlet_private_jobs p, unnest(ARRAY['query', 'anchor', 'topic_estimate']) k
         UNION SELECT a.row_data ->> 'prompt' FROM public.inlet_owner_archive a
                WHERE a.tbl = 'public.research_prompts' AND a.action = 'm' AND a.restored_at IS NULL AND a.ref IN (SELECT id::text FROM _io_tree)) q
-     WHERE length(coalesce(x, '')) >= 6 AND x !~ '^Research job [0-9a-f]{8}$' AND x <> 'private-text'
+     WHERE length(coalesce(x, '')) >= 4 AND x !~ '^Research job [0-9a-f]{8}$' AND x <> 'private-text'   -- (round 8: 4+, tester attempt 6 F4)
     ON CONFLICT DO NOTHING;
     -- round 6 (tester attempt 5 F1, F6): the SEED TEXT of every seeded tree - its questions, anchors, topics, prompts, its
     -- seeds' titles, and the subject lines (titles) of the email bodies and transcripts this run or an earlier one moves -
@@ -870,17 +870,28 @@ BEGIN
                 FROM _io_qn WHERE length(n) >= 12);
     v_spat := (SELECT '(' || string_agg(slug, '|' ORDER BY length(slug) DESC) || ')' FROM _io_qn WHERE length(slug) >= 12);
     PERFORM set_config('inlet_owner.pat', coalesce(v_pat, ''), true), set_config('inlet_owner.spat', coalesce(v_spat, ''), true);
-    -- the prefilter (the full pattern costs about 2 ms a row on live): a text can carry a 12+ seed text only if it holds
-    -- EVERY word of it, so it is enough to look for ONE word per seed text; a short one only as the whole field. Every
-    -- text is split into its words once and joined against these, and only a hit pays for the pattern.
-    -- round 7 (the deploy blocker: a shared longest word let almost every row through): the word chosen is the RAREST of
-    -- the seed text's words (3+ characters) by term frequency in a sample of the very columns the sweep reads (TABLESAMPLE
-    -- SYSTEM 5 %, repeatable); ties go to the longer word. The choice changes only how fast the sweep is, never what it
-    -- finds: a row that carries the seed text carries all its words.
+    -- the prefilter (the full pattern costs about 2 ms a row on live). Round 8 (tester attempt 6 F2): it is PROVABLY no
+    -- narrower than io_cut, so it changes how fast the sweep is and never what it cuts. Why it holds:
+    --   * a seed text n of 12+ characters is matched by its pattern: each alphanumeric run of n literally (any case), and
+    --     each separator of n as at least one non-alphanumeric character. So in a text that matches, every INNER run of n
+    --     (not its first, not its last) stands between two non-alphanumeric characters, i.e. it is a whole token of the
+    --     text when the text is split on [^[:alnum:]]+ - whatever whitespace (a newline, a tab) or case it has. The first
+    --     and last runs may be glued to other letters ('xplover'), so for a seed text with no usable inner run the chosen
+    --     word is checked as a SUBSTRING instead (_io_qe);
+    --   * a short seed text (4-11) is cut only when the whole field equals it after normalisation, so the field's tokens
+    --     ARE its tokens: any one of them (the rarest) is a token of the field;
+    --   * a json value is tested on its DECODED strings and keys (io_json_text), never on its escaped text, where a newline
+    --     becomes the letter n glued to the next word; io_cut_json cuts exactly those strings and keys.
+    -- The word chosen is the rarest by term frequency in a 5 % sample (TABLESAMPLE SYSTEM, repeatable) of the very columns
+    -- the sweep reads; ties go to the longer word.
     CREATE TEMP TABLE _io_qwords ON COMMIT DROP AS
-    SELECT DISTINCT q.n, w FROM _io_qn q, regexp_split_to_table(q.n, '[^[:alnum:]]+') w WHERE length(q.n) >= 12 AND w <> '';
+    SELECT q.n, x.w, x.i, count(*) OVER (PARTITION BY q.n) AS nw
+      FROM _io_qn q, regexp_split_to_table(q.n, '[^[:alnum:]]+') WITH ORDINALITY x(w, i) WHERE x.w <> '';
+    -- (a leading separator makes an empty first piece: number the real runs again)
+    CREATE TEMP TABLE _io_qtok ON COMMIT DROP AS
+    SELECT n, w, row_number() OVER (PARTITION BY n ORDER BY i) AS pos, count(*) OVER (PARTITION BY n) AS nw FROM _io_qwords;
     CREATE TEMP TABLE _io_df (w TEXT PRIMARY KEY, df BIGINT NOT NULL DEFAULT 0) ON COMMIT DROP;
-    INSERT INTO _io_df (w) SELECT DISTINCT w FROM _io_qwords WHERE length(w) >= 3 ON CONFLICT DO NOTHING;
+    INSERT INTO _io_df (w) SELECT DISTINCT w FROM _io_qtok ON CONFLICT DO NOTHING;
     IF EXISTS (SELECT 1 FROM _io_df) THEN
         FOR r IN SELECT format('%I.%I', ns.nspname, c.relname) AS tbl, a.attname AS col
                    FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace JOIN pg_attribute a ON a.attrelid = c.oid
@@ -895,17 +906,32 @@ BEGIN
                              WHERE sw.w IN (SELECT w FROM _io_df) GROUP BY sw.w) x WHERE x.w = d.w', r.tbl, r.col);
         END LOOP;
     END IF;
+    -- per seed text: 12+ with an inner run of 3+ characters -> its rarest inner run, a TOKEN; 12+ without one -> its rarest
+    -- run, a SUBSTRING; 4-11 (whole field only) -> its rarest run, a TOKEN
+    CREATE TEMP TABLE _io_qpick ON COMMIT DROP AS
+    SELECT DISTINCT ON (t.n) t.n, t.w,
+           CASE WHEN length(t.n) >= 12 AND NOT (t.pos > 1 AND t.pos < t.nw AND length(t.w) >= 3) THEN 'substring' ELSE 'token' END AS kind
+      FROM _io_qtok t LEFT JOIN _io_df dfx ON dfx.w = t.w
+     ORDER BY t.n,
+              (length(t.n) < 12 OR (t.pos > 1 AND t.pos < t.nw AND length(t.w) >= 3)) DESC,
+              (length(t.w) >= 3) DESC, coalesce(dfx.df, 0), length(t.w) DESC, t.w;
     CREATE TEMP TABLE _io_qw (w TEXT PRIMARY KEY) ON COMMIT DROP;
-    INSERT INTO _io_qw
-    SELECT DISTINCT ON (q.n) q.w FROM _io_qwords q LEFT JOIN _io_df dfx ON dfx.w = q.w
-     ORDER BY q.n, (length(q.w) >= 3) DESC, coalesce(dfx.df, 0), length(q.w) DESC, q.w
-    ON CONFLICT DO NOTHING;
-    RAISE NOTICE 'inlet owner timing: the seed texts and their prefilter words (% seed text(s), % word(s)) at % s',
-        (SELECT count(*) FROM _io_qn), (SELECT count(*) FROM _io_qw), round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
+    INSERT INTO _io_qw SELECT DISTINCT w FROM _io_qpick WHERE kind = 'token' ON CONFLICT DO NOTHING;
+    CREATE TEMP TABLE _io_qe (w TEXT PRIMARY KEY) ON COMMIT DROP;
+    INSERT INTO _io_qe SELECT DISTINCT w FROM _io_qpick WHERE kind = 'substring' ON CONFLICT DO NOTHING;
+    RAISE NOTICE 'inlet owner timing: the seed texts and their prefilter words (% seed text(s), % token word(s), % substring word(s)) at % s',
+        (SELECT count(*) FROM _io_qn), (SELECT count(*) FROM _io_qw), (SELECT count(*) FROM _io_qe), round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
     CREATE FUNCTION pg_temp.io_pre(p TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE AS $f$
         SELECT p IS NOT NULL AND (
                    EXISTS (SELECT 1 FROM regexp_split_to_table(lower(p), '[^[:alnum:]]+') AS sw(word) JOIN pg_temp._io_qw q ON q.w = sw.word)
-                OR (length(p) < 64 AND btrim(regexp_replace(lower(p), '[[:space:]]+', ' ', 'g')) IN (SELECT n FROM pg_temp._io_qn WHERE length(n) < 12)))
+                OR EXISTS (SELECT 1 FROM pg_temp._io_qe e WHERE position(e.w IN lower(p)) > 0))
+    $f$;
+    -- a json value's DECODED strings and keys, one text (the prefilter's input for a jsonb column)
+    CREATE FUNCTION pg_temp.io_json_text(j JSONB) RETURNS TEXT LANGUAGE sql IMMUTABLE AS $f$
+        SELECT string_agg(v, ' ') FROM (
+            SELECT x #>> '{}' AS v FROM jsonb_path_query(j, 'strict $.**') x WHERE jsonb_typeof(x) = 'string'
+            UNION ALL
+            SELECT k FROM jsonb_path_query(j, 'strict $.**') o, jsonb_object_keys(CASE WHEN jsonb_typeof(o) = 'object' THEN o ELSE '{}'::jsonb END) k) q
     $f$;
     -- does a text carry seed text (a 12+ span, or a short one as the whole field)?
     CREATE FUNCTION pg_temp.io_hit(p TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE AS $f$
@@ -918,6 +944,7 @@ BEGIN
     DECLARE pat TEXT := current_setting('inlet_owner.pat', true); s TEXT := p;
     BEGIN
         IF s IS NULL THEN RETURN NULL; END IF;
+        IF NOT pg_temp.io_pre(s) THEN RETURN s; END IF;   -- (round 8: provably unchanged otherwise; see the prefilter)
         IF coalesce(pat, '') <> '' THEN s := regexp_replace(s, pat, 'private-text', 'gi'); END IF;
         IF EXISTS (SELECT 1 FROM pg_temp._io_qn q WHERE length(q.n) < 12 AND q.n = btrim(regexp_replace(lower(s), '[[:space:]]+', ' ', 'g'))) THEN
             s := 'private-text';
@@ -930,6 +957,17 @@ BEGIN
     CREATE FUNCTION pg_temp.io_cut_slug(p TEXT) RETURNS TEXT LANGUAGE sql STABLE AS $f$
         SELECT CASE WHEN p IS NULL OR coalesce(current_setting('inlet_owner.spat', true), '') = '' THEN p
                     WHEN p ~* current_setting('inlet_owner.spat', true) THEN NULL ELSE p END
+    $f$;
+    -- round 8 (tester attempt 6 F1): a text[] cut element by element, its shape kept EXACTLY - NULL stays NULL, an empty
+    -- array stays '{}' (array_agg over no rows is NULL, which refused the run on a NOT NULL column: sources.tags), a NULL
+    -- element stays NULL, the bounds are kept
+    CREATE FUNCTION pg_temp.io_cut_arr(a TEXT[]) RETURNS TEXT[] LANGUAGE plpgsql STABLE AS $f$
+    DECLARE o TEXT[] := a; i INT;
+    BEGIN
+        IF a IS NULL OR cardinality(a) = 0 THEN RETURN a; END IF;
+        FOR i IN array_lower(a, 1) .. array_upper(a, 1) LOOP o[i] := pg_temp.io_cut(a[i]); END LOOP;
+        RETURN o;
+    END;
     $f$;
     -- a json value: every string (and every key) cut, the shape kept (the JSON text itself is never edited)
     CREATE FUNCTION pg_temp.io_cut_json(j JSONB) RETURNS JSONB LANGUAGE plpgsql STABLE AS $f$
@@ -984,9 +1022,9 @@ BEGIN
     -- the per-table expressions: a row is a hit when a column's cut value differs (the word prefilter first)
     CREATE FUNCTION pg_temp.io_sweep_where(p_cols NAME[], p_typs TEXT[]) RETURNS TEXT LANGUAGE sql STABLE AS $f$
         SELECT string_agg(CASE WHEN typ = 'jsonb' THEN
-                              format('(pg_temp.io_pre(t.%1$I::text) AND pg_temp.io_cut_json(t.%1$I) IS DISTINCT FROM t.%1$I)', col)
+                              format('(pg_temp.io_pre(pg_temp.io_json_text(t.%1$I)) AND pg_temp.io_cut_json(t.%1$I) IS DISTINCT FROM t.%1$I)', col)
                           WHEN typ = 'text[]' THEN
-                              format('(pg_temp.io_pre(array_to_string(t.%1$I, '' '')) AND (SELECT array_agg(pg_temp.io_cut(x) ORDER BY i) FROM unnest(t.%1$I) WITH ORDINALITY u(x, i)) IS DISTINCT FROM t.%1$I)', col)
+                              format('(pg_temp.io_pre(array_to_string(t.%1$I, '' '')) AND pg_temp.io_cut_arr(t.%1$I) IS DISTINCT FROM t.%1$I)', col)
                           WHEN col = 'slug' THEN
                               format('(t.%1$I IS NOT NULL AND %2$L <> '''' AND pg_temp.io_pre(t.%1$I) AND t.%1$I ~* %2$L)', col, coalesce(current_setting('inlet_owner.spat', true), ''))
                           ELSE format('(pg_temp.io_pre(t.%1$I) AND pg_temp.io_cut(t.%1$I) IS DISTINCT FROM t.%1$I)', col) END, ' OR ')
@@ -1026,7 +1064,7 @@ BEGIN
                 CONTINUE;
             END IF;
             v_set := (SELECT string_agg(CASE WHEN typ = 'jsonb' THEN format('%1$I = pg_temp.io_cut_json(t.%1$I)', col)
-                                        WHEN typ = 'text[]' THEN format('%1$I = (SELECT array_agg(pg_temp.io_cut(x) ORDER BY i) FROM unnest(t.%1$I) WITH ORDINALITY u(x, i))', col)
+                                        WHEN typ = 'text[]' THEN format('%1$I = pg_temp.io_cut_arr(t.%1$I)', col)
                                         WHEN col = 'slug' THEN format('%1$I = pg_temp.io_cut_slug(t.%1$I)', col)
                                         ELSE format('%1$I = pg_temp.io_cut(t.%1$I)', col) END, ', ')
                         FROM unnest(r.cols, r.typs) u(col, typ));
@@ -1698,7 +1736,11 @@ BEGIN
                            CASE WHEN coalesce(array_length(n.w, 1), 0) <= 64 THEN 1 ELSE 8 END) k
     ON CONFLICT DO NOTHING;
     INSERT INTO public.inlet_owner_withheld_pages (page_ref, n_chunks, whole_hash)
-    SELECT n.page_ref, (SELECT count(*) FROM public.inlet_owner_withheld_chunks c WHERE c.page_ref = n.page_ref), n.whole FROM _io_norm n
+    -- (round 8, the timing: one GROUP BY instead of a count per page - the chunks' key starts with h, so a count by
+    -- page_ref was a full scan of the chunk store for every withheld page)
+    SELECT n.page_ref, coalesce(k.c, 0), n.whole FROM _io_norm n
+      LEFT JOIN (SELECT c.page_ref, count(*) AS c FROM public.inlet_owner_withheld_chunks c
+                  WHERE c.page_ref IN (SELECT page_ref FROM _io_norm) GROUP BY c.page_ref) k ON k.page_ref = n.page_ref
     ON CONFLICT (page_ref) DO NOTHING;
     GET DIAGNOSTICS n_chunk_pages = ROW_COUNT;
     RAISE NOTICE 'inlet owner timing: step 6 (the withheld text kept as chunks) at % s', round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
