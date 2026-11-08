@@ -471,6 +471,10 @@ SELECT count(*) FILTER (WHERE (($($m1.Groups[1].Value)) OR ($($m2.Groups[1].Valu
   # the restore runbook (documentation/runbooks/restore-from-snapshot.md): pg_restore --clean --if-exists --no-owner
   # --no-acl, then the slot re-apply (440, 470: --no-acl drops every grant and --no-owner the view's owner)
   $snapSql = "SELECT (SELECT count(*) FROM public.thoughts) || '|' || (SELECT md5(coalesce(string_agg(id::text || ':' || coalesce(user_id, '-'), ',' ORDER BY id), '')) FROM public.thoughts) || '|' || (SELECT count(*) FROM public.sources) || '|' || (SELECT md5(coalesce(string_agg(id::text, ',' ORDER BY id), '')) FROM public.sources)"
+  # PD1's final 440 adds two owner-only stores; the restore must bring them back too (when the chain has them)
+  foreach ($st in @('inlet_private_rows', 'inlet_private_claim_sources')) {
+    if ((Q "SELECT to_regclass('public.$st') IS NOT NULL") -eq 't') { $snapSql += " || '|' || (SELECT count(*) || ':' || md5(coalesce(string_agg(owner_sub, ',' ORDER BY owner_sub), '')) FROM public.$st)" }
+  }
   $guardSql = "SELECT (SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_inlet_stamp_thoughts', 'trg_inlet_stamp_sources') AND tgenabled = 'A') || '|' || coalesce((SELECT string_agg(id || '=' || owner_sub, ',' ORDER BY id) FROM public.inlet_connections), '-') || '|' || coalesce((SELECT pg_get_userbyid(c.relowner) FROM pg_class c WHERE c.oid = to_regclass('public.inlet_connection_mail')), '-')"
   $restore = { param($dump) $o = Dk exec $db pg_restore -U postgres -d openbrain --clean --if-exists --no-owner --no-acl $dump; @{ rc = $script:rc; out = $o } }
   $reapply = {

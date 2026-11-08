@@ -416,7 +416,9 @@ BEGIN
         ARRAY['podcast_formats', 'owner_sub'], ARRAY['podcast_render_requests', 'requester_sub'],
         ARRAY['inlet_private_sources', 'inlet_owner_sub'], ARRAY['inlet_private_source_chunks', 'inlet_owner_sub'],
         ARRAY['inlet_private_claims', 'inlet_owner_sub'], ARRAY['inlet_private_claim_links', 'owner_sub'],
-        ARRAY['inlet_private_jobs', 'owner_sub'], ARRAY['inlet_private_job_events', 'owner_sub']] LOOP
+        ARRAY['inlet_private_jobs', 'owner_sub'], ARRAY['inlet_private_job_events', 'owner_sub'],
+        -- round 4 (PD1's final 440): its two newer owner-only stores
+        ARRAY['inlet_private_rows', 'owner_sub'], ARRAY['inlet_private_claim_sources', 'owner_sub']] LOOP
         IF to_regclass('public.' || c[1]) IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = ('public.' || c[1])::regclass AND conname = c[1] || '_inlet_stamp_owner_ok') THEN
             EXECUTE format('ALTER TABLE public.%I ADD CONSTRAINT %I CHECK (public.inlet_subject_ok(%I)) NOT VALID', c[1], c[1] || '_inlet_stamp_owner_ok', c[2]);

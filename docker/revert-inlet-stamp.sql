@@ -18,7 +18,8 @@ DECLARE c TEXT;
 BEGIN
     FOREACH c IN ARRAY ARRAY['podcast_episodes', 'research_handbacks', 'podcast_teams', 'podcast_presenters',
                              'podcast_voice_links', 'podcast_formats', 'podcast_render_requests', 'inlet_private_sources', 'inlet_private_source_chunks',
-                             'inlet_private_claims', 'inlet_private_claim_links', 'inlet_private_jobs', 'inlet_private_job_events'] LOOP
+                             'inlet_private_claims', 'inlet_private_claim_links', 'inlet_private_jobs', 'inlet_private_job_events',
+                             'inlet_private_rows', 'inlet_private_claim_sources'] LOOP
         IF to_regclass('public.' || c) IS NOT NULL THEN
             EXECUTE format('ALTER TABLE public.%I DROP CONSTRAINT IF EXISTS %I', c, c || '_inlet_stamp_owner_ok');
         END IF;
