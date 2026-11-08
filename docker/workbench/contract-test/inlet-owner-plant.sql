@@ -1,5 +1,5 @@
 -- inlet-owner-plant.sql - rw-inlet-owner's lab plant (synthetic rows only; never point it at a live database).
---   psql -v ON_ERROR_STOP=1 -v mark=<random token> -v phase=plant|late -f inlet-owner-plant.sql
+--   psql -v ON_ERROR_STOP=1 -v mark=<random token> -v phase=plant|late|round5 -f inlet-owner-plant.sql
 -- Plants personal data with a marker (:mark) in EVERY personal field a second user could read - thought content and
 -- metadata, an email-body source (title, content, url, metadata, chunk), a podcast transcript, a claim drawn only from
 -- an email body, a claim drawn from an email body AND a shared article (the mixed case), a claim grounded only on the
@@ -31,6 +31,7 @@ BEGIN
     v  := '[' || array_to_string(array_fill('0.02'::text, ARRAY[greatest(dim, 1)]), ',') || ']';
     sv := '[' || array_to_string(array_fill('0.02'::text, ARRAY[greatest(sdim, 1)]), ',') || ']';
     cv := '[' || array_to_string(array_fill('0.02'::text, ARRAY[greatest(cdim, 1)]), ',') || ']';
+    IF ph = 'round5' THEN RETURN; END IF;   -- (round 5's delta plant: the last block below)
     IF ph = 'late' THEN
         -- a second run's input: a new unowned gmail thought, a new email-body source, a new email-body seed
         mail_url := 'https://mail.google.com/mail/u/0/#inbox/late' || m;
@@ -298,4 +299,55 @@ BEGIN
     RETURNING id INTO ctl;
     INSERT INTO public.lab_inlet_owner_plant VALUES ('adv3', jsonb_build_object('mail_url', mail_url, 'hx', hx, 'j1', j1, 'j1e', j1e, 'r', r, 'b1', b1, 'b2', b2, 'ctl', ctl))
     ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v;
+END $$;
+
+-- round 5 (tester attempt 4 F1-F3, the coordinator's points 4 and the claim edges): on the adv3 tree seeded through a
+-- branch - the steers the engine writes for its two branches (text, topic, anchor, gap, caller, context, step id), the
+-- filed event of the sibling with its filed session (query text, metadata), a cancel and an admission trail row that hang
+-- on its jobs - every one carrying the marker. phase=round5 adds the two shapes round 4 refused or broke on: a filed
+-- event naming the email body the run moves (F2), and two gap branches with a gap_ref in one seeded tree (F6).
+DO $$
+DECLARE
+    ph TEXT := current_setting('lab.phase');
+    p JSONB; a JSONB; m TEXT; st1 UUID; st2 UUID; sess UUID; g1 UUID; g2 UUID; adm UUID := gen_random_uuid(); can BIGINT;
+BEGIN
+    IF ph NOT IN ('plant', 'round5') THEN RETURN; END IF;
+    p := (SELECT v FROM public.lab_inlet_owner_plant WHERE k = 'plant');
+    a := (SELECT v FROM public.lab_inlet_owner_plant WHERE k = 'adv3');
+    m := p ->> 'mark';
+    IF ph = 'plant' THEN
+        INSERT INTO public.research_steers (root_job_id, parent_job_id, child_job_id, steer_kind, step_id, text, topic_estimate, anchor, gap, caller, context_snapshot, actor_sub)
+        VALUES ((a ->> 'r')::uuid, (a ->> 'r')::uuid, (a ->> 'b1')::uuid, 'gap', 's1' || m || 'r5step', 'steer ' || m || 'r5text', 'topic ' || m || 'r5topic',
+                'anchor ' || m || 'r5anchor', jsonb_build_object('claim_id', m || 'r5gid', 'text', 'gap ' || m || 'r5gap', 'score', 0.4, 'threshold', 0.5),
+                'caller ' || m || 'r5caller', jsonb_build_object('n', m || 'r5ctx'), 'system:gap')
+        RETURNING id INTO st1;
+        INSERT INTO public.research_steers (root_job_id, parent_job_id, child_job_id, steer_kind, step_id, text, topic_estimate, anchor, gap, actor_sub)
+        VALUES ((a ->> 'r')::uuid, (a ->> 'r')::uuid, (a ->> 'b2')::uuid, 'interhub', 's2', 'a ' || m || 'r5hub <-> b', 'topic', 'anchor',
+                jsonb_build_object('a', jsonb_build_object('label', m || 'r5la'), 'b', jsonb_build_object('label', 'b'), 'density', 0.2), 'system:gap')
+        RETURNING id INTO st2;
+        INSERT INTO public.sessions (origin_tool, query_text, metadata)
+        VALUES ('owui', 'sibling ' || m || 'r5sess', jsonb_build_object('research_key', 'rs-' || m || 'r5rk', 'model', m || 'r5model'))
+        RETURNING id INTO sess;
+        INSERT INTO public.research_job_events (job_id, root_job_id, step_id, type, kind, payload)
+        VALUES ((a ->> 'b2')::uuid, (a ->> 'r')::uuid, NULL, 'filed', 'due_process', jsonb_build_object('synthesis_id', NULL, 'research_key', 'rs-' || m, 'session_id', sess));
+        INSERT INTO public.research_cancels (job_id, actor_sub, caller, reason, outcome)
+        VALUES ((a ->> 'b1')::uuid, 'system:gap', 'c', 'reason ' || m || 'r5cancel', 'already_terminal') RETURNING id INTO can;
+        INSERT INTO public.research_admission_trail (id, job_id, url, url_key, kind, claim_kind, family, score, total, floor, model_version, signals, reasons, path)
+        VALUES (adm, (a ->> 'r')::uuid, 'https://adm.example.org/' || m || 'r5admurl', 'adm.example.org/x', 'admitted', 'fact', 'news', 0.5, 1, 0.2, 'v1',
+                '{}'::jsonb, jsonb_build_array('because ' || m || 'r5reason'), '[]'::jsonb);
+        INSERT INTO public.lab_inlet_owner_plant VALUES ('adv5', jsonb_build_object('st1', st1, 'st2', st2, 'sess', sess, 'can', can, 'adm', adm))
+        ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v;
+    ELSE
+        -- F2: a filed event (one per job: on the seeded branch b1) naming the email body this run moves private
+        INSERT INTO public.research_job_events (job_id, root_job_id, step_id, type, kind, payload)
+        VALUES ((a ->> 'b1')::uuid, (a ->> 'r')::uuid, NULL, 'filed', 'due_process',
+                jsonb_build_object('synthesis_id', p -> 'sources' ->> 'mail', 'research_key', 'rs-f2'));
+        -- F6: two gap branches with a gap_ref in the email-seeded tree j1
+        INSERT INTO public.research_jobs (status, origin, query, anchor, root_job_id, parent_job_id, rooted_step_id, branch_kind, gap_ref)
+        VALUES ('done', 'manual', 'Verify: one', 'x', (a ->> 'j1')::uuid, (a ->> 'j1')::uuid, 's1', 'gap', 'claim:' || gen_random_uuid()) RETURNING id INTO g1;
+        INSERT INTO public.research_jobs (status, origin, query, anchor, root_job_id, parent_job_id, rooted_step_id, branch_kind, gap_ref)
+        VALUES ('done', 'manual', 'How does a relate to b?', 'x', (a ->> 'j1')::uuid, (a ->> 'j1')::uuid, 's1', 'interhub', 'interhub:a|b') RETURNING id INTO g2;
+        INSERT INTO public.lab_inlet_owner_plant VALUES ('round5', jsonb_build_object('g1', g1, 'g2', g2))
+        ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v;
+    END IF;
 END $$;
