@@ -326,6 +326,9 @@ try {
   # direct PG, as the MCP lanes write (integrations/kubernetes-deployment: capture_thought, agent-memory)
   $mcpIns = { param($src) $o = Dk exec $db psql -U ob_app_memory -d openbrain -X -A -t -v ON_ERROR_STOP=1 -c "INSERT INTO thoughts (content, embedding, metadata, exposure) VALUES ('mcp probe $mode$rand', NULL, jsonb_build_object('source', '$src', 'exposure', 'ops'), 'ops') RETURNING id"; @{ rc = $script:rc; refused = ($o -match 'inlet stamp'); out = $o } }
   $m1 = & $mcpIns 'mcp'; $m2 = & $mcpIns 'agent-memory'
+  # round 5 (the union with rw-mcp-identity): the capture as mcp-identity now writes it - stamped with the lane's subject
+  $m3 = Dk exec $db psql -U ob_app_memory -d openbrain -X -A -t -c "INSERT INTO thoughts (content, embedding, metadata, exposure, user_id) VALUES ('mcp stamped probe $mode$rand', NULL, jsonb_build_object('source', 'mcp', 'exposure', 'ops'), 'ops', '$A') RETURNING 'landed'"
+
   $clr = Dk exec $db psql -U ob_app_memory -d openbrain -X -A -t -c "UPDATE thoughts SET user_id = NULL WHERE content LIKE '%$MA%' AND metadata->>'source' = 'gmail'"
   $clrRefused = $clr -match 'inlet stamp'
   $chg = Dk exec $db psql -U ob_app_memory -d openbrain -X -A -t -c "UPDATE thoughts SET user_id = '$B' WHERE content LIKE '%$MA%' AND metadata->>'source' = 'gmail'"
@@ -393,6 +396,7 @@ UPDATE thoughts SET metadata = jsonb_build_object('exposure', 'ops', 'source', '
     } else {
       Check ($refusedOk -eq $refusedCases.Count -and $acceptedBad -eq 0) "PostgREST: every unowned or wrongly owned shape is refused by the database, naming the guard ($refusedOk of $($refusedCases.Count); accepted $acceptedBad)"
       Check ($controlsOk -eq $okCases.Count) "PostgREST: the correctly owned controls land, and the compile's dossier stays shared ($controlsOk of $($okCases.Count))"
+      Check ($m3 -match 'landed') 'the union with rw-mcp-identity: an MCP capture stamped with its lane subject (as mcp-identity writes it) is accepted'
       Check ($m1.refused -and $m1.rc -ne 0 -and $m2.refused -and $m2.rc -ne 0) 'direct PG as ob_app_memory: an unstamped MCP-shaped capture_thought and agent-memory insert is refused (rw-mcp-identity must stamp them before 470 goes live)'
       Check ($clrRefused -and $chgRefused) 'an app role can neither clear nor change an owner'
       Check ($su0.refused -and $su1.refused -and $su2.refused -and "$($su0.out)$($su1.out)$($su2.out)" -notmatch 'landed' -and $alwaysOn -eq '4') "no escape hatch: a superuser's unowned personal insert is refused too - with a setting, and under session_replication_role = replica (all four guards are ALWAYS triggers: $alwaysOn)"

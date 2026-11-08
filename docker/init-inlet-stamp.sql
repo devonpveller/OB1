@@ -224,7 +224,7 @@ AS $$
     SELECT public.inlet_stamp_is_dossier(p_meta)
        AND NOT (p_meta ? 'source')
        AND coalesce(p_meta::text, '') !~* '"inlet_connection"\s*:'
-       AND coalesce(p_meta::text, '') !~* '"gmail_?[a-z_]*"\s*:'
+       AND coalesce(p_meta::text, '') !~* '"[^"]*gmail[^"]*"\s*:'   -- round 5 (review R1): ANY key containing gmail (Gmail-Id, "gmail id", ...)
        AND coalesce(p_meta::text, '') !~* 'mail\.google\.com'
        AND coalesce(p_content, '') !~* 'mail\.google\.com'
 $$;
@@ -320,7 +320,7 @@ AS $$
     SELECT coalesce(p_url, '') ~* 'mail\.google\.com'
         OR coalesce(p_content_type, '') = 'podcast_transcript'
         OR coalesce(p_meta ->> 'source', '') = 'daily-digest-podcast'
-        OR coalesce(p_meta::text, '') ~* '"gmail_(id|thread_id|labels)"\s*:'
+        OR coalesce(p_meta::text, '') ~* '"[^"]*gmail[^"]*"\s*:'   -- round 5 (review R1): ANY key containing gmail, any case or spelling
         OR coalesce(p_meta::text, '') ~* 'mail\.google\.com'
         OR coalesce(p_content, '') ~* 'mail\.google\.com'
 $$;
