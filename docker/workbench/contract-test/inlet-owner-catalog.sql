@@ -580,6 +580,10 @@ BEGIN
     SELECT count(*) INTO n FROM public.research_jobs j, public.lab_catalog_ids i WHERE i.k = 'r9_done_job' AND j.id = i.v::uuid AND j.status = 'done';
     RAISE NOTICE 'CATALOG CODE-VALUE a job outside the tree whose status equals a seeded topic (Done): % still done (want 1)', n;
     IF n <> 1 THEN fails := fails + 1; END IF;
+    -- (and the code value inside json: no job's progress phase - 'done' in the seeded and the control tree - was rewritten)
+    SELECT count(*) INTO n FROM public.research_jobs j WHERE j.progress ->> 'phase' = 'private-text';
+    RAISE NOTICE 'CATALOG CODE-VALUE a job progress phase rewritten by the short seed text (Done): % (want 0)', n;
+    IF n <> 0 THEN fails := fails + 1; END IF;
     RAISE NOTICE 'CATALOG SUMMARY columns with the seed marker: % (declared %, leaks %); tables % (planted %, declared %, unplanted %)',
         hits, allowed, hits - allowed, (SELECT count(*) FROM public.lab_catalog_tables),
         (SELECT count(*) FROM public.lab_catalog_tables WHERE status = 'planted'), (SELECT count(*) FROM public.lab_catalog_tables WHERE status = 'declared'),

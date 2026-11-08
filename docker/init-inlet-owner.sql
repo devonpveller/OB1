@@ -1010,16 +1010,22 @@ BEGIN
     END;
     $f$;
     -- a json value: every string (and every key) cut, the shape kept (the JSON text itself is never edited)
-    CREATE FUNCTION pg_temp.io_cut_json(j JSONB) RETURNS JSONB LANGUAGE plpgsql STABLE AS $f$
+    CREATE FUNCTION pg_temp.io_code_name(p_name TEXT) RETURNS BOOLEAN LANGUAGE sql IMMUTABLE AS $f$
+        SELECT coalesce(p_name, '') ~ '^(status|state|kind|type|category|phase|mode|outcome|origin|origin_tool|origin_claimed|origin_registry|link_type|steer_kind|branch_kind|request_kind|content_type|page_class|epistemic_tag|volatility|verdict|strength|claim_kind|family|run_kind|screen_verdict|edge_type|action|purpose|inlet_kind|scope|role|level|priority|format|source_type|reason_type)$'
+            OR coalesce(p_name, '') ~ '_(status|state|kind|type|code|mode|class)$'
+    $f$;
+    -- (round 9: a value under a code-like KEY - 'phase', 'status', 'kind', ... as io_code_name - is a code: the short
+    -- whole-field rule skips it, as it skips a code-like column; a seed 'Done' never rewrites {"phase": "done"})
+    CREATE FUNCTION pg_temp.io_cut_json(j JSONB, p_code BOOLEAN DEFAULT false) RETURNS JSONB LANGUAGE plpgsql STABLE AS $f$
     DECLARE o JSONB; k TEXT; v JSONB;
     BEGIN
         IF j IS NULL THEN RETURN NULL; END IF;
         CASE jsonb_typeof(j)
-            WHEN 'string' THEN RETURN to_jsonb(pg_temp.io_cut(j #>> '{}'));
-            WHEN 'array' THEN RETURN (SELECT coalesce(jsonb_agg(pg_temp.io_cut_json(x) ORDER BY i), '[]'::jsonb) FROM jsonb_array_elements(j) WITH ORDINALITY e(x, i));
+            WHEN 'string' THEN RETURN to_jsonb(pg_temp.io_cut(j #>> '{}', p_code));
+            WHEN 'array' THEN RETURN (SELECT coalesce(jsonb_agg(pg_temp.io_cut_json(x, p_code) ORDER BY i), '[]'::jsonb) FROM jsonb_array_elements(j) WITH ORDINALITY e(x, i));
             WHEN 'object' THEN
                 o := '{}'::jsonb;
-                FOR k, v IN SELECT * FROM jsonb_each(j) LOOP o := o || jsonb_build_object(pg_temp.io_cut(k), pg_temp.io_cut_json(v)); END LOOP;
+                FOR k, v IN SELECT * FROM jsonb_each(j) LOOP o := o || jsonb_build_object(pg_temp.io_cut(k), pg_temp.io_cut_json(v, pg_temp.io_code_name(k))); END LOOP;
                 RETURN o;
             ELSE RETURN j;
         END CASE;
@@ -1049,8 +1055,7 @@ BEGIN
     CREATE FUNCTION pg_temp.io_code_col(p_rel OID, p_att SMALLINT, p_name NAME, p_typ OID) RETURNS BOOLEAN LANGUAGE sql STABLE AS $f$
         SELECT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = p_rel AND k.contype = 'c' AND p_att = ANY (k.conkey))
             OR EXISTS (SELECT 1 FROM pg_type ty WHERE ty.oid = p_typ AND ty.typtype IN ('d', 'e'))
-            OR p_name ~ '^(status|state|kind|type|category|phase|mode|outcome|origin|origin_tool|origin_claimed|origin_registry|link_type|steer_kind|branch_kind|request_kind|content_type|page_class|epistemic_tag|volatility|verdict|strength|claim_kind|family|run_kind|screen_verdict|edge_type|action|purpose|inlet_kind|scope|role|level|priority|format|source_type|reason_type)$'
-               OR p_name ~ '_(status|state|kind|type|code|mode|class)$'
+            OR pg_temp.io_code_name(p_name::text)
     $f$;
     CREATE FUNCTION pg_temp.io_sweep_tables() RETURNS TABLE (oid OID, tbl TEXT, cols NAME[], typs TEXT[], pkcols NAME[], codes BOOLEAN[]) LANGUAGE sql STABLE AS $f$
         SELECT c.oid, format('%I.%I', ns.nspname, c.relname),
