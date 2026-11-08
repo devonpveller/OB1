@@ -184,6 +184,12 @@ try {
   if (-not $Red) {
     # the initdb chain ran 430 on the empty volume; the live database has not had it. Take it off, so the plant and the 380 / 390
     # runs below are the live order and "before 430" is a real state
+    # rw-inlet-stamp: the chain also ran slot 470, which sits on 440 (revert order 470, 440, 430): it comes off first - this
+    # lab plants pre-PD1 (unowned) thoughts, which 470 refuses
+    if (Test-Path (Join-Path $dk 'revert-inlet-stamp.sql')) {
+      $o470 = File (Join-Path $dk 'revert-inlet-stamp.sql') 'rv470-empty.sql'; Save '470-revert-on-empty.log' $o470
+      Check ($script:rc -eq 0) 'the chain''s own slot 470 (empty volume) is taken off first (revert order 470, 440, 430)'
+    }
     # rw-inlet-owner: the chain also ran slot 440, which sits on 430 (its guard calls 430's link helper); the revert order is
     # 440, then 430 - so 440 comes off first (on the empty volume it has nothing to restore)
     if (Test-Path (Join-Path $dk 'revert-inlet-owner.sql')) {

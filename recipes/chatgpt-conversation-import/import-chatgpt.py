@@ -19,6 +19,10 @@ Ingestion modes:
     --ingest-endpoint:    Custom endpoint (requires INGEST_URL, INGEST_KEY)
 
 Options:
+    --owner SUBJECT        REQUIRED (rw-inlet-stamp, plan 08 PD2): the subject whose export this is. Every row is
+                           written with it (thoughts.user_id), private to them. Without it, or with a value that is
+                           not a subject (blank, a service: principal, the literal "operator"), the import refuses
+                           (exit 2) before it reads the export, and writes nothing.
     --dry-run              Parse, filter, extract, but don't ingest
     --after YYYY-MM-DD     Only conversations created after this date
     --before YYYY-MM-DD    Only conversations created before this date
@@ -46,6 +50,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -80,6 +85,21 @@ EMBEDDING_MODEL = os.environ.get("LOCAL_EMBED_MODEL", "local-embed")
 OLLAMA_BASE = "http://localhost:11434"
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+
+# rw-inlet-stamp (plan 08 PD2, slot 470): whose export this is - set from --owner in main(), before anything is read.
+OWNER = None
+
+
+def subject_ok(s):
+    """The same rule as the database's inlet_subject_ok() (slot 470)."""
+    return (isinstance(s, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@|+=:/-]{0,254}", s) is not None
+            and re.match(r"(?i)(service|system|anonymous):", s) is None and s.lower() != "operator")
+
+
+def _owner():
+    if not subject_ok(OWNER):
+        raise RuntimeError("inlet owner: not set - refusing to write an unowned row")
+    return OWNER
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 INGEST_URL = os.environ.get("INGEST_URL", "")
@@ -527,7 +547,9 @@ def check_semantic_duplicate(thought_text, threshold=0.92):
             "query_embedding": embedding,
             "match_threshold": threshold,
             "match_count": 1,
-            "filter": {"source": "chatgpt"},
+            # rw-inlet-stamp: shared rows plus this owner's only - one owner's import never dedups against (or learns
+            # of) another owner's thoughts (slot 440's owner_scope)
+            "filter": {"source": "chatgpt", "owner_scope": _owner()},
         },
     )
 
@@ -579,6 +601,7 @@ def ingest_thought_supabase(content, metadata_dict, embed_text=None):
             "embedding": embedding,
             "metadata": {**metadata_dict, "exposure": "ops"},
             "exposure": "ops",
+            "user_id": _owner(),  # rw-inlet-stamp: the export's owner (--owner); the database refuses an unowned row
         },
     )
 
@@ -601,6 +624,7 @@ def ingest_thought_endpoint(content, extra_metadata, full_text=None):
         "content": content,
         "source": "chatgpt",
         "extra_metadata": extra_metadata,
+        "user_id": _owner(),
     }
     if full_text:
         body["full_text"] = full_text
@@ -686,10 +710,8 @@ def store_conversation(conv, extraction, conv_meta, message_count, import_batch)
     if embedding:
         body["embedding"] = embedding
 
-    # Include user_id if provided (required for RLS; auth.uid() is NULL with service_role)
-    user_id = os.environ.get("USER_ID", "")
-    if user_id:
-        body["user_id"] = user_id
+    # rw-inlet-stamp: the export's owner (--owner), never an env value
+    body["user_id"] = _owner()
 
     # Upsert: insert or update on chatgpt_id conflict
     resp = http_post_with_retry(
@@ -744,6 +766,7 @@ Examples:
   python import-chatgpt.py export.zip --focus personal""",
     )
     parser.add_argument("zip_path", help="Path to ChatGPT data export zip file or extracted directory")
+    parser.add_argument("--owner", default=None, metavar="SUBJECT", help="REQUIRED: the subject whose export this is (every row is private to them)")
     parser.add_argument("--dry-run", action="store_true", help="Parse and extract but don't ingest")
     parser.add_argument("--after", type=parse_date, help="Only conversations after YYYY-MM-DD")
     parser.add_argument("--before", type=parse_date, help="Only conversations before YYYY-MM-DD")
@@ -783,7 +806,17 @@ and skip conversations outside it.""")
 
 
 def main():
+    global OWNER
     args = parse_args()
+
+    # rw-inlet-stamp: no owner, no import (exit 2, nothing read, nothing written)
+    if not subject_ok(args.owner):
+        if args.owner is None:
+            print("Error: --owner SUBJECT is required: the subject whose export this is (every row is written private to them). Nothing was read or written.")
+        else:
+            print("Error: --owner is not a valid subject (blank, a service: principal, or the literal operator). Nothing was read or written.")
+        sys.exit(2)
+    OWNER = args.owner
 
     if not os.path.isfile(args.zip_path) and not os.path.isdir(args.zip_path):
         print(f"Error: Path not found: {args.zip_path}")

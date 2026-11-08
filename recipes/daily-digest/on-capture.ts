@@ -6,12 +6,12 @@
  * (mounted read-only). Writes go only to the presenter model (openbrain-db, via PostgREST) and the
  * podcast archive (wherever the configuration store's podcast.archive_destination points NOW).
  *
- *   deno run -A on-capture.ts capture   [--no-db] [--link-reports=<dir>]
+ *   deno run -A on-capture.ts capture   --owner=<subject> [--no-db] [--link-reports=<dir>]
  *   deno run -A on-capture.ts verify-quiesced --manifest=<path>
  *   deno run -A on-capture.ts rerender --manifest=<path> --episode=<ON episode id>   (needs TTS)
  *
  * capture: (1) every speaker_profile / episode_profile / podcast_config -> the presenter model
- * (src/on-capture/on-mapping.ts; owner WORKSPACE_DEFAULT_SUB) with the field ledger; (2) every ON
+ * (src/on-capture/on-mapping.ts; owner: the REQUIRED --owner=<subject>, rw-inlet-stamp) with the field ledger; (2) every ON
  * episode -> the archive (origin on-archive): the audio file as ON stored it (its native format),
  * row.json (the row, `content` included), outline.json, transcript.json, sources.json, profile.json
  * (the episode's own profile snapshots) and the sidecar; (3) the migration investigation (one
@@ -21,7 +21,7 @@
  *
  * Env: SURREAL_URL (http://surrealdb:8000), SURREAL_USER, SURREAL_PASSWORD, SURREAL_NS / SURREAL_DB
  * (open_notebook), ON_DATA_DIR (where ON's /app/data is mounted, e.g. /on-data), ON_DATA_PREFIX
- * (/app/data), WORKSPACE_DEFAULT_SUB (the owner), BRAIN_REST_URL, WORKBENCH_URL, MCP_ACCESS_KEY,
+ * (/app/data), BRAIN_REST_URL, WORKBENCH_URL, MCP_ACCESS_KEY,
  * and for rerender the P7a audio env (CHAT_API_BASE, PODCAST_TTS_KEY, PODCAST_SEGMENT_CACHE_DIR, FFMPEG_BIN).
  */
 import { ArchiveWriter, sha256Hex, storeDestination } from "./src/podcast/archive.ts";
@@ -32,7 +32,7 @@ import { gatewaySpeech } from "./src/podcast/tts-client.ts";
 import { mapOn, type OnRecord, profileCounts } from "./src/on-capture/on-mapping.ts";
 import { byClass, classify, CLEAN_MIGRATION_TEST } from "./src/on-capture/migration.ts";
 import { SurrealReader } from "./src/on-capture/surreal-read.ts";
-import { digestOwnerSub } from "./src/enrich/owner-sub.ts";
+import { ownerArg } from "./src/enrich/owner-sub.ts";
 import { canon, changed, fingerprint as fp } from "./src/on-capture/fingerprint.ts";
 
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
@@ -44,7 +44,18 @@ const surreal = new SurrealReader({
   url: env("SURREAL_URL", "http://surrealdb:8000"), ns: env("SURREAL_NS", "open_notebook"), db: env("SURREAL_DB", "open_notebook"),
   user: env("SURREAL_USER"), pass: env("SURREAL_PASSWORD"),
 });
-const OWNER = digestOwnerSub(); // rw-boundary-digest round 2 (F6): the one owner source
+// rw-inlet-stamp (plan 08 PD2): an admin CLI takes its owner explicitly. `capture` writes the presenter model and the
+// episodes for --owner=<subject>, and refuses (exit 2, nothing read or written) without a valid one; rerender takes the
+// owner from the manifest the capture wrote; verify-quiesced writes nothing.
+const OWNER = (() => {
+  if (verb !== "capture") return "";
+  try {
+    return ownerArg();
+  } catch (e) {
+    console.error((e as Error).message);
+    return Deno.exit(2);
+  }
+})();
 const destination = storeDestination({ workbenchUrl: env("WORKBENCH_URL", "http://openbrain-workbench:8000"), key: env("MCP_ACCESS_KEY") });
 const archive = new ArchiveWriter(destination);
 const store = new PresenterStore(env("BRAIN_REST_URL", "http://openbrain-rest"));

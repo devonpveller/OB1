@@ -311,6 +311,9 @@ export const NEWSLETTER_BODY = Array.from(
     `Paragraph ${i + 1}: the newsletter discusses model routing, queue admission and how a local inference stack recovers after an outage without losing the morning brief.`,
 ).join("\n\n");
 
+/** The owner the brain stub records for the `gmail` inlet connection (rw-inlet-stamp). */
+export const BRAIN_STUB_OWNER = "stub-owner-0001";
+
 export function brainStub(): Stub & { requests: string[] } {
   const requests: string[] = [];
   const thought = {
@@ -338,6 +341,10 @@ export function brainStub(): Stub & { requests: string[] } {
       return Response.json([thought]);
     }
     if (path.startsWith("/rest/v1/sources")) return Response.json([]);
+    // rw-inlet-stamp: the inlet owner record (the digest asks it first; only the `gmail` connection has an owner here)
+    if (req.method === "POST" && path === "/rest/v1/rpc/inlet_connection_owner") {
+      return req.json().then((b) => b?.p_id === "gmail" ? Response.json(BRAIN_STUB_OWNER) : Response.json({ message: "no owner" }, { status: 404 }));
+    }
     if (path.startsWith("/rest/v1/rpc/")) return Response.json([]);
     return Response.json([]);
   });

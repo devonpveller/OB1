@@ -15,12 +15,12 @@ import { PresenterStore } from "../src/podcast/presenter-store.ts";
 import type { RoomTranscript, Team } from "../src/podcast/presenters.ts";
 import { SegmentCache } from "../src/podcast/segment-cache.ts";
 import { gatewaySpeech } from "../src/podcast/tts-client.ts";
-import { digestOwnerSub } from "../src/enrich/owner-sub.ts";
+import { digestOwner } from "../src/enrich/owner-sub.ts";
 
 const env = (k: string, d = "") => Deno.env.get(k) ?? d;
 const API = env("CHAT_API_BASE", "http://llama-cpp:8080/v1");
 const KEY = env("PODCAST_TTS_KEY");
-const OWNER = digestOwnerSub();
+const OWNER = await digestOwner(env("BRAIN_REST_URL", "http://openbrain-rest")); // rw-inlet-stamp: the inlet connection's recorded owner
 const store = new PresenterStore(env("BRAIN_REST_URL", "http://openbrain-rest"));
 const destination = storeDestination({ workbenchUrl: env("WORKBENCH_URL", "http://openbrain-workbench:8000"), key: env("MCP_ACCESS_KEY") });
 const archive = new ArchiveWriter(destination);

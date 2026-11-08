@@ -98,6 +98,7 @@ async function runLinkEnrich(o: { gwUrl: string; brainUrl: string; researchUrl: 
     cwd: RECIPE,
     env: {
       MCP_ACCESS_KEY: "test",
+      INLET_CONNECTION: "gmail", // rw-inlet-stamp: the run's owner is the brain stub's record for this connection
       RESEARCH_DIGEST_KEY: "test-digest-key-000000", // round 2 (F2): the digest researches only with its own key
       BRAIN_REST_URL: o.brainUrl,
       RESEARCH_URL: o.researchUrl,

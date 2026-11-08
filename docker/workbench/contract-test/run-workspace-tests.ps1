@@ -213,6 +213,18 @@ $shimCases = @(
 $shimRefused = @($shimCases | Where-Object { Test-LabDockerArgs $_ }).Count
 Check ($shimRefused -eq $shimCases.Count) "the lab docker shim refuses every forbidden shape ($shimRefused / $($shimCases.Count))"
 
+# rw-inlet-stamp (slot 470): its guards refuse an unowned personal row for every role, with no escape hatch. This lab's
+# fixtures and several cases (5h, 5p, 5r, 5e) plant LEGACY-shaped rows (unowned, as before PD1), so the LAB - never the
+# migration - switches 470's two triggers off around those loads and on again right after; [5r] takes 470 off
+# entirely (the revert order: 470 before 440) and puts it back after 440's second run. The sweep asserts the guards ON.
+function Stamp-Guard([string]$how) {
+  $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "DO `$`$ BEGIN IF to_regclass('public.inlet_connections') IS NOT NULL THEN ALTER TABLE public.thoughts $how TRIGGER trg_inlet_stamp_thoughts; ALTER TABLE public.sources $how TRIGGER trg_inlet_stamp_sources; END IF; END `$`$"
+  return $script:rc
+}
+function Stamp-GuardState {
+  $r = "$(Dk exec $db psql -U postgres -d openbrain -X -A -t -c "SELECT CASE WHEN to_regclass('public.inlet_connections') IS NULL THEN 'absent' WHEN (SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_inlet_stamp_thoughts', 'trg_inlet_stamp_sources') AND tgenabled = 'A') = 2 THEN 'on' ELSE 'off' END")".Trim()
+  return $r
+}
 function LocalSnapshot { (Dk images --filter 'reference=*:local' --format '{{.Repository}}:{{.Tag}} {{.ID}}' | Out-String).Trim() -split "`n" | Sort-Object }
 $localBefore = LocalSnapshot
 
@@ -340,9 +352,14 @@ try {
   if ($errs.Count) { Save 'initdb-errors.log' ($errs -join "`n") }
   $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) 'ob_app_memory (non-superuser, service_role) - the production shape'
+  $null = Stamp-Guard 'DISABLE'   # rw-inlet-stamp: the fixtures are legacy-shaped (an unowned idea thought)
   $null = Dk cp (Join-Path $ct 'fixtures.sql') "${db}:/tmp/fixtures.sql"
   $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/fixtures.sql
+  Save 'fixtures.log' $o
   Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) 'fixtures applied'
+  $null = Stamp-Guard 'ENABLE ALWAYS'
+  $gs = Stamp-GuardState
+  Check ($gs -eq 'on' -or ($gs -eq 'absent' -and @($chain | Where-Object { $_[1] -eq '470-init-inlet-stamp.sql' }).Count -eq 0)) "rw-inlet-stamp: slot 470's guards are PRESENT and ALWAYS-enabled again after the legacy-shaped fixture load ($gs; absent passes only on a chain without slot 470)"
 
   $ctMount = "${ct}:/ct:ro"
   $null = Run-Detached "$P-embed" @('--network-alias', 'stub-embed', '-v', $ctMount, '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '/ct/stub-embed.ts')
@@ -443,11 +460,13 @@ try {
 
   # rw-p8a4-ideas: the ideas panel and the refinery view over the real workbench and database (two users + the app role)
   if (-not $SettingsOnly) {
+  $null = Stamp-Guard 'DISABLE'   # rw-inlet-stamp: the test plants a legacy (unowned) idea thought
   Write-Host '[5h] the ideas and refinery view integration test (owner-checked idea functions, the dossier into the room, archive, user sources)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault", '-e', 'DOCS_TEST_VAULT=/vault',
     '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/ideas/ideas_integration_test.ts')
+  $null = Stamp-Guard 'ENABLE ALWAYS'
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
   Save 'ideas-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|Values are not equal|\[Diff\]|^\s+[-+]' }) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
@@ -550,6 +569,7 @@ try {
   #   checks; files back, revert twice; byte-identity; two MUTANTS (no thought archive step / no wiki archive step) must
   #   refuse and change nothing; init again + files out (the sweep then runs on that state).
   if (-not $Red -and -not $SettingsOnly) {
+    $null = Stamp-Guard 'DISABLE'   # rw-inlet-stamp: slot 380's plants and reverts are legacy-shaped (unowned idea thoughts)
     Write-Host '[5p] slot 380: the idea thoughts leave the shared corpus and the wiki stops showing them (plant, RED x2, init x2, reconcile, deploy step, revert x2, mutants, init)'
     $phase = {
       param($ph, $logName)
@@ -700,6 +720,7 @@ try {
   # keeps the reconcile repair (files still present) from writing either back; a clean page goes in; the revert brings
   # them back; init again withholds them.
   if (-not $Red -and -not $SettingsOnly) {
+    $null = Stamp-Guard 'ENABLE ALWAYS'
     Write-Host '[5q] slot 390 and the wiki: plant, RED with round 1, init, the viewer''s reconcile repair with the files present, search as B, revert, init'
     $wk = -join ((97..122) | Get-Random -Count 10 | ForEach-Object { [char]$_ })
     $mark = "wikireportsecret$wk"
@@ -880,6 +901,15 @@ try {
   # changed; init again; the late rows; the second run (exactly the new unowned rows). The sweep then runs on that state.
   if (-not $SettingsOnly -and (-not $Red -or $IdeasOnly)) {
     Write-Host '[5r] slot 440: personal data becomes its owner''s and private (plant, RED, refusals, init x2, reconcile, deploy step, revert x2, mutants, init, late rows, second run)'
+    $null = Stamp-Guard 'ENABLE ALWAYS'
+    # rw-inlet-stamp: [5r] plants pre-PD1 data and reverts 440, which writes owners back to NULL - so 470 comes off first
+    # (the revert order: 470 before 440) and goes back on after 440's second run, as on the live database
+    $has470 = (Stamp-GuardState) -ne 'absent'
+    if ($has470) {
+      $null = Dk cp (Join-Path $dockerDir 'revert-inlet-stamp.sql') "${db}:/tmp/rv470.sql"
+      $o470 = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv470.sql
+      Check ($script:rc -eq 0 -and (Stamp-GuardState) -eq 'absent') '[5r] slot 470 taken off first (revert order 470, 440)'
+    }
     $ir = -join ((97..122) | Get-Random -Count 10 | ForEach-Object { [char]$_ })
     $inMark = "inletmark$ir"; $inA = "inlet-owner-$ir"; $inB = "inlet-second-$ir"
     $script:p410 = @{}
@@ -1137,6 +1167,13 @@ try {
       $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "INSERT INTO public.lab_inlet_owner_plant SELECT 'late-unowned', jsonb_build_object('ids', coalesce(jsonb_agg(id ORDER BY id), '[]')) FROM public.thoughts WHERE user_id IS NULL ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v"
       $r4 = & $inPsql $inInit 'init (the second run, after new unowned rows)' @()
       $s = & $inPhase 'rerun' 'inlet-rerun.log'
+      if ($has470) {
+        # 470 back on, right after 440's second run (the live order); it seeds its record from 440's
+        $null = Dk cp (Join-Path $dockerDir 'init-inlet-stamp.sql') "${db}:/tmp/in470.sql"
+        $o470 = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/in470.sql
+        Save 'inlet-stamp-reapply.log' $o470
+        Check ($script:rc -eq 0 -and (Stamp-GuardState) -eq 'on') "[5r] slot 470 applied again right after 440's second run, its guards ON"
+      }
       Check ($r3 -eq 0 -and $lrc -eq 0 -and $r4 -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 1) "[5r] the second run stamps and isolates exactly the rows that arrived unowned; B still reads nothing personal ($($s.Value))"
       # the gmail prune deletes BY OWNER: three expired short-term mails (the owner's, B's, an unowned one that arrived
       # since the last run). RED: the base's prune ($InletBaseSha) deletes all three. GREEN: this prune deletes the owner's only.
@@ -1146,8 +1183,12 @@ try {
       [System.IO.File]::WriteAllText((Join-Path $pruneBase 'prune-short-term.ts'), ((& git -C $ob1 show "${InletBaseSha}:recipes/email-history-import/prune-short-term.ts") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
       $pruneRes = @{}
       foreach ($run in @(@('red', $pruneBase), @('green', (Join-Path $ob1 'recipes\email-history-import')))) {
+        $null = Stamp-Guard 'DISABLE'   # the plant includes an unowned legacy mail (and pre-470 mail with no connection)
         $ids = ((Dk exec $db psql -U postgres -d openbrain -X -tAc "WITH x AS (INSERT INTO public.thoughts (content, metadata, exposure, user_id) SELECT 'Subject: lab prune | ' || o, jsonb_build_object('source', 'gmail', 'email_date', '2020-01-01T00:00:00Z', 'gmail_labels', jsonb_build_array('brain/keep-short-term')), 'ops', NULLIF(o, 'none') FROM unnest(ARRAY['$inA', '$inB', 'none']) o RETURNING id) SELECT string_agg(id::text, ',') FROM x") | Out-String).Trim()
-        $po = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "$($run[1]):/p:ro", '-e', 'SUPABASE_URL=http://openbrain-rest',
+        $null = Stamp-Guard 'ENABLE ALWAYS'
+        # rw-inlet-stamp (slot 470): this prune serves ONE inlet connection, `gmail`, whose recorded owner is the owner
+        # slot 440 recorded (470 seeded it); the base's prune ignores both
+        $po = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "$($run[1]):/p:ro", '-e', 'SUPABASE_URL=http://openbrain-rest', '-e', 'INLET_CONNECTION=gmail',
           '--entrypoint', 'deno', $wbTestTag, 'run', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '/p/prune-short-term.ts', '--retention-days=30', '--no-wiki-recompile')
         Save "inlet-prune-$($run[0]).log" ((($po -split "`n") | Where-Object { $_ -match 'Found|Deleted|nothing|owner' }) -join "`n")
         $left = ((Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT coalesce(user_id, 'none') FROM public.thoughts WHERE id IN ($ids) ORDER BY 1") -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ','
@@ -1165,12 +1206,14 @@ try {
 
   if (-not $IdeasOnly -and -not $SettingsOnly) {
   # rw-p5a-intake: the intake and queue panel over the real workbench and database, two users and OWUI's key
+  $null = Stamp-Guard 'DISABLE'   # rw-inlet-stamp: the test plants an unowned thought for the entity queue
   Write-Host '[5e] the intake and queue panel integration test (two users, the OWUI inlet, every queue)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
     '-e', "INTAKE_TEST_BASE=http://$P-wb:8000", '-e', "INTAKE_TEST_KEY=$key", '-e', "INTAKE_TEST_OWUI_KEY=$owuiKey",
     '-e', 'INTAKE_TEST_RESEARCH=http://stub-research:8000', '-e', 'INTAKE_TEST_GATE=http://stub-gate:8080',
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/intake/intake_integration_test.ts')
+  $null = Stamp-Guard 'ENABLE ALWAYS'
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
   Save 'intake-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|Values are not equal|\[Diff\]|^\s+[-+]' }) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
@@ -1204,6 +1247,8 @@ try {
     Write-Host "    [5g] after the restart: $($after -replace "`n", ' ; ')"
     Check ($staleIds.Count -eq 2 -and @(($after -split "`n") | Where-Object { $_ -match '^failed\|interrupted: the workbench restarted' }).Count -eq 2) '[5g] the start-up sweep marks the stale holding / embedding jobs failed (retryable)'
   }
+  $gs = Stamp-GuardState
+  Check ($gs -eq 'on' -or ($gs -eq 'absent' -and @($chain | Where-Object { $_[1] -eq '470-init-inlet-stamp.sql' }).Count -eq 0)) "rw-inlet-stamp: slot 470's guards are PRESENT and ALWAYS-enabled before the isolation sweep ($gs; absent passes only on a chain without slot 470)"
   Write-Host "[5d] the route-wide isolation sweep (as user A, every registered route, both doors; response walk $walk)"
   $o = Lab-Docker 1800 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
     '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro",

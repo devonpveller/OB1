@@ -164,9 +164,15 @@ function Start-Db([string]$name) {
   $o = Dk exec $name psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) "$name has ob_app_memory (non-superuser, service_role member)"
   $null = Dk cp (Join-Path $ct 'fixtures.sql') "${name}:/tmp/fixtures.sql"
+  # rw-inlet-stamp (slot 470): fixtures.sql is legacy-shaped (an unowned idea thought); the LAB switches 470's guards off
+  # around this load only and on again right after (the migration has no escape hatch)
+  $null = Dk exec $name psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF to_regclass('public.inlet_connections') IS NOT NULL THEN ALTER TABLE public.thoughts DISABLE TRIGGER trg_inlet_stamp_thoughts; ALTER TABLE public.sources DISABLE TRIGGER trg_inlet_stamp_sources; END IF; END `$`$"
   $o = Dk exec $name psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/fixtures.sql
   Save "$name-fixtures.log" $o
   Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) "$name fixtures applied"
+  $null = Dk exec $name psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF to_regclass('public.inlet_connections') IS NOT NULL THEN ALTER TABLE public.thoughts ENABLE ALWAYS TRIGGER trg_inlet_stamp_thoughts; ALTER TABLE public.sources ENABLE ALWAYS TRIGGER trg_inlet_stamp_sources; END IF; END `$`$"
+  $stampState = "$(Dk exec $name psql -U postgres -d openbrain -X -A -t -c "SELECT CASE WHEN to_regclass('public.inlet_connections') IS NULL THEN 'absent' WHEN (SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_inlet_stamp_thoughts', 'trg_inlet_stamp_sources') AND tgenabled = 'A') = 2 THEN 'on' ELSE 'off' END")".Trim()
+  Check ($stampState -eq 'on' -or ($stampState -eq 'absent' -and @($chain | Where-Object { $_[1] -eq '470-init-inlet-stamp.sql' }).Count -eq 0)) "rw-inlet-stamp: slot 470's guards are PRESENT and ALWAYS-enabled again after the fixture load ($stampState; absent passes only on a chain without slot 470)"
   return $true
 }
 
@@ -320,7 +326,7 @@ try {
   $o = Dk run -d --name $wbName --label $label --network $net -e PORT=8000 -e "WORKBENCH_KEY=$key" `
     -e "DB_HOST=$dbB" -e DB_USER=ob_app_memory -e "DB_PASSWORD=$appPw" -e OPEN_BRAIN_URL=http://unreachable.invalid `
     -e "EMBEDDING_API_BASE=http://${embName}:8080/v1" -e WIKI_GIT_DIR=/tmp/wiki -e WIKI_ASSETS_DIR=/tmp/wiki/assets `
-    -e CONTRACT_MOUNTS_ROOT=/mounts -v "$(Join-Path $ob1 'recipes'):/recipes:ro" $tag
+    -e CONTRACT_MOUNTS_ROOT=/mounts -e WORKSPACE_IDENTITY_HEADER=X-Test-Sub -v "$(Join-Path $ob1 'recipes'):/recipes:ro" $tag
   Check ($script:rc -eq 0) "workbench $wbName started"
   if ($script:rc -eq 0) { $made.containers += $wbName }
   $up = $false
@@ -394,6 +400,8 @@ try {
   $o = Dk run --rm --label $label --network $net -v "${gen}:/spec:ro" -v "${ct}:/ct:ro" $dreddTag `
     /spec/openapi.json "http://${wbName}:8000" --header "X-Brain-Key: $key" --hookfiles=/ct/dredd-hooks.js
   Save 'dredd.log' ($o -replace $key, '***')
+  # the failing transactions alone (dredd.log can exceed the capture cap)
+  Save 'dredd-failures.log' ((((($o -replace $key, '***') -replace '\x1b\[[0-9;]*m', '') -split "`n") | Where-Object { $_ -match '^(fail|error):|statusCode|expected|real' } | Select-Object -First 60) -join "`n")
   $clean = $o -replace '\x1b\[[0-9;]*m', ''
   $dm = ([regex]'complete: (\d+) passing, (\d+) failing, (\d+) errors, (\d+) skipped, (\d+) total').Match($clean)
   # Every operation's success (or typed 501) example must pass; the documented error shapes are
