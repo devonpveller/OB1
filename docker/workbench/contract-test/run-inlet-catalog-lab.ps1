@@ -19,6 +19,7 @@
 #   E late      440, then late rows in the private tree (a branch, its steer, events, a cancel, a filed session): the second
 #               run rebuilds exactly them (no late marker in a shared row), the third has nothing to do
 #   F mutant    440 without its [archive-steers] step: refused, nothing changed
+#   H bounds    (round 9) a 0-based and a two-dimensional text[] on a swept column: refused with the count, nothing changed
 # The code scan: every table named by an INSERT / UPDATE / DELETE (or a PostgREST rest/v1/<table>) in the research service,
 # the research curator, the persist route of openbrain-mcp (/research/persist), the workbench sessions and the daily digest /
 # podcast code - intersected with the catalog by the SQL. A table one of them starts writing is in the case the next run.
@@ -179,7 +180,7 @@ try {
       foreach ($m in [regex]::Matches($t, 'rest/v1/([a-z_][a-z0-9_]*)')) { [void]$set.Add($m.Groups[1].Value.ToLower()) }
       foreach ($m in [regex]::Matches($t, '\.from\(\s*[''"]([a-z_][a-z0-9_]*)[''"]\s*\)\s*\.(insert|update|upsert|delete)')) { [void]$set.Add($m.Groups[1].Value.ToLower()) }
       # round 8 (tester attempt 6, X3): a request helper, this.#req("POST", "<table>", ...) (the podcast stores)
-      foreach ($m in [regex]::Matches($t, '(?i)\breq\(\s*[''"](POST|PATCH|PUT|DELETE)[''"]\s*,\s*[''"`]/?(rest/v1/)?([a-z_][a-z0-9_]*)')) { [void]$set.Add($m.Groups[3].Value.ToLower()) }
+      foreach ($m in [regex]::Matches($t, '(?i)\breq(?:\s*<[^()]*?>)?\(\s*[''"](POST|PATCH|PUT|DELETE)[''"]\s*,\s*[''"`]/?(rest/v1/)?([a-z_][a-z0-9_]*)')) { [void]$set.Add($m.Groups[3].Value.ToLower()) }
     }
     return @{ files = $fs.Count; names = $set }
   }
@@ -234,7 +235,7 @@ try {
   $prc = $script:rc
   $io = Psql 'cat_a' $init @('-v', "owner_sub=$owner"); $irc = $script:rc; Save 'A-440.log' (Notices $io)
   $co = Psql 'cat_a' $catalog $checkVars; Save 'A-check.log' (Notices $co)
-  foreach ($l in (Notices $co) -split "`n" | Where-Object { $_ -match 'LEAK|UNPLANTED|PRIVATE|CONTROL|THREAD|CLAIM-EDGES|SUMMARY|RESULT' }) { Write-Host "    $l" }
+  foreach ($l in (Notices $co) -split "`n" | Where-Object { $_ -match 'LEAK|UNPLANTED|PRIVATE|CONTROL|THREAD|CLAIM-EDGES|EMPTY-TAGS|SHORT-TOPIC|GREEK|ACCENT-SLUG|CODE-VALUE|SUMMARY|RESULT' }) { Write-Host "    $l" }
   $tables = @(($po -split "`n") | Where-Object { $_ -match 'CATALOG TABLE' } | ForEach-Object { $_.Trim() })
   Save 'A-tables.txt' ($tables -join "`n")
   $leakTables = @(([regex]::Matches((Notices $co), 'CATALOG HIT LEAK public\.([a-z_]+)\.') | ForEach-Object { $_.Groups[1].Value }) | Sort-Object -Unique)
@@ -330,6 +331,23 @@ try {
     Case 'mutant-sweep' ($cut2 -ne $src -and $mrc2 -ne 0 -and (Notices $mo2) -match 'refused, nothing changed' -and $before2 -eq $after2) "a 440 whose content sweep cuts rows it did not archive first is refused and changes nothing"
   }
 
+  # ---------------------------------------------------------------- H. arrays the archive cannot restore (round 9)
+  # A shared article's tags 0-based ('[0:1]={...}') and another's two-dimensional: JSON keeps no array bounds, so the
+  # revert could not restore them byte-identical (and a 2-D text[] cannot be cut by element). 440 must refuse with the
+  # count, before anything changes (md5 of every table, and the rows' own text form, which keeps the bounds).
+  Write-Host '[H] a 0-based and a two-dimensional text[] on a swept column'
+  $null = Fresh 'cat_h'
+  $null = Psql 'cat_h' $catalog $plantVars
+  $null = Sql 'cat_h' "INSERT INTO public.sources (url, title, content, content_type, tags) VALUES ('https://shared.example/b0/$mk', 'Zero based', 'a page', 'web_article', '[0:1]={misc,news}'::text[]), ('https://shared.example/b2/$mk', 'Two dimensional', 'a page', 'web_article', '{{misc,news},{a,b}}'::text[])"
+  $null = Dk exec $db psql -U postgres -d cat_h -X -q -c $md5Fn
+  $rowSql = "SELECT md5(string_agg(s::text, ',' ORDER BY s.id)) FROM public.sources s"
+  $before = Sql 'cat_h' $md5Sql; $rb = Sql 'cat_h' $rowSql
+  $ho = Psql 'cat_h' $init @('-v', "owner_sub=$owner"); $hrc = $script:rc
+  $after = Sql 'cat_h' $md5Sql; $ra = Sql 'cat_h' $rowSql
+  $bounds = Sql 'cat_h' "SELECT string_agg(tags::text, ' ' ORDER BY title) FROM public.sources WHERE url LIKE 'https://shared.example/b_/$mk'"
+  Save 'H-bounds.log' ("$(Notices $ho)`ntags after: $bounds")
+  Case 'bounds' ($hrc -ne 0 -and (Notices $ho) -match 'refused, nothing changed - 2 row\(s\) of public\.sources column tags hold an array that is multi-dimensional or not 1-based' -and $before -eq $after -and $rb -eq $ra -and $bounds -eq '{{misc,news},{a,b}} [0:1]={misc,news}') "a 0-based and a 2-D text[] on a swept column: 440 refused with the count, nothing changed (tags after: $bounds)"
+
   # ---------------------------------------------------------------- G. the case's own discovery (round 6, T19 3a)
   # A table a writer under integrations/research-service/tools/ writes, one the grounding backfiller writes, and tables keyed
   # by a job, a source or a session under other names and types (job_ref uuid, a TEXT job_id, a session foreign key), none
@@ -339,9 +357,10 @@ try {
   New-Item -ItemType Directory -Force (Join-Path $st 'integrations\research-service\tools'), (Join-Path $st 'integrations\grounding-backfiller'),
     (Join-Path $st 'integrations\research-service\extras'), (Join-Path $st 'recipes\daily-digest\src\podcast'), (Join-Path $st 'integrations\kubernetes-deployment') | Out-Null
   # round 8: the tester's attack tables - X1 a foreign key onto research_steers, written from research-service/extras/;
-  # X2 a digest .from().insert(); X3 a podcast store's this.#req("POST", ...); X4 openbrain-mcp outside the persist route
+  # X2 a digest .from().insert(); X3 a podcast store's this.#req("POST", ...); X4 openbrain-mcp outside the persist route;
+  # round 9: X5 a typed call, this.#req<Row[]>("POST", "<table>") (presenter-store.ts)
   Write-Utf8 (Join-Path $st 'integrations\research-service\extras\steer-notes.ts') "await c.queryObject(``INSERT INTO public.research_steer_notes (steer_id, note) VALUES (`$1, `$2)``, [s, n]);`n"
-  Write-Utf8 (Join-Path $st 'recipes\daily-digest\src\podcast\x.ts') "await sb.from(""digest_extra_notes"").insert({ note });`nawait this.#req(""POST"", ""podcast_extra_notes"", rows, ""return=minimal"");`n"
+  Write-Utf8 (Join-Path $st 'recipes\daily-digest\src\podcast\x.ts') "await sb.from(""digest_extra_notes"").insert({ note });`nawait this.#req(""POST"", ""podcast_extra_notes"", rows, ""return=minimal"");`nawait this.#req<Row[]>(""POST"", ""digest_typed_notes"", rows);`n"
   Write-Utf8 (Join-Path $st 'integrations\kubernetes-deployment\mcp-notes.ts') "await client.queryObject(``INSERT INTO mcp_extra_notes (note) VALUES (`$1)``, [n]);`n"
   Write-Utf8 (Join-Path $st 'integrations\research-service\tools\notes.ts') "await c.queryObject(``INSERT INTO public.research_tools_notes (note) VALUES (`$1)``, [n]);`n"
   Write-Utf8 (Join-Path $st 'integrations\grounding-backfiller\notes.ts') "await c.queryObject(``INSERT INTO grounding_notes (note) VALUES (`$1)``, [n]);`n"
@@ -358,13 +377,14 @@ try {
     "CREATE TABLE public.digest_extra_notes (id serial PRIMARY KEY, note text);`n" +
     "CREATE TABLE public.podcast_extra_notes (id serial PRIMARY KEY, note text);`n" +
     "CREATE TABLE public.mcp_extra_notes (id serial PRIMARY KEY, note text);`n" +
+    "CREATE TABLE public.digest_typed_notes (id serial PRIMARY KEY, note text);`n" +
     "GRANT SELECT ON public.research_tools_notes, public.grounding_notes, public.research_job_notes, public.digest_job_text, public.research_session_notes,
-       public.research_steer_notes, public.digest_extra_notes, public.podcast_extra_notes, public.mcp_extra_notes TO service_role;`n")
+       public.research_steer_notes, public.digest_extra_notes, public.podcast_extra_notes, public.mcp_extra_notes, public.digest_typed_notes TO service_role;`n")
   $null = Psql 'cat_g' $ddl @()
   $go = Psql 'cat_g' $catalog @('-v', 'phase=plant', '-v', "mark=$mk", '-v', "ctl=$cm", '-v', "write_set=$($ws2.names -join ',')")
   Save 'G-plant.log' $go
   $want = @('research_tools_notes', 'grounding_notes', 'research_job_notes', 'digest_job_text', 'research_session_notes',
-            'research_steer_notes', 'digest_extra_notes', 'podcast_extra_notes', 'mcp_extra_notes')
+            'research_steer_notes', 'digest_extra_notes', 'podcast_extra_notes', 'mcp_extra_notes', 'digest_typed_notes')
   $found = @($want | Where-Object { $go -match "CATALOG TABLE public\.$_ UNPLANTED" })
   Check ($found.Count -eq $want.Count) "[selftest] the case reports every unplanted new table UNPLANTED ($($found -join ', '); missing: $(@($want | Where-Object { $found -notcontains $_ }) -join ', '))"
 }

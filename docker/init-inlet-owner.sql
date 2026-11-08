@@ -508,7 +508,7 @@ DECLARE
     n_thoughts BIGINT := 0; n_src_mail INT := 0; n_src_pod INT := 0; n_chunks BIGINT := 0; n_claims INT := 0;
     n_mixed   INT := 0; n_jobs INT := 0; n_seeds BIGINT := 0; n_meta INT := 0; n_pages INT := 0; n_ents INT := 0;
     n_rebuild INT := 0; n_left BIGINT; n_prompts INT := 0; n_events INT := 0; n_chunk_pages INT := 0;
-    v_pat TEXT; v_spat TEXT; n_sweep BIGINT := 0; n_sweep_tbl INT := 0; n_srcrows BIGINT := 0;
+    v_pat TEXT; v_spat TEXT; v_xpat TEXT; n_sweep BIGINT := 0; n_sweep_tbl INT := 0; n_srcrows BIGINT := 0;
     n_steers BIGINT := 0; n_sess BIGINT := 0; n_stamp BIGINT := 0; n_threads BIGINT := 0; n_leaf BIGINT := 0; n_want BIGINT; n_retitle INT := 0;
     r RECORD; d RECORD;
     c_mail CONSTANT TEXT := '(https?://)?mail\.google\.com[^][:space:]"<>()\\]*';
@@ -919,12 +919,50 @@ BEGIN
     INSERT INTO _io_qw SELECT DISTINCT w FROM _io_qpick WHERE kind = 'token' ON CONFLICT DO NOTHING;
     CREATE TEMP TABLE _io_qe (w TEXT PRIMARY KEY) ON COMMIT DROP;
     INSERT INTO _io_qe SELECT DISTINCT w FROM _io_qpick WHERE kind = 'substring' ON CONFLICT DO NOTHING;
-    RAISE NOTICE 'inlet owner timing: the seed texts and their prefilter words (% seed text(s), % token word(s), % substring word(s)) at % s',
-        (SELECT count(*) FROM _io_qn), (SELECT count(*) FROM _io_qw), (SELECT count(*) FROM _io_qe), round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
+    -- round 9 (tester attempt 7 G1): the token proof holds only where lower() and the pattern's case-insensitive match agree,
+    -- which is guaranteed for ASCII letters only (a Greek final sigma, a dotless i, a micro sign, a long s fold differently).
+    -- So a 12+ seed text with a NON-ASCII letter or digit in any of its runs is NOT prefiltered: it is matched by its own
+    -- pattern (v_xpat) on every row the sweep reads. Live has none today, so the sweep's speed is unchanged there.
+    -- A seed text is "non-ASCII" when one of its alphanumeric RUNS has a non-ASCII character (a non-ASCII separator - a
+    -- dash, a curly quote - is matched as "a non-alphanumeric character" either way, so it keeps the proof). A short (4-11)
+    -- one keeps its token: its rule is lower(field) = n, and the field's lower() tokens then ARE n's tokens.
+    CREATE TEMP TABLE _io_qx (n TEXT PRIMARY KEY) ON COMMIT DROP;
+    INSERT INTO _io_qx SELECT q.n FROM _io_qn q
+     WHERE length(q.n) >= 12 AND EXISTS (SELECT 1 FROM regexp_split_to_table(q.n, '[^[:alnum:]]+') x WHERE x ~ '[^ -~]');
+    DELETE FROM _io_qw w WHERE NOT EXISTS (SELECT 1 FROM _io_qpick k WHERE k.w = w.w AND k.kind = 'token' AND NOT EXISTS (SELECT 1 FROM _io_qx x WHERE x.n = k.n));
+    DELETE FROM _io_qe e WHERE NOT EXISTS (SELECT 1 FROM _io_qpick k WHERE k.w = e.w AND k.kind = 'substring' AND NOT EXISTS (SELECT 1 FROM _io_qx x WHERE x.n = k.n));
+    v_xpat := (SELECT '(' || string_agg(replace(regexp_replace(n, '[^[:alnum:] ]', '[^[:alnum:][:space:]]', 'g'), ' ', '[[:space:]]+'), '|' ORDER BY length(n) DESC) || ')'
+                 FROM _io_qx);
+    PERFORM set_config('inlet_owner.xpat', coalesce(v_xpat, ''), true);
+    -- round 9 (G10): the slug prefilter works on the SLUG FORM of a seed text ([a-z0-9]+ runs between '-'), the form the
+    -- slug pattern (v_spat) matches - never on the text's own words (an accented word is split by the slug form)
+    CREATE TEMP TABLE _io_qstok ON COMMIT DROP AS
+    SELECT q.slug, x.w, x.i AS pos, count(*) OVER (PARTITION BY q.slug) AS nw
+      FROM (SELECT DISTINCT slug FROM _io_qn WHERE length(slug) >= 12) q, regexp_split_to_table(q.slug, '-') WITH ORDINALITY x(w, i) WHERE x.w <> '';
+    CREATE TEMP TABLE _io_qspick ON COMMIT DROP AS
+    SELECT DISTINCT ON (t.slug) t.slug, t.w,
+           CASE WHEN t.pos > 1 AND t.pos < t.nw AND length(t.w) >= 3 THEN 'token' ELSE 'substring' END AS kind
+      FROM _io_qstok t LEFT JOIN _io_df dfx ON dfx.w = t.w
+     ORDER BY t.slug, (t.pos > 1 AND t.pos < t.nw AND length(t.w) >= 3) DESC, (length(t.w) >= 3) DESC, coalesce(dfx.df, 0), length(t.w) DESC, t.w;
+    CREATE TEMP TABLE _io_qws (w TEXT PRIMARY KEY) ON COMMIT DROP;
+    INSERT INTO _io_qws SELECT DISTINCT w FROM _io_qspick WHERE kind = 'token' ON CONFLICT DO NOTHING;
+    CREATE TEMP TABLE _io_qses (w TEXT PRIMARY KEY) ON COMMIT DROP;
+    INSERT INTO _io_qses SELECT DISTINCT w FROM _io_qspick WHERE kind = 'substring' ON CONFLICT DO NOTHING;
+    RAISE NOTICE 'inlet owner timing: the seed texts and their prefilter words (% seed text(s), % token word(s), % substring word(s), % non-ASCII seed text(s) unfiltered, % slug word(s)) at % s',
+        (SELECT count(*) FROM _io_qn), (SELECT count(*) FROM _io_qw), (SELECT count(*) FROM _io_qe), (SELECT count(*) FROM _io_qx),
+        (SELECT count(*) FROM _io_qws) + (SELECT count(*) FROM _io_qses), round(extract(epoch FROM clock_timestamp() - v_now)::numeric, 1);
     CREATE FUNCTION pg_temp.io_pre(p TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE AS $f$
         SELECT p IS NOT NULL AND (
                    EXISTS (SELECT 1 FROM regexp_split_to_table(lower(p), '[^[:alnum:]]+') AS sw(word) JOIN pg_temp._io_qw q ON q.w = sw.word)
-                OR EXISTS (SELECT 1 FROM pg_temp._io_qe e WHERE position(e.w IN lower(p)) > 0))
+                OR EXISTS (SELECT 1 FROM pg_temp._io_qe e WHERE position(e.w IN lower(p)) > 0)
+                -- (round 9: the seed texts with a non-ASCII run, by their own pattern - no prefilter for them)
+                OR (coalesce(current_setting('inlet_owner.xpat', true), '') <> '' AND p ~* current_setting('inlet_owner.xpat', true)))
+    $f$;
+    -- round 9 (G10): may a slug carry a seed text's slug form? (its slug-form words, never the text's own words)
+    CREATE FUNCTION pg_temp.io_pre_slug(p TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE AS $f$
+        SELECT p IS NOT NULL AND (
+                   EXISTS (SELECT 1 FROM regexp_split_to_table(lower(p), '[^[:alnum:]]+') AS sw(word) JOIN pg_temp._io_qws q ON q.w = sw.word)
+                OR EXISTS (SELECT 1 FROM pg_temp._io_qses e WHERE position(e.w IN lower(p)) > 0))
     $f$;
     -- a json value's DECODED strings and keys, one text (the prefilter's input for a jsonb column)
     CREATE FUNCTION pg_temp.io_json_text(j JSONB) RETURNS TEXT LANGUAGE sql IMMUTABLE AS $f$
@@ -940,12 +978,14 @@ BEGIN
                 OR btrim(regexp_replace(lower(p), '[[:space:]]+', ' ', 'g')) IN (SELECT n FROM pg_temp._io_qn WHERE length(n) < 12))
     $f$;
     -- cut the seed text out of a shared text: every 12+ span, any case, any whitespace; a field that IS a short one whole
-    CREATE FUNCTION pg_temp.io_cut(p TEXT) RETURNS TEXT LANGUAGE plpgsql STABLE AS $f$
+    -- (round 9: p_code true - a code-like column - skips the short whole-field rule; the 12+ span rule stays)
+    CREATE FUNCTION pg_temp.io_cut(p TEXT, p_code BOOLEAN DEFAULT false) RETURNS TEXT LANGUAGE plpgsql STABLE AS $f$
     DECLARE pat TEXT := current_setting('inlet_owner.pat', true); s TEXT := p;
     BEGIN
         IF s IS NULL THEN RETURN NULL; END IF;
         IF NOT pg_temp.io_pre(s) THEN RETURN s; END IF;   -- (round 8: provably unchanged otherwise; see the prefilter)
         IF coalesce(pat, '') <> '' THEN s := regexp_replace(s, pat, 'private-text', 'gi'); END IF;
+        IF p_code THEN RETURN s; END IF;
         IF EXISTS (SELECT 1 FROM pg_temp._io_qn q WHERE length(q.n) < 12 AND q.n = btrim(regexp_replace(lower(s), '[[:space:]]+', ' ', 'g'))) THEN
             s := 'private-text';
         END IF;
@@ -1003,11 +1043,21 @@ BEGIN
     -- those rows, joined by key (an earlier step's archive image of a row is found by one hash join, not a lookup per
     -- row), then re-checks only those rows: every other row was not a hit, and nothing in between writes seed text.
     CREATE TEMP TABLE _io_sw (tbl TEXT NOT NULL, pk JSONB NOT NULL, PRIMARY KEY (tbl, pk)) ON COMMIT DROP;
-    CREATE FUNCTION pg_temp.io_sweep_tables() RETURNS TABLE (oid OID, tbl TEXT, cols NAME[], typs TEXT[], pkcols NAME[]) LANGUAGE sql STABLE AS $f$
+    -- round 9 (tester attempt 7 item 5): a CODE-LIKE text column never gets the short (4-11) whole-field rule, so a seed
+    -- text such as 'Done' can never rewrite status = 'done' and refuse the run on its CHECK. Code-like: a text column under
+    -- a CHECK constraint, of a domain type, or named like a code (the list below). The 12+ span rule applies to every column.
+    CREATE FUNCTION pg_temp.io_code_col(p_rel OID, p_att SMALLINT, p_name NAME, p_typ OID) RETURNS BOOLEAN LANGUAGE sql STABLE AS $f$
+        SELECT EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conrelid = p_rel AND k.contype = 'c' AND p_att = ANY (k.conkey))
+            OR EXISTS (SELECT 1 FROM pg_type ty WHERE ty.oid = p_typ AND ty.typtype IN ('d', 'e'))
+            OR p_name ~ '^(status|state|kind|type|category|phase|mode|outcome|origin|origin_tool|origin_claimed|origin_registry|link_type|steer_kind|branch_kind|request_kind|content_type|page_class|epistemic_tag|volatility|verdict|strength|claim_kind|family|run_kind|screen_verdict|edge_type|action|purpose|inlet_kind|scope|role|level|priority|format|source_type|reason_type)$'
+               OR p_name ~ '_(status|state|kind|type|code|mode|class)$'
+    $f$;
+    CREATE FUNCTION pg_temp.io_sweep_tables() RETURNS TABLE (oid OID, tbl TEXT, cols NAME[], typs TEXT[], pkcols NAME[], codes BOOLEAN[]) LANGUAGE sql STABLE AS $f$
         SELECT c.oid, format('%I.%I', ns.nspname, c.relname),
                array_agg(a.attname ORDER BY a.attnum), array_agg(format_type(a.atttypid, a.atttypmod) ORDER BY a.attnum),
                (SELECT array_agg(at.attname ORDER BY at.attnum) FROM pg_index i JOIN pg_attribute at ON at.attrelid = i.indrelid AND at.attnum = ANY (i.indkey)
-                 WHERE i.indrelid = c.oid AND i.indisprimary)
+                 WHERE i.indrelid = c.oid AND i.indisprimary),
+               array_agg(pg_temp.io_code_col(c.oid, a.attnum, a.attname, a.atttypid) ORDER BY a.attnum)
           FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace JOIN pg_attribute a ON a.attrelid = c.oid
          WHERE ns.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relforcerowsecurity
            AND c.relname NOT LIKE 'lab\_%' AND c.relname NOT LIKE 'inlet\_%' AND c.relname NOT IN ('thoughts', 'wiki_pages', 'entities')
@@ -1020,15 +1070,15 @@ BEGIN
          GROUP BY c.oid, ns.nspname, c.relname
     $f$;
     -- the per-table expressions: a row is a hit when a column's cut value differs (the word prefilter first)
-    CREATE FUNCTION pg_temp.io_sweep_where(p_cols NAME[], p_typs TEXT[]) RETURNS TEXT LANGUAGE sql STABLE AS $f$
+    CREATE FUNCTION pg_temp.io_sweep_where(p_cols NAME[], p_typs TEXT[], p_codes BOOLEAN[]) RETURNS TEXT LANGUAGE sql STABLE AS $f$
         SELECT string_agg(CASE WHEN typ = 'jsonb' THEN
                               format('(pg_temp.io_pre(pg_temp.io_json_text(t.%1$I)) AND pg_temp.io_cut_json(t.%1$I) IS DISTINCT FROM t.%1$I)', col)
                           WHEN typ = 'text[]' THEN
                               format('(pg_temp.io_pre(array_to_string(t.%1$I, '' '')) AND pg_temp.io_cut_arr(t.%1$I) IS DISTINCT FROM t.%1$I)', col)
                           WHEN col = 'slug' THEN
-                              format('(t.%1$I IS NOT NULL AND %2$L <> '''' AND pg_temp.io_pre(t.%1$I) AND t.%1$I ~* %2$L)', col, coalesce(current_setting('inlet_owner.spat', true), ''))
-                          ELSE format('(pg_temp.io_pre(t.%1$I) AND pg_temp.io_cut(t.%1$I) IS DISTINCT FROM t.%1$I)', col) END, ' OR ')
-          FROM unnest(p_cols, p_typs) u(col, typ)
+                              format('(t.%1$I IS NOT NULL AND %2$L <> '''' AND pg_temp.io_pre_slug(t.%1$I) AND t.%1$I ~* %2$L)', col, coalesce(current_setting('inlet_owner.spat', true), ''))
+                          ELSE format('(pg_temp.io_pre(t.%1$I) AND pg_temp.io_cut(t.%1$I, %2$L) IS DISTINCT FROM t.%1$I)', col, code) END, ' OR ')
+          FROM unnest(p_cols, p_typs, p_codes) u(col, typ, code)
     $f$;
     CREATE FUNCTION pg_temp.io_sweep(p_mode TEXT, p_batch UUID DEFAULT NULL, p_owner TEXT DEFAULT NULL) RETURNS BIGINT LANGUAGE plpgsql AS $f$
     DECLARE
@@ -1038,7 +1088,7 @@ BEGIN
         IF p_mode = 'collect' THEN
             IF coalesce(pat, '') = '' AND NOT EXISTS (SELECT 1 FROM pg_temp._io_qn WHERE length(n) < 12) THEN RETURN 0; END IF;
             FOR r IN SELECT * FROM pg_temp.io_sweep_tables() LOOP
-                v_where := pg_temp.io_sweep_where(r.cols, r.typs);
+                v_where := pg_temp.io_sweep_where(r.cols, r.typs, r.codes);
                 IF r.pkcols IS NULL THEN
                     EXECUTE format('SELECT count(*) FROM %s t WHERE %s', r.tbl, v_where) INTO v_n;
                     IF v_n > 0 THEN
@@ -1055,7 +1105,7 @@ BEGIN
         END IF;
         -- p_mode 'apply' / 'recheck': only the tables and rows 'collect' found
         FOR r IN SELECT x.* FROM pg_temp.io_sweep_tables() x WHERE x.tbl IN (SELECT DISTINCT tbl FROM pg_temp._io_sw) LOOP
-            v_where := pg_temp.io_sweep_where(r.cols, r.typs);
+            v_where := pg_temp.io_sweep_where(r.cols, r.typs, r.codes);
             v_pkjson := 'jsonb_build_object(' || (SELECT string_agg(format('%L, t.%I', k, k), ', ') FROM unnest(r.pkcols) k) || ')';
             v_apk := 'jsonb_build_object(' || (SELECT string_agg(format('%L, a.row_data -> %L', k, k), ', ') FROM unnest(r.pkcols) k) || ')';
             IF p_mode = 'recheck' THEN
@@ -1066,8 +1116,8 @@ BEGIN
             v_set := (SELECT string_agg(CASE WHEN typ = 'jsonb' THEN format('%1$I = pg_temp.io_cut_json(t.%1$I)', col)
                                         WHEN typ = 'text[]' THEN format('%1$I = pg_temp.io_cut_arr(t.%1$I)', col)
                                         WHEN col = 'slug' THEN format('%1$I = pg_temp.io_cut_slug(t.%1$I)', col)
-                                        ELSE format('%1$I = pg_temp.io_cut(t.%1$I)', col) END, ', ')
-                        FROM unnest(r.cols, r.typs) u(col, typ));
+                                        ELSE format('%1$I = pg_temp.io_cut(t.%1$I, %2$L)', col, code) END, ', ')
+                        FROM unnest(r.cols, r.typs, r.codes) u(col, typ, code));
             -- the keys an earlier step of this batch already archived (one image per row and batch: theirs is the original)
             CREATE TEMP TABLE IF NOT EXISTS _io_sw_arch (pk JSONB PRIMARY KEY) ON COMMIT DROP;
             TRUNCATE _io_sw_arch;
@@ -1190,7 +1240,7 @@ BEGIN
            pg_temp.io_cut(t.description) AS description, pg_temp.io_cut_slug(t.slug) AS slug
       FROM public.threads t
      WHERE pg_temp.io_pre(t.name) OR pg_temp.io_pre(t.description)
-        OR (coalesce(current_setting('inlet_owner.spat', true), '') <> '' AND pg_temp.io_pre(t.slug) AND t.slug ~* current_setting('inlet_owner.spat', true));
+        OR (coalesce(current_setting('inlet_owner.spat', true), '') <> '' AND pg_temp.io_pre_slug(t.slug) AND t.slug ~* current_setting('inlet_owner.spat', true));
     DELETE FROM _io_threads_new n USING public.threads t
      WHERE t.id = n.id AND n.name IS NOT DISTINCT FROM t.name AND n.description IS NOT DISTINCT FROM t.description AND n.slug IS NOT DISTINCT FROM t.slug;
     -- a thread link of a tree's synthesis carries no reason text (a suggestion's reason was written from the report's question)
@@ -1249,6 +1299,22 @@ BEGIN
         END IF;
         EXECUTE format('SELECT count(*) FROM %s t WHERE t.%I::text IN %s', r.tbl, r.col, pg_temp.io_leaf_match(r.kind)) INTO v_n;
         UPDATE _io_leaf SET n = v_n WHERE tbl = r.tbl AND col = r.col;
+    END LOOP;
+    -- round 9 (tester attempt 7 items 3-4): the archive is to_jsonb(row) and the revert jsonb_populate_record, and JSON has
+    -- no array bounds: an array value that is multi-dimensional or not 1-based could not be restored byte-identical (and a
+    -- 2-D text[] cannot be cut element by element). Such a value in ANY array column of a table this run may write refuses
+    -- the run here - before the sweep first reads them, before anything changes, with the count per column. Live has none (2026-11-08).
+    FOR r IN SELECT format('%I.%I', ns.nspname, c.relname) AS tbl, a.attname AS col
+               FROM pg_class c JOIN pg_namespace ns ON ns.oid = c.relnamespace JOIN pg_attribute a ON a.attrelid = c.oid
+               JOIN pg_type ty ON ty.oid = a.atttypid
+              WHERE ns.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relname NOT LIKE 'inlet\_%' AND c.relname NOT LIKE 'lab\_%'
+                AND a.attnum > 0 AND NOT a.attisdropped AND ty.typcategory = 'A' LOOP
+        EXECUTE format('SELECT count(*) FROM %s t WHERE t.%I IS NOT NULL AND cardinality(t.%I) > 0 AND (array_ndims(t.%I) > 1 OR array_lower(t.%I, 1) <> 1)',
+                       r.tbl, r.col, r.col, r.col, r.col) INTO v_n;
+        IF v_n > 0 THEN
+            RAISE EXCEPTION 'inlet owner: refused, nothing changed - % row(s) of % column % hold an array that is multi-dimensional or not 1-based; the archive (json) could not restore it byte-identical. Make them 1-based, one-dimensional first', v_n, r.tbl, r.col
+                USING ERRCODE = '55000';
+        END IF;
     END LOOP;
     -- round 6 (F1): the content sweep, counted now (applied after step 5): any shared row that still carries seed text
     n_sweep := pg_temp.io_sweep('collect');
@@ -1689,7 +1755,7 @@ BEGIN
     INSERT INTO _io_pages (slug, retitle_only)
     SELECT w.slug, true FROM public.wiki_pages w
      WHERE pg_temp.io_hit(w.title)
-        OR (coalesce(current_setting('inlet_owner.spat', true), '') <> '' AND pg_temp.io_pre(w.slug) AND w.slug ~* current_setting('inlet_owner.spat', true))
+        OR (coalesce(current_setting('inlet_owner.spat', true), '') <> '' AND pg_temp.io_pre_slug(w.slug) AND w.slug ~* current_setting('inlet_owner.spat', true))
     ON CONFLICT (slug) DO NOTHING;
     GET DIAGNOSTICS v_n = ROW_COUNT; n_retitle := n_retitle + v_n;
     IF EXISTS (SELECT 1 FROM _io_retitled) THEN

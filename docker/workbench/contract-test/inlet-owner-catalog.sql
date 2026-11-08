@@ -370,6 +370,30 @@ BEGIN
     VALUES ('https://shared.example/short/' || substr(md5(m), 1, 8), 'An ordinary page', 'a public page', 'web_article',
             ARRAY['misc', 'Pyxis', NULL], jsonb_build_object('subject', 'Pyxis', 'n', 1)) RETURNING id INTO x;
     INSERT INTO public.lab_catalog_ids VALUES ('r8_short_source', x::text);
+    -- round 9 (tester attempt 7 G1): a seeded-tree topic in Greek (a final sigma); a SHARED claim carries it upper-cased
+    -- (the prefilter's lower() and the pattern's case-insensitive match fold the final sigma differently; convert_from's
+    -- result is collation "C", where upper() folds ASCII only, hence the COLLATE)
+    INSERT INTO public.research_jobs (status, origin, query, anchor, topic_estimate, root_job_id, parent_job_id, rooted_step_id, branch_kind)
+    SELECT 'done', 'manual', 'Verify: greek topic', 'x', convert_from(decode('ce9720ceb5cf84ceaecf83ceb9ceb120cf83cf8dcebdcebfceb4cebfcf8220cf84ceb7cf8220ceb5cf84ceb1ceb9cf81ceb5ceafceb1cf8220cebeceb5cebaceb9cebdceac20ceb1cf8dcf81ceb9cebf', 'hex'), 'UTF8'), v::uuid, v::uuid, 's2', 'gap'
+      FROM public.lab_catalog_ids WHERE k = 'seeded_root';
+    INSERT INTO public.claims (text) VALUES ('Reported: ' || upper(convert_from(decode('ce9720ceb5cf84ceaecf83ceb9ceb120cf83cf8dcebdcebfceb4cebfcf8220cf84ceb7cf8220ceb5cf84ceb1ceb9cf81ceb5ceafceb1cf8220cebeceb5cebaceb9cebdceac20ceb1cf8dcf81ceb9cebf', 'hex'), 'UTF8') COLLATE "default") || ' (wire)') RETURNING id INTO x;
+    INSERT INTO public.lab_catalog_ids VALUES ('r9_greek_claim', x::text);
+    -- round 9 (G10): a seeded-tree topic with an accented word; its slug form (montr-alaise) as a thread slug and as a
+    -- wiki page's slug
+    INSERT INTO public.research_jobs (status, origin, query, anchor, topic_estimate, root_job_id, parent_job_id, rooted_step_id, branch_kind)
+    SELECT 'done', 'manual', 'Verify: accented topic', 'x', convert_from(decode('546865206d6f6e7472c3a9616c6169736520717561727465726c7920706c616e20726576696577', 'hex'), 'UTF8'), v::uuid, v::uuid, 's3', 'gap'
+      FROM public.lab_catalog_ids WHERE k = 'seeded_root';
+    INSERT INTO public.threads (name, description, slug, status)
+    VALUES ('Quarterly thread', 'a thread', 'the-montr-alaise-quarterly-plan-review', 'active') RETURNING id INTO x;
+    INSERT INTO public.lab_catalog_ids VALUES ('r9_accent_thread', x::text);
+    INSERT INTO public.wiki_pages (slug, page_class, title, body, links)
+    VALUES ('research/the-montr-alaise-quarterly-plan-review', 'research', 'Quarterly review', 'The report.', '[]'::jsonb);
+    -- round 9 (tester attempt 7 item 5): a seeded-tree topic that IS a code value ('Done'): a status = 'done' outside the
+    -- tree stays 'done' (a CHECK column), and the run is not refused
+    INSERT INTO public.research_jobs (status, origin, query, anchor, topic_estimate, root_job_id, parent_job_id, rooted_step_id, branch_kind)
+    SELECT 'done', 'manual', 'Verify: code topic', 'x', 'Done', v::uuid, v::uuid, 's4', 'gap' FROM public.lab_catalog_ids WHERE k = 'seeded_root';
+    INSERT INTO public.research_jobs (status, origin, query) VALUES ('done', 'manual', 'another unrelated job ' || substr(md5(m), 1, 6)) RETURNING id INTO x;
+    INSERT INTO public.lab_catalog_ids VALUES ('r9_done_job', x::text);
     -- the short subject: an email body titled with it (moved), and a thread named exactly it
     INSERT INTO public.sources (url, title, content, content_type)
     VALUES ('https://mail.google.com/mail/u/0/#inbox/' || substr(md5(m || 'short'), 1, 16), 'Acme layoff', 'a short mail ' || m, 'web_article');
@@ -540,6 +564,21 @@ BEGIN
     SELECT count(*) INTO n FROM public.sources s, public.lab_catalog_ids i WHERE i.k = 'r8_short_source' AND s.id = i.v::uuid
        AND s.tags IS NOT DISTINCT FROM ARRAY['misc', 'private-text', NULL]::text[] AND s.metadata = jsonb_build_object('subject', 'private-text', 'n', 1);
     RAISE NOTICE 'CATALOG SHORT-TOPIC the whole text[] element and the whole jsonb string replaced, the rest kept: % (want 1)', n;
+    IF n <> 1 THEN fails := fails + 1; END IF;
+    -- 11. (round 9) G1: the upper-cased Greek topic cut from the shared claim; G10: the accented topic's slug form cleared
+    -- from the thread and its page withheld; the code value: status 'done' outside the tree kept
+    SELECT count(*) INTO n FROM public.claims c, public.lab_catalog_ids i WHERE i.k = 'r9_greek_claim' AND c.id = i.v::uuid
+       AND c.text = 'Reported: private-text (wire)';
+    RAISE NOTICE 'CATALOG GREEK the shared claim carrying the upper-cased Greek topic: % cut (want 1)', n;
+    IF n <> 1 THEN fails := fails + 1; END IF;
+    SELECT count(*) INTO n FROM public.threads t, public.lab_catalog_ids i WHERE i.k = 'r9_accent_thread' AND t.id = i.v::uuid AND t.slug IS NOT NULL;
+    RAISE NOTICE 'CATALOG ACCENT-SLUG the thread slugged with the accented topic''s slug form: % still slugged (want 0)', n;
+    IF n <> 0 THEN fails := fails + 1; END IF;
+    SELECT count(*) INTO n FROM public.wiki_pages WHERE slug = 'research/the-montr-alaise-quarterly-plan-review';
+    RAISE NOTICE 'CATALOG ACCENT-SLUG the page at the accented topic''s slug form still served: % (want 0)', n;
+    IF n <> 0 THEN fails := fails + 1; END IF;
+    SELECT count(*) INTO n FROM public.research_jobs j, public.lab_catalog_ids i WHERE i.k = 'r9_done_job' AND j.id = i.v::uuid AND j.status = 'done';
+    RAISE NOTICE 'CATALOG CODE-VALUE a job outside the tree whose status equals a seeded topic (Done): % still done (want 1)', n;
     IF n <> 1 THEN fails := fails + 1; END IF;
     RAISE NOTICE 'CATALOG SUMMARY columns with the seed marker: % (declared %, leaks %); tables % (planted %, declared %, unplanted %)',
         hits, allowed, hits - allowed, (SELECT count(*) FROM public.lab_catalog_tables),
