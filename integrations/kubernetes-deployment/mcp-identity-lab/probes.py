@@ -871,9 +871,10 @@ def main():
         other = [p for p in bad if p not in R3]
         print(f"== RED-R3: R3 probes failing {len([p for p in bad if p in R3])} of {len(R3)}; R3 passing (must be none): {r3_passing}; non-R3 failing (must be none): {other[:20]}", flush=True)
         sys.exit(0 if R3 and not r3_passing and not other else 1)
-    # red-r2 / red-r1: the round-3 probes are reported, not judged (their RED base is 7b302ed: mode red-r3)
-    good = [p for p in good if p not in R3]
-    bad = [p for p in bad if p not in R3]
+    # red-r2 / red-r1: every round-3 probe ("e.r3 ...", R3 or a regression check added in round 3) is reported, not
+    # judged - its RED base is 7b302ed (mode red-r3), and on an older tree a round-3 regression check can fail too
+    good = [p for p in good if p not in R3 and not p.startswith("e.r3")]
+    bad = [p for p in bad if p not in R3 and not p.startswith("e.r3")]
     r2_passing = [p for p in good if p in R2]
     others_failing = [p for p in bad if p not in R2]
     print(f"== RED: R2 probes failing {len([p for p in bad if p in R2])} of {len(R2)}; R2 passing (must be none): {r2_passing[:20]}", flush=True)
