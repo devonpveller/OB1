@@ -36,6 +36,7 @@ import { SUGGESTION_LIST_SQL } from "./suggestion-list.ts";
 import { personalLaneRefusal } from "./mcp-lanes.ts";
 import { contractHeaders } from "./contract-tools.ts";
 import { callerStore, loadIdentityConfig, NO_IDENTITY_WRITE, resolveCaller, type Caller } from "./mcp-identity.ts";
+import { accessKeyFromQuery } from "./access-key-query.ts";
 import { captureIdea, promoteIdea, researchIdea, updateIdea } from "./idea-tools.ts";
 import { thoughtOwnerSql, thoughtReader, thoughtWriter } from "./thought-owner.ts";
 import {
@@ -2043,7 +2044,9 @@ const app = new Hono();
 app.use("*", async (c, next) => {
   const names: string[] = [];
   for (const [n] of c.req.raw.headers) names.push(n);
-  const r = await resolveCaller((n) => c.req.header(n), names, new URL(c.req.url).searchParams.get("key"), IDENTITY);
+  // round 5 (PD2's integration round): ?key= is offered as an access key only where it is one - not on a route that
+  // owns a `key` parameter (GET /research/lookup?key=<research_key>; access-key-query.ts lists them)
+  const r = await resolveCaller((n) => c.req.header(n), names, accessKeyFromQuery(c.req.method, c.req.path, new URL(c.req.url).searchParams), IDENTITY);
   if (!r.ok) {
     if (r.status === 403) console.error(`[open-brain] identity refused (403): ${r.error}`);
     return c.json({ error: r.error }, r.status);
