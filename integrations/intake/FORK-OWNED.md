@@ -92,4 +92,8 @@ reviewed-upstream: 63fd32f338f417e3c2200fbc83c84ef6b8f22339
 # of code-like column NAMES its sweep skips (screen_verdict among them): a read-only name match, not the intake schema,
 # role or service; nothing of the list above changes.
 reviewed-upstream: 54e34e4eed076f13e52d647a9051f19bb30b359b
+# rw-inlet-stamp round 5 (2026-11-08): reviewed. Not upstream - the fork's own work/rw-inlet-stamp (PD2, 1d78973) merged onto
+# work/rw-mcp-identity as work/rw-inlet-stamp-int (the merge's second parent). The hits are this file's own review entries
+# above (PD2's round-4 note naming screen_verdict); nothing of the list above changes.
+reviewed-upstream: 1d78973e021e7280108b50897590dc2d3b47890c
 ```
