@@ -96,7 +96,8 @@ param(
   # rw-inlet-owner round 3: round 2's migration (the RED of the seed-body case)
   [string]$InletPrev2Sha = '6d79704',
   # rw-inlet-owner round 4: round 3's migration (the RED of the rebuild case, tester attempt 3's 4a)
-  [string]$InletPrev3Sha = '3a4424f'
+  [string]$InletPrev3Sha = '3a4424f',
+  [string]$InletPrev4Sha = '51f00ea'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -983,7 +984,7 @@ try {
       Check ($s.Success -and $s.Groups[1].Value -eq 'FAILED' -and [int]$s.Groups[2].Value -eq 0 -and $script:lastInlet -match "B's reads with a personal marker: [1-9]") "[5r] RED on the base ($BaseSha): user B reads the planted markers, and every privacy check fails ($($s.Value))"
     } else {
       $s = & $inPhase 'snapshot' 'inlet-snapshot.log'
-      Check ($s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] the 14 touched tables hashed before the first run ($($s.Value))"
+      Check ($s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] the 21 touched tables hashed before the first run ($($s.Value))"
       $s = & $inPhase 'migrated' 'inlet-red-before-440.log'
       Check ($s.Success -and $s.Groups[1].Value -eq 'FAILED' -and [int]$s.Groups[2].Value -eq 0 -and $script:lastInlet -match "B's reads with a personal marker: [1-9]") "[5r] RED: before slot 440 runs, user B reads the markers and every privacy check fails ($($s.Value))"
       $nrc = & $inPsql $inInit 'init without an owner' @()
@@ -1042,6 +1043,29 @@ try {
       $p3RevRc = & $inPsql $p3R "round 3 revert ($InletPrev3Sha)" @()
       $s = & $inPhase 'reverted' 'inlet-after-round3-revert.log'
       Check ($p3RevRc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] round 3's revert brings the planted state back byte-identical ($($s.Value))"
+      # round 5: RED with round 4's migration ($InletPrev4Sha). (1) the plant: the round-5 case fails (the steers, the filed
+      # session, the step ids of a seeded tree keep the marker; the cancel and the admission trail row stay shared), the
+      # round-4 case passes; its revert is byte-identical. (2) + the round-5 delta (F2: a filed event naming the email body;
+      # F6: two gap branches with a gap_ref): round 4 refuses or aborts the whole run, and nothing changed
+      $p4I = Join-Path $env:TEMP "$P-440-prev4-init.sql"; $p4R = Join-Path $env:TEMP "$P-440-prev4-revert.sql"
+      $script:made.dirs += @($p4I, $p4R)
+      [System.IO.File]::WriteAllText($p4I, ((& git -C $ob1 show "${InletPrev4Sha}:docker/init-inlet-owner.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+      [System.IO.File]::WriteAllText($p4R, ((& git -C $ob1 show "${InletPrev4Sha}:docker/revert-inlet-owner.sql") -join "`n") + "`n", (New-Object System.Text.UTF8Encoding $false))
+      $p4Rc = & $inPsql $p4I "round 4 init ($InletPrev4Sha)" @('-v', "owner_sub=$inA")
+      $null = & $inOut
+      $s = & $inPhase 'migrated' 'inlet-red-round4.log'
+      $redR4 = [string]$script:lastInlet
+      Check ($p4Rc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'FAILED' -and $redR4 -match 'round 5 \(tester attempt 4[^\n]*\.\.\. FAILED' -and $redR4 -match 'round 4 \(tester attempt 3, 4a[^\n]*\.\.\. ok') "[5r] RED: round 4's migration ($InletPrev4Sha) - a seeded tree's steers, filed session and step ids keep the marker, its cancel and admission trail stay shared (the round-5 case fails; the round-4 case passes) ($($s.Value))"
+      $null = & $inBack
+      $p4RevRc = & $inPsql $p4R "round 4 revert ($InletPrev4Sha)" @()
+      $s = & $inPhase 'reverted' 'inlet-after-round4-revert.log'
+      Check ($p4RevRc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] round 4's revert brings the planted state back byte-identical ($($s.Value))"
+      $r5rc = & $inPsql $plantFile 'round5 plant' @('-v', "mark=$inMark", '-v', 'phase=round5')
+      $s = & $inPhase 'snapshot' 'inlet-snapshot-round5.log'
+      Check ($r5rc -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] the round-5 delta planted (F2: a filed event naming the email body; F6: two gap branches with a gap_ref) and the tables hashed again ($($s.Value))"
+      $p4Rc2 = & $inPsql $p4I "round 4 init on the round-5 delta ($InletPrev4Sha)" @('-v', "owner_sub=$inA")
+      $s = & $inPhase 'reverted' 'inlet-after-round4-refused.log'
+      Check ($p4Rc2 -ne 0 -and $script:p410["round 4 init on the round-5 delta ($InletPrev4Sha)"] -match 'still names private data|uq_research_jobs_tree_gap' -and $s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] RED: round 4's migration ($InletPrev4Sha) stops the whole run on the round-5 delta (F2 / F6), and nothing changed ($($s.Value))"
       $rcs = @((& $inPsql $inInit 'init' @('-v', "owner_sub=$inA")), (& $inPsql $inInit 'init again' @()))
       Check (@($rcs | Where-Object { $_ -ne 0 }).Count -eq 0 -and $script:p410['init'] -match 'thought\(s\) now the owner' -and $script:p410['init again'] -match 'nothing to do') '[5r] init-inlet-owner.sql makes the personal data private; a second run (the recorded owner) has nothing to do'
       $orc = & $inPsql $inInit 'init naming another owner' @('-v', "owner_sub=$inB")
@@ -1051,7 +1075,7 @@ try {
       Write-Host "    [reconcile --repair, files present] exit $($script:rc)"
       $moved = & $inOut
       $s = & $inPhase 'migrated' 'inlet-migrated.log'
-      Check ($moved -ge 4 -and $s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 10 -and [int]$s.Groups[3].Value -eq 0) "[5r] after 440 (+ the reconcile repair, + the deploy step): B reads nothing personal anywhere (the service-owned job included), the mixed claim keeps only its shared source, A reads as before, the guard holds (every link form, the text come back, the marker, the note), no function answers the anon role, the manifest counts shared links only, the stores are closed ($($s.Value))"
+      Check ($moved -ge 4 -and $s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 11 -and [int]$s.Groups[3].Value -eq 0) "[5r] after 440 (+ the reconcile repair, + the deploy step): B reads nothing personal anywhere (the service-owned job included), the mixed claim keeps only its shared source, A reads as before, the guard holds (every link form, the text come back, the marker, the note), no function answers the anon role, the manifest counts shared links only, the stores are closed ($($s.Value))"
       # the REAL entity-wiki compile over the two withheld entity pages: the one with shared evidence (the article) is
       # rebuilt from shared material only, through the gateway alias (a stand-in that keeps every prompt); the private-only
       # one (round 2, tester 3: its only material left is a TYPED EDGE) gets no model call and no page. RED: round 1's
@@ -1125,9 +1149,9 @@ try {
       $rcs = @((& $inPsql $inRevert 'revert' @()), (& $inPsql $inRevert 'revert again' @()))
       Check (@($rcs | Where-Object { $_ -ne 0 }).Count -eq 0 -and $script:p410['revert'] -match 'batch\(es\) restored' -and $script:p410['revert again'] -match 'nothing to restore') '[5r] revert-inlet-owner.sql restores the batch; a second run has nothing to restore'
       $s = & $inPhase 'reverted' 'inlet-reverted.log'
-      Check ($s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] after the revert the 14 tables are byte-identical (md5) to before the first run ($($s.Value))"
+      Check ($s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] after the revert the 21 tables are byte-identical (md5) to before the first run ($($s.Value))"
       $srcText = Get-Content -Raw $inInit
-      foreach ($m in @(@('archive-thoughts', 'a thought'), @('archive-sources', 'a source'), @('archive-pages', 'a wiki page'), @('archive-jobs', 'a research job'), @('archive-events', 'a job event'))) {
+      foreach ($m in @(@('archive-thoughts', 'a thought'), @('archive-sources', 'a source'), @('archive-pages', 'a wiki page'), @('archive-jobs', 'a research job'), @('archive-events', 'a job event'), @('archive-steers', 'a research steer'), @('archive-leaf', 'a row that hangs on a seeded job'))) {
         $mutant = Join-Path $env:TEMP "$P-440-mutant-$($m[0]).sql"
         $cut = [regex]::Replace($srcText, "(?s)-- \[$($m[0])\].*?-- \[/$($m[0])\]", '-- (mutant: no archive step)')
         [System.IO.File]::WriteAllText($mutant, $cut, (New-Object System.Text.UTF8Encoding $false))

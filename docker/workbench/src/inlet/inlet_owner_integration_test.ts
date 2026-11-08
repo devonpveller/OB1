@@ -6,14 +6,14 @@
 // SKIPPED unless DOCS_TEST_BASE and INLET_PHASE are set. contract-test/run-workspace-tests.ps1 [5r] runs it in phases
 // around psql runs of contract-test/inlet-owner-plant.sql, init-inlet-owner.sql and revert-inlet-owner.sql, on a
 // DISPOSABLE internal network:
-//   snapshot  the md5 of the 14 tables slot 410 touches, kept in the lab's plant table (before the first init)
+//   snapshot  the md5 of the 21 tables slot 440 touches, kept in the lab's plant table (before the first init)
 //   migrated  as user B (a second, seeded subject): no planted marker and no Gmail id or URL in any read B has (the
 //             workbench's contract and legacy routes, nested fields included; the viewer's pages, nav and graph; the
 //             compile's PostgREST reads; match_thoughts as B / shared); the mixed claim is B's with only the shared
 //             source, the private and chained claims are not; as the owner A: every thought through match_thoughts,
 //             the moved source through the owner read; the guard; the stores readable by no app role
 //   rerun     after the late plant + init again: exactly the rows that arrived unowned are stamped and isolated
-//   reverted  after the revert: the 14 tables byte-identical to the snapshot
+//   reverted  after the revert: the 21 tables byte-identical to the snapshot
 // Only counts, route names and pass/fail are printed, never a row's content. Never point it at a live stack.
 // Environment: INLET_PHASE, INLET_OWNER (A), INLET_SECOND (B), INLET_VIEWER, OPEN_BRAIN_URL, DOCS_TEST_BASE,
 // DOCS_TEST_KEY, CONTRACT_TEST_DB_HOST/_PORT/_USER/_PASSWORD (superuser).
@@ -85,8 +85,11 @@ const leaks = (text: string, m: string) => {
   return new RegExp(`(?<!ctl)${m}`).test(body) || /mail\.google\.com/i.test(body);
 };
 
+// round 5 (tester attempt 4 F1): every table the slot touches - the research steers, events and prompts, the sessions and
+// threads a filing stamped, the rows that hang on a seeded tree's job (research_cancels, research_admission_trail) too
 const TABLES = ["thoughts", "sources", "source_chunks", "claims", "claim_sources", "research_jobs", "wiki_pages", "entities",
-  "thought_entities", "source_entities", "thread_sources", "source_extraction_queue", "session_sources", "research_private_report_claims"];
+  "thought_entities", "source_entities", "thread_sources", "source_extraction_queue", "session_sources", "research_private_report_claims",
+  "research_job_events", "research_prompts", "research_steers", "sessions", "threads", "research_cancels", "research_admission_trail"];
 async function snapshot(): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   for (const tb of TABLES) {
@@ -96,10 +99,10 @@ async function snapshot(): Promise<Record<string, string>> {
   return out;
 }
 
-t("snapshot", "the 14 tables slot 410 touches, hashed before the first run", async () => {
+t("snapshot", "the 21 tables slot 440 touches, hashed before the first run", async () => {
   const snap = await snapshot();
   await sql(`INSERT INTO public.lab_inlet_owner_plant VALUES ('snapshot', $1::jsonb) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v`, [JSON.stringify(snap)]);
-  assertEquals(Object.keys(snap).length, 14);
+  assertEquals(Object.keys(snap).length, TABLES.length);
 });
 
 // every read user B has, by route name (the body is searched for the marker; only the names are reported)
@@ -453,6 +456,47 @@ t("migrated", "round 4 (tester attempt 3, 4a - the tester's plant): a seeded tre
   assert(JSON.stringify(own[0]).includes(`${m}rt`), "the owner's copy keeps the original result");
 });
 
+t("migrated", "round 5 (tester attempt 4, F1-F3, the coordinator's points): the rest of a seeded tree is rebuilt too - its steers (text, topic, anchor, gap, caller, context, step id), the session its filing wrote, the step ids of its jobs and events; a cancel and an admission trail row that hang on its jobs move to the owner's store; a filed event naming a moved source and two gap branches no longer stop the run; a private claim's own edges are kept for its owner", async () => {
+  const p = await plant();
+  const a = await plant("adv3");
+  const r5 = await plant("adv5");
+  const m = p.mark as string;
+  const tree = (await sql<{ id: string }>(`SELECT id::text FROM public.research_jobs WHERE id = $1::uuid OR root_job_id = $1::uuid`, [a.r])).map((x) => x.id);
+  const rows = await sql<{ t: string }>(
+    `SELECT to_jsonb(s)::text AS t FROM public.research_steers s WHERE s.root_job_id = $1::uuid
+     UNION ALL SELECT to_jsonb(x)::text FROM public.sessions x WHERE x.id = $2::uuid
+     UNION ALL SELECT to_jsonb(j)::text FROM public.research_jobs j WHERE j.id = ANY($3::uuid[])
+     UNION ALL SELECT to_jsonb(e)::text FROM public.research_job_events e WHERE e.root_job_id = $1::uuid`, [a.r, r5.sess, tree]);
+  const hits = rows.filter((r) => leaks(r.t, m)).length;
+  console.log(`inlet privacy: the round-5 rows of the seeded tree (steers, the filed session, jobs, events) carrying a marker: ${hits} of ${rows.length}`);
+  assertEquals(hits, 0);
+  assert(rows.length >= 6, "the planted steers, session, jobs and events are all there");
+  const moved = (await sql<{ c: number; t: number }>(
+    `SELECT (SELECT count(*)::int FROM public.research_cancels WHERE job_id = ANY($1::uuid[])) AS c,
+            (SELECT count(*)::int FROM public.research_admission_trail WHERE job_id = ANY($1::uuid[])) AS t`, [tree]))[0];
+  assertEquals([moved.c, moved.t], [0, 0], "the cancel and the admission trail row left the shared tables");
+  // the owner's store holds each of them, the marker included; the app role reads none of it
+  const own = (await sql<{ tbl: string }>(`SELECT DISTINCT tbl FROM public.inlet_private_rows WHERE row_data::text LIKE '%' || $1 || '%' ORDER BY 1`, [m])).map((x) => x.tbl);
+  for (const tb of ["public.research_admission_trail", "public.research_cancels", "public.research_steers", "public.sessions"]) {
+    assert(own.includes(tb), `the owner's store holds the ${tb} row (${own.join(", ")})`);
+  }
+  for (const tb of ["inlet_private_rows", "inlet_private_claim_sources"]) {
+    assertEquals(await errCode(() => asApp(`SELECT count(*) FROM public.${tb}`)), "42501", `${tb} is refused to the app role`);
+  }
+  // the private claims' own edges (the private claim's source edge, the chained claim's parent edge), keyed by claim and owner
+  const edges = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.inlet_private_claim_sources WHERE claim_id = ANY($1::uuid[]) AND owner_sub = $2`,
+    [[p.claims.priv, p.claims.chain], A]))[0].n;
+  assert(edges >= 2, `the private claims' own edges are in the owner's store (${edges})`);
+  // round 5's delta plant (when the runner planted it): F2 and F6
+  const d = await plant("round5");
+  if (d.g1) {
+    const filed = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.research_job_events WHERE type = 'filed' AND payload ->> 'synthesis_id' = $1`, [p.sources.mail]))[0].n;
+    assertEquals(filed, 0, "F2: no filed event names the moved email body");
+    const g = (await sql<{ n: number; d: number }>(`SELECT count(*)::int AS n, count(DISTINCT gap_ref)::int AS d FROM public.research_jobs WHERE id = ANY($1::uuid[])`, [[d.g1, d.g2]]))[0];
+    assertEquals([g.n, g.d], [2, 2], "F6: each gap branch keeps a gap_ref of its own");
+  }
+});
+
 t("rerun", "a second run stamps and isolates exactly the rows that arrived unowned since the first", async () => {
   const late = await plant("late");
   const before = await plant("late-unowned");     // every unowned thought id at the moment of the late plant (the runner records it)
@@ -470,7 +514,7 @@ t("rerun", "a second run stamps and isolates exactly the rows that arrived unown
   assertEquals(hits, [], "B still reads nothing personal");
 });
 
-t("reverted", "the 14 tables are byte-identical to the snapshot taken before the first run", async () => {
+t("reverted", "the 21 tables are byte-identical to the snapshot taken before the first run", async () => {
   const want = await plant("snapshot") as Record<string, string>;
   const got = await snapshot();
   const differ = TABLES.filter((tb) => want[tb] !== got[tb]);

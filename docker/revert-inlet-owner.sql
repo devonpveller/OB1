@@ -46,7 +46,7 @@ BEGIN
         FOR r IN
             SELECT a.tbl, a.col, a.action, count(*) AS n FROM public.inlet_owner_archive a WHERE a.batch = v_batch
              GROUP BY a.tbl, a.col, a.action
-             ORDER BY CASE a.action WHEN 's' THEN 0 WHEN 'k' THEN 1 WHEN 'c' THEN 2 WHEN 'n' THEN 3 WHEN 'd' THEN 3
+             ORDER BY CASE a.action WHEN 's' THEN 0 WHEN 'k' THEN 1 WHEN 'c' THEN 2 WHEN 'p' THEN 2 WHEN 'n' THEN 3 WHEN 'd' THEN 3
                                     WHEN 'm' THEN 4 WHEN 'j' THEN 5 WHEN 'o' THEN 6 WHEN 'u' THEN 7 WHEN 'w' THEN 8 ELSE 9 END, a.tbl
         LOOP
             IF to_regclass(r.tbl) IS NULL THEN
@@ -55,7 +55,7 @@ BEGIN
             SELECT string_agg(format('t.%1$I = x.%1$I', at.attname), ' AND ') INTO v_pk
               FROM pg_index i JOIN pg_attribute at ON at.attrelid = i.indrelid AND at.attnum = ANY(i.indkey)
              WHERE i.indrelid = r.tbl::regclass AND i.indisprimary;
-            IF r.action IN ('s', 'k', 'c', 'w') THEN
+            IF r.action IN ('s', 'k', 'c', 'p', 'w') THEN   -- (round 5: 'p' a row that hung on a seeded tree's job, moved private)
                 -- whole rows back (generated columns recompute)
                 SELECT string_agg(quote_ident(at.attname), ', ' ORDER BY at.attnum) INTO v_cols
                   FROM pg_attribute at
@@ -121,7 +121,9 @@ BEGIN
                        metrics = CASE WHEN NOT (a.row_data ? 'metrics') THEN j.metrics
                                       WHEN jsonb_typeof(a.row_data -> 'metrics') = 'null' THEN NULL ELSE a.row_data -> 'metrics' END,
                        inlet_ref = CASE WHEN NOT (a.row_data ? 'inlet_ref') THEN j.inlet_ref
-                                        WHEN jsonb_typeof(a.row_data -> 'inlet_ref') = 'null' THEN NULL ELSE a.row_data -> 'inlet_ref' END
+                                        WHEN jsonb_typeof(a.row_data -> 'inlet_ref') = 'null' THEN NULL ELSE a.row_data -> 'inlet_ref' END,
+                       -- round 5: a seeded branch's rooted step id
+                       rooted_step_id = CASE WHEN a.row_data ? 'rooted_step_id' THEN a.row_data ->> 'rooted_step_id' ELSE j.rooted_step_id END
                   FROM public.inlet_owner_archive a
                  WHERE a.batch = v_batch AND a.action = 'j' AND (a.row_data ->> 'id')::uuid = j.id;
                 GET DIAGNOSTICS v_n = ROW_COUNT;
@@ -168,6 +170,13 @@ BEGIN
             DELETE FROM public.inlet_owner_withheld_pages p USING public.inlet_owner_archive a WHERE a.batch = v_batch AND a.action = 'w' AND p.page_ref = a.id;
         END IF;
         DELETE FROM public.inlet_private_claim_links WHERE batch = v_batch;
+        IF to_regclass('public.inlet_private_rows') IS NOT NULL THEN
+            DELETE FROM public.inlet_private_rows WHERE batch = v_batch;
+            DELETE FROM public.inlet_private_claim_sources WHERE batch = v_batch;
+            IF to_regclass('public.inlet_owner_seed_text') IS NOT NULL THEN
+                DELETE FROM public.inlet_owner_seed_text WHERE batch = v_batch;
+            END IF;
+        END IF;
         IF to_regclass('public.inlet_private_jobs') IS NOT NULL THEN
             DELETE FROM public.inlet_private_jobs WHERE batch = v_batch;
             DELETE FROM public.inlet_private_job_events WHERE batch = v_batch;
@@ -205,8 +214,14 @@ BEGIN
         IF to_regclass('public.inlet_owner') IS NOT NULL THEN
             REVOKE ALL ON public.inlet_owner FROM ob_inlet_owner_view;
         END IF;
-        REVOKE service_role FROM ob_inlet_owner_view;
-        DROP ROLE ob_inlet_owner_view;
+        -- (round 5: a role is cluster-wide; when ANOTHER database of the cluster still holds 440's view or grants - a lab
+        -- clones one database into several - the role stays, with nothing left of it in this one)
+        IF NOT EXISTS (SELECT 1 FROM pg_shdepend d JOIN pg_database x ON x.oid = d.dbid
+                        WHERE d.refclassid = 'pg_authid'::regclass AND d.refobjid = (SELECT oid FROM pg_roles WHERE rolname = 'ob_inlet_owner_view')
+                          AND x.datname <> current_database()) THEN
+            REVOKE service_role FROM ob_inlet_owner_view;
+            DROP ROLE ob_inlet_owner_view;
+        END IF;
     END IF;
 END $$;
 -- match_thoughts as the first run found it
