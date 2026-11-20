@@ -293,12 +293,18 @@ t("9.1e/f the main lab workbench (WORKSPACE_DEFAULT_SUB blank): private_views of
 t("4.1 the shared contract reads answer A and B byte-identically, with no private marker", async () => {
   for (const p of [`/workbench/contract/search?q=${MARK}`, `/workbench/contract/search?q=${MA}`, `/workbench/contract/search?q=${MB}`,
     `/workbench/contract/claims?q=${MARK}&limit=200`, `/workbench/contract/claims?limit=200`, `/workbench/contract/search?q=nearest+probe`,
-    `/workbench/contract/timeline?limit=200`, `/workbench/search?q=${MARK}`]) {
+    `/workbench/search?q=${MARK}`]) {
     const a = await req(WB_S, p, as.A), b = await req(WB_S, p, as.B);
     assertEquals([a.status, a.text], [b.status, b.text], `${p}: the same for A and B`);
     // a search answer echoes its own query ("query": "<the words asked>"): that is the caller's text, not a leak
     const body = a.text.replace(/"(query|q)"\s*:\s*"[^"]*"/g, '""');
     assert(!hasA(body) && !hasB(body), `${p}: no private marker`);
+  }
+  // the timeline is per caller by design (a job's question is its owner's: knowledge.ts timeline(who)), so A's and B's
+  // answers differ; neither carries a private marker or the other's
+  for (const [u, own] of [["A", hasB], ["B", hasA]] as const) {
+    const r = await req(WB_S, `/workbench/contract/timeline?limit=200`, as[u]);
+    assert(!own(r.text) && !r.text.includes(MA), `timeline as ${u}: nothing of the other's private material`);
   }
 });
 
