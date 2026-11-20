@@ -89,6 +89,11 @@ Deno.test({
         const ok = u.searchParams.get("owner_sub") === "eq.e2e-owner" && (u.searchParams.get("name") === "eq.tech_experts" || u.searchParams.get("id") === "eq.tech_experts");
         return Response.json(ok && u.searchParams.has("name") ? TEAM : []);
       }
+      // rw-inlet-stamp: the inlet owner record - the chain's connection belongs to e2e-owner
+      if (req.method === "POST" && path === "/rest/v1/rpc/inlet_connection_owner") {
+        const b = await req.json();
+        return b.p_id === "gmail" ? Response.json("e2e-owner") : Response.json({ message: "no owner" }, { status: 404 });
+      }
       if (req.method === "POST" && path === "/rest/v1/podcast_episodes") {
         const b = await req.json();
         episodes.push(b);
@@ -119,7 +124,7 @@ Deno.test({
         cwd: RECIPE,
         env: {
           MCP_ACCESS_KEY: "test", BRAIN_REST_URL: brain.url, RESEARCH_URL: engine.url, CHAT_API_BASE: `${gw.url}/v1`, CHAT_API_KEY: "sk-chat",
-          PODCAST_TTS_KEY: "sk-podcast-tts", PODCAST_TEAM: "tech_experts", PODCAST_OWNER_SUB: "e2e-owner", WORKBENCH_URL: workbench.url, CONTRACT_MOUNTS_ROOT: `${dir}/mounts`,
+          PODCAST_TTS_KEY: "sk-podcast-tts", PODCAST_TEAM: "tech_experts", INLET_CONNECTION: "gmail", WORKBENCH_URL: workbench.url, CONTRACT_MOUNTS_ROOT: `${dir}/mounts`,
           PODCAST_SEGMENT_CACHE_DIR: `${dir}/cache`, REPORTS_DIR: `${dir}/reports`, FETCH_PROXY_URL: "", GAP_DIVE_ENABLED: "0",
           GMAIL_READ_CREDENTIALS: `${dir}/absent-credentials.json`, GMAIL_READ_TOKEN: `${dir}/absent-token.json`,
           ROUTINE_DATE: DATE, ROUTINE_STATE_DIR: `${dir}/reports/routine`, MODEL_WAIT_UNTIL_MS: String(Date.now() + 60_000),

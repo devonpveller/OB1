@@ -363,7 +363,17 @@ claude mcp add --transport http open-brain http://127.0.0.1:8808/ \
   --header "x-brain-key: $KEY"
 ```
 
-### Connect from Open WebUI (via the mcpo bridges)
+### Connect from Open WebUI, per user (rw-mcp-identity: native MCP connections)
+
+Open WebUI 0.11 speaks MCP natively. It connects straight to `http://openbrain-mcp:8000/` and `http://openbrain-ext:8000/`
+(both on `ai-stack_llm-net`) with **Auth: OAuth (system)** and a custom header `x-brain-key: <MCP_OWUI_ACCESS_KEY>`.
+Each request then carries the signed-in user's Authentik access token, and the servers act as THAT user. The operator is
+`WORKSPACE_DEFAULT_SUB`'s own sub; any other user reads shared rows plus their own and writes rows owned by themselves.
+No token = shared rows only, every write refused. Configuration (`MCP_OWUI_*`), the connection swap and the
+signing-key rotation: ai-stack `documentation/runbooks/openbrain-owui-identity.md`. The mcpo bridges below can carry no
+user, so since this item their lanes have no identity (shared reads only, no writes) until they are retired.
+
+### Connect from Open WebUI (via the mcpo bridges) - INERT since rw-mcp-identity
 
 Open WebUI v0.8.10 has **no native MCP** — its URL-based "tool server" /
 integration speaks **OpenAPI**. So the stack runs **two** `mcpo`

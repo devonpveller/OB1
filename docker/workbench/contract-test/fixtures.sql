@@ -192,24 +192,25 @@ INSERT INTO public.reference_holder_state (holder_kind, holder_ref, content_sha2
   ('legacy_note', 'notes/p2a/fixture-note.md', NULL, '{"fixture": true}');
 
 -- P7a (init-podcasts.sql): one team of two presenters with their voice links, one format, one
--- render of the operator's, one shared render of another user's, one render request.
+-- render of the operator's, one shared render of another user's, one render request. rw-inlet-stamp (slot 470): the
+-- model's owner is a real-shaped lab subject, lab-podcaster-0001 (an owner is never the literal 'operator').
 INSERT INTO public.podcast_voice_links (id, owner_sub, route, voice, speed, origin) VALUES
-  ('pod-fx-voice-a', 'operator', 'local-tts', 'bm_george', 1.0, 'operator'),
-  ('pod-fx-voice-b', 'operator', 'local-tts', 'bf_emma', 1.0, 'operator');
+  ('pod-fx-voice-a', 'lab-podcaster-0001', 'local-tts', 'bm_george', 1.0, 'operator'),
+  ('pod-fx-voice-b', 'lab-podcaster-0001', 'local-tts', 'bf_emma', 1.0, 'operator');
 INSERT INTO public.podcast_presenters (id, owner_sub, name, personality, backstory, language, voice_link_id, origin) VALUES
-  ('pod-fx-presenter-a', 'operator', 'Fixture Alex', 'Analytical, asks probing questions', 'A researcher', 'en-US', 'pod-fx-voice-a', 'operator'),
-  ('pod-fx-presenter-b', 'operator', 'Fixture Jamie', 'Enthusiastic and practical', 'An engineer', 'en-US', 'pod-fx-voice-b', 'operator');
+  ('pod-fx-presenter-a', 'lab-podcaster-0001', 'Fixture Alex', 'Analytical, asks probing questions', 'A researcher', 'en-US', 'pod-fx-voice-a', 'operator'),
+  ('pod-fx-presenter-b', 'lab-podcaster-0001', 'Fixture Jamie', 'Enthusiastic and practical', 'An engineer', 'en-US', 'pod-fx-voice-b', 'operator');
 INSERT INTO public.podcast_teams (id, owner_sub, name, description, origin) VALUES
-  ('pod-fx-team', 'operator', 'fixture_team', 'Two fixture presenters', 'operator');
+  ('pod-fx-team', 'lab-podcaster-0001', 'fixture_team', 'Two fixture presenters', 'operator');
 INSERT INTO public.podcast_team_members (team_id, position, presenter_id) VALUES
   ('pod-fx-team', 0, 'pod-fx-presenter-a'), ('pod-fx-team', 1, 'pod-fx-presenter-b');
 INSERT INTO public.podcast_formats (id, owner_sub, name, description, team_id, briefing, segments, language, script_route, origin) VALUES
-  ('pod-fx-format', 'operator', 'fixture_format', 'A fixture format', 'pod-fx-team', 'Discuss the fixture.', 3, 'en-US', 'local-large:nothink', 'operator');
+  ('pod-fx-format', 'lab-podcaster-0001', 'fixture_format', 'A fixture format', 'pod-fx-team', 'Discuss the fixture.', 3, 'en-US', 'local-large:nothink', 'operator');
 INSERT INTO public.podcast_episodes (id, owner_sub, shared, title, team_id, audio_format, seconds, archive_dir, created_at) VALUES
-  ('e7000000-0000-4000-8000-000000000001', 'operator', false, 'Fixture episode', 'pod-fx-team', 'mp3', 12.5, '/mounts/podcast-archive/renders/fixture', '2026-10-17T12:00:00Z'),
+  ('e7000000-0000-4000-8000-000000000001', 'lab-podcaster-0001', false, 'Fixture episode', 'pod-fx-team', 'mp3', 12.5, '/mounts/podcast-archive/renders/fixture', '2026-10-17T12:00:00Z'),
   ('e7000000-0000-4000-8000-000000000002', 'fixture-other-user', true, 'Shared fixture episode', NULL, 'mp3', 3.25, '/mounts/podcast-archive/renders/fixture-shared', '2026-10-17T11:00:00Z');
 INSERT INTO public.podcast_render_requests (id, requester_sub, actor_sub, team_id, title, input, state, created_at, updated_at) VALUES
-  ('e8000000-0000-4000-8000-000000000001', 'operator', 'operator', 'pod-fx-team', 'Fixture request',
+  ('e8000000-0000-4000-8000-000000000001', 'lab-podcaster-0001', 'lab-podcaster-0001', 'pod-fx-team', 'Fixture request',
    '{"transcript": {"title": "Fixture request", "turns": [{"presenterId": "pod-fx-presenter-a", "text": "Hello."}, {"presenterId": "pod-fx-presenter-b", "text": "Hi."}]}}',
    'queued', '2026-10-17T12:00:00Z', '2026-10-17T12:00:00Z');
 

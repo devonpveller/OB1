@@ -53,15 +53,16 @@ const B = "/workbench/contract";
 const SERVICE_KEY = "contract-integration-service-key-0123";
 const front = app ? new Hono() : null;
 if (front) {
-  const env = (k: string) => ({ WORKSPACE_SERVICE_KEYS: `contract-test=${SERVICE_KEY}` } as Record<string, string>)[k];
+  // rw-inlet-stamp: the seam's test identity header (as the workbench labs run it), for the P7a cases' real-shaped owner
+  const env = (k: string) => ({ WORKSPACE_SERVICE_KEYS: `contract-test=${SERVICE_KEY}`, WORKSPACE_IDENTITY_HEADER: "X-Test-Sub" } as Record<string, string>)[k];
   front.use("*", identitySeam(seamDeps(null, env)));
   front.route("/", app!);
 }
-async function call(method: string, path: string, body?: unknown, opts: { asDefault?: boolean } = {}) {
+async function call(method: string, path: string, body?: unknown, opts: { asDefault?: boolean; as?: string } = {}) {
   const eraser = (body as { eraser?: { kind?: string } } | undefined)?.eraser;
   const service = !opts.asDefault && !!eraser && eraser.kind !== "user";
   const r = await front!.request(B + path, {
-    method, headers: { "content-type": "application/json", ...(service ? { "x-brain-key": SERVICE_KEY } : {}) },
+    method, headers: { "content-type": "application/json", ...(service ? { "x-brain-key": SERVICE_KEY } : {}), ...(opts.as ? { "X-Test-Sub": opts.as } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await r.text();
@@ -1097,51 +1098,56 @@ t("the purge's trail actor is the authenticated user; a body 'by' is a note and 
   assert(!JSON.stringify(ev[0].detail).includes("body-actor"));
 });
 
-// ── rw-p7a-tts: podcasts, presenters, teams, render requests (the caller is the default identity) ──
+// ── rw-p7a-tts: podcasts, presenters, teams, render requests (the caller is the podcast model's owner, PODCASTER:
+// a real-shaped lab subject through the seam's test identity header - rw-inlet-stamp: an owner is never the literal
+// 'operator') ──
+const PODCASTER = "lab-podcaster-0001";
+const asPod = { as: PODCASTER };
 t("P7a presenters() and teams() are the caller's presenter model; podcasts() never lists an archived ON episode", async () => {
-  const pres = await call("GET", `/presenters`);
+  const pres = await call("GET", `/presenters`, undefined, asPod);
   assertEquals(pres.status, 200, pres.text);
   assertEquals(pres.json.presenters.map((p: any) => [p.id, p.voice.voice]), [["pod-fx-presenter-a", "bm_george"], ["pod-fx-presenter-b", "bf_emma"]]);
-  const teams = await call("GET", `/teams`);
+  const teams = await call("GET", `/teams`, undefined, asPod);
   assertEquals(teams.json.teams[0].presenters.map((p: any) => p.presenter_id), ["pod-fx-presenter-a", "pod-fx-presenter-b"]);
   // another user's presenter model is invisible
   await sql(`INSERT INTO public.podcast_voice_links (id, owner_sub, route, voice) VALUES ('p7a-int-v', 'p7a-other', 'local-tts', 'af_bella') ON CONFLICT DO NOTHING`);
   await sql(`INSERT INTO public.podcast_presenters (id, owner_sub, name, voice_link_id) VALUES ('p7a-int-p', 'p7a-other', 'OtherUsersPresenter', 'p7a-int-v') ON CONFLICT DO NOTHING`);
-  assert(!(await call("GET", `/presenters`)).text.includes("OtherUsersPresenter"));
-  const pods = await call("GET", `/podcasts`);
+  assert(!(await call("GET", `/presenters`, undefined, asPod)).text.includes("OtherUsersPresenter"));
+  const pods = await call("GET", `/podcasts`, undefined, asPod);
   assertEquals(pods.json.podcasts.map((p: any) => [p.id, p.mine]), [["e7000000-0000-4000-8000-000000000001", true], ["e7000000-0000-4000-8000-000000000002", false]]);
   assertEquals(pods.json.podcasts[1].team_id, null, "a shared render does not name its owner's team");
   // an ON archive item can never be a row: the table admits origin 'render' only
-  let refused = false;
+  // (a valid owner, so the ORIGIN is what refuses it)
+  let refusal = "";
   try {
-    await sql(`INSERT INTO public.podcast_episodes (owner_sub, origin, title, audio_format, archive_dir) VALUES ('operator', 'on-archive', 'x', 'mp3', '/x')`);
-  } catch {
-    refused = true;
+    await sql(`INSERT INTO public.podcast_episodes (owner_sub, origin, title, audio_format, archive_dir) VALUES ('${PODCASTER}', 'on-archive', 'x', 'mp3', '/x')`);
+  } catch (e) {
+    refusal = String((e as Error).message);
   }
-  assert(refused, "podcast_episodes refuses origin on-archive");
+  assert(/origin/i.test(refusal), `podcast_episodes refuses origin on-archive, naming origin: ${refusal}`);
 });
 
 t("P7a a render request records the CALLER as requester; another user's team or a stray presenter is not found; only the requester lists it", async () => {
   const body = { team_id: "pod-fx-team", title: "p7a integration", transcript: { title: "p7a integration", turns: [{ presenterId: "pod-fx-presenter-a", text: "PrivatePromptP7a" }] } };
-  const r = await call("POST", `/podcasts/requests`, body);
+  const r = await call("POST", `/podcasts/requests`, body, asPod);
   assertEquals(r.status, 202, r.text);
   assertEquals([r.json.state, r.json.turns], ["queued", 1]);
   const row = (await sql<{ requester_sub: string; actor_sub: string }>(`SELECT requester_sub, actor_sub FROM public.podcast_render_requests WHERE id = $1`, [r.json.id]))[0];
-  assertEquals([row.requester_sub, row.actor_sub], ["operator", "operator"]);
+  assertEquals([row.requester_sub, row.actor_sub], [PODCASTER, PODCASTER]);
   // a body cannot name a requester: unknown keys are not stored anywhere
-  const spoof = await call("POST", `/podcasts/requests`, { ...body, requester_sub: "p7a-other", owner_sub: "p7a-other" });
+  const spoof = await call("POST", `/podcasts/requests`, { ...body, requester_sub: "p7a-other", owner_sub: "p7a-other" }, asPod);
   assert(spoof.status === 202 || spoof.status === 400, spoof.text);
   if (spoof.status === 202) {
-    assertEquals((await sql<{ requester_sub: string }>(`SELECT requester_sub FROM public.podcast_render_requests WHERE id = $1`, [spoof.json.id]))[0].requester_sub, "operator");
+    assertEquals((await sql<{ requester_sub: string }>(`SELECT requester_sub FROM public.podcast_render_requests WHERE id = $1`, [spoof.json.id]))[0].requester_sub, PODCASTER);
   }
   await sql(`INSERT INTO public.podcast_teams (id, owner_sub, name) VALUES ('p7a-int-team', 'p7a-other', 'others') ON CONFLICT DO NOTHING`);
-  assertEquals((await call("POST", `/podcasts/requests`, { ...body, team_id: "p7a-int-team" })).status, 404);
-  assertEquals((await call("POST", `/podcasts/requests`, { ...body, transcript: { title: "x", turns: [{ presenterId: "p7a-int-p", text: "x" }] } })).status, 404);
+  assertEquals((await call("POST", `/podcasts/requests`, { ...body, team_id: "p7a-int-team" }, asPod)).status, 404);
+  assertEquals((await call("POST", `/podcasts/requests`, { ...body, transcript: { title: "x", turns: [{ presenterId: "p7a-int-p", text: "x" }] } }, asPod)).status, 404);
   await sql(`INSERT INTO public.podcast_render_requests (requester_sub, actor_sub, team_id, title, input) VALUES ('p7a-other', 'p7a-other', 'p7a-int-team', 'OthersRequestTitle', '{"transcript":{"title":"t","turns":[]}}')`);
-  const mine = await call("GET", `/podcasts/requests`);
+  const mine = await call("GET", `/podcasts/requests`, undefined, asPod);
   assert(mine.json.requests.some((x: any) => x.id === r.json.id));
   assert(!mine.text.includes("OthersRequestTitle"), "another user's request is not listed");
-  assertEquals((await call("POST", `/podcasts/requests`, { team_id: "pod-fx-team", title: "x", transcript: { title: "x", turns: [] } })).status, 400);
+  assertEquals((await call("POST", `/podcasts/requests`, { team_id: "pod-fx-team", title: "x", transcript: { title: "x", turns: [] } }, asPod)).status, 400);
 });
 
 t("P7a the three appendix stubs are backed: their not_implemented registry entries are retired", async () => {

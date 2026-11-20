@@ -10,6 +10,10 @@
  *   node import-google-activity.mjs ./Takeout/My\ Activity [options]
  *   node import-google-activity.mjs ./Takeout/My\ Activity --dry-run --limit 5
  *
+ * --owner <subject> is REQUIRED (rw-inlet-stamp, plan 08 PD2, slot 470): the subject whose Takeout this is. Every row
+ * is written with it (thoughts.user_id), private to that owner. Without it, or with a value that is not a subject (blank,
+ * a service: principal, the literal "operator"), the import refuses before it reads the Takeout and writes nothing.
+ *
  * Environment variables:
  *   SUPABASE_URL              Supabase project URL
  *   SUPABASE_SERVICE_ROLE_KEY Supabase service role key
@@ -83,6 +87,7 @@ function parseArgs() {
     verbose: false,
     raw: false,
     categories: null,  // null = all high-value
+    owner: null,       // rw-inlet-stamp: the subject this Takeout belongs to (required)
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -108,6 +113,9 @@ function parseArgs() {
       case "--categories":
         config.categories = new Set(args[++i].split(",").map(s => s.trim()));
         break;
+      case "--owner":
+        config.owner = args[++i] ?? "";
+        break;
       case "--help":
       case "-h":
         printUsage();
@@ -128,7 +136,21 @@ function parseArgs() {
     process.exit(1);
   }
 
+  // rw-inlet-stamp: no owner, no import (exit 2, nothing read, nothing written)
+  if (!subjectOk(config.owner)) {
+    console.error(config.owner == null
+      ? "Error: --owner <subject> is required: the subject whose Takeout this is (every row is written private to them). Nothing was read or written."
+      : "Error: --owner is not a valid subject (blank, a service: principal, or the literal operator). Nothing was read or written.");
+    process.exit(2);
+  }
+
   return config;
+}
+
+/** The same rule as the database's inlet_subject_ok() (slot 470). */
+export function subjectOk(s) {
+  return typeof s === "string" && /^[A-Za-z0-9][A-Za-z0-9._@|+=:\/-]{0,254}$/.test(s) &&
+    !/^(service|system|anonymous):/i.test(s) && s.toLowerCase() !== "operator";
 }
 
 function printUsage() {
@@ -147,6 +169,7 @@ Options:
   --after YYYY-MM-DD     Only process activity after this date
   --before YYYY-MM-DD    Only process activity before this date
   --categories LIST      Comma-separated categories (default: Search,Gmail,Maps,YouTube,Chrome)
+  --owner SUBJECT        REQUIRED: the subject whose Takeout this is (every row is private to them)
   --raw                  Skip LLM summarization, insert grouped entries as-is
   --verbose              Show full thought text during processing
   --help                 Show this message
@@ -350,7 +373,8 @@ async function generateEmbedding(text) {
 
 // ─── Ingestion ──────────────────────────────────────────────────────────────
 
-async function ingestThought(content, metadata) {
+async function ingestThought(content, metadata, owner) {
+  if (!subjectOk(owner)) return { ok: false, error: "no owner (refusing to write an unowned row)" };
   const embedding = await generateEmbedding(content);
   if (!embedding) {
     return { ok: false, error: "Failed to generate embedding" };
@@ -379,6 +403,7 @@ async function ingestThought(content, metadata) {
       embedding,
       metadata: { ...metadata, exposure: "ops" },
       exposure: "ops",
+      user_id: owner,   // rw-inlet-stamp: the Takeout's owner (--owner); the database refuses an unowned row
     }
   );
 
@@ -569,7 +594,7 @@ async function main() {
           entry_count: entries.length,
         };
 
-        const result = await ingestThought(content, metadata);
+        const result = await ingestThought(content, metadata, config.owner);
         if (result.ok) {
           ingested++;
           console.log(`      -> Thought ${i + 1} ingested`);

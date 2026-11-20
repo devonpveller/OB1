@@ -35,6 +35,14 @@ FILE LOCATION
 
 ## Steps
 
+> **Owner (rw-inlet-stamp, plan 08 PD2):** every run needs `--owner <subject>` - the subject whose data this is
+> (in this stack, the Authentik subject of the person; the operator's is `WORKSPACE_DEFAULT_SUB`). Every thought is
+> written private to that owner (`thoughts.user_id`), and the database refuses an unowned one (slot 470). Without
+> `--owner`, or with a value that is not a subject (blank, a `service:` principal, the literal `operator`), the script
+> exits 2 before it reads the export and writes nothing. Through the REST door (slot 450) the script uses the import
+> caller's token, minted by the operator only when an import is needed.
+
+
 ### 1. Export your data from ChatGPT
 
 Go to ChatGPT → Settings → Data Controls → Export Data. You'll receive an email with a download link within a few minutes. Download the zip file.
@@ -69,7 +77,7 @@ All three values come from your credential tracker. You can also copy `.env.exam
 ### 5. Do a dry run first
 
 ```bash
-python import-chatgpt.py path/to/chatgpt-export.zip --dry-run --limit 10
+python import-chatgpt.py path/to/chatgpt-export.zip --owner <subject> --dry-run --limit 10
 ```
 
 This parses, filters, and extracts knowledge from 10 conversations without writing anything to your database. Review the output to see what would be imported and how the LLM distills each conversation into typed thoughts.
@@ -77,7 +85,7 @@ This parses, filters, and extracts knowledge from 10 conversations without writi
 ### 6. Run the full import
 
 ```bash
-python import-chatgpt.py path/to/chatgpt-export.zip
+python import-chatgpt.py path/to/chatgpt-export.zip --owner <subject>
 ```
 
 The script will:

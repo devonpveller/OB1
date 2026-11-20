@@ -15,7 +15,12 @@
  *   CHAT_MODEL - Model name for metadata extraction (default: gpt-4o-mini)
  *   MCP_ACCESS_KEY - Authentication key for MCP endpoint (the FULL lane)
  *   MCP_PERSONAL_ACCESS_KEY - Optional key for the PERSONAL lane (Open WebUI via
- *     openbrain-mcpo): every tool EXCEPT agent_memory_*. See mcp-lanes.ts.
+ *     openbrain-mcpo): every tool EXCEPT agent_memory_*. See mcp-lanes.ts. NO identity since
+ *     rw-mcp-identity (mcpo cannot carry a user): shared rows only, every write refused.
+ *   MCP_OWUI_ACCESS_KEY, MCP_OWUI_OIDC_ISSUER, MCP_OWUI_OIDC_AUDIENCE, MCP_OWUI_OIDC_JWKS -
+ *     the OWUI lane (rw-mcp-identity): Open WebUI's native MCP connection, acting as the
+ *     signed-in user (their Authentik access token). All four or none. See mcp-identity.ts.
+ *   WORKSPACE_DEFAULT_SUB - the operator's subject: the full lane acts as it.
  *   OPEN_BRAIN_CITATION_BASE_URL - Optional base URL for search/fetch citation links
  */
 
@@ -28,8 +33,12 @@ import { Pool } from "postgres";
 import { registerAgentMemory } from "./agent-memory.ts";
 import { registerContractTools } from "./contract-tools.ts";
 import { SUGGESTION_LIST_SQL } from "./suggestion-list.ts";
-import { laneForKey, personalLaneRefusal, resolvePersonalKey } from "./mcp-lanes.ts";
-import { captureIdea, ideaOwner, promoteIdea, researchIdea, updateIdea } from "./idea-tools.ts";
+import { personalLaneRefusal } from "./mcp-lanes.ts";
+import { contractHeaders } from "./contract-tools.ts";
+import { callerStore, loadIdentityConfig, NO_IDENTITY_WRITE, resolveCaller, type Caller } from "./mcp-identity.ts";
+import { accessKeyFromQuery } from "./access-key-query.ts";
+import { captureIdea, promoteIdea, researchIdea, updateIdea } from "./idea-tools.ts";
+import { thoughtOwnerSql, thoughtReader, thoughtWriter } from "./thought-owner.ts";
 import {
   buildEgress,
   dedupShareScope,
@@ -60,9 +69,11 @@ const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY")!;
 // THE PERSONAL LANE (PLAN §1.1; amp-owui-deny, operator D1 2026-10-06). Held by Open WebUI's
 // openbrain-mcpo instead of MCP_ACCESS_KEY. Same tools, minus agent memory - see mcp-lanes.ts.
 // Unset = no personal lane: only MCP_ACCESS_KEY authenticates, exactly as before.
-const _personal = resolvePersonalKey(MCP_ACCESS_KEY, Deno.env.get("MCP_PERSONAL_ACCESS_KEY"));
-if (_personal.warning) console.error(`[open-brain] ${_personal.warning}`);
-const MCP_PERSONAL_ACCESS_KEY = _personal.key;
+// rw-mcp-identity: the three lanes and who each acts for (mcp-identity.ts). Read once; a half-configured OWUI lane, a
+// reused key or an unusable WORKSPACE_DEFAULT_SUB stops the server here instead of serving the wrong subject.
+const IDENTITY = loadIdentityConfig((k) => Deno.env.get(k));
+for (const w of IDENTITY.warnings) console.error(`[open-brain] ${w}`);
+console.error(`[open-brain] lanes: full (the operator${IDENTITY.operatorSub ? "" : ": NOT SET, no identity"}), personal ${IDENTITY.personalKey ? "on (no identity)" : "off"}, owui ${IDENTITY.oidc ? `on (${IDENTITY.oidc.keys.length} signing key(s))` : "off"}`);
 
 // THE PLANE THIS SERVER'S CORPUS WRITES LAND ON (PLAN §1.1; DFU C.9 H3, operator
 // 2026-08-31). `thoughts.exposure` is a NOT NULL column with NO DEFAULT, so every INSERT in
@@ -277,19 +288,27 @@ Only extract what's explicitly there.`,
 
 // --- MCP Server Setup ---
 
-const server = new McpServer({
-  name: "open-brain",
-  version: "1.0.0",
-});
+// rw-mcp-identity: ONE McpServer PER REQUEST, built from the recorded registrations below. A shared server that is
+// connect()ed to each request's transport keeps only the LAST transport, so a response could be sent to another
+// request's connection; with per-user subjects that would hand one user's rows to another. Each request now gets its own
+// server (and transport), built for its lane.
+type Registration = { args: unknown[]; fullOnly: boolean };
+const REGISTRY: Registration[] = [];
+// typed as McpServer's own registerTool, so every handler below keeps its inferred argument types
+const server = {
+  registerTool: ((...args: unknown[]) => { REGISTRY.push({ args, fullOnly: false }); return undefined as never; }) as McpServer["registerTool"],
+};
+function buildServer(lane: "full" | "personal" | "owui"): McpServer {
+  const s = new McpServer({ name: "open-brain", version: "1.0.0" });
+  const reg = s.registerTool.bind(s) as unknown as (...a: unknown[]) => unknown;
+  for (const r of REGISTRY) if (lane === "full" || !r.fullOnly) registerCappedOn(reg as never, r.args);
+  return s;
+}
 
 // The personal lane's server. It receives every tool registered through server.registerTool
 // below (the wrapper registers on both) EXCEPT the agent-memory tools, which are registered
 // on `server` alone (see registerAgentMemory near the end). Absent, not disabled: a tool that
 // was never registered cannot be listed or dispatched, whatever the request says.
-const personalServer = new McpServer({
-  name: "open-brain",
-  version: "1.0.0",
-});
 
 // --- Tool result size caps (adjustable via env) -----------------------------
 // Large tool payloads (research dumps from list_threads / search_claims /
@@ -371,29 +390,35 @@ function capResultText(tool: string, text: string): string {
 // before the first registerTool call, so every tool (and any added later)
 // inherits the cap with no per-handler changes.
 type ToolResponse = { content?: Array<Record<string, unknown>>; [k: string]: unknown };
-const _origRegisterTool = server.registerTool.bind(server);
-const _origRegisterToolPersonal = personalServer.registerTool.bind(personalServer);
-// Register one capped tool on the given server(s). `server.registerTool` (every tool in this
-// file) goes to BOTH lanes; `fullLaneOnly.registerTool` (agent memory) goes to the full lane.
-function registerCapped(targets: Array<(...a: never[]) => unknown>, args: unknown[]): unknown {
-  let first: unknown;
-  for (const t of targets) {
-    const r = registerCappedOn(t, args);
-    if (first === undefined) first = r;
-  }
-  return first;
-}
-(server as unknown as { registerTool: (...a: unknown[]) => unknown }).registerTool = ((...args: unknown[]) =>
-  registerCapped([_origRegisterTool, _origRegisterToolPersonal], args)) as (...a: unknown[]) => unknown;
+// `server.registerTool` (every tool in this file) goes to every lane; `fullLaneOnly.registerTool` (agent memory) to the
+// full lane only (the per-request server of a personal / owui request never has them).
 const fullLaneOnly = {
-  registerTool: (...args: unknown[]) => registerCapped([_origRegisterTool], args),
+  registerTool: (...args: unknown[]) => { REGISTRY.push({ args, fullOnly: true }); },
 };
+// rw-mcp-identity: a tool is a READ when it says so (annotations.readOnlyHint === true) or is named here; every other
+// tool is a WRITE, and a write is refused before its handler runs when the request has no verified identity (the anchor:
+// "a request with no identity gets shared-only reads, and every personal write is refused"; coordinator 2026-11-04: every
+// write, shared-knowledge writes included).
+export const READ_TOOLS_WITHOUT_HINT: ReadonlySet<string> = new Set(["agent_memory_recall"]);
+export function isReadTool(name: string, config: unknown): boolean {
+  const hint = (config as { annotations?: { readOnlyHint?: unknown } } | undefined)?.annotations?.readOnlyHint;
+  return hint === true || READ_TOOLS_WITHOUT_HINT.has(name);
+}
+function currentRequestCaller(): Caller {
+  const c = callerStore.getStore();
+  if (!c) throw new Error("no request identity in scope");
+  return c;
+}
 function registerCappedOn(register: (...a: never[]) => unknown, args: unknown[]): unknown {
   const [name, config, handler] = args as [string, unknown, (...a: unknown[]) => unknown];
+  const read = isReadTool(name, config);
   return register(
     name as never,
     config as never,
     (async (...a: unknown[]): Promise<ToolResponse> => {
+      if (!read && !currentRequestCaller().subject) {
+        return { content: [{ type: "text", text: NO_IDENTITY_WRITE }], isError: true };
+      }
       const res = (await handler(...a)) as ToolResponse;
       if (res && Array.isArray(res.content)) {
         res.content = res.content.map((c) =>
@@ -458,11 +483,14 @@ server.registerTool(
         const mdOn = hasMd(metadata_filter);
         const params: unknown[] = [embStr, 0.5, 10];
         if (mdOn) params.push(JSON.stringify(metadata_filter));
+        // rw-inlet-owner: shared thoughts plus the lane subject's own
+        const ownerIdx = params.push(thoughtReader());
         const result = await client.queryObject<ThoughtMatch>(
           `SELECT id, content, metadata, created_at,
                   1 - (embedding <=> $1::vector) AS similarity
            FROM thoughts
            WHERE 1 - (embedding <=> $1::vector) >= $2
+             AND ${thoughtOwnerSql(`$${ownerIdx}`)}
              ${mdOn ? "AND metadata @> $4::jsonb" : ""}
            ORDER BY embedding <=> $1::vector
            LIMIT $3`,
@@ -511,10 +539,13 @@ server.registerTool(
         const mdOn = hasMd(metadata_filter);
         const params: unknown[] = [id];
         if (mdOn) params.push(JSON.stringify(metadata_filter));
+        // rw-inlet-owner: another owner's thought is answered as no thought at all
+        const ownerIdx = params.push(thoughtReader());
         const result = await client.queryObject<ThoughtRecord>(
           `SELECT id, content, metadata, created_at, updated_at
            FROM thoughts
            WHERE id = $1
+             AND ${thoughtOwnerSql(`$${ownerIdx}`)}
              ${mdOn ? "AND metadata @> $2::jsonb" : ""}
            LIMIT 1`,
           params,
@@ -582,11 +613,14 @@ server.registerTool(
         const mdOn = hasMd(metadata_filter);
         const params: unknown[] = [embStr, threshold, limit];
         if (mdOn) params.push(JSON.stringify(metadata_filter));
+        // rw-inlet-owner: shared thoughts plus the lane subject's own
+        const ownerIdx = params.push(thoughtReader());
         const result = await client.queryObject<ThoughtMatch>(
           `SELECT id, content, metadata, created_at,
                   1 - (embedding <=> $1::vector) AS similarity
            FROM thoughts
            WHERE 1 - (embedding <=> $1::vector) >= $2
+             AND ${thoughtOwnerSql(`$${ownerIdx}`)}
              ${mdOn ? "AND metadata @> $4::jsonb" : ""}
            ORDER BY embedding <=> $1::vector
            LIMIT $3`,
@@ -768,6 +802,10 @@ server.registerTool(
         params.push(JSON.stringify(metadata_filter));
         paramIdx++;
       }
+      // rw-inlet-owner: shared thoughts plus the lane subject's own
+      conditions.push(thoughtOwnerSql(`$${paramIdx}`));
+      params.push(thoughtReader());
+      paramIdx++;
 
       const whereClause = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
 
@@ -831,15 +869,16 @@ server.registerTool(
     try {
       const client = await pool.connect();
       try {
+        // rw-inlet-owner: shared thoughts plus the lane subject's own
         const countResult = await client.queryObject<{ count: number }>(
-          "SELECT COUNT(*)::int AS count FROM thoughts"
+          `SELECT COUNT(*)::int AS count FROM thoughts WHERE ${thoughtOwnerSql("$1")}`, [thoughtReader()]
         );
 
         const dataResult = await client.queryObject<{
           metadata: Record<string, unknown>;
           created_at: string;
         }>(
-          "SELECT metadata, created_at FROM thoughts ORDER BY created_at DESC"
+          `SELECT metadata, created_at FROM thoughts WHERE ${thoughtOwnerSql("$1")} ORDER BY created_at DESC`, [thoughtReader()]
         );
 
         const count = countResult.rows[0]?.count || 0;
@@ -932,12 +971,15 @@ server.registerTool(
         ...(metadata_extra ?? {}),
       };
 
+      // rw-mcp-identity: a capture is its writer's (the operator on the full lane, the signed-in user on the owui lane);
+      // thoughtWriter() throws the refusal when the request has no identity, before anything is written.
+      const owner = thoughtWriter();
       const client = await pool.connect();
       try {
         await client.queryObject(
-          `INSERT INTO thoughts (content, embedding, metadata, exposure)
-           VALUES ($1, $2::vector, $3::jsonb, $4::text)`,
-          [content, embStr, JSON.stringify({ ...meta, exposure: CORPUS_EXPOSURE }), CORPUS_EXPOSURE]
+          `INSERT INTO thoughts (content, embedding, metadata, exposure, user_id)
+           VALUES ($1, $2::vector, $3::jsonb, $4::text, $5::text)`,
+          [content, embStr, JSON.stringify({ ...meta, exposure: CORPUS_EXPOSURE }), CORPUS_EXPOSURE, owner]
         );
       } finally {
         client.release();
@@ -982,7 +1024,8 @@ server.registerTool(
 // it never auto-merges. ~0.70 sim == ~0.30 distance.
 const IDEA_DEDUP_SIM = Number(Deno.env.get("IDEA_DEDUP_SIM") || "0.70");
 // rw-p8a4-ideas: whose ideas these tools read and write (never a tool argument)
-const IDEA_OWNER = ideaOwner();
+// rw-mcp-identity: whose ideas these tools read and write is the REQUEST's subject (thought-owner.ts): thoughtReader()
+// for a read, thoughtWriter() for a write (refused with no identity). Never a tool argument, never a module constant.
 
 server.registerTool(
   "capture_idea",
@@ -1015,7 +1058,7 @@ server.registerTool(
               WHERE status <> 'archived' AND embedding IS NOT NULL AND owner_sub = $2
               ORDER BY embedding <=> $1::vector
               LIMIT 1`,
-            [embStr, IDEA_OWNER],
+            [embStr, thoughtWriter()],
           );
           const top = dup.rows[0];
           if (top && top.sim >= IDEA_DEDUP_SIM) {
@@ -1029,7 +1072,7 @@ server.registerTool(
 
         // rw-p8a4-ideas (operator 2026-11-02: ideas are completely user isolated): the idea and its private revision 1
         // through idea_capture() - no corpus thought, so the idea's text is in no shared search
-        const ideaId = await captureIdea(client, IDEA_OWNER, { title: ttl, idea: body, domain: domain ?? null, embedding: embStr });
+        const ideaId = await captureIdea(client, thoughtWriter(), { title: ttl, idea: body, domain: domain ?? null, embedding: embStr });
 
         return {
           content: [{ type: "text" as const, text:
@@ -1067,7 +1110,7 @@ server.registerTool(
       const embedding = await getEmbedding(`${(title?.trim() || "")}\n\n${body}`.trim());
       const client = await pool.connect();
       try {
-        const r = await updateIdea(client, IDEA_OWNER, {
+        const r = await updateIdea(client, thoughtWriter(), {
           idea_id, idea: body, title, embedding: `[${embedding.join(",")}]`,
         });
         return { content: [{ type: "text" as const, text: r.text }], ...(r.isError ? { isError: true } : {}) };
@@ -1107,7 +1150,7 @@ server.registerTool(
               AND 1 - (embedding <=> $1::vector) >= $2
             ORDER BY embedding <=> $1::vector
             LIMIT $3`,
-          [embStr, threshold, limit, IDEA_OWNER],
+          [embStr, threshold, limit, thoughtReader()],
         );
         if (!res.rows.length) {
           return { content: [{ type: "text" as const, text: `No matching ideas found for "${query}".` }] };
@@ -1139,7 +1182,7 @@ server.registerTool(
     try {
       const client = await pool.connect();
       try {
-        const r = await researchIdea(client, IDEA_OWNER, idea_id);
+        const r = await researchIdea(client, thoughtWriter(), idea_id);
         return { content: [{ type: "text" as const, text: r.text }], ...(r.isError ? { isError: true } : {}) };
       } finally {
         client.release();
@@ -1168,7 +1211,7 @@ server.registerTool(
     try {
       const client = await pool.connect();
       try {
-        const r = await promoteIdea(client, IDEA_OWNER, idea_id, document_path);
+        const r = await promoteIdea(client, thoughtWriter(), idea_id, document_path);
         return { content: [{ type: "text" as const, text: r.text }], ...(r.isError ? { isError: true } : {}) };
       } finally {
         client.release();
@@ -1965,10 +2008,25 @@ server.registerTool(
 // One tool per read operation of the workbench's typed retrieval contract, registered through
 // server.registerTool so both lanes get them and every result is size-capped like any tool.
 // The schemas come from the workbench (contract-tools.json, generated); each call goes to the
-// workbench over HTTP with the same shared key the viewer's forwarder injects (WORKBENCH_KEY = MCP_ACCESS_KEY).
+// workbench over HTTP.
+// rw-mcp-identity round 2 (tester F1): the workbench serves the CALLER, never this server's standing. Without forward-auth
+// (as live) the workbench resolves MCP_ACCESS_KEY (= WORKBENCH_KEY) to WORKSPACE_DEFAULT_SUB, the operator - right for the
+// full lane (the operator's own clients) and wrong for everyone else. So per call (contractHeaders, in the request's scope):
+//   full lane                 -> x-brain-key: MCP_ACCESS_KEY (the operator, as before)
+//   owui lane + verified user -> x-brain-key: CONTRACT_WORKBENCH_MCP_KEY (the workbench's service key `mcp`, i.e. service:mcp
+//                                = nobody) + x-ob-user-token: the SAME user token, which the workbench verifies itself
+//                                against the same static JWKS and only then serves as that token's sub
+//   no identity (owui without a token, personal lane / mcpo)
+//                             -> x-brain-key: CONTRACT_WORKBENCH_MCP_KEY alone: service:mcp, shared material only
+//   CONTRACT_WORKBENCH_MCP_KEY unset -> every non-full-lane contract call is refused (fail closed)
+const CONTRACT_WORKBENCH_MCP_KEY = (Deno.env.get("CONTRACT_WORKBENCH_MCP_KEY") ?? "").trim();
+if (CONTRACT_WORKBENCH_MCP_KEY && CONTRACT_WORKBENCH_MCP_KEY === MCP_ACCESS_KEY) {
+  throw new Error("CONTRACT_WORKBENCH_MCP_KEY must differ from MCP_ACCESS_KEY (the workbench would serve it as the operator)");
+}
+if (!CONTRACT_WORKBENCH_MCP_KEY) console.error("[open-brain] CONTRACT_WORKBENCH_MCP_KEY is not set: the contract tools answer the full lane only");
 registerContractTools(server, {
   workbenchUrl: Deno.env.get("CONTRACT_WORKBENCH_URL") || "http://openbrain-workbench:8000",
-  key: MCP_ACCESS_KEY,
+  headers: () => contractHeaders(callerStore.getStore(), MCP_ACCESS_KEY, CONTRACT_WORKBENCH_MCP_KEY),
 });
 
 // --- Research persistence REST API (deep_research -> open-brain) ---
@@ -1980,10 +2038,27 @@ registerContractTools(server, {
 
 const app = new Hono();
 
+// rw-mcp-identity: EVERY route (the MCP catch-all and the REST twins) first resolves who the request acts for
+// (mcp-identity.ts: the lane by key, a forged user header 403, a bad user token 401) and then runs inside that caller's
+// AsyncLocalStorage scope, which is where thoughtReader() / thoughtWriter() read the subject. Nothing runs outside it.
+app.use("*", async (c, next) => {
+  const names: string[] = [];
+  for (const [n] of c.req.raw.headers) names.push(n);
+  // round 5 (PD2's integration round): ?key= is offered as an access key only where it is one - not on a route that
+  // owns a `key` parameter (GET /research/lookup?key=<research_key>; access-key-query.ts lists them)
+  const r = await resolveCaller((n) => c.req.header(n), names, accessKeyFromQuery(c.req.method, c.req.path, new URL(c.req.url).searchParams), IDENTITY);
+  if (!r.ok) {
+    if (r.status === 403) console.error(`[open-brain] identity refused (403): ${r.error}`);
+    return c.json({ error: r.error }, r.status);
+  }
+  c.set("caller" as never, r.caller as never);
+  return await callerStore.run(r.caller, () => next());
+});
+
 function researchAuthed(c: { req: { header: (k: string) => string | undefined; url: string } }): boolean {
   const provided = c.req.header("x-brain-key") ||
     new URL(c.req.url).searchParams.get("key");
-  return !!provided && provided === MCP_ACCESS_KEY;
+  return !!provided && provided === MCP_ACCESS_KEY && callerStore.getStore()?.lane === "full";
 }
 
 // GET /research/lookup?key=<research_key> — current synthesis row + staleness.
@@ -2309,7 +2384,7 @@ app.post("/research/persist", async (c) => {
 // needs, taken as new surface rather than as a risky refactor of what already works.
 // Registered BEFORE the catch-all, or the MCP transport would swallow the REST route.
 //
-// Registered on the FULL lane only (fullLaneOnly), never on personalServer: the personal lane
+// Registered on the FULL lane only (fullLaneOnly), never on a personal / owui server: the personal lane
 // (Open WebUI via openbrain-mcpo) can read personal-plane data, so it must not write memories
 // this door stamps 'ops' (amp-owui-deny, operator D1 2026-10-06; mcp-lanes.ts).
 registerAgentMemory(fullLaneOnly, app, {
@@ -2325,19 +2400,22 @@ registerAgentMemory(fullLaneOnly, app, {
   // The cloud door (:8061) is unaffected: it is default-deny and the agent-memory tools are
   // not on its allowlist. The ops door is a separate instance with its own forced value.
   doorExposure: "ops",
+  // rw-mcp-identity: the memory's thought is its writer's (the full lane = the operator); no identity = refused
+  ownerSub: () => callerStore.getStore()?.subject ?? null,
 });
+
+// Build one full-lane server at start: every registration is replayed once here, so a tool that cannot register fails
+// the start (and the d5 binding test sees the registered tools) instead of the first request.
+buildServer("full");
 
 // --- MCP catch-all with Auth Check ---
 
 app.all("*", async (c) => {
-  const provided = c.req.header("x-brain-key") || new URL(c.req.url).searchParams.get("key");
-  const lane = laneForKey(provided, MCP_ACCESS_KEY, MCP_PERSONAL_ACCESS_KEY);
-  if (!lane) {
-    return c.json({ error: "Invalid or missing access key" }, 401);
-  }
+  // the identity middleware above already refused an unknown key (401) and forged identity (403)
+  const lane = (c.get("caller" as never) as unknown as Caller).lane;
 
-  if (lane === "personal" && c.req.method === "POST") {
-    // A clear refusal before dispatch. The tools are not on personalServer at all, so this
+  if (lane !== "full" && c.req.method === "POST") {
+    // A clear refusal before dispatch. The tools are not on a personal / owui server at all, so this
     // is the message, not the boundary: if the peek ever misses, the call still finds no tool.
     const body = await c.req.raw.clone().json().catch(() => null);
     const refusal = body ? personalLaneRefusal(body) : null;
@@ -2345,7 +2423,7 @@ app.all("*", async (c) => {
   }
 
   const transport = new StreamableHTTPTransport();
-  await (lane === "full" ? server : personalServer).connect(transport);
+  await buildServer(lane).connect(transport);
   return transport.handleRequest(c);
 });
 

@@ -2,7 +2,9 @@
 # boundary).
 #
 #   powershell -NoProfile -File OB1\recipes\daily-digest\lab\run-digest-boundary-lab.ps1 [-Id <owner id>] [-Evidence <dir>]
-#       [-Red [-BaseSha 116b80e]] [-RedShare [-BaseSha 7a25233]] [-SkipPodcastGate] [-KeepImage]
+#       [-Red [-BaseSha 116b80e]] [-RedShare [-BaseSha 7a25233]] [-RedStamp [-BaseSha 0f4c680]] [-SkipPodcastGate] [-KeepImage]
+#   -RedStamp (rw-inlet-stamp, plan 08 PD2): the pre-PD2 digest (OB1 0f4c680: 440 + 460, no 470) - the e2e passes only if
+#   the second mailbox's email (connection gmail-b, user BEE) reaches the OWNER's run; GREEN must show it nowhere
 #   -RedShare (round 2, tester F1): the item's round-1 code (OB1 7a25233) - the e2e passes only if the meeting / Drive
 #   codes of the share links reach shared rows there (the leak attempt 1 found); GREEN must show none
 #
@@ -34,6 +36,7 @@ param(
   [string]$Evidence = '',
   [switch]$Red,
   [switch]$RedShare,
+  [switch]$RedStamp,
   [string]$BaseSha = '',
   [switch]$SkipPodcastGate,
   [switch]$KeepImage
@@ -51,10 +54,10 @@ $podTag = "openbrain-podcast-test:wt-$short"
 if ($testTag -match ':local$' -or $podTag -match ':local$') { throw 'refusing a :local tag' }
 $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
-if ($Red -and $RedShare) { throw '-Red or -RedShare, not both' }
-$base = $Red -or $RedShare
-if (-not $BaseSha) { $BaseSha = if ($RedShare) { '7a25233' } else { '116b80e' } }
-$mode = if ($Red) { 'red' } elseif ($RedShare) { 'red-share' } else { 'green' }
+if (@($Red, $RedShare, $RedStamp | Where-Object { $_ }).Count -gt 1) { throw '-Red, -RedShare or -RedStamp, one at most' }
+$base = $Red -or $RedShare -or $RedStamp
+if (-not $BaseSha) { $BaseSha = if ($RedShare) { '7a25233' } elseif ($RedStamp) { '0f4c680' } else { '116b80e' } }
+$mode = if ($Red) { 'red' } elseif ($RedShare) { 'red-share' } elseif ($RedStamp) { 'red-stamp' } else { 'green' }
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "rwdg-evidence-$mode-$rand" }
 New-Item -ItemType Directory -Force $Evidence | Out-Null
 $work = Join-Path $env:TEMP "rwdg-work-$rand"

@@ -42,6 +42,8 @@
  *   --ingest-endpoint               Use INGEST_URL/INGEST_KEY instead of Supabase direct
  */
 
+import { inletConnection, inletOwner } from "./inlet-owner.ts";
+
 // ─── Configuration ───────────────────────────────────────────────────────────
 
 const SCRIPT_DIR = new URL(".", import.meta.url).pathname;
@@ -49,7 +51,8 @@ const CREDENTIALS_PATH = `${SCRIPT_DIR}credentials.json`;
 const TOKEN_PATH = `${SCRIPT_DIR}token.json`;
 const SYNC_LOG_PATH = `${SCRIPT_DIR}sync-log.json`;
 
-const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
+// GMAIL_API_BASE: a lab seam (rw-inlet-stamp's lab points it at a Gmail stub); unset = Google, as before.
+const GMAIL_API = (Deno.env.get("GMAIL_API_BASE") || "https://gmail.googleapis.com").replace(/\/+$/, "") + "/gmail/v1/users/me";
 const SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
 
 // Supabase direct insert (default mode)
@@ -806,6 +809,17 @@ interface IngestResult {
 
 let fingerprintSupported: boolean | null = null;
 
+// rw-inlet-stamp (plan 08 PD2, slot 470): whose mail this run writes - the owner the database records for this
+// container's inlet connection (INLET_CONNECTION; inlet-owner.ts). Set once in main() before anything is fetched; every
+// row carries it (thoughts.user_id) and names its connection (metadata.inlet_connection). The database refuses a gmail
+// row without both.
+let RUN_OWNER: { connection: string; owner: string } | null = null;
+
+function ownerStamp(): { connection: string; owner: string } {
+  if (!RUN_OWNER) throw new Error("inlet owner: not resolved - refusing to write an unowned row");
+  return RUN_OWNER;
+}
+
 // Low-level: POST one row to /rest/v1/thoughts. Handles the one-time
 // fingerprint-column-missing retry handshake and 409 duplicate-fingerprint
 // short-circuit. Caller supplies the already-computed embedding + metadata.
@@ -825,11 +839,13 @@ async function insertThoughtRow(
   // backfill already put every pre-existing row of this corpus on; it widens nothing
   // relative to 08-30 and does not settle where this corpus belongs, which is an open
   // PLAN 1.1 decision for the operator.
+  const stamp = ownerStamp();
   const row: Record<string, unknown> = {
     content,
     embedding,
-    metadata: { ...metadata, exposure: "ops" },
+    metadata: { ...metadata, exposure: "ops", inlet_connection: stamp.connection },
     exposure: "ops",
+    user_id: stamp.owner,
   };
   if (fingerprintSupported !== false) row.content_fingerprint = fingerprint;
 
@@ -965,12 +981,14 @@ async function ingestThoughtEndpoint(
 ): Promise<IngestResult> {
   const fingerprint = await sha256(content);
 
+  const stamp = ownerStamp();
   const body: Record<string, unknown> = {
     content,
     source,
     content_fingerprint: fingerprint,
+    user_id: stamp.owner,
   };
-  if (extraMetadata) body.extra_metadata = extraMetadata;
+  body.extra_metadata = { ...(extraMetadata ?? {}), inlet_connection: stamp.connection };
 
   const res = await fetch(INGEST_URL, {
     method: "POST",
@@ -1009,6 +1027,16 @@ async function main(argsOverride?: Partial<CliArgs>) {
     if (argsOverride.labelsPrefix !== undefined && argsOverride.labels === undefined) {
       args.labels = [];
     }
+  }
+  // rw-inlet-stamp: the owner first - no connection or no recorded owner = this run stops here, before Gmail is
+  // asked for anything and before any row is written. (--list-labels writes nothing and reads only label names.)
+  if (!args.listLabels) {
+    const connection = inletConnection();
+    RUN_OWNER = { connection, owner: await inletOwner(`${SUPABASE_URL}/rest/v1`, connection, {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    }) };
+    console.log(`Inlet connection: ${connection} (its owner is recorded; every row is stamped with it)`);
   }
   const creds = await loadCredentials();
   const accessToken = await authorize(creds);

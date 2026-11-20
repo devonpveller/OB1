@@ -21,7 +21,7 @@ import { PodcastBriefSection } from "./sections/podcast-brief.ts";
 import { HtmlRenderer } from "./renderers/html.ts";
 import { MarkdownRenderer } from "./renderers/markdown.ts";
 import { DigestOrchestrator } from "./digest.ts";
-import { digestOwnerSub } from "./enrich/owner-sub.ts";
+import { digestOwnerResolver } from "./enrich/owner-sub.ts";
 import type { Section } from "./sections/section.ts";
 import { Clock, realClock } from "./routine/clock.ts";
 import { probeModel } from "./routine/model-gate.ts";
@@ -56,10 +56,12 @@ export function buildDigestApp(d: DigestAppDeps): { routine: MorningRoutine; orc
   const REPORT_DIR = env("DIGEST_REPORT_DIR", "/reports");
 
   // ─── Clients ──────────────────────────────────────────────────────────────
-  const brain = new BrainClient({ baseUrl: env("OPEN_BRAIN_URL", "http://openbrain-rest") });
+  // whose digest this is: the owner the database records for this digest's inlet connection (rw-inlet-stamp, plan 08
+  // PD2; owner-sub.ts, the one owner source). Asked when a section first needs it; until it answers, the sections that
+  // read the owner's thoughts or settings fail (and are left out of the email) instead of reading anyone's.
+  const DIGEST_OWNER = digestOwnerResolver(env("OPEN_BRAIN_URL", "http://openbrain-rest"), (k) => d.env(k), d.fetchFn);
+  const brain = new BrainClient({ baseUrl: env("OPEN_BRAIN_URL", "http://openbrain-rest"), owner: DIGEST_OWNER });
   const settings = new SettingReader(env("OPEN_BRAIN_URL", "http://openbrain-rest"), d.fetchFn);
-  // whose digest this is (rw-settings-store): rw-boundary-digest round 2 (F6) - the one owner source, owner-sub.ts
-  const DIGEST_OWNER_SUB = digestOwnerSub((k) => env(k));
   const llm = new LlmClient({
     chatBase: env("LOCAL_LLM_BASE", "http://llama-cpp:8080/v1"),
     chatModel: env("LOCAL_LLM_MODEL", "local-small"),
@@ -101,8 +103,8 @@ export function buildDigestApp(d: DigestAppDeps): { routine: MorningRoutine; orc
     new PodcastBriefSection({ path: briefPath, maxAgeMs: envInt("PODCAST_BRIEF_MAX_AGE_MS", 12 * 3600 * 1000), now: () => clock.now() }),
     new AiNewsSection(brain, {
       // rw-settings-store: the digest owner's digest.window_hours (the Settings panel), read on every digest;
-      // DIGEST_WINDOW_HOURS when they stored none. The owner is DIGEST_OWNER_SUB (= WORKSPACE_DEFAULT_SUB).
-      windowHours: () => digestWindowFor(settings, DIGEST_OWNER_SUB, envInt("DIGEST_WINDOW_HOURS", 24)),
+      // DIGEST_WINDOW_HOURS when they stored none. The owner is the digest's inlet owner (DIGEST_OWNER).
+      windowHours: async () => digestWindowFor(settings, await DIGEST_OWNER(), envInt("DIGEST_WINDOW_HOURS", 24)),
       limit: envInt("DIGEST_LIMIT", 200),
     }),
   ];

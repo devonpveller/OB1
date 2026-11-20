@@ -4,7 +4,7 @@
 // Pinned: every write is ONE call of the owner-checked SQL function, the owner is this server's configured subject
 // (never a tool argument), nothing writes `ideas` / `idea_revisions` directly, and another owner's idea (the
 // function's not_found) fails the tool and leaves no thought behind.
-import { captureIdea, ideaOwner, promoteIdea, researchIdea, updateIdea, type IdeaClient } from "./idea-tools.ts";
+import { captureIdea, promoteIdea, researchIdea, updateIdea, type IdeaClient } from "./idea-tools.ts";
 
 function assert(c: unknown, m = "assertion failed"): asserts c {
   if (!c) throw new Error(m);
@@ -35,10 +35,10 @@ const ID = "a1000000-0000-4000-8000-0000000000a1";
 const EDIT = { idea_id: ID, idea: " refined ", embedding: "[0.1]" };
 const directWrites = (log: { sql: string }[]) => log.filter((l) => /(INSERT INTO|UPDATE)\s+(public\.)?(ideas|idea_revisions)\b/.test(l.sql));
 
-Deno.test("ideaOwner: the configured default subject, else the seam's placeholder - never a tool argument", () => {
-  eq(ideaOwner(() => undefined), "operator");
-  eq(ideaOwner(() => "   "), "operator");
-  eq(ideaOwner((k) => (k === "WORKSPACE_DEFAULT_SUB" ? " sub-123 " : undefined)), "sub-123");
+Deno.test("the owner is passed in, never read from the environment here (rw-mcp-identity: the request's subject)", async () => {
+  const src = await Deno.readTextFile(new URL("./idea-tools.ts", import.meta.url));
+  assert(!/Deno\.env/.test(src), "idea-tools.ts reads the environment");
+  assert(!/export function ideaOwner/.test(src), "ideaOwner (the env default) is back");
 });
 
 Deno.test("update_idea: one idea_edit() call with the server's owner and NO corpus thought (ideas are user isolated); no direct write", async () => {

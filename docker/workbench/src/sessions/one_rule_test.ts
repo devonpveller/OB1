@@ -17,11 +17,16 @@ Deno.test("round 3: OWN_QUERY applies the steer-text rule as well as the owner r
   assert(q.includes("j.branch_kind = 'steer'") && q.includes("research_steers"), `the steer-text rule: ${q}`);
 });
 
+Deno.test("rw-mcp-identity round 3 (review F6): OWN_QUERY hides another owner's idea job's query", () => {
+  const q = OWN_QUERY("j", "$5", who, "$6").replace(/\s+/g, " ");
+  assert(q.includes("j.refinery_id") && q.includes("public.ideas"), `the foreign-idea arm: ${q}`);
+});
+
 // file -> function (or const) -> the rule its body must carry (why it may read a job's question)
 const ALLOWED: Record<string, Record<string, RegExp[]>> = {
   "contracts/repo/sessions.ts": {
     // the one rule itself: the owner rule AND the steer-text rule
-    "const OWN_QUERY": [/OWNERLESS_FOREIGN\(/, /STEER_TEXT_HIDDEN\(/],
+    "const OWN_QUERY": [/OWNERLESS_FOREIGN\(/, /STEER_TEXT_HIDDEN\(/, /FOREIGN_IDEA\(/],
     // the job by id: the allow-list for anyone but the owner, the steer text hidden from a non-actor
     "function session": [/FOREIGN_JOB\(/, /STEER_TEXT_HIDDEN\(/, /CASE WHEN o\.others THEN '' ELSE j\.query END/],
     // the jobs list: the same

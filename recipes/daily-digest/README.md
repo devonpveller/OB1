@@ -232,7 +232,7 @@ Runs are killed after `PODCAST_RUN_MAX_MS` (16 h).
 ## Podcast audio (research-workbench P7a)
 
 The episode's voices no longer come from Open Notebook. `link-enrich.ts --audio` turns the script's
-`HOST A:` / `HOST B:` lines into turns of the team `PODCAST_TEAM` (a team of `PODCAST_OWNER_SUB` in the
+`HOST A:` / `HOST B:` lines into turns of the team `PODCAST_TEAM` (a team of the run's owner - the recorded owner of `INLET_CONNECTION`, `src/enrich/owner-sub.ts` - in the
 presenter model, `OB1/docker/init-podcasts.sql`; the cast's names, backstories and personalities go into
 the script prompt), and `src/podcast/`:
 

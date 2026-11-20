@@ -95,5 +95,7 @@ Deno.test("index.ts registers agent memory on the FULL lane only", async () => {
   assert(/registerAgentMemory\(fullLaneOnly,/.test(src), "registerAgentMemory must receive fullLaneOnly");
   assert(!/registerAgentMemory\(server\b/.test(src), "registerAgentMemory must not receive server");
   assert(!/registerAgentMemory\(personalServer\b/.test(src), "registerAgentMemory must not receive personalServer");
-  assert(/lane === "full" \? server : personalServer/.test(src), "the catch-all must pick the server by lane");
+  // rw-mcp-identity: one server per request, built for its lane; only the full lane replays the fullOnly registrations
+  assert(/await buildServer\(lane\)\.connect\(transport\)/.test(src), "the catch-all must build the request's server by lane");
+  assert(/if \(lane === "full" \|\| !r\.fullOnly\)/.test(src), "only the full lane may get the fullOnly (agent memory) tools");
 });

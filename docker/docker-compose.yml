@@ -192,11 +192,14 @@ services:
       - ./init-settings.sql:/docker-entrypoint-initdb.d/400-init-settings.sql:ro # research-workbench rw-settings-store (plan 08 PD3): the settings registry, the per-user tier, setting_get() - the one read function services use (fresh-volume only; live: psql -f BEFORE the new workbench image; revert: revert-settings.sql)
       - ./init-request-boundary.sql:/docker-entrypoint-initdb.d/420-init-request-boundary.sql:ro # research-workbench rw-boundary-core (plan 09 PD0a): research_jobs.request_kind + boundary, the derived-job guard, the private research_handbacks (forced RLS, purpose-scoped functions), a derived root's report is shared (fresh-volume only; live: psql -f BEFORE the new research + workbench images, a fresh backup first; revert: revert-request-boundary.sql, before 390's)
       - ./init-privacy-hardening.sql:/docker-entrypoint-initdb.d/430-init-privacy-hardening.sql:ro # research-workbench rw-privacy-hardening: the follow-ups of slots 380/390 (390 notebook-label repair F1/F2, the wiki guard's case-insensitive thought/ link and %2F, the withheld marker header, one refusal message for a note, an idea's purge erases its archive rows) as a FORWARD migration (fresh-volume: nothing to repair; live: psql -f AFTER 380 + 390, a fresh backup first, the wiki compile stopped, then the new openbrain-wiki-viewer and openbrain-workbench images, openbrain-wiki and the curator restarted (bind-mounted recipes); revert: revert-privacy-hardening.sql BEFORE the 390 and 380 reverts)
+      - ./init-inlet-owner.sql:/docker-entrypoint-initdb.d/440-init-inlet-owner.sql:ro # research-workbench rw-inlet-owner (plan 08 PD1): every existing thought becomes the operator's and private (thoughts.user_id), the email-body and podcast-transcript sources + the claims drawn only from them move to owner-private stores, Gmail ids / URLs leave the shared rows and job seeds, the wiki pages presenting them are withheld and guarded (fresh-volume: nothing to do; live: psql -v owner_sub=<WORKSPACE_DEFAULT_SUB> -f after a fresh backup, the writers STOPPED; LIVE ORDER 380, 390, 400, 430, 420, 460, then 440 - never before 460; on a fresh volume 440 runs first by name and has nothing to do; revert: revert-inlet-owner.sql first, before 460 / 420 / 430 / 390 / 380)
       - ./init-rest-door-auth.sql:/docker-entrypoint-initdb.d/450-init-rest-door-auth.sql:ro # research-workbench rw-rest-door-auth: the REST door's per-caller roles, PostgREST's authenticator, rest_setting_get, EXECUTE revoked from PUBLIC (catalog-generated stand-in grants for every non-door role) (fresh-volume only; live: psql -f, then the authenticator password, then the callers' code, then the door switch; revert: revert-rest-door-auth.sql)
       - ./init-boundary-digest.sql:/docker-entrypoint-initdb.d/460-init-boundary-digest.sql:ro # research-workbench rw-boundary-digest (plan 09 PD0c): a derived root's run knobs (mode article, gap_research, dry_run, deadline_at) on 420's options allow-list, podcast_episodes.transcript (the owner's private script), handback_deliver (the digest's delivery record on the private hand-back) (fresh-volume only; live: psql -f AFTER 420, BEFORE the new research image and the digest code, a fresh backup first; re-run it after any re-run of 420; revert: revert-boundary-digest.sql, before 420's)
+      - ./init-inlet-stamp.sql:/docker-entrypoint-initdb.d/470-init-inlet-stamp.sql:ro # research-workbench rw-inlet-stamp (plan 08 PD2): the inlet owner record (inlet_connections), every new thought carries its owner and a shared source is never personal (triggers), owner CHECKs on the podcast episode / hand-back / 440 stores (fresh-volume: no record, the inlet writers refuse until -v owner_sub is given; live: psql -f right AFTER 440 in PD1's window, the writers stopped, and only once rw-mcp-identity is live; revert: revert-inlet-stamp.sql, before 440's)
       # rw-rest-door-auth: slot 450 AGAIN, last (fresh volume only; idempotent). The door map applies to whatever the chain
-      # created after 450 (slot 460's podcast_episodes.transcript column grant is guarded on the column existing). Live
-      # never runs this (initdb only): there 450 is applied by psql after 460 (the test plan's apply order).
+      # created after 450 (slot 460's podcast_episodes.transcript column, slot 470's inlet_connections and its functions: each
+      # map line is guarded on its object existing). Live never runs this (initdb only): there 450 is applied by psql after
+      # the later slots (the test plan's apply order: 440 and 470 were applied first on live, 450 after them).
       - ./init-rest-door-auth.sql:/docker-entrypoint-initdb.d/990-init-rest-door-auth-final.sql:ro
     networks:
       - obnet
@@ -271,10 +274,23 @@ services:
       # contract routes here, with MCP_ACCESS_KEY (= the workbench's WORKBENCH_KEY). The workbench
       # runs under the wiki profile; with it off, every contract tool answers an error, no crash.
       CONTRACT_WORKBENCH_URL: http://openbrain-workbench:8000
+      # rw-mcp-identity round 2 (tester F1): the workbench serves the CALLER of a contract tool. The full lane keeps
+      # MCP_ACCESS_KEY (the operator); every other caller goes with THIS key - the workbench's `mcp=<key>` entry in
+      # WORKSPACE_SERVICE_KEYS (service:mcp, nobody) - plus, for a verified Open WebUI user, their own token, which the
+      # workbench verifies itself. Blank = the contract tools answer the full lane only (fail closed).
+      CONTRACT_WORKBENCH_MCP_KEY: ${OB_WORKBENCH_MCP_KEY:-}
       # research-workbench rw-p8a4-ideas: the idea tools act for ONE owner subject - the workspace's default
       # identity (the subject capture_idea files ideas under); update_idea / research_idea / promote_idea refuse
       # any other owner's idea through the owner-checked SQL functions (slot 370). Blank = "operator", as the seam.
       WORKSPACE_DEFAULT_SUB: ${WORKSPACE_DEFAULT_SUB:-}
+      # rw-mcp-identity: WORKSPACE_DEFAULT_SUB above is ALSO who the full lane (MCP_ACCESS_KEY) acts as - the
+      # operator's own clients, named in this configuration - and the subject that makes an OWUI user the operator.
+      # The OWUI lane: Open WebUI's native MCP connection with the signed-in user's Authentik token (mcp-identity.ts).
+      # All four or none (none = the lane is off, exactly as before); the JWKS is static (no fetch, no egress).
+      MCP_OWUI_ACCESS_KEY: ${MCP_OWUI_ACCESS_KEY:-}
+      MCP_OWUI_OIDC_ISSUER: ${MCP_OWUI_OIDC_ISSUER:-}
+      MCP_OWUI_OIDC_AUDIENCE: ${MCP_OWUI_OIDC_AUDIENCE:-}
+      MCP_OWUI_OIDC_JWKS: ${MCP_OWUI_OIDC_JWKS:-}
     # No host port: openbrain-mcp is reachable only on internal networks.
     # Trusted local clients (Open WebUI via openbrain-mcpo, recipes on
     # obnet) talk to it directly. Two lanes by key: MCP_ACCESS_KEY = full
@@ -325,6 +341,17 @@ services:
       DEFAULT_USER_ID: ${DEFAULT_USER_ID}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       PORT: "8000"
+      # rw-mcp-identity: per-user rows. The OWUI lane (Open WebUI's native MCP connection, the signed-in user's
+      # Authentik token): the operator (WORKSPACE_DEFAULT_SUB) keeps DEFAULT_USER_ID's rows, any other user gets
+      # their own. MCP_ACCESS_KEY (held only by openbrain-mcpo-ext, which carries no user) has NO identity here:
+      # the wiki_* reads only. Same four OWUI variables as openbrain-mcp, all or none.
+      # round 2 (F6): the personal key is no identity here too, so openbrain-mcpo-ext can hold it instead of MCP_ACCESS_KEY.
+      MCP_PERSONAL_ACCESS_KEY: ${MCP_PERSONAL_ACCESS_KEY:-}
+      WORKSPACE_DEFAULT_SUB: ${WORKSPACE_DEFAULT_SUB:-}
+      MCP_OWUI_ACCESS_KEY: ${MCP_OWUI_ACCESS_KEY:-}
+      MCP_OWUI_OIDC_ISSUER: ${MCP_OWUI_OIDC_ISSUER:-}
+      MCP_OWUI_OIDC_AUDIENCE: ${MCP_OWUI_OIDC_AUDIENCE:-}
+      MCP_OWUI_OIDC_JWKS: ${MCP_OWUI_OIDC_JWKS:-}
       # Compiled wiki (read-only) for the wiki_* tools (req 13).
       WIKI_DIR: /wiki/content
       # CORE -> `wiki` PROFILE, at runtime only (sl-ob1-profiles). Deliberately
@@ -340,8 +367,12 @@ services:
     # personal-by-design and have no cloud surface. Reachable internally
     # via openbrain-mcpo-ext for OWUI; cloud is denied entirely (the
     # openbrain-gateway allow-list excludes every extension tool).
+    # rw-mcp-identity: ALSO on ai-stack_llm-net, so Open WebUI's native MCP connection reaches it directly
+    # (http://openbrain-ext:8000/, as openbrain-mcp:8000). llm-net is internal (no route out), and the only
+    # inference on it is llm-gateway behind a LiteLLM key this service does not hold: no egress, no inference path.
     networks:
       - obnet
+      - llm-net
     restart: unless-stopped
 
   # ── Household pantry / meal planner (pantry-meal-planner, item pantry-core) ──
@@ -1257,6 +1288,9 @@ services:
       # Blank = the door refuses the compile's requests (401).
       OPEN_BRAIN_REST_TOKEN: ${OB_REST_TOKEN_WIKI:-}
       OPEN_BRAIN_SERVICE_KEY: ${OB_REST_TOKEN_WIKI:-}
+      # rw-inlet-stamp (plan 08 PD2, slot 470): the vault's inlet connection - every note thought is written with its
+      # recorded owner (public.inlet_connections), never a constant
+      INLET_CONNECTION: vault
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       # P4.7 — commit working source-content edits as revisions, one per compile
       # (service-to-service call to the workbench; needs the X-Brain-Key).
@@ -1492,6 +1526,12 @@ services:
       # the browser door's own key (required with sign-in; then WORKBENCH_KEY is an internal service)
       WORKSPACE_DOOR_KEY: ${WORKSPACE_DOOR_KEY:-}
       WORKSPACE_SERVICE_KEYS: ${WORKSPACE_SERVICE_KEYS:-}
+      # rw-mcp-identity round 2 (tester F1): with an `mcp=<OB_WORKBENCH_MCP_KEY>` entry above, openbrain-mcp's contract
+      # calls for an Open WebUI user carry that user's Authentik token (x-ob-user-token); the workbench verifies it HERE,
+      # against the same static provider config openbrain-mcp uses, and serves its sub. Blank = the header is refused (403).
+      MCP_OWUI_OIDC_ISSUER: ${MCP_OWUI_OIDC_ISSUER:-}
+      MCP_OWUI_OIDC_AUDIENCE: ${MCP_OWUI_OIDC_AUDIENCE:-}
+      MCP_OWUI_OIDC_JWKS: ${MCP_OWUI_OIDC_JWKS:-}
       # P2b's identity header: blank = off, ignored while forward-auth sign-in is configured;
       # set = the edge MUST strip a client-sent copy and set it itself (workbench/README.md "Sign-in (Authentik forward-auth)")
       WORKSPACE_IDENTITY_HEADER: ${WORKSPACE_IDENTITY_HEADER:-}

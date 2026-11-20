@@ -65,7 +65,8 @@ t("an Idea Refinery job rides the agent key: mattermost, with the idea id as its
   assertEquals(r.status, 202);
   // what openbrain-idea-refinery does right after submitting: stamp the job on the revision
   const [{ id: thought }] = await sql<{ id: number }>(
-    `INSERT INTO thoughts (content, exposure) VALUES ('e2e idea', 'ops') RETURNING id`);
+    // rw-inlet-stamp (slot 470): an idea's thought is personal - written with its owner, as every personal row is
+    `INSERT INTO thoughts (content, exposure, user_id) VALUES ('e2e idea', 'ops', 'e2e-idea-owner-0001') RETURNING id`);
   const [{ id: idea }] = await sql<{ id: string }>(`INSERT INTO ideas (title) VALUES ('e2e idea') RETURNING id`);
   await sql(`INSERT INTO idea_revisions (idea_id, revision, summary, thought_id) VALUES ($1, 1, 'e2e idea', $2)`, [idea, thought]);
   await sql(`UPDATE idea_revisions SET research_job_id = $2 WHERE idea_id = $1 AND revision = 1`, [idea, r.json.job_id]);

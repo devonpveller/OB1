@@ -4,9 +4,9 @@
 // owner's idea answers exactly like an idea that does not exist; nothing here writes `ideas` or `idea_revisions`
 // itself (the database refuses this server's role if it tries: trg_ideas_write_guard).
 //
-// WHO the owner is: openbrain-mcp has no per-user sign-in; its idea tools act for the workspace's default identity,
-// WORKSPACE_DEFAULT_SUB (blank = "operator", the identity seam's placeholder) - the subject capture_idea files every
-// idea under. A user signed in elsewhere is never named by a tool argument.
+// WHO the owner is: the request's subject (rw-mcp-identity, thought-owner.ts thoughtWriter()): the operator on the full
+// lane, the signed-in Open WebUI user on the owui lane; a request with no identity writes nothing. index.ts passes it in;
+// a user is never named by a tool argument.
 //
 // Pure of the server: index.ts registers the tools and passes its pool client; idea-tools.test.ts drives these with a
 // recording fake client.
@@ -22,10 +22,6 @@ export interface Outcome {
   title?: string;
   job_id?: string;
   document_path?: string;
-}
-
-export function ideaOwner(get: (k: string) => string | undefined = (k) => Deno.env.get(k)): string {
-  return (get("WORKSPACE_DEFAULT_SUB") ?? "").trim() || "operator";
 }
 
 // the actor these writes record (who acted): this door
