@@ -133,8 +133,9 @@ t("1.4 A's semantic search: the planted nearest chunk first, exactly one embeddi
 
 t("1.5 A's private jobs: the list, and each one's original text through inlet_private_job", async () => {
   const want = await sql<{ id: string; q: string }>(
-    `SELECT DISTINCT p.job_id::text AS id, (SELECT x.query FROM public.inlet_private_job(p.job_id, $1) x) AS q FROM public.inlet_private_jobs p WHERE p.owner_sub = $1`, [A]);
-  const live = want.filter((w) => w.q !== null);
+    `SELECT DISTINCT p.job_id::text AS id, x.query AS q FROM public.inlet_private_jobs p JOIN public.research_jobs j ON j.id = p.job_id
+       CROSS JOIN LATERAL public.inlet_private_job(p.job_id, $1) x WHERE p.owner_sub = $1`, [A]);
+  const live = want;
   assert(live.length >= 1, `A has a seeded job (${live.length})`);
   const r = await req(WB_S, `${P}/jobs?limit=200`, as.A);
   assertEquals(r.status, 200, r.text);
