@@ -126,7 +126,7 @@ function Invoke-OwnerPrivateViewLab {
   $subs = @('', 'service:x', 'SERVICE:x', 'anonymous:', 'system:x', 'operator', 'Operator', $script:pvB)
   $n34 = @()
   foreach ($s in $subs) {
-    $n = Invoke-PvQ "SET ROLE ob_workbench; SELECT (SELECT count(*) FROM public.owner_private_claims('$s')) + (SELECT count(*) FROM public.owner_private_source_text('$s', '$inMark')) + (SELECT count(*) FROM public.owner_private_jobs('$s')) + (SELECT count(*) FROM public.owner_private_source_knn('$s', (SELECT embedding FROM public.inlet_private_source_chunks WHERE inlet_owner_sub = '$inA' AND embedding IS NOT NULL LIMIT 1)))"
+    $n = Invoke-PvQ "SET ROLE ob_workbench; SELECT (SELECT count(*) FROM public.owner_private_claims('$s')) + (SELECT count(*) FROM public.owner_private_source_text('$s', '$inMark')) + (SELECT count(*) FROM public.owner_private_jobs('$s')) + (SELECT count(*) FROM public.owner_private_source_knn('$s', ('[1' || repeat(',0', 1023) || ']')::vector))"
     $n34 += "'$s'=$(($n -split "`n")[-1])"
   }
   $nA = Invoke-PvQ "SET ROLE ob_workbench; SELECT count(*) FROM public.owner_private_claims('$inA')"
