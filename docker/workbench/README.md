@@ -674,3 +674,25 @@ configured - the single-user mode as shipped - the default subject `WORKSPACE_DE
 or another header user). Settings is a user front end: a service key gets 403 (`USER_ONLY`). Lab:
 `run-workspace-tests.ps1 -Subnet <x.y.z.0/24>` [5j]-[5m] (+ the e2e's ST1 and B's settings in the sweep), or
 `-SettingsOnly` for those and the sweep; `-Red -SettingsOnly -BaseSha <sha>` stages the base's chain too.
+
+## My private material (rw-owner-private-view, plan 08 PD-PV, slot 480)
+
+The owner's own private material, which slot 440 moved out of the shared tables: their private claims, the shared
+claims carrying their private link (beside those claims' shared sources), search over their moved email bodies and
+podcast transcripts (text, or semantic over the kept chunk embeddings - only the QUERY is embedded), and their research
+jobs seeded with private material with the original question (through PD1's `inlet_private_job`).
+
+- Routes: `GET /workbench/contract/private/{claims, claims/{id}, sources, jobs, jobs/{id}}` (src/contracts/routes/private.ts).
+  No `x-mcp-tool`: no MCP tool. `USER_ONLY`: a service key gets 403. Every answer is `Cache-Control: no-store, private`.
+- Who: the identity seam's subject only, when eligible (src/identity/private_view.ts). Sign-in on: a signed-in user
+  acting as themselves (an impersonating admin, an on-behalf caller, a service: the empty answer). Sign-in off (as
+  shipped): the default identity `WORKSPACE_DEFAULT_SUB` - every request through the door is that user, which is why
+  `auth/me` says `private_views: "default-identity"` and the workbench logs it at start-up. Run
+  `check-multiuser-ready.ps1` before anyone else is given access.
+- The database: the workbench logs in as `ob_workbench` (slot 480; a member of `ob_app_memory`), the ONLY role that may
+  run the owner-scoped reads and PD1's two reads. `OB_WORKBENCH_DB_PASSWORD` in `OB1/docker/.env`. Re-run
+  `init-owner-private-view.sql` after any 440 re-run; `check-owner-private-view-deploy.ps1` reports drift (read-only).
+- Semantic search uses `PRIVATE_EMBEDDING_API_KEY` = `OB_WORKBENCH_EMBED_LLM_KEY` (the workbench-embed virtual key, no
+  fallback to the MCP key); blank = 503 "search is not available" and no embedding call.
+- The panel "My private material" keeps what it shows in its own state (nothing in localStorage) and has no cite,
+  insert or share action.
