@@ -25,7 +25,7 @@ param(
   [string]$Id = 'wt-rw-rest-door-auth',
   [string]$Subnet = '',
   [string]$Evidence = '',
-  [string]$BaseSha = '5ca84f5',
+  [string]$BaseSha = '5566c18',   # development's pin before this item (440 + 460 + 470 applied, no 450) - the live state
   [string]$NewSha = 'HEAD',
   [string]$NodeImage = 'node:22-slim',
   [switch]$Red,
@@ -137,7 +137,8 @@ $callerReq = [ordered]@{
   'openbrain-digest' = '/rest/v1/thoughts?select=id&limit=1'
   'openbrain-podcast' = '/rest/v1/podcast_teams?select=id&limit=1'
   'openbrain-gmail-pull' = '/rest/v1/thoughts?select=id&limit=1'
-  'openbrain-gmail-prune' = '/rest/v1/thoughts?select=id,metadata&metadata->>source=eq.gmail&limit=1'
+  # round 6: since slot 470 the prune reads and deletes only through its per-connection view (its role has no thoughts grant)
+  'openbrain-gmail-prune' = '/rest/v1/inlet_connection_mail?select=id,metadata&inlet_connection=eq.gmail&limit=1'
 }
 $probeJs = @'
 const t = (process.env.OPEN_BRAIN_REST_TOKEN || process.env.OPEN_BRAIN_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();

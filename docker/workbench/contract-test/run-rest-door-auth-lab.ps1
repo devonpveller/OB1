@@ -215,6 +215,17 @@ try {
   }
   $execAfter = @((Psql $execSql) -split "`n" | Where-Object { $_ })
   Save 'exec-after.txt' ($execAfter -join "`n")
+  # round 6 (case 10): every role's function EXECUTE and table privileges in public (not superusers, pg_*, or this lab's
+  # own lab_* roles), taken HERE for the live order - right after 450 by psql, before cases 7 / 9 revert and restore
+  $allSql = @"
+SELECT r.rolname || ' F ' || p.oid::regprocedure::text FROM pg_roles r CROSS JOIN pg_proc p
+ WHERE p.pronamespace = 'public'::regnamespace AND NOT r.rolsuper AND r.rolname !~ '^(pg_|lab_)' AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
+UNION ALL
+SELECT r.rolname || ' T ' || c.relname || ' ' || pr FROM pg_roles r CROSS JOIN pg_class c CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) pr
+ WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r','v','m','p') AND NOT r.rolsuper AND r.rolname !~ '^(pg_|lab_)' AND has_table_privilege(r.oid, c.oid, pr)
+ORDER BY 1;
+"@
+  $allLive = if ($Red) { @() } else { @((Psql $allSql) -split "`n" | Where-Object { $_ }) }
 
   # ------------------------------------------------------------ 5. case 5: PUBLIC and the direct-Postgres roles (catalog)
   Write-Host '[5] case 5 - PUBLIC runs nothing; every direct-Postgres role keeps every function it could run'
@@ -459,17 +470,10 @@ SELECT md5(COALESCE(string_agg(x, E'\n' ORDER BY x), '')) || ' ' || count(*) FRO
     $f2 = Join-Path $work 'fp.sql'; [System.IO.File]::WriteAllText($f2, $fpSql, (New-Object System.Text.UTF8Encoding $false))
     $null = Dk cp $f2 "${db2}:/tmp/fp.sql"
     $fpFresh = ((Dk exec $db2 psql -U postgres -d openbrain -X -q -tA -f /tmp/fp.sql) -split "`n" | Where-Object { $_ -match '^[0-9a-f]{32} ' } | Select-Object -First 1)
-    # round 6: the same comparison over EVERY role (not superusers, pg_*, or this lab's own lab_* roles): function EXECUTE
-    # and table privileges in public. The lines themselves go to evidence, so a difference names its (role, object).
-    $allSql = @"
-SELECT r.rolname || ' F ' || p.oid::regprocedure::text FROM pg_roles r CROSS JOIN pg_proc p
- WHERE p.pronamespace = 'public'::regnamespace AND NOT r.rolsuper AND r.rolname !~ '^(pg_|lab_)' AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
-UNION ALL
-SELECT r.rolname || ' T ' || c.relname || ' ' || pr FROM pg_roles r CROSS JOIN pg_class c CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) pr
- WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r','v','m','p') AND NOT r.rolsuper AND r.rolname !~ '^(pg_|lab_)' AND has_table_privilege(r.oid, c.oid, pr)
-ORDER BY 1;
-"@
-    $allLive = @((Psql $allSql) -split "`n" | Where-Object { $_ })
+    # round 6: the same comparison over EVERY role: the live-order snapshot (taken after 450's first runs, above) against
+    # the fresh volume, which gets ob_app_memory the way the main database did (the production shape, out of band).
+    # The lines themselves go to evidence, so a difference names its (role, object).
+    $null = Dk exec $db2 psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') THEN CREATE ROLE ob_app_memory LOGIN NOSUPERUSER NOBYPASSRLS IN ROLE service_role; END IF; END `$`$;"
     $f3 = Join-Path $work 'all.sql'; [System.IO.File]::WriteAllText($f3, $allSql, (New-Object System.Text.UTF8Encoding $false))
     $null = Dk cp $f3 "${db2}:/tmp/all.sql"
     $allFresh = @((Dk exec $db2 psql -U postgres -d openbrain -X -q -tA -f /tmp/all.sql) -split "`n" | Where-Object { $_ })

@@ -571,6 +571,31 @@ BEGIN
             WHERE pol.polname LIKE 'rest\_door\_%' LOOP
     EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', g.sig, g.role_name);
   END LOOP;
+  -- round 6 (found by the lab: the prune's view answered 42501 "permission denied for function ob_corpus_on_ops_plane"):
+  -- through a VIEW the role reads or writes, the base tables are checked as the view owner and get the policies that
+  -- apply to the view OWNER - but every function in the view's own query and in those policies is still executed with
+  -- the CALLER's EXECUTE privilege. So the door role gets EXECUTE on exactly those functions (before slot 450 the caller
+  -- was service_role, which holds every one).
+  FOR g IN SELECT DISTINCT x.role_name, x.sig FROM (
+             SELECT m.role_name, p.oid::regprocedure AS sig
+               FROM _rda_map m
+               JOIN pg_class v ON v.oid = ('public.' || quote_ident(m.rel))::regclass AND v.relkind = 'v'
+               JOIN pg_rewrite rw ON rw.ev_class = v.oid
+               JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = rw.oid AND d.refclassid = 'pg_proc'::regclass
+               JOIN pg_proc p ON p.oid = d.refobjid AND p.pronamespace = 'public'::regnamespace
+             UNION
+             SELECT m.role_name, p.oid::regprocedure
+               FROM _rda_map m
+               JOIN pg_class v ON v.oid = ('public.' || quote_ident(m.rel))::regclass AND v.relkind = 'v'
+               JOIN pg_rewrite rw ON rw.ev_class = v.oid
+               JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = rw.oid AND d.refclassid = 'pg_class'::regclass AND d.refobjid <> v.oid
+               JOIN pg_class b ON b.oid = d.refobjid AND b.relkind IN ('r', 'p') AND b.relrowsecurity
+               JOIN pg_policy pol ON pol.polrelid = b.oid
+                AND (0::oid = ANY (pol.polroles) OR EXISTS (SELECT 1 FROM unnest(pol.polroles) pr WHERE pg_has_role(v.relowner, pr, 'USAGE')))
+               JOIN pg_depend d2 ON d2.classid = 'pg_policy'::regclass AND d2.objid = pol.oid AND d2.refclassid = 'pg_proc'::regclass
+               JOIN pg_proc p ON p.oid = d2.refobjid AND p.pronamespace = 'public'::regnamespace) x LOOP
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', g.sig, g.role_name);
+  END LOOP;
   RAISE NOTICE 'rest door: % policy cop(ies) for the door roles', n;
 END $$;
 
