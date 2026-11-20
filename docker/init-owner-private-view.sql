@@ -80,7 +80,11 @@ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') THEN RETURN; END IF;
     FOR f IN SELECT p.oid::regprocedure::text FROM pg_proc p
               WHERE p.pronamespace = 'public'::regnamespace
-                AND (p.proname LIKE 'inlet\_private\_%' OR p.proname LIKE 'owner\_private\_%')
+                AND p.oid IN (SELECT to_regprocedure(n)::oid FROM unnest(ARRAY['public.owner_private_subject_ok(text)', 'public.owner_private_source_kind(text,text,jsonb)',
+                     'public.owner_private_claims(text,uuid,text,text,uuid,timestamptz,uuid,integer)',
+                     'public.owner_private_source_text(text,text,text,integer)', 'public.owner_private_source_knn(text,vector,text,integer)',
+                     'public.owner_private_has_sources(text)', 'public.owner_private_jobs(text,timestamptz,uuid,integer)',
+                     'public.inlet_private_source(uuid,text)', 'public.inlet_private_job(uuid,text)']) n)
                 AND has_function_privilege('ob_app_memory', p.oid, 'EXECUTE')
               ORDER BY 1 LOOP
         RAISE NOTICE 'owner private view: drift - % is executable by ob_app_memory (a 440 re-run?): moved to ob_workbench', f;

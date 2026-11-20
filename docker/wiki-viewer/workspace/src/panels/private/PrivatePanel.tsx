@@ -128,9 +128,14 @@ function Research() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [open, setOpen] = useState<JobText | null>(null);
   const [need, setNeed] = useState(false);
-  useEffect(() => {
-    get(`${P}/jobs`).then((r) => { setJobs(r.jobs ?? []); setNeed(!!r.sign_in_required); }).catch(() => setJobs([]));
-  }, []);
+  const [next, setNext] = useState<string | null>(null);
+  const load = async (more = false) => {
+    const r = await get(`${P}/jobs${more && next ? `?before=${q(next)}` : ""}`).catch(() => ({ jobs: [], next: null }));
+    setJobs(more ? [...jobs, ...(r.jobs ?? [])] : (r.jobs ?? []));
+    setNext(r.next ?? null);
+    setNeed(!!r.sign_in_required);
+  };
+  useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const show = async (id: string) => setOpen((await get(`${P}/jobs/${q(id)}`).catch(() => null))?.job ?? null);
   return (
     <div data-testid="private-research">
@@ -144,6 +149,7 @@ function Research() {
           </li>
         ))}
       </ul>
+      {next && <button type="button" onClick={() => load(true)}>More</button>}
       {open && (
         <div className="ws-detail" data-testid="private-job">
           <p><Chip /> {open.query}</p>

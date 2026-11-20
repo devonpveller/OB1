@@ -38,6 +38,8 @@ BEGIN
         ALTER ROLE ob_workbench NOLOGIN;
         RAISE NOTICE 'owner private view revert: ob_workbench has % session(s): kept, NOLOGIN - recreate the workbench as ob_app_memory and run this file again', n;
     ELSE
+        -- nothing ob_workbench owns is silently dropped: hand it to the migration owner (postgres, who runs these files) first
+        REASSIGN OWNED BY ob_workbench TO postgres;
         DROP OWNED BY ob_workbench;
         DROP ROLE ob_workbench;
     END IF;

@@ -75,4 +75,23 @@ describe("My private material", () => {
     expect(screen.getByTestId("private-sign-in")).toBeTruthy();
     expect(screen.getByTestId("private-default-identity").textContent).toMatch(/Sign-in is off/);
   });
+  it("Research tab: More fetches the next page with the cursor and appends it; the button goes when next is null", async () => {
+    const J = (n: number) => ({ id: `f5200000-0000-4000-8000-00000000000${n}`, root_job_id: null, created_at: "2026-10-17T12:00:00.000Z", state: "done", query: `question ${MARK} ${n}` });
+    const CUR = "opaque-cursor-1";
+    const { log } = fakeApi([["GET", "/workbench/contract/private/jobs", (url) => (url.includes(`before=${CUR}`) ? { private: true, jobs: [J(2)], next: null } : { private: true, jobs: [J(1)], next: CUR })]]);
+    setMe(me("signed-in"));
+    render(<PrivatePanel params={{}} />);
+    await act(async () => { await settle(); });
+    fireEvent.click(screen.getByText("Research"));
+    await act(async () => { await settle(); });
+    expect(screen.getByText(`question ${MARK} 1`)).toBeTruthy();
+    expect(screen.queryByText(`question ${MARK} 2`)).toBeNull();
+    await act(async () => { fireEvent.click(screen.getByText("More")); await settle(); });
+    expect(log.some((r) => r.url.includes(`/private/jobs`) && r.url.includes(`before=${CUR}`))).toBe(true);
+    expect(screen.getByText(`question ${MARK} 1`)).toBeTruthy();
+    expect(screen.getByText(`question ${MARK} 2`)).toBeTruthy();
+    expect(screen.queryByText("More")).toBeNull();
+    expect(JSON.stringify({ ...localStorage })).not.toContain(MARK);
+    expect(document.querySelector('[data-action="cite"], [data-action="link"], [data-action="share"]')).toBeNull();
+  });
 });

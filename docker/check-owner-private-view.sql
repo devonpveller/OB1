@@ -33,9 +33,15 @@ lines AS (
            NOT (EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_workbench') AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory')
                 AND pg_has_role('ob_workbench', 'ob_app_memory', 'MEMBER'))
     UNION ALL
+    -- scoped to exactly the nine functions slot 480 moves, so a later function of PD1's cannot fail this check for good
     SELECT 4, 'drift: ' || f.sig || ' executable by ob_app_memory', true
       FROM f
-     WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_workbench') AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory')
+     WHERE f.oid IN (SELECT to_regprocedure(n)::oid FROM unnest(ARRAY['public.owner_private_subject_ok(text)', 'public.owner_private_source_kind(text,text,jsonb)',
+                      'public.owner_private_claims(text,uuid,text,text,uuid,timestamptz,uuid,integer)',
+                      'public.owner_private_source_text(text,text,text,integer)', 'public.owner_private_source_knn(text,vector,text,integer)',
+                      'public.owner_private_has_sources(text)', 'public.owner_private_jobs(text,timestamptz,uuid,integer)',
+                      'public.inlet_private_source(uuid,text)', 'public.inlet_private_job(uuid,text)']) n)
+       AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_workbench') AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory')
        AND has_function_privilege('ob_app_memory', f.oid, 'EXECUTE')
     UNION ALL
     -- the five owner reads must exist (slot 480 applied), whatever else is true
