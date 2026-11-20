@@ -424,6 +424,13 @@ SELECT o.k || ' ' || o.name || ' -> ' || COALESCE((SELECT string_agg(d.rolname |
     $lostRestored = @($execBefore | Where-Object { $execRestored -notcontains $_ })
     $g1 = PsqlFile (Join-Path $dockerDir 'init-grants.sql'); Save 'restore-init-grants.log' $g1
     $g2 = PsqlFile (Join-Path $dockerDir 'init-pantry.sql'); Save 'restore-init-pantry.log' $g2   # its own explicit grants (ob_pantry)
+    # round 6: the merged runbook re-applies 440 and 470 before 450 (470 owns the prune's view again - --no-owner gave it
+    # to postgres - and both are re-runnable with nothing to do here)
+    foreach ($sl in @('init-inlet-owner.sql', 'init-inlet-stamp.sql')) {
+      if (Test-Path (Join-Path $dockerDir $sl)) { $gx = PsqlFile (Join-Path $dockerDir $sl); Save "restore-$sl.log" $gx; if ($script:rc -ne 0) { Fail "[9-restore] the runbook's re-apply of $sl failed (exit $($script:rc))" } }
+    }
+    $vOwner = (Psql "SELECT COALESCE((SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = to_regclass('public.inlet_connection_mail')), 'none')").Trim()
+    Check ($vOwner -eq 'ob_inlet_stamp_view' -or $vOwner -eq 'none') "[9-restore] the prune's view is its slot's view role's again after the re-apply ($vOwner)"
     $o9 = PsqlFile $init450; $rr9 = $script:rc; Save 'restore-450.log' $o9
     $execReapplied = @((Psql $execSql) -split "`n" | Where-Object { $_ })
     $lost9 = @($execBefore | Where-Object { $execReapplied -notcontains $_ })
@@ -470,6 +477,13 @@ SELECT md5(COALESCE(string_agg(x, E'\n' ORDER BY x), '')) || ' ' || count(*) FRO
     $f2 = Join-Path $work 'fp.sql'; [System.IO.File]::WriteAllText($f2, $fpSql, (New-Object System.Text.UTF8Encoding $false))
     $null = Dk cp $f2 "${db2}:/tmp/fp.sql"
     $fpFresh = ((Dk exec $db2 psql -U postgres -d openbrain -X -q -tA -f /tmp/fp.sql) -split "`n" | Where-Object { $_ -match '^[0-9a-f]{32} ' } | Select-Object -First 1)
+    # the fingerprint's lines too, so a difference names its (role, object)
+    $fpLines = (($fpSql -split "`n") | ForEach-Object { if ($_ -like 'SELECT md5(*') { 'SELECT x FROM (' } elseif ($_ -match 'has_function_privilege\(d\.rolname, p\.oid, ''EXECUTE''\)\) s;') { $_ -replace '\) s;', ') s ORDER BY 1;' } else { $_ } }) -join "`n"
+    $dLive = @((Psql $fpLines) -split "`n" | Where-Object { $_ })
+    $f4l = Join-Path $work 'fplines.sql'; [System.IO.File]::WriteAllText($f4l, $fpLines, (New-Object System.Text.UTF8Encoding $false))
+    $null = Dk cp $f4l "${db2}:/tmp/fplines.sql"
+    $dFresh = @((Dk exec $db2 psql -U postgres -d openbrain -X -q -tA -f /tmp/fplines.sql) -split "`n" | Where-Object { $_ })
+    Save 'case10-door-diff.txt' ("door lines: live $($dLive.Count), fresh $($dFresh.Count)`n-- only live:`n$((@($dLive | Where-Object { $dFresh -notcontains $_ })) -join "`n")`n-- only fresh:`n$((@($dFresh | Where-Object { $dLive -notcontains $_ })) -join "`n")")
     # round 6: the same comparison over EVERY role: the live-order snapshot (taken after 450's first runs, above) against
     # the fresh volume, which gets ob_app_memory the way the main database did (the production shape, out of band).
     # The lines themselves go to evidence, so a difference names its (role, object).

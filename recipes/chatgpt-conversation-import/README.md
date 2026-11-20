@@ -40,7 +40,10 @@ FILE LOCATION
 > written private to that owner (`thoughts.user_id`), and the database refuses an unowned one (slot 470). Without
 > `--owner`, or with a value that is not a subject (blank, a `service:` principal, the literal `operator`), the script
 > exits 2 before it reads the export and writes nothing. Through the REST door (slot 450) the script uses the import
-> caller's token, minted by the operator only when an import is needed.
+> caller's token, minted by the operator only when an import is needed
+> (`OB1/docker/rest-door/mint-rest-tokens.ps1 -Import -ImportOwner <subject>`, into `SUPABASE_SERVICE_ROLE_KEY`). The
+> token's `sub` must be the same subject as `--owner`: the database lets a door caller write only rows owned by its
+> own verified subject, so a token for one person cannot import for another.
 
 
 ### 1. Export your data from ChatGPT
