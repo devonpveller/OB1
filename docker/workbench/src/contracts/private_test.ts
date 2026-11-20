@@ -17,7 +17,7 @@ import type { Identity } from "../middleware/identity.ts";
 import type { PrivateViewConfig } from "../identity/private_view.ts";
 
 const A = "lab-owner-aaaa-0001";
-const CLAIM = { id: "f5100000-0000-4000-8000-000000000001", kind: "private", text: "MARK-A claim", status: "active", epistemic_tag: "sourced", confidence: 0.5, contradicted: false, created_at: "2026-10-17T12:00:00.000Z", private_sources: [], private_parents: [], shared_sources: [] };
+const CLAIM = { id: "f5100000-0000-4000-8000-000000000001", kind: "private", text: "MARK-A claim", status: "active", epistemic_tag: "sourced", confidence: "0.5" /* float8 arrives as a string */, contradicted: false, created_at: "2026-10-17T12:00:00.000Z", private_sources: [], private_parents: [], shared_sources: [] };
 
 function rig(cfg: PrivateViewConfig, who: Identity | undefined, embed: ((t: string) => Promise<number[]>) | null = async () => [0.1, 0.2]) {
   const calls: { sql: string; args: unknown[] }[] = [];
@@ -31,7 +31,7 @@ function rig(cfg: PrivateViewConfig, who: Identity | undefined, embed: ((t: stri
       let rows: unknown[] = [];
       if (sql.includes("owner_private_claims")) rows = mine && (args[1] === null || args[1] === CLAIM.id) ? [CLAIM] : [];
       else if (sql.includes("owner_private_has_sources")) rows = [{ yes: mine }];
-      else if (sql.includes("owner_private_source_text") || sql.includes("owner_private_source_knn")) rows = mine ? [{ source_id: "f5000000-0000-4000-8000-000000000001", title: "MARK-A mail", kind: "email", created_at: "2026-10-17T12:00:00.000Z", idx: 0, snippet: "MARK-A", score: 0.9 }] : [];
+      else if (sql.includes("owner_private_source_text") || sql.includes("owner_private_source_knn")) rows = mine ? [{ source_id: "f5000000-0000-4000-8000-000000000001", title: "MARK-A mail", kind: "email", created_at: "2026-10-17T12:00:00.000Z", idx: 0, snippet: "MARK-A", score: "0.9" }] : [];
       else if (sql.includes("owner_private_jobs")) rows = mine ? [{ id: "f5200000-0000-4000-8000-000000000001", root_job_id: null, created_at: "2026-10-17T12:00:00.000Z", state: "done", query: "MARK-A question" }] : [];
       else if (pd1) rows = mine ? [{ query: "MARK-A question", result: null, progress: null, error: null }] : [];
       return Promise.resolve(rows as T[]);

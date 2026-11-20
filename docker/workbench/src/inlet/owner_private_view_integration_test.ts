@@ -296,7 +296,9 @@ t("4.1 the shared contract reads answer A and B byte-identically, with no privat
     `/workbench/contract/timeline?limit=200`, `/workbench/search?q=${MARK}`]) {
     const a = await req(WB_S, p, as.A), b = await req(WB_S, p, as.B);
     assertEquals([a.status, a.text], [b.status, b.text], `${p}: the same for A and B`);
-    assert(!hasA(a.text) && !hasB(a.text), `${p}: no private marker`);
+    // a search answer echoes its own query ("query": "<the words asked>"): that is the caller's text, not a leak
+    const body = a.text.replace(/"(query|q)"\s*:\s*"[^"]*"/g, '""');
+    assert(!hasA(body) && !hasB(body), `${p}: no private marker`);
   }
 });
 

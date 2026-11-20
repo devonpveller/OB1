@@ -52,6 +52,9 @@ async function guarded<T>(f: () => Promise<T[]>): Promise<T[]> {
   }
 }
 
+// deno-postgres hands float8 back as a string: the wire carries numbers
+const num = <T>(k: keyof T) => (rows: T[]): T[] => rows.map((r) => ({ ...r, [k]: Number(r[k]) }));
+
 export function claims(db: Db, sub: string, o: { id?: string | null; q?: string | null; kind?: string; source?: string | null; before?: Cursor | null; limit: number }) {
   return guarded(() =>
     db.query<PrivateClaimRow>(
@@ -59,7 +62,7 @@ export function claims(db: Db, sub: string, o: { id?: string | null; q?: string 
               private_sources, private_parents, shared_sources
          FROM public.owner_private_claims($1, $2::uuid, $3, $4, $5::uuid, $6::timestamptz, $7::uuid, $8)`,
       [sub, o.id ?? null, o.q ?? null, o.kind ?? "all", o.source ?? null, o.before?.at ?? null, o.before?.id ?? null, o.limit],
-    )
+    ).then(num<PrivateClaimRow>("confidence"))
   );
 }
 
@@ -69,7 +72,7 @@ export function textHits(db: Db, sub: string, q: string, kind: string, limit: nu
       `SELECT source_id::text, title, kind, created_at, idx, snippet, rank::float8 AS score
          FROM public.owner_private_source_text($1, $2, $3, $4)`,
       [sub, q, kind, limit],
-    )
+    ).then(num<PrivateHitRow>("score"))
   );
 }
 
@@ -79,7 +82,7 @@ export function knnHits(db: Db, sub: string, vec: number[], kind: string, limit:
       `SELECT source_id::text, title, kind, created_at, idx, snippet, (1 - distance)::float8 AS score
          FROM public.owner_private_source_knn($1, $2::vector, $3, $4)`,
       [sub, `[${vec.join(",")}]`, kind, limit],
-    )
+    ).then(num<PrivateHitRow>("score"))
   );
 }
 
