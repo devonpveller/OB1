@@ -96,4 +96,9 @@ reviewed-upstream: 54e34e4eed076f13e52d647a9051f19bb30b359b
 # work/rw-mcp-identity as work/rw-inlet-stamp-int (the merge's second parent). The hits are this file's own review entries
 # above (PD2's round-4 note naming screen_verdict); nothing of the list above changes.
 reviewed-upstream: 1d78973e021e7280108b50897590dc2d3b47890c
+# rw-rest-door-auth round 6 (2026-11-20): reviewed. Not upstream - the fork's own work/rw-inlet-stamp-int (5566c18:
+# development's pin, 440 + 470 + mcp-identity) merged into work/rw-rest-door-auth-int2 as the merge's second parent. The hits
+# are init-inlet-owner.sql's io_code_name list (screen_verdict, the read-only name match reviewed above) and this file's own
+# review entries; nothing of the list above changes.
+reviewed-upstream: 5566c18355140fad0e058874187ca09d8b662ed0
 ```
