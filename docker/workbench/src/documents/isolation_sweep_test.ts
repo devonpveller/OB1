@@ -381,7 +381,30 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     await sql(`INSERT INTO public.research_admission_trail (job_id, url, url_key, kind, found_via) VALUES ($1, $2, public.contract_url_key($2), 'admitted', $3), ($1, $4, public.contract_url_key($4), 'admitted', $5)`,
       [bJob, `https://example.org/${viaSecret}/lead`, lead, `https://example.org/${viaSecret}/direct`, shared]);
   }
-  const markers: Record<string, string> = { ...M, path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret, viaSecret,
+  // rw-owner-private-view (slot 480): B's private material in slot 440's owner stores (planted as superuser, the shape
+  // copied from the shared fixture rows: the stores are LIKE the shared tables without their defaults) - a private
+  // source with a chunk, a private claim with its edge, a private link on the shared fixture claim, a seeded job's own
+  // text. A (signed in: eligible for A's OWN private views) must read none of it through any route.
+  const pv: Record<string, string> = {};
+  if ((await sql<{ ok: boolean }>(`SELECT to_regclass('public.inlet_private_claim_sources') IS NOT NULL AND to_regprocedure('public.owner_private_claims(text,uuid,text,text,uuid,timestamptz,uuid,integer)') IS NOT NULL AS ok`))[0].ok) {
+    const mk = `PrivViewSecret${rnd()}`, batch = crypto.randomUUID(), src = crypto.randomUUID(), claim = crypto.randomUUID();
+    await sql(`INSERT INTO public.inlet_private_sources SELECT (jsonb_populate_record(NULL::public.inlet_private_sources, to_jsonb(s) || jsonb_build_object(
+                 'id', $1::uuid, 'url', 'https://mail.google.com/mail/u/0/#inbox/' || $2, 'title', 'mail ' || $2, 'content', 'body ' || $2,
+                 'content_hash', md5($2), 'inlet_owner_sub', $3::text, 'inlet_batch', $4::uuid))).* FROM public.sources s WHERE s.id = $5`, [src, mk, bSub, batch, FX_ACTIVE]);
+    await sql(`INSERT INTO public.inlet_private_source_chunks SELECT (jsonb_populate_record(NULL::public.inlet_private_source_chunks, to_jsonb(ch) || jsonb_build_object(
+                 'source_id', $1::uuid, 'content', 'chunk ' || $2, 'inlet_owner_sub', $3::text, 'inlet_batch', $4::uuid))).* FROM public.source_chunks ch WHERE ch.source_id = $5`, [src, mk, bSub, batch, FX_ACTIVE]);
+    await sql(`INSERT INTO public.inlet_private_claims SELECT (jsonb_populate_record(NULL::public.inlet_private_claims, to_jsonb(c) || jsonb_build_object(
+                 'id', $1::uuid, 'text', 'claim ' || $2, 'text_hash', md5('c' || $2), 'inlet_owner_sub', $3::text, 'inlet_batch', $4::uuid))).* FROM public.claims c WHERE c.id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'`, [claim, mk, bSub, batch]);
+    await sql(`INSERT INTO public.inlet_private_claim_sources (claim_id, edge_ref, owner_sub, batch, source_id, row_data) VALUES ($1, md5($2), $3, $4, $5, jsonb_build_object('note', $2::text))`, [claim, mk, bSub, batch, src]);
+    await sql(`INSERT INTO public.inlet_private_claim_links (claim_id, source_id, owner_sub, batch, row_data) VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', $1, $2, $3, jsonb_build_object('note', $4::text))`, [src, bSub, batch, mk]);
+    const job = (await sql<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, query) VALUES ('done', 'manual', 'a neutral question') RETURNING id::text`))[0].id;
+    await sql(`INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data) VALUES ($1, 'public.research_jobs', 'query', 'j', $2, jsonb_build_object('id', $2::uuid))`, [batch, job]);
+    await sql(`INSERT INTO public.inlet_private_jobs (job_id, batch, owner_sub, row_data) VALUES ($1, $2, $3, jsonb_build_object('query', 'q ' || $4, 'result', jsonb_build_object('synthesis', 's ' || $4), 'error', 'e ' || $4))`, [job, batch, bSub, mk]);
+    Object.assign(pv, { pvMarker: mk, pvSource: src, pvClaim: claim, pvJob: job });
+    console.log("sweep: B's private material planted (a moved source and chunk, a private claim and its edge, a private link on a shared claim, a seeded job's text)");
+  }
+  // the text marker only: the ids are tried as inputs (a job id is shared knowledge, and a refusal may echo its input)
+  const markers: Record<string, string> = { ...M, ...(pv.pvMarker ? { pvMarker: pv.pvMarker } : {}), path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret, viaSecret,
     ...(bIntake.add ? { intakeUrl: intakeMk.url, intakeAdd: bIntake.add } : {}), ...(bIntake.import ? { intakeFile: intakeMk.file, intakeImport: bIntake.import } : {}),
     podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id,
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
@@ -419,12 +442,15 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     .filter((r) => !r.path.endsWith("*") && r.method !== "ALL")
     .filter((r) => { const k = `${r.method} ${r.path}`; if (seen.has(k)) return false; seen.add(k); return true; });
   assert(routes.length > 50, `the router lists ${routes.length} routes`);
+  // rw-owner-private-view: the private views are on the router's own table, so every pass below calls them
+  const privateRoutes = routes.filter((r) => r.path.startsWith("/workbench/contract/private/"));
+  assertEquals(privateRoutes.length, 5, `the sweep enumerates the five private routes (${privateRoutes.map((r) => r.path).join(", ")})`);
   const fill = (path: string, v: string) =>
     path.replace(/:([A-Za-z_]+)(\{[^}]*\})?/g, (_m, _n, re) => (re && re.includes(".")) ? v : encodeURIComponent(v));
   const reads = routes.filter((x) => ["GET", "HEAD"].includes(x.method));
 
   // 1. TEMPLATED: B's ids and paths in every parameter, query and body field (the request gate)
-  const ids = [bPath, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake)].filter(Boolean);
+  const ids = [bPath, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob].filter(Boolean);
   const query = (v: string) => new URLSearchParams({
     path: bPath, ref: bPath, from: bPath, id: v, idea_id: bRefinery, refinery_id: bRefinery, job_id: bJob,
     source_id: bHeld || v, kind: "user_document", holder_kind: "user_document", format: "md", limit: "500", q: "fixture",
@@ -474,7 +500,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const named = (v: string) =>
     v === bJob ? "<B job>" : v === bHeld ? "<B held>" : v === bRefId ? "<B ref>" : v === bRefinery ? "<B refinery>" : bExports.includes(v) ? "<B export>"
       : v === bRoom ? "<B room>" : v === bSessRoom ? "<B session room>" : bCleanup.includes(v) ? "<B cleanup action>" : v;
-  const realIds = [...new Set([bJob, bHeld, bRefId, bRefinery, ...bExports, bRoom, bSessRoom, ...bCleanup, FX_ACTIVE, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
+  const realIds = [...new Set([bJob, bHeld, bRefId, bRefinery, ...bExports, bRoom, bSessRoom, ...bCleanup, pv.pvClaim, pv.pvJob, pv.pvSource, FX_ACTIVE, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
     .slice(0, 40);
   for (const r of reads.filter((x) => x.path.includes(":"))) {
     for (const v of realIds) {

@@ -96,7 +96,9 @@ sources.get("/:id", async (c) => {
   const src = await repo.getSource(c.req.param("id"));
   if (!src) {
     // rw-inlet-owner: the owner's own moved (private) source; anyone else gets the same 404 as for no source at all
-    const mine = await repo.getPrivateSource(c.req.param("id"), seamIdentity(c)?.sub ?? "");
+    // rw-owner-private-view (D2): an admin impersonating the owner gets the same 404 as anyone
+    const who = seamIdentity(c);
+    const mine = who?.impersonating ? null : await repo.getPrivateSource(c.req.param("id"), who?.sub ?? "");
     if (mine) return c.json({ source: mine, gravity: null });
     return c.json({ error: "not found" }, 404);
   }

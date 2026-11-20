@@ -8,6 +8,7 @@ import { emptyTrash } from "./repositories/notes.ts";
 import { sweepExpiredImpersonations } from "./identity/store.ts";
 import { flushExpiredRefusals, logRefusal } from "./identity/refusal_log.ts";
 import { sweepStaleJobs } from "./intake/repo.ts";
+import { DEFAULT_IDENTITY_LOG, privateViewConfig, privateViewsMode } from "./identity/private_view.ts";
 
 // Make sure we can commit notes / the Changes log into the vault (best-effort).
 await ensureVaultRepo();
@@ -65,6 +66,8 @@ if (seam.fa && seam.db) {
   sweep();
   setInterval(sweep, SWEEP_MS);
 }
+// rw-owner-private-view (D4): say once that the private views serve the default identity while sign-in is off
+if (privateViewsMode(privateViewConfig()) === "default-identity") console.log(DEFAULT_IDENTITY_LOG);
 // N2: the counted refusals of each ended minute get their one line, even if no refusal follows
 setInterval(() => flushExpiredRefusals(), 60_000);
 

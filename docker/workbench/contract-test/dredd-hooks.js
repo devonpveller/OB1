@@ -27,12 +27,19 @@ const CLEANUP_WRITE = /\/cleanup\/(sources\/\{id\}\/(sever|erase)|process-all|to
 //    identity header (the lab workbench runs with WORKSPACE_IDENTITY_HEADER=X-Test-Sub).
 const PODCAST_MODEL = /\/(podcasts|presenters|teams)(\/|$| )/;
 
+// 7. rw-owner-private-view (slot 480): the owner's private views answer the signed-in owner only (or the configured
+//    default identity while sign-in is off). The Dredd workbench has neither (no WORKSPACE_DEFAULT_SUB), so the three
+//    list / search ops are checked on their (empty) 200 shape here, and the two by-id reads - an owner's row or the
+//    unknown-id 404 - are skipped, like the per-user cleanup action above. run-workspace-tests.ps1 [5s]
+//    (src/inlet/owner_private_view_integration_test.ts) exercises them as the owner, as other users and per identity mode.
+const PRIVATE_BY_ID = /\/private\/(claims|jobs)\/\{id\}/;
+
 hooks.beforeEach((transaction, done) => {
   if (PODCAST_MODEL.test(String(transaction.name || '')) && transaction.request && transaction.request.headers) {
     transaction.request.headers['X-Test-Sub'] = 'lab-podcaster-0001';
   }
   const code = String(transaction.expected && transaction.expected.statusCode);
-  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || ''));
+  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || PRIVATE_BY_ID.test(String(transaction.name || ''));
   done();
 });
 
