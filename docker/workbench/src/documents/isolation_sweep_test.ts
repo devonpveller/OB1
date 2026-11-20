@@ -389,17 +389,17 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   if ((await sql<{ ok: boolean }>(`SELECT to_regclass('public.inlet_private_claim_sources') IS NOT NULL AND to_regprocedure('public.owner_private_claims(text,uuid,text,text,uuid,timestamptz,uuid,integer)') IS NOT NULL AS ok`))[0].ok) {
     const mk = `PrivViewSecret${rnd()}`, batch = crypto.randomUUID(), src = crypto.randomUUID(), claim = crypto.randomUUID();
     await sql(`INSERT INTO public.inlet_private_sources SELECT (jsonb_populate_record(NULL::public.inlet_private_sources, to_jsonb(s) || jsonb_build_object(
-                 'id', $1::uuid, 'url', 'https://mail.google.com/mail/u/0/#inbox/' || $2, 'title', 'mail ' || $2, 'content', 'body ' || $2,
-                 'content_hash', md5($2), 'inlet_owner_sub', $3::text, 'inlet_batch', $4::uuid))).* FROM public.sources s WHERE s.id = $5`, [src, mk, bSub, batch, FX_ACTIVE]);
+                 'id', $1::uuid, 'url', 'https://mail.google.com/mail/u/0/#inbox/' || $2::text, 'title', 'mail ' || $2::text, 'content', 'body ' || $2::text,
+                 'content_hash', md5($2::text), 'inlet_owner_sub', $3::text, 'inlet_batch', $4::uuid))).* FROM public.sources s WHERE s.id = $5::uuid`, [src, mk, bSub, batch, FX_ACTIVE]);
     await sql(`INSERT INTO public.inlet_private_source_chunks SELECT (jsonb_populate_record(NULL::public.inlet_private_source_chunks, to_jsonb(ch) || jsonb_build_object(
-                 'source_id', $1::uuid, 'content', 'chunk ' || $2, 'inlet_owner_sub', $3::text, 'inlet_batch', $4::uuid))).* FROM public.source_chunks ch WHERE ch.source_id = $5`, [src, mk, bSub, batch, FX_ACTIVE]);
+                 'source_id', $1::uuid, 'content', 'chunk ' || $2::text, 'inlet_owner_sub', $3::text, 'inlet_batch', $4::uuid))).* FROM public.source_chunks ch WHERE ch.source_id = $5::uuid`, [src, mk, bSub, batch, FX_ACTIVE]);
     await sql(`INSERT INTO public.inlet_private_claims SELECT (jsonb_populate_record(NULL::public.inlet_private_claims, to_jsonb(c) || jsonb_build_object(
-                 'id', $1::uuid, 'text', 'claim ' || $2, 'text_hash', md5('c' || $2), 'inlet_owner_sub', $3::text, 'inlet_batch', $4::uuid))).* FROM public.claims c WHERE c.id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'`, [claim, mk, bSub, batch]);
-    await sql(`INSERT INTO public.inlet_private_claim_sources (claim_id, edge_ref, owner_sub, batch, source_id, row_data) VALUES ($1, md5($2), $3, $4, $5, jsonb_build_object('note', $2::text))`, [claim, mk, bSub, batch, src]);
-    await sql(`INSERT INTO public.inlet_private_claim_links (claim_id, source_id, owner_sub, batch, row_data) VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', $1, $2, $3, jsonb_build_object('note', $4::text))`, [src, bSub, batch, mk]);
+                 'id', $1::uuid, 'text', 'claim ' || $2::text, 'text_hash', md5('c' || $2::text), 'inlet_owner_sub', $3::text, 'inlet_batch', $4::uuid))).* FROM public.claims c WHERE c.id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1'`, [claim, mk, bSub, batch]);
+    await sql(`INSERT INTO public.inlet_private_claim_sources (claim_id, edge_ref, owner_sub, batch, source_id, row_data) VALUES ($1::uuid, md5($2::text), $3::text, $4::uuid, $5::uuid, jsonb_build_object('note', $2::text))`, [claim, mk, bSub, batch, src]);
+    await sql(`INSERT INTO public.inlet_private_claim_links (claim_id, source_id, owner_sub, batch, row_data) VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', $1::uuid, $2::text, $3::uuid, jsonb_build_object('note', $4::text))`, [src, bSub, batch, mk]);
     const job = (await sql<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, query) VALUES ('done', 'manual', 'a neutral question') RETURNING id::text`))[0].id;
-    await sql(`INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data) VALUES ($1, 'public.research_jobs', 'query', 'j', $2, jsonb_build_object('id', $2::uuid))`, [batch, job]);
-    await sql(`INSERT INTO public.inlet_private_jobs (job_id, batch, owner_sub, row_data) VALUES ($1, $2, $3, jsonb_build_object('query', 'q ' || $4, 'result', jsonb_build_object('synthesis', 's ' || $4), 'error', 'e ' || $4))`, [job, batch, bSub, mk]);
+    await sql(`INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data) VALUES ($1::uuid, 'public.research_jobs', 'query', 'j', $2::text, jsonb_build_object('id', $2::text::uuid))`, [batch, job]);
+    await sql(`INSERT INTO public.inlet_private_jobs (job_id, batch, owner_sub, row_data) VALUES ($1::uuid, $2::uuid, $3::text, jsonb_build_object('query', 'q ' || $4::text, 'result', jsonb_build_object('synthesis', 's ' || $4::text), 'error', 'e ' || $4::text))`, [job, batch, bSub, mk]);
     Object.assign(pv, { pvMarker: mk, pvSource: src, pvClaim: claim, pvJob: job });
     console.log("sweep: B's private material planted (a moved source and chunk, a private claim and its edge, a private link on a shared claim, a seeded job's text)");
   }
