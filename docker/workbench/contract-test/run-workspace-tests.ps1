@@ -1111,7 +1111,9 @@ try {
         # as the migration left them, put back after the compile
         $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "DROP TABLE IF EXISTS public.lab_inlet_owner_ents; CREATE TABLE public.lab_inlet_owner_ents AS SELECT * FROM public.entities WHERE id IN ($ents)"
         $cmp = Lab-Docker 600 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${recipesDir}:/recipes:ro", '-v', "${vault}:/vault",
-          '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', "OPEN_BRAIN_SERVICE_KEY=$(if ($door.Door -eq 'auth') { & $tok 'WIKI' } else { 'lab-placeholder' })", '-e', 'LLM_API_KEY=lab-placeholder',
+          # rw-rest-door-auth: round 1's compile (RED) predates the door's tokens (its row writer sends none) - it runs on the
+          # lab's legacy door; this tree's compile (GREEN) goes through the door with the wiki token, as openbrain-wiki's child
+          '-e', "OPEN_BRAIN_URL=$(if ($runTag -eq 'red' -and $door.Door -eq 'auth') { $legacyRest } else { 'http://openbrain-rest' })", '-e', "OPEN_BRAIN_SERVICE_KEY=$(if ($door.Door -eq 'auth' -and $runTag -ne 'red') { & $tok 'WIKI' } else { 'lab-placeholder' })", '-e', 'LLM_API_KEY=lab-placeholder',
           '-e', 'LLM_BASE_URL=http://llama-cpp:8080/v1', '-e', 'LLM_MODEL=lab-stub', '-e', 'WIKI_GIT_DIR=/vault',
           '--entrypoint', 'node', $viewerTag, '/recipes/entity-wiki/generate-wiki.mjs', '--ids', $ents, '--include-sources', '--no-graph', '--out-dir', '/vault/content')
         $cmpRc = $script:rc
