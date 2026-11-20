@@ -14,7 +14,8 @@
  *
  * Env:
  *   SUPABASE_URL              PostgREST proxy base (Caddy openbrain-rest)
- *   SUPABASE_SERVICE_ROLE_KEY non-secret placeholder, stripped by Caddy
+ *   SUPABASE_SERVICE_ROLE_KEY this service's REST-door token (rw-rest-door-auth, slot 450: role ob_rest_gmail_prune;
+ *                             compose maps OB_REST_TOKEN_GMAIL_PRUNE into it); the door refuses a request without it
  *   BRAIN_SHORT_TERM_RETENTION_DAYS  retention cutoff (default 90)
  *   BRAIN_SHORT_TERM_LABEL    holding-pen label (default brain/keep-short-term)
  *   WIKI_RECOMPILE_URL        default http://openbrain-wiki:8000/recompile
@@ -63,9 +64,8 @@ function parseArgs(): PruneArgs {
   return args;
 }
 
-// PostgREST headers — mirror pull-gmail.ts. The `apikey` value is a
-// non-secret placeholder; Caddy (openbrain-rest) strips Authorization
-// and PostgREST runs as the service role internally.
+// PostgREST headers — mirror pull-gmail.ts. Since rw-rest-door-auth (slot 450) the key is this service's own door
+// token: Caddy passes the Authorization header on and PostgREST runs the request as ob_rest_gmail_prune.
 function pgrHeaders(prefer?: string): HeadersInit {
   const h: Record<string, string> = {
     "Content-Type": "application/json",

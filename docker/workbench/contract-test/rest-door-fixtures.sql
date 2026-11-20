@@ -1,6 +1,9 @@
 -- rest-door-fixtures.sql - synthetic rows for the rw-rest-door-auth lab (run-rest-door-auth-lab.ps1). Lab only.
 -- Two users: lab-operator (the run owner the digest's / podcast's tokens name) and lab-other (a second user).
 -- The ids the probe needs go to lab.seed (a schema PostgREST does not serve).
+-- Round 6 (450 integrated with 440 / 470): every thought has an owner (slot 470 refuses an unowned one), a gmail one
+-- names its inlet connection, and - where slot 470 is in the chain - the owner record holds the lab's two connections
+-- (gmail, vault -> lab-operator). Written as the superuser (no door claims): 470's guard checks only the shapes here.
 CREATE SCHEMA IF NOT EXISTS lab;
 CREATE TABLE IF NOT EXISTS lab.seed (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 
@@ -8,14 +11,18 @@ DO $$
 DECLARE
   e1 BIGINT; e2 BIGINT; t1 BIGINT; tp BIGINT; s1 UUID; th UUID; rr UUID; ep UUID;
 BEGIN
+  IF to_regclass('public.inlet_connections') IS NOT NULL THEN
+    INSERT INTO public.inlet_connections (id, kind, owner_sub) VALUES ('gmail', 'gmail', 'lab-operator'), ('vault', 'vault', 'lab-operator')
+    ON CONFLICT (id) DO NOTHING;
+  END IF;
   INSERT INTO public.entities (entity_type, canonical_name, normalized_name) VALUES ('tool', 'Lab Entity', 'lab entity') RETURNING id INTO e1;
   INSERT INTO public.entities (entity_type, canonical_name, normalized_name) VALUES ('tool', 'Lab Entity Two', 'lab entity two') RETURNING id INTO e2;
   -- an ops-plane thought (the door's plane), queued for extraction by the thoughts trigger
-  INSERT INTO public.thoughts (content, metadata, exposure) VALUES ('lab ops thought about the lab entity', '{"exposure":"ops"}', 'ops') RETURNING id INTO t1;
+  INSERT INTO public.thoughts (content, metadata, exposure, user_id) VALUES ('lab ops thought about the lab entity', '{"exposure":"ops"}', 'ops', 'lab-operator') RETURNING id INTO t1;
   INSERT INTO public.thought_entities (thought_id, entity_id, mention_role, source) VALUES (t1, e1, 'mentioned', 'lab');
   -- an expired gmail thought the prune deletes
-  INSERT INTO public.thoughts (content, metadata, exposure)
-    VALUES ('lab gmail to prune', '{"source":"gmail","gmail_id":"lab-gmail-1","email_date":"2001-01-01","exposure":"ops"}', 'ops') RETURNING id INTO tp;
+  INSERT INTO public.thoughts (content, metadata, exposure, user_id)
+    VALUES ('lab gmail to prune', '{"source":"gmail","gmail_id":"lab-gmail-1","email_date":"2001-01-01","exposure":"ops","inlet_connection":"gmail"}', 'ops', 'lab-operator') RETURNING id INTO tp;
   -- an owner-stamped personal thought (rw-inlet-owner's class): no door role may read it without a credential
   INSERT INTO public.thoughts (content, metadata, exposure, user_id) VALUES ('lab private thought of the operator', '{}', 'personal', 'lab-operator');
   INSERT INTO public.sources (url, title, content, content_type) VALUES ('https://lab.invalid/a', 'Lab source', 'lab source body', 'web_article') RETURNING id INTO s1;

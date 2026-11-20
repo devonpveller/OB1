@@ -930,6 +930,7 @@ try {
       param($ph, $logName)
       $o = Lab-Docker 600 @('run', '--rm', '--label', $label, '--network', $net, '-e', "INLET_PHASE=$ph",
         '-e', "INLET_OWNER=$inA", '-e', "INLET_SECOND=$inB", '-e', "INLET_VIEWER=http://${P}-viewer:8080", '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
+        '-e', "OPEN_BRAIN_REST_TOKEN=$(& $tok 'WIKI')",
         '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
         '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
         $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/inlet/inlet_owner_integration_test.ts')
@@ -1110,7 +1111,7 @@ try {
         # as the migration left them, put back after the compile
         $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "DROP TABLE IF EXISTS public.lab_inlet_owner_ents; CREATE TABLE public.lab_inlet_owner_ents AS SELECT * FROM public.entities WHERE id IN ($ents)"
         $cmp = Lab-Docker 600 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${recipesDir}:/recipes:ro", '-v', "${vault}:/vault",
-          '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'OPEN_BRAIN_SERVICE_KEY=lab-placeholder', '-e', 'LLM_API_KEY=lab-placeholder',
+          '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', "OPEN_BRAIN_SERVICE_KEY=$(if ($door.Door -eq 'auth') { & $tok 'WIKI' } else { 'lab-placeholder' })", '-e', 'LLM_API_KEY=lab-placeholder',
           '-e', 'LLM_BASE_URL=http://llama-cpp:8080/v1', '-e', 'LLM_MODEL=lab-stub', '-e', 'WIKI_GIT_DIR=/vault',
           '--entrypoint', 'node', $viewerTag, '/recipes/entity-wiki/generate-wiki.mjs', '--ids', $ents, '--include-sources', '--no-graph', '--out-dir', '/vault/content')
         $cmpRc = $script:rc
@@ -1145,6 +1146,7 @@ try {
       $privS = ((Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT v -> 'sources' ->> 'mail' FROM public.lab_inlet_owner_plant WHERE k = 'plant'") | Out-String).Trim()
       $po = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "$(Join-Path $ob1 'recipes\_shared'):/shared:ro", '-v', "${vault}:/vault", '-v', "${ct}:/ct:ro",
         '-e', 'SHARED=/shared', '-e', 'WIKI_GIT_DIR=/vault', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'PGRST_URL=http://openbrain-postgrest:3000',
+        '-e', "OPEN_BRAIN_REST_TOKEN=$(& $tok 'WIKI')",
         '-e', "IDEA_THOUGHT=$ideaT", '-e', "PRIV_THOUGHT=$privT", '-e', "PRIV_SOURCE=$privS", '-e', "TAG=$($ir.Substring(0, 6))", '--entrypoint', 'node', $viewerTag, '/ct/inlet-owner-probe.mjs')
       $pl = (($po -split "`n") | Where-Object { $_ -match '^PROBE ' } | Select-Object -Last 1)
       Save 'inlet-probe.log' ((($po -split "`n") | Where-Object { $_ -match '^PROBE |\[wiki-pages\]' }) -join "`n")
@@ -1153,8 +1155,14 @@ try {
       Check ($pj -and $pj.exit -eq 0 -and -not $pj.rows.idea -and -not $pj.rows.priv -and $pj.rows.clean -and -not $pj.files.idea -and -not $pj.files.priv -and $pj.files.clean -and $pj.unsynced -eq 0 -and $pj.withheldMemo.idea -and $pj.withheldMemo.priv -and $pj.marker.header -eq '2' -and $pj.marker.back -eq 0) "[5r] a mixed batch (a 380-withheld row + a 440-withheld row) through the real writer: both WITHHELD (no row, no file), the clean page lands, nothing unsynced, exit 0; the marker counts 2"
       $rpcOk = $pj -and @($pj.rpc.PSObject.Properties | Where-Object { $_.Name -notmatch ':view' -and $_.Name -notmatch ':table:' -and [int]$_.Value -lt 300 }).Count -eq 0
       $tblOk = $pj -and @($pj.rpc.PSObject.Properties | Where-Object { $_.Name -match ':table:' -and [int]$_.Value -eq 299 }).Count -eq 0
-      $viewOk = $pj -and $pj.rpc.'postgrest:view' -eq 200 -and $pj.rpc.'rest:view' -eq 200 -and -not $pj.rpc.'postgrest:view-has-owner-column' -and -not $pj.rpc.'rest:view-has-owner-column'
-      Check ($rpcOk -and $tblOk -and $viewOk) "[5r] every slot-440 function is refused through PostgREST with no credentials, directly and through openbrain-rest (round 1's inlet_owner_default is gone); no private table returns a row; the prune's view names no owner"
+      # rw-rest-door-auth (slot 450): behind the door as compose has it, a credential-less read of the prune's view is
+      # refused like every other (401/403); on the base door (anon = service_role) it is readable and names no owner
+      $viewOk = if ($door.Door -eq 'auth') {
+        $pj -and @(401, 403) -contains [int]$pj.rpc.'postgrest:view' -and @(401, 403) -contains [int]$pj.rpc.'rest:view'
+      } else {
+        $pj -and $pj.rpc.'postgrest:view' -eq 200 -and $pj.rpc.'rest:view' -eq 200 -and -not $pj.rpc.'postgrest:view-has-owner-column' -and -not $pj.rpc.'rest:view-has-owner-column'
+      }
+      Check ($rpcOk -and $tblOk -and $viewOk) "[5r] every slot-440 function is refused through PostgREST with no credentials, directly and through openbrain-rest (round 1's inlet_owner_default is gone); no private table returns a row; the prune's view $(if ($door.Door -eq 'auth') { 'is refused without a credential (slot 450)' } else { 'names no owner' })"
       # lab hygiene: the probe's clean page leaves again (row and file), so the revert is measured against the migration's state
       $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "DELETE FROM public.wiki_pages WHERE slug LIKE 'content/topic/io-%'"
       foreach ($pf in @(Get-ChildItem -File (Join-Path $vault 'content\topic') -Filter 'io-*.md' -ErrorAction SilentlyContinue)) { Remove-Item -Force -LiteralPath $pf.FullName }
@@ -1186,6 +1194,15 @@ try {
         $o470 = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/in470.sql
         Save 'inlet-stamp-reapply.log' $o470
         Check ($script:rc -eq 0 -and (Stamp-GuardState) -eq 'on') "[5r] slot 470 applied again right after 440's second run, its guards ON"
+        # rw-rest-door-auth: 470's objects were made again, so the door roles' 470 lines are gone until 450 runs again -
+        # the live order (440, 470, then 450)
+        if ($door.Door -eq 'auth') {
+          $null = Dk cp (Join-Path $dockerDir 'init-rest-door-auth.sql') "${db}:/tmp/in450.sql"
+          $o450 = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/in450.sql
+          Save 'inlet-450-after-470.log' $o450
+          $g450 = "$(Dk exec $db psql -U postgres -d openbrain -X -A -t -c "SELECT has_table_privilege('ob_rest_gmail_prune', 'public.inlet_connection_mail', 'DELETE')::text || '/' || has_function_privilege('ob_rest_gmail_pull', 'public.inlet_connection_owner(text)', 'EXECUTE')::text")".Trim()
+          Check ($script:rc -eq 0 -and $g450 -eq 'true/true') "[5r] slot 450 again after 470 (the live order): the door's 470 lines are back ($g450)"
+        }
       }
       Check ($r3 -eq 0 -and $lrc -eq 0 -and $r4 -eq 0 -and $s.Success -and $s.Groups[1].Value -eq 'ok' -and [int]$s.Groups[2].Value -eq 1) "[5r] the second run stamps and isolates exactly the rows that arrived unowned; B still reads nothing personal ($($s.Value))"
       # the gmail prune deletes BY OWNER: three expired short-term mails (the owner's, B's, an unowned one that arrived
@@ -1201,7 +1218,11 @@ try {
         $null = Stamp-Guard 'ENABLE ALWAYS'
         # rw-inlet-stamp (slot 470): this prune serves ONE inlet connection, `gmail`, whose recorded owner is the owner
         # slot 440 recorded (470 seeded it); the base's prune ignores both
-        $po = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "$($run[1]):/p:ro", '-e', 'SUPABASE_URL=http://openbrain-rest', '-e', 'INLET_CONNECTION=gmail',
+        # rw-rest-door-auth: the GREEN prune goes through the door with its own token (its role reaches only the view);
+        # the base's prune (RED) deletes on thoughts directly, which no door role may - it runs on the lab's legacy door
+        $pruneUrl = if ($run[0] -eq 'red' -and $door.Door -eq 'auth') { $legacyRest } else { 'http://openbrain-rest' }
+        $pruneKey = if ($run[0] -eq 'red') { 'lab-placeholder' } else { & $tok 'GMAIL_PRUNE' }
+        $po = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "$($run[1]):/p:ro", '-e', "SUPABASE_URL=$pruneUrl", '-e', "SUPABASE_SERVICE_ROLE_KEY=$pruneKey", '-e', 'INLET_CONNECTION=gmail',
           '--entrypoint', 'deno', $wbTestTag, 'run', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '/p/prune-short-term.ts', '--retention-days=30', '--no-wiki-recompile')
         Save "inlet-prune-$($run[0]).log" ((($po -split "`n") | Where-Object { $_ -match 'Found|Deleted|nothing|owner' }) -join "`n")
         $left = ((Dk exec $db psql -U postgres -d openbrain -X -tAc "SELECT coalesce(user_id, 'none') FROM public.thoughts WHERE id IN ($ids) ORDER BY 1") -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ','

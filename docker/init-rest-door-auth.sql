@@ -36,6 +36,12 @@
 --     nothing beyond that role's own table grants and RLS; review of the map line is the control for that;
 --   * a named function whose family-shaped argument is not a person: post_research_notification(... p_subject ...)
 --     (a notification's subject line).
+-- And for a SECURITY DEFINER function (round 6, D3) the test is a substring one with no exemption: no argument whose
+-- name CONTAINS owner, sub, user, uid, requester or actor.
+--
+-- LATER SLOTS ON LIVE (round 6): live had 440 and 470 applied BEFORE this file (2026-11-20), a fresh volume runs 440,
+-- 450, 460, 470, then 990 (this file again). Both orders end in the same door grants (lab case 10): 470 grants nothing
+-- to a door role itself, and every 440 / 470 object is either a map line below or deliberately on no door role.
 --
 -- The authenticator's password is not in this file: it is set out of band from OB_REST_AUTHENTICATOR_PASSWORD
 -- (OB1/docker/rest-door/mint-rest-tokens.ps1 -SetAuthenticatorPassword; the ob_pantry / ob_app_memory way).
@@ -70,6 +76,10 @@ CREATE TABLE IF NOT EXISTS rest_door.regrants (
 -- NEW oid), so a stand-in missing from a function whose oid moved is given back; one missing from the SAME function
 -- object was revoked on purpose and stays revoked.
 ALTER TABLE rest_door.regrants ADD COLUMN IF NOT EXISTS fn_oid OID;
+-- round 6 (delta review D1): the oid of the ROLE it was granted to. A role created outside the chain (ob_app_memory,
+-- ob_pantry's login, ...) that is dropped and created again - a rebuilt cluster, a restore into a fresh one - is a NEW
+-- role object: its stand-ins are given back, as for a function whose oid moved.
+ALTER TABLE rest_door.regrants ADD COLUMN IF NOT EXISTS role_oid OID;
 REVOKE ALL ON ALL TABLES IN SCHEMA rest_door FROM PUBLIC;
 
 -- first run only: the before-state. A function created later (slot 440 landing second) is not in it; its
@@ -200,18 +210,24 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', g.fn::regprocedure, g.role_name);
   END LOOP;
 END $$;
-INSERT INTO rest_door.regrants (signature, role_name, fn_oid) SELECT signature, role_name, fn FROM _rda_regrant
-ON CONFLICT (signature, role_name) DO UPDATE SET fn_oid = EXCLUDED.fn_oid;
+INSERT INTO rest_door.regrants (signature, role_name, fn_oid, role_oid)
+SELECT g.signature, g.role_name, g.fn, r.oid FROM _rda_regrant g JOIN pg_roles r ON r.rolname = g.role_name
+ON CONFLICT (signature, role_name) DO UPDATE SET fn_oid = EXCLUDED.fn_oid, role_oid = EXCLUDED.role_oid;
 -- R1 (the review) + round 5 (F-1, F-2, F-3): a restore with --no-acl (the runbook's) recreates every function under the
 -- CURRENT default ACLs - PUBLIC no longer holds them, so the query above finds nothing - and drops the stand-in grants,
 -- while rest_door.regrants comes back as data. So, row by row (a loop: every existence test runs before anything that
 -- needs the object, and has_function_privilege gets oids, never a name that may not exist):
---   * a row whose role or function no longer exists is stale: skipped with a NOTICE and pruned;
+--   * a row whose FUNCTION no longer exists is stale: skipped with a NOTICE and pruned (a restore recreates a function
+--     under the same signature, so a missing one was dropped for good);
+--   * a row whose ROLE does not exist (yet) is skipped with a NOTICE and KEPT (round 6, delta review D1): a role made
+--     outside the chain - ob_app_memory, created out of band after a rebuilt volume or a restore into a fresh cluster -
+--     gets its stand-ins back on the first 450 run after it exists. Never granted to anyone else meanwhile;
 --   * a row 450 could never have written is refused with a NOTICE (and left for the operator): its role must be a
 --     stand-in candidate (not PUBLIC, a superuser, pg_*, anon, authenticated, the authenticator or a door role) and its
 --     function one whose archived before-state let PUBLIC run it;
---   * the stand-in is given back only when the function object CHANGED since it was granted (fn_oid differs: a restore
---     or a drop-and-recreate). Missing from the SAME object = revoked on purpose: left revoked (see the runbook).
+--   * the stand-in is given back only when the function object or the role object CHANGED since it was granted
+--     (fn_oid or role_oid differs: a restore, a drop-and-recreate, a role made again). Missing from the SAME function
+--     and the SAME role = revoked on purpose: left revoked (the runbook says how to make that permanent).
 DO $$
 DECLARE
   x RECORD;
@@ -220,19 +236,29 @@ DECLARE
   v_fn OID;
   n_back INT := 0;
   n_stale INT := 0;
+  n_waiting INT := 0;
   n_refused INT := 0;
   n_kept INT := 0;
 BEGIN
-  -- archives written before round 5 have no fn_oid: they name the function as it is now
+  -- archives written before round 5 / 6 have no fn_oid / role_oid: they name the objects as they are now
   UPDATE rest_door.regrants r SET fn_oid = to_regprocedure(r.signature) WHERE r.fn_oid IS NULL AND to_regprocedure(r.signature) IS NOT NULL;
-  FOR x IN SELECT signature, role_name, fn_oid FROM rest_door.regrants ORDER BY signature, role_name LOOP
+  UPDATE rest_door.regrants r SET role_oid = ro.oid FROM pg_roles ro WHERE r.role_oid IS NULL AND ro.rolname = r.role_name;
+  FOR x IN SELECT signature, role_name, fn_oid, role_oid FROM rest_door.regrants ORDER BY signature, role_name LOOP
+    v_role := NULL; v_super := NULL;
     SELECT r.oid, r.rolsuper INTO v_role, v_super FROM pg_roles r WHERE r.rolname = x.role_name;
     v_fn := to_regprocedure(x.signature);
-    IF v_role IS NULL OR v_fn IS NULL THEN
-      RAISE NOTICE 'rest door: stale archived stand-in % -> % (% no longer exists): skipped and pruned',
-        x.signature, x.role_name, CASE WHEN v_role IS NULL THEN 'the role' ELSE 'the function' END;
+    IF v_fn IS NULL THEN
+      RAISE NOTICE 'rest door: stale archived stand-in % -> % (the function no longer exists): skipped and pruned',
+        x.signature, x.role_name;
       DELETE FROM rest_door.regrants WHERE signature = x.signature AND role_name = x.role_name;
       n_stale := n_stale + 1;
+      CONTINUE;
+    END IF;
+    IF v_role IS NULL THEN
+      -- kept: given back once the role exists (D1); said once, in the summary below. A row with no role_oid yet is
+      -- marked 0 (no role object), so the role made later is a NEW object and its stand-in comes back.
+      UPDATE rest_door.regrants SET role_oid = 0 WHERE signature = x.signature AND role_name = x.role_name AND role_oid IS NULL;
+      n_waiting := n_waiting + 1;
       CONTINUE;
     END IF;
     IF v_super OR x.role_name ~ '^pg_' OR x.role_name IN ('anon', 'authenticated', 'ob_rest_authenticator') OR x.role_name ~ '^ob_rest_'
@@ -242,21 +268,24 @@ BEGIN
       CONTINUE;
     END IF;
     IF has_function_privilege(v_role, v_fn, 'EXECUTE') THEN
-      IF x.fn_oid IS DISTINCT FROM v_fn THEN
-        UPDATE rest_door.regrants SET fn_oid = v_fn WHERE signature = x.signature AND role_name = x.role_name;
+      IF x.fn_oid IS DISTINCT FROM v_fn OR x.role_oid IS DISTINCT FROM v_role THEN
+        UPDATE rest_door.regrants SET fn_oid = v_fn, role_oid = v_role WHERE signature = x.signature AND role_name = x.role_name;
       END IF;
       CONTINUE;
     END IF;
-    IF x.fn_oid IS NOT DISTINCT FROM v_fn THEN
-      n_kept := n_kept + 1;   -- revoked from this very function object: on purpose
+    IF x.fn_oid IS NOT DISTINCT FROM v_fn AND x.role_oid IS NOT DISTINCT FROM v_role THEN
+      n_kept := n_kept + 1;   -- revoked from this very function object and role: on purpose
       CONTINUE;
     END IF;
     EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO %I', v_fn::regprocedure, x.role_name);
-    UPDATE rest_door.regrants SET fn_oid = v_fn WHERE signature = x.signature AND role_name = x.role_name;
+    UPDATE rest_door.regrants SET fn_oid = v_fn, role_oid = v_role WHERE signature = x.signature AND role_name = x.role_name;
     n_back := n_back + 1;
   END LOOP;
-  RAISE NOTICE 'rest door: % archived stand-in grant(s) given back (a restore without ACLs; 0 otherwise); % stale row(s) pruned; % row(s) refused; % deliberately revoked left revoked',
-    n_back, n_stale, n_refused, n_kept;
+  IF n_waiting > 0 THEN
+    RAISE NOTICE 'rest door: % archived stand-in(s) name a role that does not exist (yet): kept, not granted - create the out-of-chain roles (ob_app_memory, ...) and run this file again to give them back (restore runbook)', n_waiting;
+  END IF;
+  RAISE NOTICE 'rest door: % archived stand-in grant(s) given back (a restore without ACLs; 0 otherwise); % stale row(s) pruned; % kept for a missing role; % row(s) refused; % deliberately revoked left revoked',
+    n_back, n_stale, n_waiting, n_refused, n_kept;
 END $$;
 -- a function created after the first run (440 landing second) that PUBLIC could run: archive its before-state too
 INSERT INTO rest_door.fn_acl_before (signature, public_had, proacl)
@@ -367,22 +396,33 @@ INSERT INTO _rda_door (role_name, kind, object, privs) VALUES
   ('ob_rest_gmail_pull', 'table', 'thoughts', 'SELECT, INSERT'),
 
   -- == openbrain-gmail-prune ===========================================================================
-  -- previews and deletes expired gmail thoughts; the delete trigger (touch_entities_for_deleted_thought, SECURITY
-  -- INVOKER) touches the linked entities (UPDATE ... WHERE id IN (SELECT entity_id FROM thought_entities ...))
-  ('ob_rest_gmail_prune', 'table', 'thoughts',         'SELECT, DELETE'),
+  -- previews and deletes expired gmail thoughts. Since slot 470 (rw-inlet-stamp) it does both ONLY through the view
+  -- inlet_connection_mail (its connection's owner's mail; the later-slot line below), never on thoughts itself - so no
+  -- thoughts grant (round 6). The thoughts delete trigger (touch_entities_for_deleted_thought, SECURITY INVOKER) still
+  -- runs as the caller and touches the linked entities (UPDATE ... WHERE id IN (SELECT entity_id FROM thought_entities ...))
   ('ob_rest_gmail_prune', 'table', 'thought_entities', 'SELECT'),
   ('ob_rest_gmail_prune', 'table', 'entities',         'SELECT, UPDATE');
 
 -- == objects of LATER slots (the 5th column), each in its caller's block's spirit ===========================
 INSERT INTO _rda_door (role_name, kind, object, privs, slot) VALUES
-  -- rw-inlet-stamp (slot 470): every writer that stamps an owner reads it from the connection record
+  -- rw-inlet-stamp (slot 470): every writer that stamps an owner reads it from the connection record (a SECURITY DEFINER
+  -- function taking a connection id, never an owner; the record itself, inlet_connections, is on no door role)
   ('ob_rest_gmail_pull',  'function', 'inlet_connection_owner', NULL, 470),   -- pull-gmail.ts (inlet-owner.ts)
   ('ob_rest_digest',      'function', 'inlet_connection_owner', NULL, 470),   -- src/app.ts (owner-sub.ts digestOwnerResolver)
   ('ob_rest_podcast',     'function', 'inlet_connection_owner', NULL, 470),   -- link-enrich.ts (owner-sub.ts digestOwner)
   ('ob_rest_wiki',        'function', 'inlet_connection_owner', NULL, 470),   -- wiki-service.mjs noteOwner (the vault)
-  ('ob_rest_gmail_prune', 'table',    'inlet_connection_mail',  'SELECT, DELETE', 470),  -- prune-short-term.ts (per connection)
+  -- prune-short-term.ts: its preview (SELECT ... &inlet_connection=eq.<its connection>) and its delete, both on the view
+  -- (security_barrier, owned by ob_inlet_stamp_view: the base table is read and written with the view owner's rights)
+  ('ob_rest_gmail_prune', 'table',    'inlet_connection_mail',  'SELECT, DELETE', 470),
+  -- NOT on the door, deliberately (fail closed; round 6, every object slot 440 / 470 added): slot 440's owner record,
+  -- archive and owner-private stores (inlet_owner*, inlet_private_*), its prune view inlet_owner_mail (replaced by 470's)
+  -- and its owner functions (inlet_private_source / inlet_private_job take p_sub: ob_app_memory only); slot 470's record
+  -- (inlet_connections) and its guard helpers (inlet_stamp_*: called from SECURITY DEFINER triggers, need no grant).
+  -- inlet_subject_ok (470's owner CHECK) reaches a writer through the CHECK generator below - a pure predicate.
 
 -- == the import scripts (google-activity-import, chatgpt-conversation-import: host CLIs the operator runs; slot 470) ====
+  -- the token carries sub = the import's owner (mint -Import): slot 470's guard lets a door caller write only rows
+  -- owned by its verified sub. --store-conversations (chatgpt_conversations, a recipe schema) is not on the door.
   ('ob_rest_import', 'table',     'thoughts',       'SELECT, INSERT', NULL),   -- SELECT: match_thoughts (SECURITY INVOKER) reads them (ops plane by policy)
   ('ob_rest_import', 'function',  'match_thoughts', NULL,     NULL),   -- the ChatGPT import's dedup (filter.owner_scope)
   ('ob_rest_import', 'extension', 'vector',         NULL,     NULL);   -- match_thoughts orders by pgvector's distance
@@ -557,6 +597,19 @@ BEGIN
     JOIN pg_trigger t ON t.tgrelid = ('public.' || quote_ident(m.rel))::regclass AND NOT t.tgisinternal
    WHERE m.privs ~ '(INSERT|UPDATE|DELETE)'
   ON CONFLICT DO NOTHING;
+  -- round 6: a VIEW the role writes through (the prune's inlet_connection_mail): the base tables' triggers fire as the
+  -- caller too (current_user stays the caller; only the privilege and RLS checks use the view owner)
+  INSERT INTO _rda_run
+  SELECT DISTINCT m.role_name, t.tgfoid FROM _rda_map m
+    JOIN pg_class v ON v.oid = ('public.' || quote_ident(m.rel))::regclass AND v.relkind = 'v'
+    JOIN pg_rewrite rw ON rw.ev_class = v.oid
+    JOIN pg_depend d ON d.classid = 'pg_rewrite'::regclass AND d.objid = rw.oid AND d.refclassid = 'pg_class'::regclass AND d.refobjid <> v.oid
+    JOIN pg_class b ON b.oid = d.refobjid AND b.relkind IN ('r', 'p')
+    JOIN pg_trigger t ON t.tgrelid = b.oid AND NOT t.tgisinternal
+   -- only the triggers of the writes the role may make through the view (tgtype: 4 INSERT, 8 DELETE, 16 UPDATE)
+   WHERE (m.privs ~ 'INSERT' AND t.tgtype & 4 <> 0) OR (m.privs ~ 'DELETE' AND t.tgtype & 8 <> 0)
+      OR (m.privs ~ 'UPDATE' AND t.tgtype & 16 <> 0)
+  ON CONFLICT DO NOTHING;
   LOOP
     rounds := rounds + 1;
     INSERT INTO _rda_run
@@ -606,6 +659,18 @@ BEGIN
               AND p.proname NOT IN ('research_job_report_owner', 'setting_get', 'setting_problem', 'user_setting_set'));
   IF bad IS NOT NULL THEN
     RAISE EXCEPTION 'rest door: a door role can run an owner-argument function: %', bad USING ERRCODE = '55000';
+  END IF;
+  -- round 6 (delta review D3): a SECURITY DEFINER function runs as its owner, so a renamed owner argument there is the
+  -- dangerous near miss (p_ownerid, p_uid, target_owner, p_user_sub2, ...). For those the test is a SUBSTRING one: no
+  -- argument whose name contains owner, sub, user, uid, requester or actor - no exemption (a pure predicate is never
+  -- SECURITY DEFINER by definition).
+  SELECT string_agg(r.rolname || ':' || p.oid::regprocedure::text, ', ') INTO bad
+    FROM pg_proc p CROSS JOIN pg_roles r
+   WHERE p.pronamespace = 'public'::regnamespace AND r.rolname ~ '^ob_rest_' AND p.prosecdef
+     AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
+     AND EXISTS (SELECT 1 FROM unnest(COALESCE(p.proargnames, ARRAY[]::text[])) n WHERE n ~* '(owner|sub|user|uid|requester|actor)');
+  IF bad IS NOT NULL THEN
+    RAISE EXCEPTION 'rest door: a door role can run a SECURITY DEFINER function with an owner-like argument: %', bad USING ERRCODE = '55000';
   END IF;
   SELECT string_agg(p.oid::regprocedure::text, ', ') INTO bad
     FROM pg_proc p

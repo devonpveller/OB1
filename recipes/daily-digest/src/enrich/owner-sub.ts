@@ -16,6 +16,8 @@
  * owner (owner-sub.test.ts).
  */
 
+import { restAuthHeaders } from "../clients/rest-auth.ts";
+
 export class InletOwnerError extends Error {
   constructor(msg: string) {
     super(`inlet owner: ${msg} - nothing was read or written`);
@@ -48,7 +50,8 @@ export async function digestOwner(
   try {
     res = await fetchFn(`${restBase.replace(/\/+$/, "")}/rest/v1/rpc/inlet_connection_owner`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      // rw-rest-door-auth (slot 450): the door refuses a request without this service's own token
+      headers: { "Content-Type": "application/json", Accept: "application/json", ...restAuthHeaders() },
       body: JSON.stringify({ p_id: connection }),
       signal: AbortSignal.timeout(15_000),
     });

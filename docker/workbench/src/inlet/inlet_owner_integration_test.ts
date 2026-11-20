@@ -28,6 +28,11 @@ const A = Deno.env.get("INLET_OWNER") ?? "";
 const B = Deno.env.get("INLET_SECOND") ?? "";
 const VIEWER = (Deno.env.get("INLET_VIEWER") ?? "").replace(/\/+$/, "");
 const REST = (Deno.env.get("OPEN_BRAIN_URL") ?? "http://openbrain-rest").replace(/\/+$/, "");
+// rw-rest-door-auth (slot 450): the door asks every caller for its own token. These reads and upserts are the wiki
+// compile's (generate-wiki.mjs, wiki-pages.mjs), so the runner passes the WIKI role's lab token; blank (a -Red run on
+// the base door, which strips credentials) = no header.
+const REST_TOKEN = (Deno.env.get("OPEN_BRAIN_REST_TOKEN") ?? "").trim();
+const RH: Record<string, string> = REST_TOKEN ? { Authorization: `Bearer ${REST_TOKEN}` } : {};
 const APP_ROLE = "ob_app_memory";
 const off = !BASE || !HOST || !PHASE || !A || !B;
 const pool = !off
@@ -183,7 +188,7 @@ async function secondUserReads(p: Record<string, any>): Promise<string[]> {
     ["compile leaves", `thoughts?select=id,content,metadata&id=in.(${(p.thoughts as number[]).join(",")})&user_id=is.null`],
     ["compile source evidence", `source_entities?select=source_id,sources!inner(id,title,content,url)&entity_id=in.(${ents})`],
   ] as [string, string][]) {
-    const r = await fetch(`${REST}/rest/v1/${q}`);
+    const r = await fetch(`${REST}/rest/v1/${q}`, { headers: RH });
     const text = await r.text();
     if (leaks(text, m)) hits.push(`${name} (${r.status})`);
   }
@@ -261,7 +266,7 @@ t("migrated", "the guard: the leaf, a link and a withheld page's own text are no
     links: a.row_data.links, frontmatter: a.row_data.frontmatter }));
   const rebuilt = { slug: pg.evidence, page_class: "entity", title: "Mixed rebuilt", body: "rebuilt from the shared article only", links: [], frontmatter: {} };
   const w = await fetch(`${REST}/rest/v1/wiki_pages?on_conflict=slug`, {
-    method: "POST", headers: { "content-type": "application/json", Prefer: "resolution=merge-duplicates,return=representation" },
+    method: "POST", headers: { ...RH, "content-type": "application/json", Prefer: "resolution=merge-duplicates,return=representation" },
     body: JSON.stringify([...rows, rebuilt]),
   });
   const landed = (await w.json()) as { slug: string; body: string }[];
@@ -376,7 +381,7 @@ t("migrated", "round 2 (tester 4, 6): every link form is withheld (any case, %2F
   // the marker: a raw PostgREST upsert of two withheld rows says 2, and returns neither
   const r = await fetch(`${REST}/rest/v1/wiki_pages?on_conflict=slug&select=slug`, {
     method: "POST",
-    headers: { "content-type": "application/json", prefer: "resolution=merge-duplicates,return=representation" },
+    headers: { ...RH, "content-type": "application/json", prefer: "resolution=merge-duplicates,return=representation" },
     body: JSON.stringify([{ slug: "content/topic/marker-a", page_class: "entity", title: "m", body: `[[thought/${priv}]]` },
       { slug: "content/topic/marker-b", page_class: "entity", title: "m", body: tail }]),
   });
@@ -389,7 +394,7 @@ t("migrated", "round 2 (tester 3): the wiki-service manifest and the compile cou
   // the manifest's query (docker/wiki-service/wiki-service.mjs fetchEntityLinkData) and the compile's eligibility count
   for (const q of [`thought_entities?select=entity_id,thoughts!inner(id)&thoughts.user_id=is.null&entity_id=eq.${p.entities.priv}`,
                    `thought_entities?select=thought_id,thoughts!inner(id)&entity_id=eq.${p.entities.priv}&thoughts.user_id=is.null`]) {
-    const r = await fetch(`${REST}/rest/v1/${q}`);
+    const r = await fetch(`${REST}/rest/v1/${q}`, { headers: RH });
     assertEquals(((await r.json()) as unknown[]).length, 0, "no shared link for the private-only entity");
   }
   const edges = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.edges WHERE from_entity_id = $1`, [p.entities.priv]))[0].n;

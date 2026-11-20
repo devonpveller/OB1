@@ -1,7 +1,7 @@
 // The digest's owner comes from ONE place (owner-sub.ts): the database's record for the run's inlet connection
 // (rw-inlet-stamp, plan 08 PD2, slot 470; rw-boundary-digest round 2 F6 made it one function). No env owner variable,
 // no literal, no fallback; no other file of the recipe reads an owner variable or carries an "operator" fallback.
-// Run: deno test --allow-read src/enrich/owner-sub.test.ts
+// Run: deno test --allow-read --allow-env src/enrich/owner-sub.test.ts
 import { assert, assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
 import { digestOwner, digestOwnerResolver, InletOwnerError, inletConnection, ownerArg, subjectOk } from "./owner-sub.ts";
 
@@ -23,6 +23,24 @@ Deno.test("the owner is the record's for INLET_CONNECTION, asked through rpc/inl
   assertEquals(await digestOwner("http://rest", envOf({ INLET_CONNECTION: " gmail-b " }), f), "sub-b");
   assertEquals(calls.map((c) => c.url), ["http://rest/rest/v1/rpc/inlet_connection_owner", "http://rest/rest/v1/rpc/inlet_connection_owner"]);
   assertEquals(calls.map((c) => c.body.p_id), ["gmail", "gmail-b"]);
+});
+
+Deno.test("rw-rest-door-auth: the owner lookup carries this service's own door token (the door refuses one without)", async () => {
+  const seen: Array<string | null> = [];
+  const f = (async (_input: string | URL | Request, init?: RequestInit) => {
+    seen.push(new Headers(init?.headers).get("authorization"));
+    return new Response(JSON.stringify("sub-a"));
+  }) as typeof fetch;
+  const prev = Deno.env.get("OPEN_BRAIN_REST_TOKEN");
+  try {
+    Deno.env.set("OPEN_BRAIN_REST_TOKEN", "lab.door.token");
+    assertEquals(await digestOwner("http://rest", envOf({ INLET_CONNECTION: "gmail" }), f), "sub-a");
+    Deno.env.delete("OPEN_BRAIN_REST_TOKEN");
+    assertEquals(await digestOwner("http://rest", envOf({ INLET_CONNECTION: "gmail" }), f), "sub-a");
+  } finally {
+    if (prev === undefined) Deno.env.delete("OPEN_BRAIN_REST_TOKEN"); else Deno.env.set("OPEN_BRAIN_REST_TOKEN", prev);
+  }
+  assertEquals(seen, ["Bearer lab.door.token", null]);
 });
 
 Deno.test("no connection, no record, or an owner that is not a subject: refused, and no env owner is ever read", async () => {

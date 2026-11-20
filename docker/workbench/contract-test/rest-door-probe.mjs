@@ -99,9 +99,17 @@ async function asCaller(key, steps) {
   }
 }
 const zeros = `[${new Array(1024).fill(0.01).join(",")}]`;
+// round 6 (450 integrated with 440 / 470): the shapes the callers send since slot 470 - each writer asks the owner record
+// for its connection's owner (rpc/inlet_connection_owner), stamps it (thoughts.user_id) and names the connection; the
+// readers read shared rows plus their run owner's; the prune works only through its view. Without 470 in the chain
+// (cat.has470 false) the pre-470 shapes are replayed.
+const I = !!cat.has470;
+const ownerQ = (o) => `or=(user_id.is.null,user_id.eq."${o}")`;
 async function casePositive() {
   const note = `lab-note-${Date.now()}`;
   await asCaller("WIKI", [
+    ...(I ? [["vault owner", "POST", "/rpc/inlet_connection_owner", { p_id: "vault" }],
+             ["shared links", "GET", "/thought_entities?select=entity_id,thoughts!inner(id)&thoughts.user_id=is.null&limit=10"]] : []),
     ["readiness", "GET", "/entities?select=id&limit=1"],
     ["changed entities", "GET", `/entities?select=id&updated_at=gte.2000-01-01T00:00:00Z&order=id.asc&limit=10`],
     ["link snapshot", "GET", "/entities?select=id,canonical_name,entity_type,metadata,updated_at&limit=10"],
@@ -113,7 +121,7 @@ async function casePositive() {
     ["edges", "GET", `/edges?select=*&from_entity_id=eq.${S.entityId}`],
     ["thread sources", "GET", "/thread_sources?select=source_id,status&status=eq.confirmed&limit=5"],
     ["leaf thoughts", "GET", `/thought_entities?select=thought_id,thoughts(id,content,metadata)&entity_id=eq.${S.entityId}`],
-    ["note mirror insert", "POST", "/thoughts", { content: `wiki note ${note}`, metadata: { note_path: `notes/${note}.md`, exposure: "ops" }, exposure: "ops" }, { prefer: "return=representation" }],
+    ["note mirror insert", "POST", "/thoughts", { content: `wiki note ${note}`, metadata: { note_path: `notes/${note}.md`, exposure: "ops", ...(I ? { inlet_connection: "vault" } : {}) }, exposure: "ops", ...(I ? { user_id: S.owner } : {}) }, { prefer: "return=representation" }],
     ["note mirror read", "GET", `/thoughts?select=id&metadata->>note_path=eq.notes/${note}.md`],
     ["note mirror patch", "PATCH", `/thoughts?metadata->>note_path=eq.notes/${note}.md`, { content: `wiki note ${note} edited` }, { prefer: "return=minimal" }],
     ["note mirror delete", "DELETE", `/thoughts?metadata->>note_path=eq.notes/${note}.md`, undefined, { prefer: "return=minimal" }],
@@ -151,37 +159,61 @@ async function casePositive() {
   ]);
   report("2-caller-ENTITY", "openbrain-entity-worker with its own token: every inventoried request answers 2xx");
   await asCaller("DIGEST", [
-    ["recent", "GET", "/thoughts?select=id,content,metadata,created_at&created_at=gte.2000-01-01T00:00:00Z&order=created_at.desc&limit=5&metadata->>type=not.eq.profile_field"],
-    ["profile", "GET", "/thoughts?select=content&metadata->>type=eq.profile_field&metadata->>field_name=eq.address&order=created_at.desc&limit=1"],
-    ["semantic", "POST", "/rpc/match_thoughts", { query_embedding: zeros, match_threshold: 0.0, match_count: 3, filter: {} }],
+    ...(I ? [["run owner", "POST", "/rpc/inlet_connection_owner", { p_id: "gmail" }]] : []),
+    ["recent", "GET", `/thoughts?select=id,content,metadata,created_at&created_at=gte.2000-01-01T00:00:00Z&order=created_at.desc&limit=5&metadata->>type=not.eq.profile_field${I ? "&" + ownerQ(S.owner) : ""}`],
+    ["profile", "GET", `/thoughts?select=content&metadata->>type=eq.profile_field&metadata->>field_name=eq.address&order=created_at.desc&limit=1${I ? "&" + ownerQ(S.owner) : ""}`],
+    ["semantic", "POST", "/rpc/match_thoughts", { query_embedding: zeros, match_threshold: 0.0, match_count: 3, filter: I ? { owner_scope: S.owner } : {} }],
     ...(RED ? [] : [["setting", "POST", "/rpc/rest_setting_get", { p_key: "digest.window_hours" }]]),
   ]);
   report("2-caller-DIGEST", "openbrain-digest with its own token: every inventoried request answers 2xx");
   await asCaller("PODCAST", [
+    ...(I ? [["run owner", "POST", "/rpc/inlet_connection_owner", { p_id: "gmail" }]] : []),
     ["request", "GET", `/podcast_render_requests?id=eq.${S.renderId}&select=*`],
     ["request state", "PATCH", `/podcast_render_requests?id=eq.${S.renderId}`, { state: "rendering" }, { prefer: "return=minimal" }],
     ["team", "GET", `/podcast_teams?select=id,name,podcast_team_members(position,podcast_presenters(id,name,podcast_voice_links(id,route,voice,speed)))&owner_sub=eq.${S.owner}&id=eq.${S.teamId}`],
     ["episode", "POST", "/podcast_episodes", { owner_sub: S.owner, title: "Lab episode", team_id: S.teamId, audio_format: "mp3", archive_dir: "/lab/ep" }, { prefer: "return=representation" }],
     ["episode read", "GET", `/podcast_episodes?owner_sub=eq.${S.owner}&select=archive_dir&limit=1`],
-    ["gmail thoughts", "GET", "/thoughts?metadata->>gmail_id=eq.lab-gmail-1&limit=200"],
+    ["gmail thoughts", "GET", `/thoughts?metadata->>gmail_id=eq.lab-gmail-1&limit=200${I ? "&" + ownerQ(S.owner) : ""}`],
     // rw-boundary-digest (slot 460): the loop-close stores the transcript on the owner's episode row (setTranscript)
     ...(cat.hasTranscript ? [["transcript", "PATCH", `/podcast_episodes?id=eq.${S.episodeId}&owner_sub=eq.${S.owner}&select=id`, { transcript: "lab transcript" }, { prefer: "return=representation" }]] : []),
     ...(RED ? [] : [["setting", "POST", "/rpc/rest_setting_get", { p_key: "podcast.team" }]]),
   ]);
   report("2-caller-PODCAST", "openbrain-podcast with its own token: every inventoried request answers 2xx");
   await asCaller("GMAIL_PULL", [
-    ["insert", "POST", "/thoughts", { content: `lab gmail ${Date.now()}`, metadata: { source: "gmail", gmail_id: "lab-gmail-2", email_date: "2001-01-01", exposure: "ops" }, exposure: "ops" }, { prefer: "return=representation" }],
+    ...(I ? [["mailbox owner", "POST", "/rpc/inlet_connection_owner", { p_id: "gmail" }]] : []),
+    ["insert", "POST", "/thoughts", { content: `lab gmail ${Date.now()}`, metadata: { source: "gmail", gmail_id: "lab-gmail-2", email_date: "2001-01-01", exposure: "ops", ...(I ? { inlet_connection: "gmail" } : {}) }, exposure: "ops", ...(I ? { user_id: S.owner } : {}) }, { prefer: "return=representation" }],
   ]);
   report("2-caller-GMAIL_PULL", "openbrain-gmail-pull with its own token: the insert answers 2xx");
-  await asCaller("GMAIL_PRUNE", [
+  await asCaller("GMAIL_PRUNE", I ? [
+    ["view ready", "GET", "/inlet_connection_mail?select=id&limit=1"],
+    ["preview", "GET", "/inlet_connection_mail?select=id,metadata,content&inlet_connection=eq.gmail&metadata->>source=eq.gmail&metadata->>email_date=lt.2002-01-01&order=metadata->>email_date.asc&limit=10000"],
+    ["delete", "DELETE", `/inlet_connection_mail?inlet_connection=eq.gmail&id=in.(${S.pruneThoughtId})&select=id`, undefined, { prefer: "return=representation" }],
+  ] : [
     ["preview", "GET", "/thoughts?select=id,metadata,content&metadata->>source=eq.gmail&metadata->>email_date=lt.2002-01-01&order=metadata->>email_date.asc&limit=10000"],
     ["delete", "DELETE", `/thoughts?id=in.(${S.pruneThoughtId})&select=id`, undefined, { prefer: "return=representation" }],
   ]);
+  // the prune's delete really removed the expired mail (an empty 200 would also be "2xx")
+  if (I) {
+    const gone = await call(REST, "GET", `/inlet_connection_mail?id=eq.${S.pruneThoughtId}&select=id`, { token: T.GMAIL_PRUNE });
+    result("2-caller-GMAIL_PRUNE", okish(gone) && Array.isArray(gone.json) && gone.json.length === 0, `GMAIL_PRUNE: the expired mail is gone after the delete: ${gone.status} ${gone.text.slice(0, 80)}`);
+  }
   report("2-caller-GMAIL_PRUNE", "openbrain-gmail-prune with its own token: preview and delete answer 2xx");
   await asCaller("IMPORT", [
-    ["insert", "POST", "/thoughts", { content: `lab import ${Date.now()}`, metadata: { source: "chatgpt", exposure: "ops" }, exposure: "ops" }, { prefer: "return=minimal" }],
-    ["dedup", "POST", "/rpc/match_thoughts", { query_embedding: zeros, match_threshold: 0.0, match_count: 3, filter: {} }],
+    ["insert", "POST", "/thoughts", { content: `lab import ${Date.now()}`, metadata: { source: "chatgpt", exposure: "ops" }, exposure: "ops", ...(I ? { user_id: S.owner } : {}) }, { prefer: "return=minimal" }],
+    ["dedup", "POST", "/rpc/match_thoughts", { query_embedding: zeros, match_threshold: 0.0, match_count: 3, filter: I ? { source: "chatgpt", owner_scope: S.owner } : {} }],
   ]);
+  // slot 470 x 450: a door writer's stamp is its connection's recorded owner or its own verified sub - never another's
+  if (I) {
+    for (const [key, row] of [
+      ["IMPORT", { content: `lab import for another ${Date.now()}`, metadata: { source: "chatgpt", exposure: "ops" }, exposure: "ops", user_id: S.other }],
+      ["GMAIL_PULL", { content: `lab gmail for another ${Date.now()}`, metadata: { source: "gmail", gmail_id: "lab-gmail-3", exposure: "ops", inlet_connection: "gmail" }, exposure: "ops", user_id: S.other }],
+      ["WIKI", { content: `lab note for another ${Date.now()}`, metadata: { note_path: "notes/other.md", exposure: "ops", inlet_connection: "vault" }, exposure: "ops", user_id: S.other }],
+    ]) {
+      const r = await call(REST, "POST", "/thoughts", { token: T[key], body: row, headers: { prefer: "return=minimal" } });
+      result("2-stamp", !okish(r) && /inlet stamp|23514/.test(r.text), `${key} writing a row owned by a second user is refused by slot 470's guard: ${r.status} ${r.text.slice(0, 120)}`);
+    }
+    report("2-stamp", "slot 470 behind the door: a door writer cannot stamp a row with another owner than its connection's or its token's");
+  }
   report("2-caller-IMPORT", "the host import CLIs' token (slot 470's ob_rest_import): the insert and the dedup answer 2xx");
 }
 
@@ -289,7 +321,7 @@ async function caseOwner() {
   }
   // a caller that reads thoughts sees the ops plane only: the operator's personal (owner-stamped) thought is not in it
   if (!RED) {
-    for (const key of ["WIKI", "ENTITY", "DIGEST", "PODCAST", "GMAIL_PULL", "GMAIL_PRUNE"]) {
+    for (const key of Object.keys(cfg.roles).filter((k) => (cat.allowed[cfg.roles[k]]?.relations ?? []).includes("thoughts"))) {
       const r = await call(REST, "GET", "/thoughts?select=id,exposure&user_id=not.is.null&exposure=neq.ops", { token: T[key] });
       result("4-owner", okish(r) && Array.isArray(r.json) && r.json.length === 0, `${key} reads no personal owner-stamped thought: ${r.status} ${r.text.slice(0, 80)}`);
     }

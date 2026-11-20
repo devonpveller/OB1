@@ -16,6 +16,10 @@ const idea = process.env.IDEA_THOUGHT || "";
 const priv = process.env.PRIV_THOUGHT || "";
 const src = process.env.PRIV_SOURCE || "";
 const out = { tag };
+// rw-rest-door-auth (slot 450): part 1 is the wiki writer's own traffic, so it carries the wiki's lab token
+// (OPEN_BRAIN_REST_TOKEN, which recipes/_shared/wiki-pages.mjs reads too); part 2 stays credential-less on purpose.
+const tok = (process.env.OPEN_BRAIN_REST_TOKEN || "").trim();
+const auth = tok ? { authorization: `Bearer ${tok}` } : {};
 const fs = await import("node:fs");
 const path = await import("node:path");
 const wp = await import(path.join(SHARED, "wiki-pages.mjs"));
@@ -33,7 +37,7 @@ if (idea && priv) {
   wp.writeWikiPage(file("clean"), page(`IO clean ${tag}`, `A compiled page with shared text only.`));
   out.exit = await wp.finishWikiPages(`io-${tag}`);
   const list = ["idea", "priv", "clean"].map((n) => `"${slug(n)}"`).join(",");
-  const r = await fetch(`${OB}/rest/v1/wiki_pages?select=slug&slug=in.(${encodeURIComponent(list)})`, { headers: { apikey: "local-trust" } });
+  const r = await fetch(`${OB}/rest/v1/wiki_pages?select=slug&slug=in.(${encodeURIComponent(list)})`, { headers: { apikey: "local-trust", ...auth } });
   const have = new Set((await r.json()).map((x) => x.slug));
   out.rows = Object.fromEntries(["idea", "priv", "clean"].map((n) => [n, have.has(slug(n))]));
   out.files = Object.fromEntries(["idea", "priv", "clean"].map((n) => [n, fs.existsSync(file(n))]));
@@ -45,7 +49,7 @@ if (idea && priv) {
     { slug: slug("raw-priv"), page_class: "entity", title: "raw", body: `see content/thought%2F${priv}`, tags: [], links: [], frontmatter: {} },
   ];
   const m = await fetch(`${OB}/rest/v1/wiki_pages?on_conflict=slug&select=slug`, { method: "POST",
-    headers: { "content-type": "application/json", apikey: "local-trust", prefer: "resolution=merge-duplicates,return=representation" },
+    headers: { "content-type": "application/json", apikey: "local-trust", ...auth, prefer: "resolution=merge-duplicates,return=representation" },
     body: JSON.stringify(rows) });
   out.marker = { status: m.status, header: m.headers.get("x-wiki-withheld"), back: (await m.json()).length };
 }
@@ -76,7 +80,8 @@ for (const [door, base] of [["postgrest", PGRST], ["rest", `${OB}/rest/v1`]]) {
     const t = await r.text();
     out.rpc[`${door}:table:${tb}`] = r.status === 200 ? (t.trim() === "[]" ? 200 : 299) : r.status;   // 299 = rows returned
   }
-  // the prune's view: readable (the owner's gmail thoughts) but it names no owner
+  // the prune's view: readable (the owner's gmail thoughts) but it names no owner - on the base door; behind slot 450's
+  // door it is refused without a credential like everything else (the runner judges the status by the door it stood up)
   const v = await fetch(`${base}/inlet_owner_mail?limit=1`, { headers: { apikey: "local-trust" } });
   const vt = await v.text();
   out.rpc[`${door}:view`] = v.status;
