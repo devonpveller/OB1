@@ -220,7 +220,18 @@ try {
   $logs = Dk logs $db
   $errs = @(($logs -split "`n") | Where-Object { $_ -match '\bERROR\b' })
   Check ($logs -match 'PostgreSQL init process complete' -and $errs.Count -eq 0) "the database ran the initdb chain, no ERROR ($($errs.Count))"
-  $mk = 'zqseed' + (-join ((97..122) | Get-Random -Count 8 | ForEach-Object { [char]$_ }))
+  # rw-rest-door-auth round 6 (the integration with 470): this lab plants the state BEFORE PD1's window - personal shared
+  # sources, unowned thoughts - which slot 470's ALWAYS guards refuse (the live order was 440, then 470). So, as the
+  # workspace lab's [5r] does, 470 comes off the pristine database first (revert order 470 before 440); every case
+  # database is cloned from it. Absent from a chain without 470: nothing to do.
+  $revert470 = Join-Path $dockerDir 'revert-inlet-stamp.sql'
+  $has470 = "$(Dk exec $db psql -U postgres -d openbrain -X -tA -c "SELECT to_regclass('public.inlet_connections') IS NOT NULL")".Trim()
+  if ($has470 -eq 't' -and (Test-Path $revert470)) {
+    $null = Psql 'openbrain' $revert470 @()
+    $gone = "$(Dk exec $db psql -U postgres -d openbrain -X -tA -c "SELECT to_regclass('public.inlet_connections') IS NULL AND NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname LIKE 'trg_inlet_stamp%')")".Trim()
+    Check ($script:rc -eq 0 -and $gone -eq 't') "slot 470 taken off the pristine database first (this lab plants the state before PD1's window; revert order 470, 440)"
+  }
+  $mk ='zqseed' + (-join ((97..122) | Get-Random -Count 8 | ForEach-Object { [char]$_ }))
   $cm = 'zqctl' + (-join ((97..122) | Get-Random -Count 8 | ForEach-Object { [char]$_ }))
   $lm = 'zqlate' + (-join ((97..122) | Get-Random -Count 8 | ForEach-Object { [char]$_ }))
   $owner = 'lab-owner-' + $rand
