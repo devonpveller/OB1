@@ -186,8 +186,8 @@ function Invoke-OwnerPrivateViewLab {
     $script:made.images += $baseTag
     $okB = New-PvWorkbench "$P-pvbase" $baseTag ($fa + @('-e', "PRIVATE_EMBEDDING_API_KEY=$($script:pvPrivKey)"))
     if ($okB -and (Wait-Http "http://$P-pvbase:8000/health" 90)) {
-      $rb = Invoke-PvTest "$P-pvbase" 'red-base' '/^(setup|1\.[1-6])/'
-      Check ($rb.Success -and $rb.Groups[1].Value -eq 'FAILED' -and [int]$rb.Groups[2].Value -eq 0) "[5s] RED on the base ($PvBaseSha): every owner case fails (no private route) ($($rb.Value))"
+      $rb = Invoke-PvTest "$P-pvbase" 'red-base' '/^(setup|1\.[1-5])/'
+      Check ($rb.Success -and $rb.Groups[1].Value -eq 'FAILED' -and [int]$rb.Groups[2].Value -eq 0) "[5s] RED on the base ($PvBaseSha): every owner case fails (no private route; 1.6 is PD1's own route and is not in the RED set) ($($rb.Value))"
     } else { Fail "[5s] RED: the base workbench did not start" }
     $null = Dk rm -f -v "$P-pvbase"
   } else { Fail "[5s] RED: the base workbench ($PvBaseSha) did not build" }
