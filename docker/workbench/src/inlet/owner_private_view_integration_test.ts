@@ -323,3 +323,63 @@ t("4.6 no-store on every private answer, directly and through the viewer's forwa
     if (VIEWER) assertEquals((await req(VIEWER, p, {})).cache, "no-store, private", `viewer ${p}`);
   }
 });
+
+// round 2 (tester attempt 1, F1): paging through `next` loses no row, with rows TIED on created_at and rows a few
+// microseconds apart inside one millisecond (what one curator transaction / one 440 move batch writes). LAST in the file: it plants
+// extra rows for A (copied from A's own) and removes them again.
+t("1.9 paging A's claims and jobs through next sees every row exactly once, for limits 1..5, over tied and same-millisecond created_at", async () => {
+  const tag = crypto.randomUUID();
+  const T1 = "2030-01-01 00:00:00.123456+00", T2 = "2030-01-01 00:00:00.123789+00"; // 5 rows tied, 3 more in the same millisecond
+  const stamps = [T1, T1, T1, T1, T1, T2, T2, T2];
+  const claimIds: string[] = [], jobIds: string[] = [];
+  const batch = crypto.randomUUID();
+  try {
+    for (const [i, at] of stamps.entries()) {
+      const cid = crypto.randomUUID();
+      claimIds.push(cid);
+      await sql(
+        `INSERT INTO public.inlet_private_claims
+         SELECT (jsonb_populate_record(NULL::public.inlet_private_claims, to_jsonb(c) || jsonb_build_object(
+                   'id', $2::uuid, 'text', 'tie claim ' || $3::text || ' ' || $4::int, 'text_hash', md5($2::text), 'created_at', $5::timestamptz))).*
+           FROM public.inlet_private_claims c WHERE c.inlet_owner_sub = $1 ORDER BY c.id LIMIT 1`, [A, cid, tag, i, at]);
+      const [{ id: jid }] = await sql<{ id: string }>(
+        `INSERT INTO public.research_jobs (status, origin, query, created_at) VALUES ('done', 'manual', 'neutral', $1::timestamptz) RETURNING id::text AS id`, [at]);
+      jobIds.push(jid);
+      await sql(`INSERT INTO public.inlet_owner_archive (batch, tbl, col, action, ref, row_data) VALUES ($1, 'public.research_jobs', 'query,result,progress,error', 'j', $2, jsonb_build_object('id', $2::text, 'query', 'tie job'))`, [batch, jid]);
+      await sql(`INSERT INTO public.inlet_private_jobs (job_id, batch, owner_sub, row_data) VALUES ($1::uuid, $2, $3, jsonb_build_object('id', $1::text, 'query', 'tie job ' || $4::text))`, [jid, batch, A, tag]);
+    }
+    for (const [route, key, planted] of [["claims", "claims", claimIds], ["jobs", "jobs", jobIds]] as const) {
+      const all = await req(WB_S, `${P}/${route}?limit=200`, as.A);
+      assertEquals(all.status, 200, all.text);
+      const want: string[] = all.json[key].map((x: { id: string }) => x.id);
+      for (const id of planted) assert(want.includes(id), `${route}: the one-shot page holds the planted ${id}`);
+      for (let limit = 1; limit <= 5; limit++) {
+        const seen: string[] = [];
+        let before = "";
+        for (let page = 0; page < 200; page++) {
+          const r = await req(WB_S, `${P}/${route}?limit=${limit}${before ? `&before=${encodeURIComponent(before)}` : ""}`, as.A);
+          assertEquals(r.status, 200, r.text);
+          for (const x of r.json[key]) { assert(!("cursor_at" in x), "the internal stamp is not sent"); seen.push(x.id); }
+          if (!r.json.next) break;
+          before = r.json.next;
+        }
+        assertEquals(seen.length, want.length, `${route} limit=${limit}: saw ${seen.length} of ${want.length}`);
+        assertEquals(new Set(seen).size, want.length, `${route} limit=${limit}: each row exactly once`);
+        assertEquals([...seen].sort(), [...want].sort(), `${route} limit=${limit}: the same rows as the one-shot page`);
+      }
+    }
+  } finally {
+    if (claimIds.length) await sql(`DELETE FROM public.inlet_private_claims WHERE id = ANY($1::uuid[])`, [claimIds]);
+    await sql(`DELETE FROM public.inlet_private_jobs WHERE batch = $1`, [batch]);
+    await sql(`DELETE FROM public.inlet_owner_archive WHERE batch = $1`, [batch]);
+    if (jobIds.length) await sql(`DELETE FROM public.research_jobs WHERE id = ANY($1::uuid[])`, [jobIds]);
+  }
+});
+
+t("1.6b PD1's moved-source read carries no-store, private (F2)", async () => {
+  const mine = await sql<{ id: string }>(`SELECT id::text AS id FROM public.inlet_private_sources WHERE inlet_owner_sub = $1 ORDER BY id LIMIT 1`, [A]);
+  assert(mine.length === 1, "A has a moved source");
+  const r = await req(WB_S, `/workbench/sources/${mine[0].id}`, as.A);
+  assertEquals(r.status, 200, r.text);
+  assertEquals(r.cache, "no-store, private");
+});

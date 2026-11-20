@@ -9,6 +9,8 @@
 #     the LiteLLM UI - not checkable from here);
 #   * OB_WORKBENCH_DB_PASSWORD is set (ob_workbench's password; set on the database out of band);
 #   * slot 440 is applied; the ob_workbench role exists (slot 480 ran) and is a member of ob_app_memory;
+#   * the five owner_private_* reads exist and ob_workbench can EXECUTE them; no OTHER role (PUBLIC included) can run them or
+#     PD1's two reads (a "stray grant" line);
 #   * no drift: no public.inlet_private_* / owner_private_* function is executable by ob_app_memory (a 440 re-run after
 #     480 grants PD1's two reads back to it: re-run 480).
 # The multi-user readiness check (check-multiuser-ready.ps1) is a SEPARATE script and is not run here.

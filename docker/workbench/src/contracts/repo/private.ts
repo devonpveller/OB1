@@ -13,6 +13,7 @@ export interface PrivateClaimRow {
   confidence: number;
   contradicted: boolean;
   created_at: string;
+  cursor_at?: string; // internal: created_at at full (microsecond) precision, for the page cursor; never sent to a client
   private_sources: { id: string; title: string; kind: string; created_at: string }[];
   private_parents: { id: string; text: string }[];
   shared_sources: { id: string; title: string; url: string }[];
@@ -34,6 +35,7 @@ export interface PrivateJobRow {
   created_at: string;
   state: string;
   query: string | null;
+  cursor_at?: string;
 }
 
 export interface Cursor { at: string; id: string }
@@ -58,7 +60,7 @@ const num = <T>(k: keyof T) => (rows: T[]): T[] => rows.map((r) => ({ ...r, [k]:
 export function claims(db: Db, sub: string, o: { id?: string | null; q?: string | null; kind?: string; source?: string | null; before?: Cursor | null; limit: number }) {
   return guarded(() =>
     db.query<PrivateClaimRow>(
-      `SELECT id::text, kind, text, status, epistemic_tag, confidence::float8 AS confidence, contradicted, created_at,
+      `SELECT id::text, kind, text, status, epistemic_tag, confidence::float8 AS confidence, contradicted, created_at, created_at::text AS cursor_at,
               private_sources, private_parents, shared_sources
          FROM public.owner_private_claims($1, $2::uuid, $3, $4, $5::uuid, $6::timestamptz, $7::uuid, $8)`,
       [sub, o.id ?? null, o.q ?? null, o.kind ?? "all", o.source ?? null, o.before?.at ?? null, o.before?.id ?? null, o.limit],
@@ -94,7 +96,7 @@ export async function hasSources(db: Db, sub: string): Promise<boolean> {
 export function jobs(db: Db, sub: string, before: Cursor | null, limit: number) {
   return guarded(() =>
     db.query<PrivateJobRow>(
-      `SELECT job_id::text AS id, root_job_id::text, created_at, state, query
+      `SELECT job_id::text AS id, root_job_id::text, created_at, created_at::text AS cursor_at, state, query
          FROM public.owner_private_jobs($1, $2::timestamptz, $3::uuid, $4)`,
       [sub, before?.at ?? null, before?.id ?? null, limit],
     )

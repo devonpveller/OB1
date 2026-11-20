@@ -32,17 +32,31 @@ const UNAVAILABLE = { error: "search is not available" };
 
 const noStore = (c: Context) => c.header("cache-control", "no-store, private");
 
-// a page cursor: "<ISO time>,<uuid>"
+// a page cursor: OPAQUE to clients (base64url of "<timestamp>|<uuid>"). The timestamp is the row's created_at at the
+// database's own (microsecond) precision, as text (cursor_at): a millisecond Date would skip rows tied with, or inside the
+// same millisecond as, the last row of a page. A cursor that does not parse is ignored (the first page).
+const b64u = (s: string) => btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const AT_RE = /^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d(\.\d{1,6})?(Z|[+-]\d\d(:?\d\d)?)$/;
 function cursor(raw: string | undefined): pv.Cursor | null {
-  const m = /^([0-9T:.+\-Z]{10,40}),([0-9a-fA-F-]{36})$/.exec((raw ?? "").trim());
-  if (!m || !UUID_RE.test(m[2]) || Number.isNaN(Date.parse(m[1]))) return null;
-  return { at: m[1], id: m[2] };
+  const t = (raw ?? "").trim();
+  if (!/^[A-Za-z0-9_-]{20,120}$/.test(t)) return null;
+  let plain: string;
+  try {
+    plain = atob(t.replace(/-/g, "+").replace(/_/g, "/"));
+  } catch {
+    return null;
+  }
+  const i = plain.indexOf("|");
+  const at = plain.slice(0, i), id = plain.slice(i + 1);
+  if (i < 0 || !AT_RE.test(at) || !UUID_RE.test(id)) return null;
+  return { at, id };
 }
-const nextOf = (rows: { created_at: string | Date; id: string }[], n: number) => {
-  if (rows.length < n || !rows.length) return null;
+// the next-page cursor from the rows' internal cursor_at, and the rows as the client sees them (cursor_at removed)
+function page<T extends { id: string; cursor_at?: string }>(rows: T[], n: number): { rows: Omit<T, "cursor_at">[]; next: string | null } {
   const last = rows[rows.length - 1];
-  return `${new Date(last.created_at).toISOString()},${last.id}`;
-};
+  const next = rows.length >= n && last?.cursor_at ? b64u(`${last.cursor_at}|${last.id}`) : null;
+  return { rows: rows.map(({ cursor_at: _drop, ...r }) => r), next };
+}
 const clamp = (raw: string | undefined, def: number, max: number) => Math.min(max, Math.max(1, parseInt(raw ?? "", 10) || def));
 const word = (raw: string | undefined, allowed: string[], def: string) => allowed.includes((raw ?? "").trim()) ? (raw ?? "").trim() : def;
 
@@ -78,7 +92,8 @@ export function registerPrivate(app: ContractApp, deps: ContractDeps) {
       const source = q.source_id && UUID_RE.test(q.source_id) ? q.source_id : null;
       if (q.source_id && !source) return send(c, PrivateClaims, { private: true, claims: [], next: null });
       const rows = await pv.claims(deps.db, sub, { q: (q.q ?? "").slice(0, 200) || null, kind: word(q.kind, ["all", "private", "mixed"], "all"), source, before: cursor(q.before), limit: n });
-      return send(c, PrivateClaims, { private: true, claims: rows, next: nextOf(rows, n) });
+      const pg = page(rows, n);
+      return send(c, PrivateClaims, { private: true, claims: pg.rows, next: pg.next });
     } catch (e) {
       return fail(c, e);
     }
@@ -97,7 +112,8 @@ export function registerPrivate(app: ContractApp, deps: ContractDeps) {
       if (!sub || !UUID_RE.test(id)) return c.json(NOT_FOUND, 404);
       const rows = await pv.claims(deps.db, sub, { id, limit: 1 });
       if (!rows[0]) return c.json(NOT_FOUND, 404);
-      return send(c, PrivateClaimOne, { private: true, claim: rows[0] });
+      const { cursor_at: _drop, ...claim } = rows[0];
+      return send(c, PrivateClaimOne, { private: true, claim });
     } catch (e) {
       return fail(c, e);
     }
@@ -158,7 +174,8 @@ export function registerPrivate(app: ContractApp, deps: ContractDeps) {
       const q = c.req.valid("query");
       const n = clamp(q.limit, 50, 200);
       const rows = await pv.jobs(deps.db, sub, cursor(q.before), n);
-      return send(c, PrivateJobs, { private: true, jobs: rows, next: nextOf(rows, n) });
+      const pg = page(rows, n);
+      return send(c, PrivateJobs, { private: true, jobs: pg.rows, next: pg.next });
     } catch (e) {
       return fail(c, e);
     }

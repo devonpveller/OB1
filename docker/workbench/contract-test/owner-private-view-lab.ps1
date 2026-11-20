@@ -91,6 +91,27 @@ function Invoke-OwnerPrivateViewLab {
   $r2 = Invoke-PvPsql (Join-Path $dockerDir 'init-owner-private-view.sql') '480 again'
   Check ($r2.rc -eq 0 -and $r2.msg -notmatch 'drift') '[5s] 7.2 480 again: nothing to do (no drift)'
 
+  # 3.8 (round 2, F4): the catalog check also asserts the five owner reads exist, that ob_workbench can EXECUTE them, and that no
+  # other role can (PUBLIC included). Three database mutants, each restored by running 480 again (it re-creates and re-grants).
+  $f480 = Join-Path $dockerDir 'init-owner-private-view.sql'
+  $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "REVOKE EXECUTE ON FUNCTION public.owner_private_has_sources(text) FROM ob_workbench"
+  $m1 = Invoke-PvCheckSql
+  Save 'pv-check-mutant-revoked.log' $m1
+  Check ($m1 -match 'check: ob_workbench cannot EXECUTE: public\.owner_private_has_sources\(text\)' -and $m1 -match 'check: FAIL' -and $m1 -notmatch 'check: OK') '[5s] 3.8a RED: ob_workbench stripped of EXECUTE on one read -> the catalog check names it and FAILS'
+  $null = Invoke-PvPsql $f480 '480 after mutant 3.8a'
+  $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "GRANT EXECUTE ON FUNCTION public.owner_private_claims(text,uuid,text,text,uuid,timestamptz,uuid,integer) TO ob_app_memory; GRANT EXECUTE ON FUNCTION public.inlet_private_job(uuid,text) TO PUBLIC"
+  $m2 = Invoke-PvCheckSql
+  Save 'pv-check-mutant-stray.log' $m2
+  Check ($m2 -match 'stray grant: (public\.)?owner_private_claims\([^)]*\) executable by ob_app_memory' -and $m2 -match 'stray grant: (public\.)?inlet_private_job\(uuid,text\) executable by PUBLIC' -and $m2 -match 'check: FAIL') '[5s] 3.8b RED: a grant to ob_app_memory / PUBLIC on a read -> the catalog check names each stray grant and FAILS'
+  $null = Invoke-PvPsql $f480 '480 after mutant 3.8b'
+  $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "DROP FUNCTION public.owner_private_jobs(text,timestamptz,uuid,integer)"
+  $m3 = Invoke-PvCheckSql
+  Save 'pv-check-mutant-missing.log' $m3
+  Check ($m3 -match 'check: owner_private_\* function MISSING: public\.owner_private_jobs\(text,timestamptz,uuid,integer\)' -and $m3 -match 'check: FAIL') '[5s] 3.8c RED: a dropped read -> the catalog check names it MISSING and FAILS'
+  $null = Invoke-PvPsql $f480 '480 after mutant 3.8c'
+  $c1b = Invoke-PvCheckSql
+  Check ($c1b -match 'check: OK' -and $c1b -notmatch 'drift:|stray grant|MISSING|cannot EXECUTE') '[5s] 3.8d GREEN: after 480 re-runs the catalog check is OK again (no stray grant, nothing missing, ob_workbench can execute all five)'
+
   # 3.1: who can run what
   $cat = Invoke-PvQ $script:pvCatalogQ
   Save 'pv-catalog.log' $cat
