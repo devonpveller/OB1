@@ -147,31 +147,29 @@ t("L4: empty trash needs confirm: true; A's removes only A's trashed documents; 
   assert(!(await exists(b1)));
 });
 
-t("L5: the nightly run, clock injected: trashed 29 days ago survives, 31 days ago is removed (and a young one stays)", async () => {
-  const d29 = await trashed(A, `lc-d29-${run}`);
-  const d31 = await trashed(A, `lc-d31-${run}`);
-  const fresh = await trashed(A, `lc-fresh-${run}`);
-  const b31 = await trashed(B, `lc-b31-${run}`);
+t("L5: the nightly run, clock injected: 29 days after the trash it survives, 31 days after it is removed (and a young one stays)", async () => {
+  const d1 = await trashed(A, `lc-d1-${run}`);
+  const d2 = await trashed(B, `lc-d2-${run}`);
   const DAY = 86_400_000;
-  const ago = (d: number) => new Date(Date.now() - d * DAY);
-  await sql(`UPDATE public.user_document_listings SET updated_at = $2 WHERE path = $1`, [d29, ago(29)]);
-  await sql(`UPDATE public.user_document_listings SET updated_at = $2 WHERE path = $1`, [d31, ago(31)]);
-  await sql(`UPDATE public.user_document_listings SET updated_at = $2 WHERE path = $1`, [b31, ago(31)]);
   Deno.env.set("WIKI_GIT_DIR", VAULT);
   const { emptyTrash } = await import("./repo.ts");
   const { poolDb } = await import("../contracts/db.ts");
-  const out = await emptyTrash({ db: poolDb(pool as never), reg: {} as never }, "nightly-cleanup", { now: new Date() });
-  assert(out.removed.includes(d31) && !(await exists(d31)), "31 days: removed");
-  assert(out.removed.includes(b31) && !(await exists(b31)), "31 days, another user's: the nightly is for everyone");
-  assert(!out.removed.includes(d29) && (await exists(d29)), "29 days: kept");
-  assert(!out.removed.includes(fresh) && (await exists(fresh)), "just trashed: kept");
-  assertEquals((await sql(`SELECT count(*)::int AS n FROM public.user_document_listings WHERE path = $1`, [d29]))[0].n, 1);
-  // the same run, the injected clock two days later: 29 -> 31 days, now removed
-  const later = await emptyTrash({ db: poolDb(pool as never), reg: {} as never }, "nightly-cleanup", { now: new Date(Date.now() + 2 * DAY) });
-  assert(later.removed.includes(d29) && !(await exists(d29)));
-  assert(!later.removed.includes(fresh), "the fresh one is still under 30 days");
-  const nightly = await sql(`SELECT actor_sub, kind FROM public.user_document_trail WHERE path = ANY($1) ORDER BY id`, [[d31, b31, d29]]);
-  assertEquals(nightly.map((r) => [r.kind, r.actor_sub]), [["nightly_expired", "system:nightly"], ["nightly_expired", "system:nightly"], ["nightly_expired", "system:nightly"]]);
+  const deps = { db: poolDb(pool as never), reg: {} as never };
+  // the trash date is the LATER of the listing's record and the trash commit's committer date: both are "now" here,
+  // so the age is told by the injected clock, not by backdating one source
+  const r0 = await emptyTrash(deps, "nightly-cleanup", { now: new Date() });
+  assert(!r0.removed.includes(d1) && !r0.removed.includes(d2) && (await exists(d1)), "just trashed: kept");
+  const r29 = await emptyTrash(deps, "nightly-cleanup", { now: new Date(Date.now() + 29 * DAY) });
+  assert(!r29.removed.includes(d1) && !r29.removed.includes(d2) && (await exists(d1)) && (await exists(d2)), "29 days after the trash: kept");
+  assertEquals((await sql(`SELECT count(*)::int AS n FROM public.user_document_listings WHERE path = $1`, [d1]))[0].n, 1);
+  const fresh = await trashed(A, `lc-fresh-${run}`); // trashed now, after the 29-day pass; the 31-day clock below is 31 days after d1 and d2
+  const r31 = await emptyTrash(deps, "nightly-cleanup", { now: new Date(Date.now() + 31 * DAY) });
+  assert(r31.removed.includes(d1) && !(await exists(d1)), "31 days after the trash: removed");
+  assert(r31.removed.includes(d2) && !(await exists(d2)), "another user's too: the nightly is for everyone");
+  assert(r31.removed.includes(fresh), "(fresh was trashed seconds after; 31 days on the clock is past it too)");
+  const nightly = await sql(`SELECT actor_sub, kind, owner_sub FROM public.user_document_trail WHERE path = ANY($1) ORDER BY id`, [[d1, d2, fresh]]);
+  assertEquals(nightly.map((r) => [r.kind, r.actor_sub]), nightly.map(() => ["nightly_expired", "system:nightly"]));
+  assertEquals(nightly.length, 3);
 });
 
 t("L6: one trail line per hard removal, holding no body text; each user reads only their own lines and counts", async () => {
@@ -188,12 +186,13 @@ t("L6: one trail line per hard removal, holding no body text; each user reads on
   assertEquals(ownLines.status, 200);
   const mine = (ownLines.json.lines as { path: string }[]).filter((l) => l.path === x1);
   assertEquals(mine.length, 1);
-  assert(!JSON.stringify(rows).includes(marker), "no body text in the trail row");
-  assert(!ownLines.text.includes(marker), "no body text in the trail API");
+  assert(!JSON.stringify(rows).toLowerCase().includes(marker.toLowerCase()), "no body text in the trail row");
+  assert(!ownLines.text.toLowerCase().includes(marker.toLowerCase()), "no body text in the trail API");
   // two identities: B sees B's line and a B-only count; nothing of A's
   const theirs = await call("GET", `${D}/trail`, undefined, B);
   assertEquals(theirs.status, 200);
-  assert(!theirs.text.includes(x1) && !theirs.text.includes(`lc-x2-${run}`) && !theirs.text.includes(titleMark.toLowerCase()), "B never sees A's lines");
+  const theirsLow = theirs.text.toLowerCase();
+  assert(!theirsLow.includes(x1.toLowerCase()) && !theirsLow.includes(`lc-x2-${run}`) && !theirsLow.includes(titleMark.toLowerCase()), "B never sees A's lines (any letter case)");
   assertEquals(theirs.json.total, (await sql(`SELECT count(*)::int AS n FROM public.user_document_trail WHERE owner_sub = $1`, [`lifecycle-b-${run}`]))[0].n);
   // x2 was never removed: no line
   assertEquals((await sql(`SELECT count(*)::int AS n FROM public.user_document_trail WHERE path = $1`, [x2]))[0].n, 0);
@@ -215,20 +214,49 @@ t("L7: nothing private from this item is on a shared surface (planted body and t
         AND table_name NOT IN ('user_document_listings', 'user_document_trail')`)).map((r) => r.table_name);
   const hits: string[] = [];
   for (const tb of tables) {
-    const n = (await sql(`SELECT count(*)::int AS n FROM public."${tb}" x WHERE x::text LIKE $1 OR x::text LIKE $2`, [`%${body}%`, `%${title}%`]))[0].n;
+    const n = (await sql(`SELECT count(*)::int AS n FROM public."${tb}" x WHERE x::text ILIKE $1 OR x::text ILIKE $2`, [`%${body}%`, `%${title}%`]))[0].n;
     if (n) hits.push(`${tb}:${n}`);
   }
   assertEquals(hits, [], "no shared row mentions the body or the title");
   // the shared retrieval surface
   const found = await call("GET", `/workbench/contract/search?query=${encodeURIComponent(body)}`);
-  assert(!found.text.includes(body) && !found.text.includes(title), "the shared search finds nothing of it");
+  assert(!found.text.toLowerCase().includes(body.toLowerCase()) && !found.text.toLowerCase().includes(title.toLowerCase()), "the shared search finds nothing of it");
   // and the trail row (owner table) names no body
   const row = JSON.stringify(await sql(`SELECT id::text, owner_sub, actor_sub, kind, document_id::text, path, trashed_at::text FROM public.user_document_trail WHERE path = $1`, [tp]));
-  assert(!row.includes(body));
+  assert(!row.toLowerCase().includes(body.toLowerCase()));
 });
 
 t("L8: migration slot 510: the removal trail table exists with its owner index and grants", async () => {
   const cols = (await sql<{ column_name: string }>(
     `SELECT column_name FROM information_schema.columns WHERE table_name = 'user_document_trail' ORDER BY ordinal_position`)).map((r) => r.column_name);
   assertEquals(cols, ["id", "owner_sub", "actor_sub", "kind", "document_id", "path", "trashed_at", "created_at"]);
+});
+
+t("L9: the irreversible routes under concurrency and bad input: parallel delete-forever, empty-trash against a restore, a non-JSON body", async () => {
+  // eight parallel delete-forevers of one trashed document: exactly one 200, the rest 404, one trail row
+  const tp = await trashed(A, `lc-par-${run}`);
+  const res = await Promise.all(Array.from({ length: 8 }, () => call("POST", `${D}/delete-forever`, { path: tp, confirm: true })));
+  assertEquals(res.filter((r) => r.status === 200 && r.json.removed === true).length, 1, res.map((r) => r.status).join(","));
+  assertEquals(res.filter((r) => r.status === 404).length, 7);
+  assertEquals((await sql(`SELECT count(*)::int AS n FROM public.user_document_trail WHERE path = $1`, [tp]))[0].n, 1, "one trail row");
+  assert(!(await exists(tp)));
+  // empty-trash racing a restore, eight rounds: alive with no row, or removed with exactly one row
+  for (let i = 0; i < 8; i++) {
+    const t0 = await trashed(A, `lc-race${i}-${run}`);
+    const live = t0.replace("/.trash/", "/");
+    const [e, r] = await Promise.all([call("POST", `${D}/empty-trash`, { confirm: true }), call("POST", `${D}/restore`, { path: t0 })]);
+    assertEquals(e.status, 200, e.text);
+    const rows = (await sql(`SELECT count(*)::int AS n FROM public.user_document_trail WHERE path = $1`, [t0]))[0].n;
+    const alive = await exists(live);
+    assert(alive !== (rows === 1), `round ${i}: alive=${alive} rows=${rows} restore=${r.status}`);
+    if (alive) await call("POST", `${D}/trash`, { path: live }).then(() => call("POST", `${D}/empty-trash`, { confirm: true }));
+  }
+  // a non-JSON body is refused before any handler, the document untouched
+  const t1 = await trashed(A, `lc-txt-${run}`);
+  for (const [path, ct] of [["delete-forever", "text/plain"], ["empty-trash", "application/x-www-form-urlencoded"], ["unarchive", "text/plain"]]) {
+    const r = await fetch(`${BASE}${D}/${path}`, { method: "POST", headers: { "content-type": ct, "x-brain-key": KEY }, body: JSON.stringify({ path: t1, confirm: true }) });
+    assertEquals(r.status, 415, path);
+    await r.text();
+  }
+  assert(await exists(t1), "nothing removed by a non-JSON body");
 });

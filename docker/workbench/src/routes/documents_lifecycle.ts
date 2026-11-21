@@ -42,6 +42,18 @@ export function documentsLifecycleRouter(rdeps: RefineryDeps) {
   const deps: DocDeps = { db: rdeps.db, reg: rdeps.reg };
   const r = new Hono();
 
+  // these routes take a JSON body and nothing else: a text/plain or form body (which the owner scope does
+  // not search for paths) is refused before any handler (rwr-docs-lifecycle-api round 2, F6)
+  r.use("*", async (c, next) => {
+    if (c.req.method === "POST") {
+      const media = (c.req.header("content-type") ?? "").split(";")[0].trim().toLowerCase();
+      if (media !== "application/json" && !media.endsWith("+json")) {
+        return c.json({ error: "this route takes application/json" }, 415);
+      }
+    }
+    await next();
+  });
+
   // archive's way back: the document returns to its folder; a refinery archived with it is reopened
   r.post("/unarchive", wrap(async (c, who) => {
     const path = str((await body(c)).path);

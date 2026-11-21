@@ -18,13 +18,14 @@ import type { Db } from "../contracts/db.ts";
 import type { RegistryReader } from "../contracts/registry.ts";
 import { postNotification } from "../contracts/repo/system.ts";
 import { config } from "../config.ts";
-import type { Identity } from "../middleware/identity.ts";
+import { identityConfig, type Identity, ownerKey } from "../middleware/identity.ts";
 import {
-  gitMv, gitRm, vaultCommitPath, vaultExists, vaultFileHistory, vaultFolderHistory, vaultGitShow, vaultRead, vaultWrite,
+  gitMv, gitRm, VaultNotFound, vaultCommitPath, vaultExists, vaultFileHistory, vaultFolderHistory, vaultGitShow, vaultLastCommitDate, vaultRead, vaultWrite,
 } from "../util/vault.ts";
 import { safeJoin } from "../util/paths.ts";
 import { parseDocument, setFrontmatterField } from "./grammar.ts";
-import { earlier, expired, TRASH_KEEP_DAYS } from "./trash_age.ts";
+import { expired, later, TRASH_KEEP_DAYS } from "./trash_age.ts";
+import { VAULT_GIT, withPathLock } from "./path_lock.ts";
 import { dropTrail, NIGHTLY_ACTOR, type TrailKind, writeTrail } from "./trail.ts";
 import { deleteListing, listingRow, type ListingRow, moveListing, syncListing } from "./listing.ts";
 import {
@@ -187,10 +188,16 @@ export async function deleteFolder(deps: DocDeps, path: string, who: Identity) {
 
 // ── move, trash, restore, archive ─────────────────────────────────────────────────────────
 export async function moveTo(deps: DocDeps, from: string, to: string, message: string, who: Identity) {
+  // under the source path's lock: a removal of the same path (delete forever, empty trash, the nightly) and
+  // a move out of it never interleave (rwr-docs-lifecycle-api round 2)
+  return await withPathLock(from, () => moveToLocked(deps, from, to, message, who));
+}
+
+async function moveToLocked(deps: DocDeps, from: string, to: string, message: string, who: Identity) {
   await owned(deps.db, from, who);
   if (!(await vaultExists(from))) throw new DocError("no such document", 404);
   if (await vaultExists(to)) throw new DocError("a document with that name already exists there", 409);
-  await gitMv(from, to, message, who.name);
+  await withPathLock(VAULT_GIT, () => gitMv(from, to, message, who.name));
   try {
     await moveListing(deps.db, from, to);
   } catch (e) {
@@ -229,10 +236,10 @@ export async function archiveDocument(deps: DocDeps, path: string, who: Identity
 }
 
 // ── hard removal from the trash (rwr-docs-lifecycle-api) ──────────────────────────────────
-// When a trashed document went into the trash: the EARLIER of the listing record's date (set when the
-// move was recorded) and the trash move's commit date in the vault - an edit of a trashed document
-// moves the first, never the second. Unknown = null, and a document with no known date is never
-// removed by age (trash_age.ts).
+// When a trashed document went into the trash: the LATER of the listing record's date (set when the
+// move was recorded) and the trash move's COMMITTER date in the vault, so no clock skewed behind can make
+// a document older than it is. Unknown = null, and a document with no known date is never removed by
+// age (trash_age.ts).
 export async function trashedAtOf(row: ListingRow | null, rel: string): Promise<Date | null> {
   let listed: Date | null = null;
   if (row?.updated_at) {
@@ -241,36 +248,64 @@ export async function trashedAtOf(row: ListingRow | null, rel: string): Promise<
   }
   let committed: Date | null = null;
   try {
-    const h = (await vaultFileHistory(rel, 1))[0];
-    if (h?.date) {
-      const d = new Date(h.date);
-      committed = Number.isNaN(d.getTime()) ? null : d;
-    }
+    committed = await vaultLastCommitDate(rel);
   } catch { /* no history: the listing's date stands */ }
-  return earlier(listed, committed);
+  return later(listed, committed);
 }
 
-// Remove ONE trashed document for good: its trail line first (one per removal), then git rm (recoverable
-// from the vault's history), then the listing row and the document's references. If the removal itself
-// fails the trail line is taken back, so the trail never names a document that is still there.
+// Whose an unlisted document in documents/<key>/... is: the user whose directory key it is (the subjects
+// the workbench knows: signed-in users, listing owners, the default identity); otherwise nobody.
+async function ownerOfDirectory(db: Db, rel: string): Promise<string> {
+  const key = rel.split("/")[1] ?? "";
+  const subs = new Set<string>([identityConfig().defaultSub]);
+  for (const q of [`SELECT sub FROM public.workspace_users`, `SELECT DISTINCT owner_sub AS sub FROM public.user_document_listings`]) {
+    try {
+      for (const r of await db.query<{ sub: string }>(q)) if (r.sub) subs.add(r.sub);
+    } catch { /* the other source still answers */ }
+  }
+  for (const sub of subs) if ((await ownerKey(sub)) === key) return sub;
+  return "system:unowned";
+}
+
+export interface RemoveResult {
+  removed: boolean;
+  trail: string | null;
+  why?: "gone" | "young";
+}
+
+// Remove ONE trashed document for good, under the path's lock: the file is looked at again inside the lock
+// (a document restored, unarchived or already removed a moment ago is "gone": nothing removed, no line), the
+// optional age rule is re-checked there too, then `git rm` (strict: recoverable from the vault's history),
+// and only after the file is really gone the trail line (one per removal) and the listing row.
 export async function removeTrashed(
   deps: DocDeps, rel: string, kind: TrailKind,
-  o: { actor: string; author: string; owner: string; trashedAt?: Date | null },
-): Promise<{ trail: string }> {
+  o: { actor: string; author: string; owner?: string; expiredAt?: { now: Date; days: number } },
+): Promise<RemoveResult> {
   if (!isTrashed(rel)) throw new DocError("not in the trash", 400);
-  const row = await listingRow(deps.db, rel);
-  const trail = await writeTrail(deps.db, {
-    owner_sub: row?.owner_sub ?? o.owner, actor_sub: o.actor, kind, document_id: row?.id ?? null, path: rel,
-    trashed_at: o.trashedAt === undefined ? await trashedAtOf(row, rel) : o.trashedAt,
+  return await withPathLock(rel, async () => {
+    if (!(await vaultExists(rel))) return { removed: false, trail: null, why: "gone" as const };
+    const row = await listingRow(deps.db, rel);
+    const trashedAt = await trashedAtOf(row, rel);
+    if (o.expiredAt && !expired(trashedAt, o.expiredAt.now, o.expiredAt.days)) return { removed: false, trail: null, why: "young" as const };
+    const owner = row?.owner_sub ?? o.owner ?? (await ownerOfDirectory(deps.db, rel));
+    try {
+      await withPathLock(VAULT_GIT, () => gitRm(rel, `documents: remove for good ${rel} (${kind})`, o.author, { strict: true }));
+    } catch (e) {
+      if (e instanceof VaultNotFound) return { removed: false, trail: null, why: "gone" as const };
+      throw e;
+    }
+    let trail: string | null = null;
+    try {
+      trail = await writeTrail(deps.db, {
+        owner_sub: owner, actor_sub: o.actor, kind, document_id: row?.id ?? null, path: rel, trashed_at: trashedAt,
+      });
+    } catch (e) {
+      // the file is gone (the vault commit keeps the text); say so loudly rather than undo it
+      console.error(`[documents] removed ${rel} but its trail line could not be written:`, (e as Error).message);
+    }
+    await deleteListing(deps.db, rel).catch((e) => console.error(`[documents] listing delete ${rel} failed:`, (e as Error).message));
+    return { removed: true, trail };
   });
-  try {
-    await gitRm(rel, `documents: remove for good ${rel} (${kind})`, o.author);
-  } catch (e) {
-    await dropTrail(deps.db, trail).catch(() => {});
-    throw e;
-  }
-  await deleteListing(deps.db, rel).catch((e) => console.error(`[documents] listing delete ${rel} failed:`, (e as Error).message));
-  return { trail };
 }
 
 // The nightly hard removal, for every user: only a document trashed MORE than `days` days ago (Q9,
@@ -278,25 +313,21 @@ export async function removeTrashed(
 // injectable. One failing document is logged and the rest still run.
 export async function emptyTrash(deps: DocDeps, by: string, opts: { now?: Date; days?: number } = {}) {
   const now = opts.now ?? new Date();
+  const days = opts.days ?? TRASH_KEEP_DAYS;
   const removed: string[] = [];
-  const kept: string[] = [];
+  let kept = 0;
   const failed: string[] = [];
   for (const f of (await documentFiles(DOCUMENTS_ROOT)).filter(isTrashed)) {
     try {
-      const row = await listingRow(deps.db, f);
-      const at = await trashedAtOf(row, f);
-      if (!expired(at, now, opts.days ?? TRASH_KEEP_DAYS)) {
-        kept.push(f);
-        continue;
-      }
-      await removeTrashed(deps, f, "nightly_expired", { actor: NIGHTLY_ACTOR, author: by, owner: "system:unowned", trashedAt: at });
-      removed.push(f);
+      const r = await removeTrashed(deps, f, "nightly_expired", { actor: NIGHTLY_ACTOR, author: by, expiredAt: { now, days } });
+      if (r.removed) removed.push(f);
+      else if (r.why === "young") kept++;
     } catch (e) {
       console.error(`[documents] nightly empty-trash: ${f} failed:`, (e as Error).message);
       failed.push(f);
     }
   }
-  return { removed, kept: kept.length, failed };
+  return { removed, kept, failed };
 }
 
 // ── history + recover ─────────────────────────────────────────────────────────────────────

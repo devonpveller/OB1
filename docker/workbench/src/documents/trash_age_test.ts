@@ -1,7 +1,7 @@
 // deno test src/documents/trash_age_test.ts - the trash's keep-for-30-days rule (rwr-docs-lifecycle-api, Q9)
 // and the explicit confirm the irreversible routes need. Pure: the clock is injected.
 import { assert, assertEquals } from "jsr:@std/assert@1";
-import { confirmed, earlier, expired, TRASH_KEEP_DAYS } from "./trash_age.ts";
+import { confirmed, later, expired, TRASH_KEEP_DAYS } from "./trash_age.ts";
 
 const DAY = 86_400_000;
 const now = new Date("2026-12-31T00:00:00Z");
@@ -27,10 +27,10 @@ Deno.test("the clock is the injected one: the same trash date, a later now", () 
   assertEquals(expired(t, new Date(now.getTime() + 2 * DAY)), true);
 });
 
-Deno.test("earlier() picks the older known date, ignores the unknown", () => {
-  assertEquals(earlier(ago(40), ago(2))?.getTime(), ago(40).getTime());
-  assertEquals(earlier(null, ago(2))?.getTime(), ago(2).getTime());
-  assertEquals(earlier(null, null), null);
+Deno.test("later() picks the newer known date (a skewed-behind clock cannot age a document), ignores the unknown", () => {
+  assertEquals(later(ago(40), ago(2))?.getTime(), ago(2).getTime());
+  assertEquals(later(null, ago(2))?.getTime(), ago(2).getTime());
+  assertEquals(later(null, null), null);
 });
 
 Deno.test("confirm must be the boolean true - nothing else counts", () => {

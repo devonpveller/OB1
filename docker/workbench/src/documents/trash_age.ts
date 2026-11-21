@@ -13,11 +13,13 @@ export function expired(trashedAt: Date | null | undefined, now: Date, days = TR
   return now.getTime() - trashedAt.getTime() > days * DAY_MS;
 }
 
-// The older of two known dates (the trash move's commit date and the listing's record of it).
-export function earlier(a: Date | null | undefined, b: Date | null | undefined): Date | null {
+// The LATER of two known dates (the listing's record of the trash move and the trash commit's committer
+// date): a clock that is skewed behind can then never make a document look older than it is. One known
+// date stands alone; none = null (never removed by age).
+export function later(a: Date | null | undefined, b: Date | null | undefined): Date | null {
   const x = valid(a) ? a : null;
   const y = valid(b) ? b : null;
-  if (x && y) return x.getTime() <= y.getTime() ? x : y;
+  if (x && y) return x.getTime() >= y.getTime() ? x : y;
   return x ?? y;
 }
 

@@ -1,21 +1,22 @@
 // deno test -A src/documents/lifecycle_test.ts - the document lifecycle's last steps
 // (rwr-docs-lifecycle-api) over a REAL temporary git vault and an in-memory database stand-in: unarchive,
 // delete forever (owner / other user / admin / not in the trash), empty trash (own only), the nightly
-// 30-day removal with the clock injected, and the trail (one line per removal, no body text).
+// 30-day removal with the clock injected, the trail (one line per removal, no body text), and (round 2) the
+// races: parallel deletes of one document, empty trash against a restore, a failing removal.
 // The HTTP side (confirm field, routes, two sessions, the owner scope) is lifecycle_integration_test.ts.
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert@1";
 
 const vault = await Deno.makeTempDir({ prefix: "lifecycle-vault-" });
 const prevGitDir = Deno.env.get("WIKI_GIT_DIR"); // restored at the end: the variable is the process's, not this file's
 Deno.env.set("WIKI_GIT_DIR", vault);
-const sh = async (...a: string[]) => {
-  const r = await new Deno.Command("git", { args: ["-C", vault, ...a], stdout: "piped", stderr: "piped" }).output();
+const sh = async (env: Record<string, string>, ...a: string[]) => {
+  const r = await new Deno.Command("git", { args: ["-C", vault, ...a], env, stdout: "piped", stderr: "piped" }).output();
   if (!r.success) throw new Error(new TextDecoder().decode(r.stderr));
   return new TextDecoder().decode(r.stdout);
 };
-await sh("init", "-q");
-await sh("config", "user.email", "t@lab.local");
-await sh("config", "user.name", "lab");
+await sh({}, "init", "-q");
+await sh({}, "config", "user.email", "t@lab.local");
+await sh({}, "config", "user.name", "lab");
 
 const docs = await import("./repo.ts");
 const life = await import("./lifecycle.ts");
@@ -23,17 +24,20 @@ const trail = await import("./trail.ts");
 type Identity = import("../middleware/identity.ts").Identity;
 type DocErr = InstanceType<typeof docs.DocError>;
 
-// ── an in-memory stand-in for the three tables the code touches ──────────────────────────
+// ── an in-memory stand-in for the tables the code touches ────────────────────────────────
 interface L { id: string; path: string; title: string; updated_at: Date; owner_sub: string }
 const listings = new Map<string, L>();
 const trailRows: Record<string, unknown>[] = [];
+const auditRows: Record<string, unknown>[] = [];
 let trailSeq = 0;
+let failTrailInsert = false;
 const db: import("../contracts/db.ts").Db = {
   query: (sql: string, a: unknown[] = []) => {
     if (/^\s*SELECT .*FROM public\.user_document_listings WHERE path = \$1/s.test(sql)) {
       const l = listings.get(a[0] as string);
       return Promise.resolve(l ? [{ ...l, refinery_id: null }] : []) as never;
     }
+    if (/SELECT sub FROM public\.workspace_users/.test(sql)) return Promise.resolve([{ sub: "alice" }, { sub: "bob" }]) as never;
     if (/UPDATE public\.user_document_listings SET path = \$2/.test(sql)) {
       const l = listings.get(a[0] as string);
       if (l) {
@@ -47,14 +51,15 @@ const db: import("../contracts/db.ts").Db = {
       return Promise.resolve([]) as never;
     }
     if (/INSERT INTO public\.user_document_trail/.test(sql)) {
+      if (failTrailInsert) return Promise.reject(new Error("trail table is down")) as never;
       const id = String(++trailSeq);
       const [owner_sub, actor_sub, kind, document_id, path, trashed_at] = a as [string, string, string, string | null, string, Date | null];
       trailRows.push({ id, owner_sub, actor_sub, kind, document_id, path, trashed_at });
       return Promise.resolve([{ id }]) as never;
     }
-    if (/DELETE FROM public\.user_document_trail WHERE id/.test(sql)) {
-      const i = trailRows.findIndex((r) => r.id === a[0]);
-      if (i >= 0) trailRows.splice(i, 1);
+    if (/INSERT INTO public\.admin_audit/.test(sql)) {
+      const [actor_sub, subject_sub, action, reason, method, route] = a as string[];
+      auditRows.push({ actor_sub, subject_sub, action, reason, method, route, filesThen: [...trailRows].length });
       return Promise.resolve([]) as never;
     }
     if (/FROM public\.user_document_trail WHERE owner_sub = \$1 ORDER/.test(sql)) {
@@ -67,27 +72,36 @@ const db: import("../contracts/db.ts").Db = {
 };
 const deps = { db, reg: {} as never };
 
+// the directory key of a subject is the subject itself when it is a safe name (identity.ts ownerKey)
 const id = (sub: string, over: Partial<Identity> = {}): Identity => ({
-  sub, actor: sub, name: sub, key: `k-${sub}`, kind: "user", admin: false, impersonating: null, ...over,
+  sub, actor: sub, name: sub, key: sub, kind: "user", admin: false, impersonating: null, ...over,
 });
 const A = id("alice");
 const B = id("bob");
 const ADMIN = id("root", { admin: true });
+const DAY = 86_400_000;
 
 let n = 0;
-// a document committed in the vault and listed for its owner; `where` = "" (live), ".trash" or ".archive"
-async function plant(who: Identity, where: "" | ".trash" | ".archive", body: string, title = `T${++n}`) {
+// a document committed in the vault and listed for its owner; `where` = "" (live), ".trash" or ".archive";
+// `when` dates the commit (author AND committer) and the listing row - the moment it went there
+async function plant(
+  who: Identity, where: "" | ".trash" | ".archive", body: string, title = `T${++n}`,
+  o: { when?: Date; listed?: boolean; listedOwner?: string; authorWhen?: Date; listWhen?: Date } = {},
+) {
   const dir = where ? `documents/${who.key}/${where}/notes` : `documents/${who.key}/notes`;
   const rel = `${dir}/${title.toLowerCase()}.md`;
   await Deno.mkdir(`${vault}/${dir}`, { recursive: true });
   await Deno.writeTextFile(`${vault}/${rel}`, `# ${title}\n\n${body}\n`);
-  await sh("add", "--", rel);
-  await sh("commit", "-q", "-m", `plant ${rel}`);
-  listings.set(rel, { id: crypto.randomUUID(), path: rel, title, updated_at: new Date(), owner_sub: who.sub });
+  await sh({}, "add", "--", rel);
+  const when = o.when ?? new Date();
+  await sh({ GIT_COMMITTER_DATE: when.toISOString(), GIT_AUTHOR_DATE: (o.authorWhen ?? when).toISOString() }, "commit", "-q", "-m", `plant ${rel}`);
+  if (o.listed !== false) {
+    listings.set(rel, { id: crypto.randomUUID(), path: rel, title, updated_at: o.listWhen ?? when, owner_sub: o.listedOwner ?? who.sub });
+  }
   return rel;
 }
 const exists = async (rel: string) => await Deno.stat(`${vault}/${rel}`).then(() => true, () => false);
-const DAY = 86_400_000;
+const gitLog = (...a: string[]) => sh({}, ...a);
 
 Deno.test("archive then unarchive: the document is back in its folder with its history and text", async () => {
   const rel = await plant(A, "", "UNARCHIVE-BODY-1");
@@ -100,7 +114,6 @@ Deno.test("archive then unarchive: the document is back in its folder with its h
   const msgs = h.commits.map((c) => c.message).join("\n");
   assert(msgs.includes("plant") && msgs.includes("archive") && msgs.includes("unarchive"), msgs);
   assert(listings.has(rel) && !listings.has(archived), "the listing row followed the document");
-  // a live document, or someone else's, cannot be unarchived
   await assertRejects(() => life.unarchiveDocument(deps, rel, A), docs.DocError, "not in the archive");
   const other = await docs.archiveDocument(deps, await plant(B, "", "x"), B);
   const e = await assertRejects(() => life.unarchiveDocument(deps, other.archived, A), docs.DocError);
@@ -114,38 +127,42 @@ Deno.test("delete forever on an active document is refused and nothing is remove
   assertEquals((e as DocErr).status, 400);
   assert(await exists(rel) && listings.has(rel));
   assertEquals(trailRows.length, before, "no trail line for a refusal");
-  // an archived one is not in the trash either
   const arch = (await docs.archiveDocument(deps, rel, A)).archived;
   await assertRejects(() => life.deleteForever(deps, arch, A), docs.DocError, "only a document in the trash");
   assert(await exists(arch));
 });
 
-Deno.test("delete forever: the owner may; another user gets the answer a missing document gets; an admin may", async () => {
+Deno.test("delete forever: the owner may; another user gets the answer a missing document gets; an admin may (and is audited)", async () => {
   const rel = await plant(A, ".trash", "OWNER-BODY");
-  // B names A's trashed document: the same 404 text as a path that does not exist
   const foreign = await assertRejects(() => life.deleteForever(deps, rel, B), docs.DocError);
   const missing = await assertRejects(() => life.deleteForever(deps, `documents/${B.key}/.trash/nope.md`, B), docs.DocError);
   assertEquals((foreign as Error).message, (missing as Error).message);
   assertEquals((foreign as DocErr).status, 404);
   assertEquals((missing as DocErr).status, 404);
   assert(await exists(rel), "refused: nothing removed");
-  // an admin who is impersonating acts AS the user and gets no extra reach
   const imp = id("bob", { admin: true, impersonating: { reason: "r", since: "t" } });
   await assertRejects(() => life.deleteForever(deps, rel, imp), docs.DocError, "no such document");
   assert(await exists(rel));
-  // the owner
+  assertEquals(auditRows.length, 0, "a refusal is not an admin act");
   const out = await life.deleteForever(deps, rel, A);
   assertEquals(out.removed, true);
   assert(!(await exists(rel)) && !listings.has(rel));
-  // an admin, another user's trashed document
+  assertEquals(auditRows.length, 0, "an owner deleting their own is not an admin act");
+  // an admin, another user's trashed document: audited BEFORE it runs
   const rel2 = await plant(B, ".trash", "ADMIN-BODY");
+  const trailBefore = trailRows.length;
   assertEquals((await life.deleteForever(deps, rel2, ADMIN)).removed, true);
   assert(!(await exists(rel2)));
+  assertEquals(auditRows.length, 1);
+  assertEquals(
+    [auditRows[0].actor_sub, auditRows[0].subject_sub, auditRows[0].action, auditRows[0].route],
+    ["root", "bob", "request", "/workbench/documents/delete-forever"],
+  );
+  assertEquals(auditRows[0].filesThen, trailBefore, "the audit row was written before the removal's trail line");
   // ...but not another user's ACTIVE document
   const live = await plant(B, "", "LIVE-BODY");
   await assertRejects(() => life.deleteForever(deps, live, ADMIN), docs.DocError, "only a document in the trash");
   assert(await exists(live));
-  // the trail names the owner of each, the actor who removed it
   const lines = trailRows.filter((r) => r.kind === "delete_forever");
   assertEquals(lines.map((l) => [l.owner_sub, l.actor_sub]), [["alice", "alice"], ["bob", "root"]]);
 });
@@ -163,28 +180,62 @@ Deno.test("user A's empty trash removes only A's trashed documents and leaves B'
   assert((await exists(b1)) && (await exists(b2)) && listings.has(b1) && listings.has(b2), "B's trash is untouched");
   assertEquals(trailRows.filter((r) => r.kind === "empty_trash" && r.owner_sub === "bob").length, 0);
   assertEquals((await life.emptyOwnTrash(deps, A)).removed, 0, "nothing left of A's");
-  // B's own empty works and counts only B's
   const outB = await life.emptyOwnTrash(deps, B);
   assert(outB.removed >= 2);
   assert(!(await exists(b1)));
 });
 
+Deno.test("F5: empty trash applies the same ownership test as delete forever - a file in A's directory that a listing row gives to B is not A's to remove", async () => {
+  const odd = await plant(A, ".trash", "ODD", "OddOwner", { listedOwner: "bob" });
+  const mine = await plant(A, ".trash", "MINE", "MineOwner");
+  const before = trailRows.length;
+  await assertRejects(() => life.deleteForever(deps, odd, A), docs.DocError, "no such document");
+  const out = await life.emptyOwnTrash(deps, A);
+  assertEquals(out.removed, 1);
+  assert(await exists(odd) && listings.has(odd), "the oddly-owned file is left alone");
+  assert(!(await exists(mine)));
+  assertEquals(trailRows.length, before + 1);
+  assertEquals(trailRows[trailRows.length - 1].owner_sub, "alice");
+  await Deno.remove(`${vault}/${odd}`);
+  listings.delete(odd);
+});
+
 Deno.test("nightly, clock injected: trashed 29 days ago survives, 31 days ago is removed", async () => {
-  const young = await plant(A, ".trash", "YOUNG");
-  const old = await plant(A, ".trash", "OLD");
-  const real = new Date();
-  // 29 days after both went in: both stay
-  const r29 = await docs.emptyTrash(deps, "nightly-cleanup", { now: new Date(real.getTime() + 29 * DAY) });
-  assert(!r29.removed.includes(young) && !r29.removed.includes(old), "29 days: neither is removed");
-  assert((await exists(young)) && (await exists(old)));
-  // OLD is recorded as trashed 40 days ago, YOUNG just now: at the real clock only OLD goes
-  listings.get(old)!.updated_at = new Date(real.getTime() - 40 * DAY);
-  const r = await docs.emptyTrash(deps, "nightly-cleanup", { now: new Date() });
-  assert(r.removed.includes(old) && !(await exists(old)), "OLD (trashed 40 days ago) is removed");
-  assert(!r.removed.includes(young) && (await exists(young)), "YOUNG stays");
-  // 31 days after YOUNG went in: removed
-  const r31 = await docs.emptyTrash(deps, "nightly-cleanup", { now: new Date(real.getTime() + 31 * DAY) });
-  assert(r31.removed.includes(young) && !(await exists(young)), "31 days: removed");
+  const now = new Date();
+  const d29 = await plant(A, ".trash", "D29", "D29", { when: new Date(now.getTime() - 29 * DAY) });
+  const d31 = await plant(A, ".trash", "D31", "D31", { when: new Date(now.getTime() - 31 * DAY) });
+  const d30 = await plant(A, ".trash", "D30", "D30", { when: new Date(now.getTime() - 30 * DAY + 60_000) });
+  const fresh = await plant(B, ".trash", "FRESH", "Fresh");
+  const r = await docs.emptyTrash(deps, "nightly-cleanup", { now });
+  assert(r.removed.includes(d31) && !(await exists(d31)), "31 days: removed");
+  assert(!r.removed.includes(d29) && (await exists(d29)), "29 days: kept");
+  assert(!r.removed.includes(d30) && (await exists(d30)), "just under 30 days: kept");
+  assert(!r.removed.includes(fresh) && (await exists(fresh)), "just trashed: kept");
+  // the clock two days later: the 29-day one is now 31 days old
+  const later = await docs.emptyTrash(deps, "nightly-cleanup", { now: new Date(now.getTime() + 2 * DAY) });
+  assert(later.removed.includes(d29) && later.removed.includes(d30) && !later.removed.includes(fresh));
+  assert(!(await exists(d29)));
+  const last = await docs.emptyTrash(deps, "nightly-cleanup", { now: new Date(now.getTime() + 31 * DAY) });
+  assert(last.removed.includes(fresh));
+});
+
+Deno.test("F3: the trash date never makes a document older than it is - the LATER of the listing and the committer date; the author date is ignored", async () => {
+  const now = new Date();
+  const old = new Date(now.getTime() - 40 * DAY);
+  // the listing says 40 days, the trash commit (committer) says now: kept
+  const a = await plant(A, ".trash", "F3A", "F3a", { when: now, listWhen: old });
+  // the listing says now, the commit's AUTHOR date says 40 days but the committer date is now: kept
+  const b = await plant(A, ".trash", "F3B", "F3b", { when: now, authorWhen: old });
+  // both genuinely old: removed
+  const c = await plant(A, ".trash", "F3C", "F3c", { when: old });
+  const r = await docs.emptyTrash(deps, "nightly-cleanup", { now });
+  assert(!r.removed.includes(a) && (await exists(a)), "a skewed-behind listing cannot age a document");
+  assert(!r.removed.includes(b) && (await exists(b)), "an author date cannot age a document");
+  assert(r.removed.includes(c) && !(await exists(c)), "old by both clocks: removed");
+  await Deno.remove(`${vault}/${a}`);
+  await Deno.remove(`${vault}/${b}`);
+  listings.delete(a);
+  listings.delete(b);
 });
 
 Deno.test("the nightly run never removes a document with an unknowable trash date", async () => {
@@ -196,7 +247,22 @@ Deno.test("the nightly run never removes a document with an unknowable trash dat
   await Deno.remove(`${vault}/${rel}`); // not part of the later cases
 });
 
-Deno.test("each hard removal writes exactly one trail line and the line holds no body text or title", async () => {
+Deno.test("F4: a nightly line for an unlisted document in a user's own directory is that user's, not nobody's", async () => {
+  const before = trailRows.length;
+  const rel = await plant(A, ".trash", "UNLISTED", "Unlisted", { when: new Date(Date.now() - 45 * DAY), listed: false });
+  const r = await docs.emptyTrash(deps, "nightly-cleanup");
+  assert(r.removed.includes(rel));
+  assertEquals(trailRows.length, before + 1);
+  assertEquals(trailRows[trailRows.length - 1].owner_sub, "alice");
+  assertEquals(trailRows[trailRows.length - 1].actor_sub, "system:nightly");
+  // a directory no known subject owns stays nobody's
+  const stray = await plant(id("stranger"), ".trash", "STRAY", "Stray", { when: new Date(Date.now() - 45 * DAY), listed: false });
+  await docs.emptyTrash(deps, "nightly-cleanup");
+  assert(!(await exists(stray)));
+  assertEquals(trailRows[trailRows.length - 1].owner_sub, "system:unowned");
+});
+
+Deno.test("each hard removal writes exactly one trail line and the line holds no body text or title (any letter case)", async () => {
   trailRows.length = 0;
   const marker = "BODYMARK-" + crypto.randomUUID();
   const t1 = await plant(A, ".trash", marker, "TitleMark");
@@ -208,16 +274,19 @@ Deno.test("each hard removal writes exactly one trail line and the line holds no
   assertEquals(trailRows.length, 3, "one line per removed document, empty trash included");
   assertEquals(trailRows.map((r) => r.kind).sort(), ["delete_forever", "empty_trash", "empty_trash"]);
   assert(!(await exists(t2)) && !(await exists(t3)));
-  const t4 = await plant(A, ".trash", marker);
-  listings.get(t4)!.updated_at = new Date(Date.now() - 45 * DAY);
+  const t4 = await plant(A, ".trash", marker, undefined, { when: new Date(Date.now() - 45 * DAY) });
   await docs.emptyTrash(deps, "nightly-cleanup");
   assertEquals(trailRows.length, 4);
   assertEquals(trailRows[3].kind, "nightly_expired");
   assertEquals(trailRows[3].actor_sub, "system:nightly");
-  const blob = JSON.stringify(trailRows) + JSON.stringify(await trail.readTrail(db, A));
-  assert(!blob.includes(marker) && !blob.includes("TitleMark"), "no body text, no title");
-  // the vault commit of the removal is the recoverable record: the text is still in git history
-  assert((await sh("log", "--all", "-p")).includes(marker));
+  assert(!(await exists(t4)));
+  // the marker is not in the row's other fields; the title slug IS the path by design (owner-only table), so the
+  // title check looks at every field BUT the path, and at the whole line for the body marker
+  const blob = (JSON.stringify(trailRows) + JSON.stringify(await trail.readTrail(db, A))).toLowerCase();
+  assert(!blob.includes(marker.toLowerCase()), "no body text");
+  const noPath = JSON.stringify(trailRows.map(({ path: _p, ...rest }) => rest)).toLowerCase();
+  assert(!noPath.includes("titlemark"), "no title outside the path");
+  assert((await gitLog("log", "--all", "-p")).includes(marker), "the vault commit keeps the text recoverable");
 });
 
 Deno.test("the trail is the caller's own: another user reads none of A's lines or count", async () => {
@@ -226,6 +295,97 @@ Deno.test("the trail is the caller's own: another user reads none of A's lines o
   assert(mine.total > 0);
   assertEquals(theirs, { lines: [], total: 0 });
   assert(!JSON.stringify(await trail.readTrail(db, B)).includes("alice"));
+});
+
+// ── round 2: races and failures ─────────────────────────────────────────────────────────
+Deno.test("F1: eight parallel delete-forevers of one document: exactly one removal, one trail line, the rest a 404", async () => {
+  const rel = await plant(A, ".trash", "PARALLEL");
+  const before = trailRows.length;
+  const res = await Promise.allSettled(Array.from({ length: 8 }, () => life.deleteForever(deps, rel, A)));
+  const ok = res.filter((r) => r.status === "fulfilled" && (r.value as { removed: boolean }).removed);
+  const refused = res.filter((r) => r.status === "rejected" && ((r.reason as DocErr).status === 404));
+  assertEquals(ok.length, 1, "exactly one caller removed it");
+  assertEquals(refused.length, 7, "every other caller was told it is not there");
+  assertEquals(trailRows.length - before, 1, "exactly one trail line");
+  assert(!(await exists(rel)));
+  // a second wave on the same path, as a retry would be: nothing
+  await assertRejects(() => life.deleteForever(deps, rel, A), docs.DocError, "no such document");
+  assertEquals(trailRows.length - before, 1);
+});
+
+Deno.test("F1: parallel empty-trash calls and delete-forever on the same documents write one line per document", async () => {
+  const paths = [await plant(A, ".trash", "P1"), await plant(A, ".trash", "P2"), await plant(A, ".trash", "P3")]; // planted one by one: a plant is itself a git commit
+  const before = trailRows.length;
+  await Promise.all([
+    life.emptyOwnTrash(deps, A), life.emptyOwnTrash(deps, A), life.deleteForever(deps, paths[0], A).catch(() => {}),
+    docs.emptyTrash(deps, "nightly-cleanup", { now: new Date(Date.now() + 40 * DAY) }),
+  ]);
+  for (const p of paths) assert(!(await exists(p)));
+  assertEquals(trailRows.length - before, 3, "three documents, three lines, however many callers raced");
+  assertEquals(new Set(trailRows.slice(before).map((r) => r.path)).size, 3);
+});
+
+Deno.test("F2: empty trash racing a restore, eight rounds: a document is either alive with no line or removed with exactly one line, never both and never neither", async () => {
+  for (let i = 0; i < 8; i++) {
+    const trashedRel = await plant(A, ".trash", `RACE${i}`);
+    const live = trashedRel.replace("/.trash/", "/");
+    const before = trailRows.length;
+    const res = await Promise.allSettled([life.emptyOwnTrash(deps, A), docs.restoreDocument(deps, trashedRel, A)]);
+    const lines = trailRows.slice(before).filter((r) => r.path === trashedRel).length;
+    const alive = await exists(live);
+    const stillTrashed = await exists(trashedRel);
+    assert(!stillTrashed, `round ${i}: not left in the trash`);
+    assert(alive !== (lines === 1), `round ${i}: alive=${alive} lines=${lines} (restore ${res[1].status})`);
+    assert(lines <= 1, `round ${i}: at most one line`);
+    if (alive) assertEquals(lines, 0, `round ${i}: a living document has no removal line`);
+    if (alive) await Deno.remove(`${vault}/${live}`);
+  }
+});
+
+Deno.test("F2: the nightly racing a restore skips a document that is alive again", async () => {
+  for (let i = 0; i < 4; i++) {
+    const trashedRel = await plant(A, ".trash", `NIGHT${i}`, undefined, { when: new Date(Date.now() - 45 * DAY) });
+    const live = trashedRel.replace("/.trash/", "/");
+    const before = trailRows.length;
+    await Promise.allSettled([docs.emptyTrash(deps, "nightly-cleanup"), docs.restoreDocument(deps, trashedRel, A)]);
+    const lines = trailRows.slice(before).filter((r) => r.path === trashedRel).length;
+    const alive = await exists(live);
+    assert(alive !== (lines === 1), `round ${i}: alive=${alive} lines=${lines}`);
+    if (alive) await Deno.remove(`${vault}/${live}`);
+  }
+});
+
+Deno.test("F6: a removal that fails leaves no trail line and the document where it was", async () => {
+  const rel = await plant(A, ".trash", "WONTGO");
+  const before = trailRows.length;
+  await Deno.writeTextFile(`${vault}/.git/index.lock`, ""); // git cannot take its lock: `git rm` fails
+  try {
+    await assertRejects(() => life.deleteForever(deps, rel, A));
+    const e = await docs.emptyTrash(deps, "nightly-cleanup", { now: new Date(Date.now() + 90 * DAY) });
+    assert(e.failed.includes(rel) && !e.removed.includes(rel));
+  } finally {
+    await Deno.remove(`${vault}/.git/index.lock`);
+  }
+  assert(await exists(rel) && listings.has(rel), "nothing removed");
+  assertEquals(trailRows.length, before, "no trail line for a removal that did not happen");
+  // and once git can work again the same document goes, with one line
+  await life.deleteForever(deps, rel, A);
+  assertEquals(trailRows.length, before + 1);
+});
+
+Deno.test("a trail line that cannot be written after the file is gone is reported, not undone", async () => {
+  const rel = await plant(A, ".trash", "NOLINE");
+  failTrailInsert = true;
+  const before = trailRows.length;
+  try {
+    const out = await life.deleteForever(deps, rel, A);
+    assertEquals(out.removed, true);
+    assertEquals(out.trail, null);
+  } finally {
+    failTrailInsert = false;
+  }
+  assert(!(await exists(rel)));
+  assertEquals(trailRows.length, before);
 });
 
 addEventListener("unload", () => {

@@ -37,6 +37,7 @@ ALTER TABLE public.user_document_trail ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS user_document_trail_service_role_all ON public.user_document_trail;
 CREATE POLICY user_document_trail_service_role_all ON public.user_document_trail FOR ALL TO service_role USING (true) WITH CHECK (true);
 GRANT SELECT, INSERT, DELETE ON public.user_document_trail TO service_role;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role;
+-- this table's own sequence only (round 2, F7): nothing else in the schema is touched, so the revert is exact
+GRANT USAGE, SELECT ON SEQUENCE public.user_document_trail_id_seq TO service_role;
 
 NOTIFY pgrst, 'reload schema';
