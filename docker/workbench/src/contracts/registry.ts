@@ -48,6 +48,11 @@ export const REGISTRY = {
   referenceHolderKinds: "reference_holder_kinds",
   referenceOrigins: "reference_origins",
   referenceAnchorOutcomes: "reference_anchor_outcomes",
+  // rwr-flags-api (init-flags.sql, slot 500): flag for cleanup
+  flagReasons: "flag_reasons",
+  flagItemKinds: "flag_item_kinds",
+  flagFromKinds: "flag_from_kinds",
+  flagStates: "flag_states",
 } as const;
 export type RegistryName = typeof REGISTRY[keyof typeof REGISTRY];
 
