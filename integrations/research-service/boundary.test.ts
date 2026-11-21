@@ -153,7 +153,7 @@ Deno.test("the door's body: seed content, callbacks, inlet refs, on-behalf, a qu
   assert("error" in parseDoorBody({ ...ok, item: { ...ok.item, kind: "email" } }));
   assert("error" in parseDoorBody({ ...ok, item: { ...ok.item, fields: { subject: 1 } } }));
   assert("error" in parseDoorBody({ ...ok, deliver: { x: "y".repeat(5000) } }));
-  assertEquals([...PURPOSES].sort(), ["brainstorm-gap", "digest-article", "digest-gap", "idea-research"]);
+  assertEquals([...PURPOSES].sort(), ["brainstorm-gap", "digest-article", "digest-gap", "idea-research", "user-start"]);
   assertEquals(parseProposals('{"questions":["a b c", 3, "d e f"]}'), ["a b c", "d e f"]);
   assertEquals(parseProposals("not json"), []);
 });

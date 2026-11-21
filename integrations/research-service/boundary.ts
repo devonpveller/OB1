@@ -18,11 +18,12 @@ import {
   linkPathRefusal, type PublicPage, templateQuestion, tokens, topicOf,
 } from "./boundary-gate.ts";
 import { judgeAddresses } from "./intake-fetch.ts";
+import { type Budget, DEPTH_NAMES, type DepthName, resolveDepth, runCeilings } from "./depth.ts";
 
 export type InletKind = "idea" | "gmail" | "google_activity" | "brainstorm" | "document" | "chat";
-export type Purpose = "idea-research" | "digest-article" | "digest-gap" | "brainstorm-gap";
+export type Purpose = "idea-research" | "digest-article" | "digest-gap" | "brainstorm-gap" | "user-start";
 export const INLET_KINDS: ReadonlySet<string> = new Set(["idea", "gmail", "google_activity", "brainstorm", "document", "chat"]);
-export const PURPOSES: ReadonlySet<string> = new Set(["idea-research", "digest-article", "digest-gap", "brainstorm-gap"]);
+export const PURPOSES: ReadonlySet<string> = new Set(["idea-research", "digest-article", "digest-gap", "brainstorm-gap", "user-start"]);
 
 export interface PersonalItem {
   kind: InletKind;
@@ -215,10 +216,10 @@ export interface Q { queryObject<T>(sql: string, args?: unknown[]): Promise<{ ro
  *  refinery_id, no seed content / callback / on-behalf in options (the public links ride as `public_links`, which
  *  the research service fetches itself), caller 'boundary', origin 'manual' (generic: no lane names the inlet), the
  *  boundary stamp. No research_prompts row: the question is public. Slot 420's trigger refuses anything else. */
-export async function insertDerivedJob(c: Q, req: DerivedRequest, run: DerivedRun = {}): Promise<string> {
+export async function insertDerivedJob(c: Q, req: DerivedRequest, run: DerivedRun = {}, ceilings: Budget = runCeilings()): Promise<string> {
   // rw-boundary-digest (slot 460): the engine's run knobs ride beside the links - fixed values, a flag and a time,
   // nothing a caller wrote (parseDoorBody validated them; slot 460's allow-list refuses anything else)
-  const options = { public_links: req.links, queue_origin: "manual", ...runOptions(run) };
+  const options = { public_links: req.links, queue_origin: "manual", ...runOptions(run, ceilings) };
   const r = await c.queryObject<{ id: string }>(
     `INSERT INTO public.research_jobs (status, origin, caller, query, anchor, options, request_kind, boundary)
      VALUES ('queued', 'manual', 'boundary', $1, $1, $2::jsonb, 'derived', $3::jsonb) RETURNING id::text AS id`,
@@ -230,10 +231,13 @@ export async function insertDerivedJob(c: Q, req: DerivedRequest, run: DerivedRu
 /** rw-boundary-digest (plan 09 2.5 P3/P5, slot 460): how a derived job RUNS - never what it is about. The digest's
  *  article keeps its article mode and its preliminary gap pass; a dry run writes nothing canonical; the caller's
  *  deadline means the engine never starts a job nobody waits for. Enumerated values, a boolean and a timestamp only. */
-export interface DerivedRun { mode?: "article"; gap_research?: "none" | "preliminary"; dry_run?: boolean; deadline_at?: string }
+export interface DerivedRun { mode?: "article"; gap_research?: "none" | "preliminary"; dry_run?: boolean; deadline_at?: string; depth?: DepthName }
 
-export function runOptions(run: DerivedRun): Record<string, unknown> {
+export function runOptions(run: DerivedRun, ceilings: Budget = runCeilings()): Record<string, unknown> {
   return {
+    // rwr-research-start-api (slot 540): a depth preset is a budget, min(preset, admin ceiling) per limit - numbers
+    // the service chose, never a caller's (the engine clamps contract.budget against its ceilings again)
+    ...(run.depth ? { contract: { budget: resolveDepth(run.depth, ceilings).budget } } : {}),
     ...(run.mode === "article" ? { mode: "article" } : {}),
     ...(run.gap_research ? { gap_research: run.gap_research } : {}),
     ...(run.dry_run === true ? { dry_run: true } : {}),
@@ -247,8 +251,8 @@ export function parseRun(v: unknown): { run: DerivedRun } | { error: string } {
   if (v === undefined || v === null) return { run: {} };
   if (typeof v !== "object" || Array.isArray(v)) return { error: "run is an object" };
   const r = v as Record<string, unknown>;
-  const extra = Object.keys(r).filter((k) => !["mode", "gap_research", "dry_run", "deadline_at"].includes(k));
-  if (extra.length) return { error: `run carries only mode, gap_research, dry_run, deadline_at (not ${extra.join(", ").slice(0, 80)})` };
+  const extra = Object.keys(r).filter((k) => !["mode", "gap_research", "dry_run", "deadline_at", "depth"].includes(k));
+  if (extra.length) return { error: `run carries only mode, gap_research, dry_run, deadline_at, depth (not ${extra.join(", ").slice(0, 80)})` };
   const run: DerivedRun = {};
   if (r.mode !== undefined) { if (r.mode !== "article") return { error: "run.mode is article" }; run.mode = "article"; }
   if (r.gap_research !== undefined) {
@@ -256,6 +260,10 @@ export function parseRun(v: unknown): { run: DerivedRun } | { error: string } {
     run.gap_research = r.gap_research;
   }
   if (r.dry_run !== undefined) { if (typeof r.dry_run !== "boolean") return { error: "run.dry_run is a boolean" }; if (r.dry_run) run.dry_run = true; }
+  if (r.depth !== undefined) {
+    if (typeof r.depth !== "string" || !DEPTH_NAMES.has(r.depth)) return { error: "run.depth is quick, standard or deep" };
+    run.depth = r.depth as DepthName;
+  }
   if (r.deadline_at !== undefined && r.deadline_at !== null && r.deadline_at !== "") {
     const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2})$/i;
     if (typeof r.deadline_at !== "string" || !ISO.test(r.deadline_at.trim())) return { error: "run.deadline_at is an ISO-8601 date-time with a zone" };
@@ -287,7 +295,7 @@ export async function openHandback(c: Q, h: {
  *  query or options are refused outright - a derived request carries nothing a caller chose to put on the job. */
 export const DOOR_REFUSED_KEYS = ["seed_sources", "callback", "inlet_ref", "on_behalf_of", "query", "options", "thread_id", "refinery_id"];
 
-export function parseDoorBody(body: unknown): { item: PersonalItem; purpose: Purpose; deliver: Record<string, unknown>; run: DerivedRun } | { error: string } {
+export function parseDoorBody(body: unknown): { item: PersonalItem; purpose: Purpose; deliver: Record<string, unknown>; run: DerivedRun; approved?: string } | { error: string } {
   if (!body || typeof body !== "object" || Array.isArray(body)) return { error: "bad body" };
   const b = body as Record<string, unknown>;
   const bad = DOOR_REFUSED_KEYS.filter((k) => k in b);
@@ -317,9 +325,14 @@ export function parseDoorBody(body: unknown): { item: PersonalItem; purpose: Pur
   if (rev !== undefined && !Number.isInteger(rev)) return { error: "item.revision is an integer" };
   const run = parseRun(b.run);
   if ("error" in run) return { error: run.error };
+  // rwr-research-start-api: the question the owner saw in the preview (the start replaces the model's proposal with it)
+  if (b.approved_question !== undefined && (typeof b.approved_question !== "string" || !b.approved_question.trim() || b.approved_question.length > 300)) {
+    return { error: "approved_question is a string of at most 300 characters" };
+  }
   return {
     item: { kind: kind as InletKind, id, revision: rev, owner_sub: String(it.owner_sub ?? ""), fields, links: (links as string[]).slice(0, 50), identity },
     purpose: purpose as Purpose, deliver, run: run.run,
+    ...(typeof b.approved_question === "string" ? { approved: b.approved_question } : {}),
   };
 }
 
