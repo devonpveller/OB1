@@ -43,7 +43,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { parseWikiPage, upsertWikiPagesReport, isWithheldWikiPage } from "./wiki-pages.mjs";
+import { parseWikiPage, upsertWikiPagesIsolated, isWithheldWikiPage, readWithheldRecord, recordWithheldPages, withheldFileFor, slugHash } from "./wiki-pages.mjs";
 import { listOpen, STRUCTURAL_FILE } from "./structural-ledger.mjs";
 import { isContentDir, isPagePath } from "./quartz-slug.mjs";
 
@@ -328,7 +328,11 @@ export async function recheckMissing({ rows, missing, fetchImpl = fetch, delayMs
  * Returns the report; with repair, `repaired` lists the slugs whose row was
  * written and the report is re-measured afterwards (`after`).
  */
-export async function reconcile({ vault = process.env.WIKI_GIT_DIR || "/wiki", repair = false, log = console.log, classOf, structuralFile } = {}) {
+// slug hashes this process's repair passes saw a guard withhold or refuse (the viewer cannot write the record)
+const _learnedHeld = new Set();
+export function _resetReconcileForTests() { _learnedHeld.clear(); }
+
+export async function reconcile({ vault = process.env.WIKI_GIT_DIR || "/wiki", repair = false, log = console.log, classOf, structuralFile, withheldFile } = {}) {
   const { classify } = await import("./page-classes.mjs");
   const cls = classOf || ((rel) => classify(rel).page_class);
   const files = await listFiles(vault);
@@ -337,17 +341,32 @@ export async function reconcile({ vault = process.env.WIKI_GIT_DIR || "/wiki", r
   // its own writes, or this pass's repair below), leave the file list before the diff, and only their COUNT is
   // reported - never the slugs (which pages are withheld is itself private).
   // (a withheld UPDATE keeps its older row and that row's file: only a withheld slug with NO row leaves the list)
-  const leaveOutHeld = (rowsNow) => { let n = 0; for (const s of [...files.keys()]) if (isWithheldWikiPage(s) && !rowsNow.has(s)) { files.delete(s); n++; } return n; };
+  // rw-wiki-guarded-pages: and the WITHHELD RECORD (wiki-pages.mjs, <vault>/content/.withheld-pages.json, slug hashes only):
+  // what a guard withheld or refused in ANY process - the compile's, the retry's, a cleanup's - is expected, not drift. A
+  // recorded slug leaves BOTH lists: its file (the refused text, moved out by the writer or the cleanup) and an older row
+  // the guard kept (stale or, its file gone, an orphan: the viewer presents neither, so neither is drift). A slug that is
+  // not recorded is judged as before - a genuinely missing page still counts.
+  const wfile = withheldFile || withheldFileFor(vault);
+  const recorded = new Set([...Object.keys(readWithheldRecord(wfile)), ..._learnedHeld]);
+  const isHeld = (s) => isWithheldWikiPage(s) || (recorded.size > 0 && recorded.has(slugHash(s)));
+  const heldSeen = new Set();
+  let withheldFiles = 0;
+  const leaveOutHeld = (rowsNow) => {
+    for (const s of [...files.keys()]) if (isHeld(s) && (!rowsNow.has(s) || recorded.has(slugHash(s)))) { files.delete(s); heldSeen.add(s); withheldFiles++; }
+    for (const s of [...rowsNow.keys()]) if (!files.has(s) && isHeld(s)) { rowsNow.delete(s); heldSeen.add(s); }
+    return heldSeen.size;
+  };
   const rows = await listRows();
   let withheld = leaveOutHeld(rows);
   await markEmptyFiles(vault, files, rows);
   const failed = listOpen(null, structuralFile || structuralFileFor(vault));
   let report = diffFilesRows(files, rows, cls, { failed });
   report.withheld = withheld;
+  report.withheldFiles = withheldFiles;
   if (report.missing.length) {
     // round 3: a page created inside this pass is re-read once before it counts
     const rc = await recheckMissing({ rows, missing: report.missing });
-    if (rc.resolved) { await markEmptyFiles(vault, files, rows); report = diffFilesRows(files, rows, cls, { failed }); report.withheld = withheld; }
+    if (rc.resolved) { await markEmptyFiles(vault, files, rows); report = diffFilesRows(files, rows, cls, { failed }); report.withheld = withheld; report.withheldFiles = withheldFiles; }
     report.missingRecheck = rc;
   }
   report.checkedAt = new Date().toISOString();
@@ -365,24 +384,30 @@ export async function reconcile({ vault = process.env.WIKI_GIT_DIR || "/wiki", r
     try { md = await readFile(join(vault, f.rel), "utf8"); } catch { continue; }
     batch.push(rowFromFile(f.rel, md, slugs));
   }
-  for (let i = 0; i < batch.length; i += 200) {
-    const part = batch.slice(i, i + 200);
-    try {
-      const rep = await upsertWikiPagesReport(part);
-      repaired.push(...rep.written);   // a withheld row is not repaired (and is remembered: see leaveOutHeld)
-      failedWrites.push(...(rep.hidden || []).map((s) => ({ slug: s, error: "not returned and not reported withheld by a guard (row-level security?)" })));
-    } catch (e) {
-      failedWrites.push(...part.map((r) => ({ slug: r.slug, error: String(e?.message || e) })));
-    }
+  // rw-wiki-guarded-pages: in small chunks, a guard's refusal (42501) isolated to its row - one refused note used to fail
+  // the whole repair batch, every pass - and a withheld or refused row is RECORDED (hash only; a read-only vault - the
+  // viewer's - keeps it in this process: leaveOutHeld below)
+  const rep = await upsertWikiPagesIsolated(batch);
+  repaired.push(...rep.written);   // a withheld row is not repaired (and is remembered: see leaveOutHeld)
+  failedWrites.push(...(rep.hidden || []).map((s) => ({ slug: s, error: "not returned and not reported withheld by a guard (row-level security?)" })));
+  failedWrites.push(...rep.failed);
+  const heldNow = [...rep.withheld, ...rep.refused];
+  if (heldNow.length) {
+    const pc = new Map(batch.map((r) => [r.slug, r.page_class]));
+    recordWithheldPages(heldNow, { file: wfile, pageClassOf: (s) => pc.get(s) || null });
+    // this pass and this process's later ones, whether or not the record could be written (a read-only vault)
+    for (const s of heldNow) { recorded.add(slugHash(s)); _learnedHeld.add(slugHash(s)); }
   }
   log(`[reconcile] repair pass: ${repaired.length} row(s) written (${report.missing.length} missing, ${report.stale.length} stale, ${report.empty.length} empty)` +
+    (heldNow.length ? `, ${heldNow.length} withheld by a privacy guard (not drift)` : "") +
     (failedWrites.length ? `, ${failedWrites.length} FAILED (first ${failedWrites[0].slug}: ${failedWrites[0].error})` : "") +
     (repaired.length ? `; first: ${repaired.slice(0, 5).join(", ")}` : ""));
   const rowsAfter = await listRows();
-  withheld += leaveOutHeld(rowsAfter);
+  withheld = leaveOutHeld(rowsAfter); // heldSeen is cumulative
   await markEmptyFiles(vault, files, rowsAfter);
   const after = diffFilesRows(files, rowsAfter, cls, { failed });
   after.withheld = withheld;
+  after.withheldFiles = withheldFiles;
   return { ...report, repaired, repairFailed: failedWrites, after };
 }
 
@@ -391,7 +416,7 @@ export function formatReport(r) {
   const red = r.drift > 0;
   lines.push(`[reconcile] ${red ? "DRIFT" : "clean"}: ${r.files} file(s), ${r.rows} row(s); ${r.missing.length} missing, ` +
     `${r.stale.length} stale, ${r.empty.length} empty, ${r.orphan.length} orphan, ${r.failed.length} failed` +
-    (r.withheld ? `; ${r.withheld} withheld by the database (not drift)` : ""));
+    (r.withheld ? `; ${r.withheld} withheld by the database (not drift${r.withheldFiles ? `; ${r.withheldFiles} of their files still in the vault` : ""})` : ""));
   for (const [c, b] of Object.entries(r.byClass).sort()) {
     lines.push(`[reconcile]   ${c}: files=${b.files} rows=${b.rows} missing=${b.missing.length} stale=${b.stale.length} ` +
       `empty=${b.empty.length} orphan=${b.orphan.length} failed=${b.failed.length}`);

@@ -221,6 +221,122 @@ export async function upsertWikiPagesReport(rows) {
   return { written, withheld, hidden };
 }
 
+// ── REFUSED ROWS (rw-wiki-guarded-pages) ────────────────────────────────────
+// The same guards (slots 380, 390, 430, 440) do not withhold a NOTE silently: they RAISE 42501 ("wiki_pages: this page
+// cannot be saved"), and PostgREST fails the WHOLE request - every other row of the batch with it (live 2026-11-21: the
+// viewer's repair of 29 rows refused because 22 notebook notes in it carry withheld text). A refusal is the guard's
+// decision, not an outage: the batch is split until the refused row stands alone, the others land, and the refused row is
+// WITHHELD like a silent one (no row, its file left out, never retried). Nothing about the guard changes.
+// Only the guards' ONE message counts (slot 430 R3: it names no guard and no reason); any other 42501 - a missing grant,
+// "permission denied for table wiki_pages" - stays a structural failure of the run (D13 item 6).
+export const GUARD_REFUSAL_MESSAGE = "wiki_pages: this page cannot be saved";
+export function isGuardRefusal(e) {
+  const m = String(e?.message ?? e ?? "");
+  return /"code"\s*:\s*"42501"/.test(m) && m.includes(`"message":"${GUARD_REFUSAL_MESSAGE}"`);
+}
+// Rows per write request (flush, retry, repair). The guards cost a lookup per 8-word window of a body (slot 440's text
+// rule): 200 rows of long source pages measured ~10 s of guard time live - the 10 s request timeout - so the retry's
+// 200-row chunks timed out every cycle and were recorded again as a "database outage" (rw-wiki-guarded-pages).
+export const WRITE_CHUNK = () => Math.max(1, Number(process.env.WIKI_PAGES_WRITE_CHUNK || "25"));
+/**
+ * Upsert rows so that a guard's refusal fails only the refused row. Returns { written, withheld, hidden, refused, failed:
+ * [{slug, error}] }; never throws. `refused` rows are also remembered as withheld (isWithheldWikiPage).
+ */
+export async function upsertWikiPagesIsolated(rows) {
+  const out = { written: [], withheld: [], hidden: [], refused: [], failed: [] };
+  const go = async (part) => {
+    if (!part.length) return;
+    try {
+      const rep = await upsertWikiPagesReport(part);
+      out.written.push(...rep.written); out.withheld.push(...rep.withheld); out.hidden.push(...(rep.hidden || []));
+    } catch (e) {
+      if (isGuardRefusal(e) && part.length > 1) {
+        const mid = Math.ceil(part.length / 2);
+        await go(part.slice(0, mid)); await go(part.slice(mid));
+      } else if (isGuardRefusal(e)) {
+        out.refused.push(part[0].slug); _withheld.add(part[0].slug);
+      } else {
+        out.failed.push(...part.map((r) => ({ slug: r.slug, error: String(e?.message || e) })));
+      }
+    }
+  };
+  const list = (Array.isArray(rows) ? rows : [rows]).filter((r) => r && r.slug);
+  for (let i = 0; i < list.length; i += WRITE_CHUNK()) await go(list.slice(i, i + WRITE_CHUNK()));
+  return out;
+}
+
+// ── the WITHHELD RECORD (rw-wiki-guarded-pages) ─────────────────────────────
+// What a guard withheld or refused is remembered across processes - the compile learns it, the viewer's reconcile (another
+// process, a read-only vault) must count the page as expected, not drift. <vault>/content/.withheld-pages.json holds the
+// SHA-256 of each slug and nothing else of the page: no slug, no title, no text (which pages are withheld is itself
+// private). A slug leaves the record when its row lands again. A dot-file: never walked, served or committed.
+export const WITHHELD_FILE = ".withheld-pages.json";
+export function withheldFileFor(vault = process.env.WIKI_GIT_DIR || "/wiki") {
+  return process.env.WIKI_WITHHELD_FILE || nodePath.join(vault, "content", WITHHELD_FILE);
+}
+export const slugHash = (slug) => crypto.createHash("sha256").update(String(slug)).digest("hex");
+export function readWithheldRecord(file = withheldFileFor()) {
+  try {
+    const j = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (j && j.pages && typeof j.pages === "object" && !Array.isArray(j.pages)) {
+      return Object.fromEntries(Object.entries(j.pages).filter(([k]) => /^[0-9a-f]{64}$/.test(k)));
+    }
+  } catch (e) {
+    if (e?.code !== "ENOENT") warnOnce("withheld-record read", e);
+  }
+  return {};
+}
+function updateWithheldRecord(file, fn) {
+  try {
+    return withLedgerLock(file, () => {
+      const pages = readWithheldRecord(file);
+      const changed = fn(pages);
+      if (!changed) return false;
+      fs.mkdirSync(nodePath.dirname(file), { recursive: true });
+      const tmp = `${file}.tmp-${os.hostname()}-${process.pid}-${crypto.randomBytes(4).toString("hex")}`;
+      const sorted = Object.fromEntries(Object.entries(pages).sort(([a], [b]) => a.localeCompare(b)));
+      fs.writeFileSync(tmp, JSON.stringify({ pages: sorted }, null, 2) + "\n");
+      fs.renameSync(tmp, file);
+      return true;
+    });
+  } catch (e) {
+    // a read-only vault (the viewer): this process still remembers the slugs (isWithheldWikiPage)
+    warnOnce("withheld-record write", e);
+    return false;
+  }
+}
+/** Record slugs as withheld (hashes only). Returns the number added. */
+export function recordWithheldPages(slugs, { file = withheldFileFor(), pageClassOf = () => null } = {}) {
+  const list = [...new Set((slugs || []).filter(Boolean))];
+  if (!list.length) return 0;
+  for (const s of list) _withheld.add(s);
+  let added = 0;
+  const at = new Date().toISOString();
+  updateWithheldRecord(file, (pages) => {
+    for (const s of list) {
+      const k = slugHash(s);
+      if (!pages[k]) added++;
+      pages[k] = { at, ...(pageClassOf(s) ? { page_class: pageClassOf(s) } : {}) };
+    }
+    return true;
+  });
+  return added;
+}
+/** A slug whose row landed is no longer withheld. Returns the number removed. */
+export function forgetWithheldPages(slugs, { file = withheldFileFor() } = {}) {
+  const list = [...new Set((slugs || []).filter(Boolean))];
+  if (!list.length) return 0;
+  let have;
+  try { have = fs.existsSync(file) ? readWithheldRecord(file) : null; } catch { have = null; }
+  if (!have || !list.some((s) => have[slugHash(s)])) return 0;
+  let removed = 0;
+  updateWithheldRecord(file, (pages) => {
+    for (const s of list) { const k = slugHash(s); if (pages[k]) { delete pages[k]; removed++; } }
+    return removed > 0;
+  });
+  return removed;
+}
+
 // The withheld rows' files: a staged update is dropped (the file keeps the content of the row the guard kept); a file
 // this run CREATED is removed (it holds the withheld content); an older file whose slug has no row any more (a page
 // withheld before this run, its file not yet moved out) is removed too - a file with no row is reconcile drift and
@@ -250,6 +366,13 @@ async function leaveOutWithheld(slugs) {
     _created.delete(p);
     if (created || (hasRow && !hasRow.has(s))) { try { fs.unlinkSync(p); } catch { /* gone */ } }
   }
+}
+// rw-wiki-guarded-pages: every withheld or refused slug of a flush is RECORDED (hashes only), so another process's
+// reconcile (the viewer's) counts it as expected
+function recordHeld(slugs) {
+  const cls = new Map();
+  for (const s of slugs) { const p = _pathOf.get(s); const rel = p && vaultRel(p); if (rel) { try { cls.set(s, classifySlug(rel).page_class); } catch { /* none */ } } }
+  recordWithheldPages(slugs, { pageClassOf: (s) => cls.get(s) || null });
 }
 
 // A compile run that COMPLETED but with structural failures or unsynced rows
@@ -404,33 +527,34 @@ export async function flushWikiPages() {
   if (!_queue.size) return { sent: 0, failed: 0 };
   const rows = [..._queue.values()];
   _queue.clear();
-  const CHUNK = 200;
+  const CHUNK = WRITE_CHUNK();
   let sent = 0;
   let failed = 0;
   let held = 0;
+  let refusedRun = 0;
   for (let i = 0; i < rows.length; i += CHUNK) {
     const part = rows.slice(i, i + CHUNK);
-    let err = null;
-    let rep = null;
     // at or before the rows' stamp (upsertWikiPages stamps them after this)
     const landedAt = new Date(Math.floor(Date.now() / 1000) * 1000);
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        rep = await upsertWikiPagesReport(part);
-        err = null;
-        break;
-      } catch (e) {
-        err = e;
-      }
+    // rw-wiki-guarded-pages: a guard's refusal (42501) fails only the refused row; a failed request is retried once
+    const rep = await upsertWikiPagesIsolated(part);
+    if (rep.failed.length) {
+      const again = await upsertWikiPagesIsolated(part.filter((r) => rep.failed.some((f) => f.slug === r.slug)));
+      rep.failed = again.failed;
+      for (const k of ["written", "withheld", "hidden", "refused"]) rep[k].push(...again[k]);
     }
-    if (err) {
-      failed += part.length;
-      for (const r of part) { _unsynced.set(r.slug, String(err?.message || err)); commitStaged(_pathOf.get(r.slug), null); _pathOf.delete(r.slug); }
-      console.error(`[wiki-pages] row flush FAILED for ${part.length} page(s) after one retry: ${err?.message || err}`);
-    } else {
-      // a withheld row (a database guard refused it, see upsertWikiPagesReport) is neither synced nor a failure: its
-      // file is left out, so it never becomes reconcile drift, and it is not retried
-      const out = new Set(rep.withheld);
+    if (rep.failed.length) {
+      const err = rep.failed[0].error;
+      failed += rep.failed.length;
+      for (const f of rep.failed) { _unsynced.set(f.slug, f.error); commitStaged(_pathOf.get(f.slug), null); _pathOf.delete(f.slug); }
+      console.error(`[wiki-pages] row flush FAILED for ${rep.failed.length} page(s) after one retry: ${err}`);
+    }
+    {
+      // a withheld row (a database guard withheld it, see upsertWikiPagesReport) or a REFUSED one (the guard raised
+      // 42501, see upsertWikiPagesIsolated) is neither synced nor a failure: its file is left out, so it never becomes
+      // reconcile drift, and it is not retried
+      const gone = new Set(rep.failed.map((f) => f.slug));
+      const out = new Set([...rep.withheld, ...rep.refused]);
       // a missing row no guard accounts for (rw-privacy-hardening): unsynced, its file kept, the run ends 3
       const hid = new Set(rep.hidden || []);
       // It may BE a guard's withheld row whose count did not arrive (no header, a mixed batch): so nothing of it is published. The
@@ -445,15 +569,17 @@ export async function flushWikiPages() {
         if (p && _created.has(p)) { _created.delete(p); try { fs.unlinkSync(p); } catch { /* gone */ } }
         _pathOf.delete(r.slug);
       }
-      const landed = part.filter((r) => !out.has(r.slug) && !hid.has(r.slug));
+      const landed = part.filter((r) => !out.has(r.slug) && !hid.has(r.slug) && !gone.has(r.slug));
       sent += landed.length;
       _synced += landed.length;
       for (const r of landed) { _unsynced.delete(r.slug); const p = _pathOf.get(r.slug); _created.delete(p); commitStaged(p, landedAt); _pathOf.delete(r.slug); }
-      if (out.size) { held += out.size; _heldRun += out.size; await leaveOutWithheld([...out]); }
+      if (landed.length) forgetWithheldPages(landed.map((r) => r.slug));
+      if (out.size) { held += out.size; _heldRun += out.size; recordHeld([...out]); await leaveOutWithheld([...out]); }
+      refusedRun += rep.refused.length;
     }
   }
   if (sent) console.log(`[wiki-pages] synced ${sent} page row(s)`);
-  if (held) console.log(`[wiki-pages] ${held} page(s) withheld by the database (a privacy guard): not written, their files left out`);
+  if (held) console.log(`[wiki-pages] ${held} page(s) withheld by the database (a privacy guard${refusedRun ? `; ${refusedRun} refused out loud` : ""}): not written, their files left out`);
   return held ? { sent, failed, withheld: held } : { sent, failed };
 }
 
@@ -630,15 +756,29 @@ export async function retryUnsyncedRows({ outDir, vaultDir = process.env.WIKI_GI
     console.error(`[wiki-pages] unsynced-row record ${file}: ${rejected.length} slug(s) rejected (not a vault slug; never read): ` +
       rejected.slice(0, 5).map((x) => JSON.stringify(x)).join(", "));
   }
+  // rw-wiki-guarded-pages: small chunks (WRITE_CHUNK - 200 long pages ran into the request timeout on the guards' cost and
+  // were recorded again as an outage, every cycle), a guard's refusal isolated to its row, and a row a guard withholds or
+  // refuses is WITHHELD: out of the record (never retried), recorded as withheld (hash only), and its file - the refused
+  // text, which this retry read it from - leaves the vault. Before this, a withheld row counted as landed and kept its file,
+  // and one refused row failed its whole chunk, for ever.
   const landedSlugs = [];
   const failedAgain = new Map();
-  for (let i = 0; i < batch.length; i += 200) {
-    const part = batch.slice(i, i + 200);
-    try {
-      await upsertWikiPages(part);
-      for (const r of part) landedSlugs.push(r.slug);
-    } catch (e) {
-      for (const r of part) failedAgain.set(r.slug, String(e?.message || e).slice(0, 300));
+  const heldSlugs = [];
+  const rep = await upsertWikiPagesIsolated(batch);
+  landedSlugs.push(...rep.written);
+  heldSlugs.push(...rep.withheld, ...rep.refused);
+  for (const f of rep.failed) failedAgain.set(f.slug, f.error.slice(0, 300));
+  for (const s of rep.hidden || []) failedAgain.set(s, "the row was not returned and no guard reported withholding it (row-level security?)");
+  const wfile = withheldFileFor(vaultDir);
+  if (landedSlugs.length) forgetWithheldPages(landedSlugs, { file: wfile });
+  if (heldSlugs.length) {
+    const cls = new Map(batch.map((r) => [r.slug, r.page_class]));
+    recordWithheldPages(heldSlugs, { file: wfile, pageClassOf: (s) => cls.get(s) || null });
+    for (const slug of heldSlugs) {
+      for (const r of [`${slug}.md`, `${slug}/index.md`]) {
+        const abs = nodePath.resolve(root, r);
+        if (abs.startsWith(root + nodePath.sep)) { try { fs.unlinkSync(abs); break; } catch { /* next */ } }
+      }
     }
   }
   // Apply the outcome to the record AS IT IS NOW: an entry is removed only if
@@ -646,18 +786,21 @@ export async function retryUnsyncedRows({ outDir, vaultDir = process.env.WIKI_GI
   // meanwhile keeps its newer entry); entries recorded meanwhile stay.
   updateUnsynced(file, (rows) => {
     const same = (slug) => rows[slug] && seen[slug] && rows[slug].at === seen[slug].at;
-    for (const slug of [...landedSlugs, ...gone, ...rejected]) if (same(slug)) delete rows[slug];
+    for (const slug of [...landedSlugs, ...gone, ...rejected, ...heldSlugs]) if (same(slug)) delete rows[slug];
     for (const [slug, error] of failedAgain) if (rows[slug]) rows[slug] = { ...rows[slug], error, at: new Date().toISOString() };
   });
   log(`[wiki-pages] retried ${slugs.length} row(s) left unsynced by a database outage: ${landedSlugs.length} landed, ` +
-    `${failedAgain.size} failed again, ${gone.length} dropped (file gone), ${rejected.length} rejected (not a vault slug)`);
-  return { retried: slugs.length, landed: landedSlugs.length, failed: failedAgain.size, dropped: gone.length, rejected: rejected.length };
+    `${failedAgain.size} failed again, ${gone.length} dropped (file gone), ${rejected.length} rejected (not a vault slug)` +
+    (heldSlugs.length ? `, ${heldSlugs.length} withheld by a privacy guard (not retried, files left out)` : ""));
+  const res = { retried: slugs.length, landed: landedSlugs.length, failed: failedAgain.size, dropped: gone.length, rejected: rejected.length };
+  return heldSlugs.length ? { ...res, withheld: heldSlugs.length } : res;
 }
 
 // Test seam.
 export function _resetWikiPagesForTests() {
   _queue.clear();
   _unsynced.clear();
+  _withheld.clear();
   _synced = 0;
   warnedKinds.clear();
 }
