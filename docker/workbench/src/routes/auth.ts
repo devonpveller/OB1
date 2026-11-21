@@ -19,11 +19,15 @@ import type { ForwardAuthConfig } from "../identity/forward_auth.ts";
 import * as store from "../identity/store.ts";
 import { identityOf, type Identity, rawTarget, seamPath } from "../middleware/identity.ts";
 import { reasonProblem } from "../identity/reason.ts";
+import type { PrivateViewsMode } from "../identity/private_view.ts";
 
 export interface AuthDeps {
   db: Db;
   fa: ForwardAuthConfig | null;
   mode: "forward-auth" | "header" | "default";
+  // rw-owner-private-view (D4): to whom the private views are served - signed-in users, the default identity (sign-in
+  // off), or nobody (sign-in off and WORKSPACE_DEFAULT_SUB blank)
+  privateViews?: PrivateViewsMode;
 }
 
 function me(who: Identity, deps: AuthDeps) {
@@ -41,6 +45,7 @@ function me(who: Identity, deps: AuthDeps) {
       ? { sub: who.sub, name: who.name, reason: who.impersonating.reason, since: who.impersonating.since, until: who.impersonating.until ?? null }
       : null,
     logout: fa ? deps.fa?.signOutUrl ?? null : null,
+    private_views: deps.privateViews ?? "off",
   };
 }
 

@@ -720,6 +720,89 @@ export type Podcasts = {
   podcasts: Array<PodcastEpisode>;
 };
 
+export type PrivateClaim = {
+  id: string;
+  kind: string;
+  text: string;
+  status: string;
+  epistemic_tag: string;
+  confidence: number;
+  contradicted: boolean;
+  created_at: string;
+  private_sources: Array<PrivateSourceRef>;
+  private_parents: Array<{
+    id: string;
+    text: string;
+  }>;
+  shared_sources: Array<{
+    id: string;
+    title: string;
+    url: string;
+  }>;
+};
+
+export type PrivateClaimOne = {
+  private: boolean;
+  claim: PrivateClaim;
+};
+
+export type PrivateClaims = {
+  private: boolean;
+  claims: Array<PrivateClaim>;
+  next: string | null;
+  sign_in_required?: boolean;
+};
+
+export type PrivateHit = {
+  source_id: string;
+  title: string;
+  kind: string;
+  created_at: string;
+  idx: number;
+  snippet: string;
+  score: number;
+};
+
+export type PrivateHits = {
+  private: boolean;
+  mode: string;
+  hits: Array<PrivateHit>;
+  sign_in_required?: boolean;
+};
+
+export type PrivateJob = {
+  id: string;
+  root_job_id: string | null;
+  created_at: string;
+  state: string;
+  query: string | null;
+};
+
+export type PrivateJobText = {
+  private: boolean;
+  job: {
+    id: string;
+    query: string | null;
+    result: Record<string, unknown> | null;
+    progress: Record<string, unknown> | null;
+    error: string | null;
+  };
+};
+
+export type PrivateJobs = {
+  private: boolean;
+  jobs: Array<PrivateJob>;
+  next: string | null;
+  sign_in_required?: boolean;
+};
+
+export type PrivateSourceRef = {
+  id: string;
+  title: string;
+  kind: string;
+  created_at: string;
+};
+
 export type ProcessAllItem = {
   source_id: string;
   outcome: string;
