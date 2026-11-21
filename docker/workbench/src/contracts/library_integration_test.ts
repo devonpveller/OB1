@@ -149,6 +149,36 @@ t("recent: the active sources first added in the window with their titles, the e
   }
 });
 
+t("a claim linked to a PRIVATE idea report is in neither read, for anyone; a shared single-source claim is (the control)", async () => {
+  try {
+    const w0 = await get("/waiting-claims?limit=50");
+    const r0 = await get("/recent?days=7&limit=50");
+    const src = await source("private-src");
+    // user B's private idea report and a claim drawn from it, backed by ONE active source (slot 390: the claim stays in public.claims)
+    const priv = await claim("PRIVATE-B idea claim", [[src, "states"]]);
+    const rep = crypto.randomUUID();
+    await sql(`INSERT INTO public.research_private_reports (id, research_key, owner_sub, title, content) VALUES ($1, $2, 'user-b', $3, 'private report body')`, [rep, `${MARK}-key`, `${MARK} private report`]);
+    await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2)`, [rep, priv]);
+    for (const who of ["user-a", "user-b", "user-c"]) {
+      const w = await get("/waiting-claims?limit=50", who);
+      assertEquals(w.json.total, w0.json.total, `${who}: the waiting total must not move for a private claim`);
+      assert(!JSON.stringify(w.json).includes("PRIVATE-B"), `${who}: no private claim text`);
+      const r = await get("/recent?days=7&limit=50", who);
+      assertEquals(r.json.claims_total, r0.json.claims_total, `${who}: claims_total must not count a private claim`);
+    }
+    // control: the same claim shape WITHOUT a private-report link moves both numbers
+    await claim("shared control claim", [[src, "states"]]);
+    const w1 = await get("/waiting-claims?limit=50");
+    const r1 = await get("/recent?days=7&limit=50");
+    assertEquals(w1.json.total, w0.json.total + 1);
+    assertEquals(r1.json.claims_total, r0.json.claims_total + 1);
+    assert(JSON.stringify(w1.json).includes("shared control claim"));
+  } finally {
+    await sql(`DELETE FROM public.research_private_reports WHERE research_key LIKE $1`, [`${MARK}%`]);
+    await cleanup();
+  }
+});
+
 t("recent: no user's private material is in the answer (a held source and a private report are not rows of sources)", async () => {
   try {
     const r = await get("/recent?days=90&limit=50");

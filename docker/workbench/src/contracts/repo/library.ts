@@ -11,6 +11,7 @@ export async function waitingClaims(db: Db, limit: number) {
     `SELECT c.id, c.text, c.created_at, count(*) OVER () AS total
        FROM public.claims c
       WHERE c.status = 'active' AND NOT c.contradicted
+        AND NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id) -- a claim drawn from a user's PRIVATE idea report stays in public.claims (slot 390) but is not library material
         AND (SELECT count(DISTINCT s.id)
                FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
               WHERE cs.claim_id = c.id AND cs.edge_type IN ('states', 'corroborates')
@@ -41,7 +42,8 @@ export async function recentSources(db: Db, days: number, limit: number) {
       [days, limit],
     ),
     db.query<{ n: number | bigint }>(
-      `SELECT count(*) AS n FROM public.claims c WHERE c.status = 'active' AND c.created_at >= now() - make_interval(days => $1::int)`,
+      `SELECT count(*) AS n FROM public.claims c WHERE c.status = 'active' AND c.created_at >= now() - make_interval(days => $1::int)
+          AND NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)`,
       [days],
     ),
   ]);

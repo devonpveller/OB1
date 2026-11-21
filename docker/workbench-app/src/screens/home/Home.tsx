@@ -94,7 +94,7 @@ function AskBox() {
 // shows a DIFFERENT person (its periodic whoami read) every card, every read in flight and the ask box are dropped
 // and read again for the new person; a failed poll (no subject this time) keeps the current Home, and nothing is
 // drawn or read until a subject has been known at least once.
-export function Home({ subject, loaded, onRetry = () => window.location.reload() }: { subject: string | null; loaded: boolean; onRetry?: () => void }) {
+export function Home({ subject, whoAnswered, onRetry = () => window.location.reload() }: { subject: string | null; whoAnswered: boolean; onRetry?: () => void }) {
   const last = useRef<string | null>(null);
   if (subject) last.current = subject;
   const known = subject ?? last.current;
@@ -102,7 +102,7 @@ export function Home({ subject, loaded, onRetry = () => window.location.reload()
     return (
       <div className="screen home" data-testid="home">
         <h1 className="sr-only">Home</h1>
-        {loaded
+        {whoAnswered
           ? <p className="meta" data-testid="home-failed">Could not tell who you are, so nothing is shown. <button type="button" onClick={onRetry}>Try again</button></p>
           : <p className="meta" role="status" data-testid="home-waiting">Checking who you are...</p>}
       </div>

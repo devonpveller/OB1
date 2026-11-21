@@ -443,6 +443,20 @@ describe("round 3 (tester attempt 1)", () => {
   });
 });
 
+describe("round 5 (privacy lab attempt 3)", () => {
+  it("F2: while whoami is still in flight Home says Checking, never Could not tell, even when other shell reads have answered", async () => {
+    setFetcher(async (u) => {
+      const p = u.split("?")[0];
+      if (p === "/workbench/workspace/whoami") return new Promise<Response>(() => {});
+      return new Response(JSON.stringify({ sessions: [], jobs: [], sources: [], total: 0, candidates: [] }), { status: 200 });
+    });
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("count-research")).toBeTruthy());
+    expect(screen.getByTestId("home-waiting")).toBeTruthy();
+    expect(screen.queryByTestId("home-failed")).toBeNull();
+  });
+});
+
 describe("round 4 (review)", () => {
   it("1: a new-sources count with no source rows is still not the empty line; claims_total alone is news", async () => {
     LIB = { ...LIB0, recent: { days: 7, sources_total: 0, claims_total: 3, sources: [] } };
