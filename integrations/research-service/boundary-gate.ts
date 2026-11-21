@@ -26,7 +26,9 @@ import { LEXICON_COUNT, LEXICON_SHA256, LEXICON_SOURCE, LEXICON_WORDS } from "./
 // pd0c-1 (rw-boundary-digest round 2): the private-host list gained the meeting / invite / share-link rule (shareLink)
 // pd0b-1 (rw-boundary-ideas, 420 reviewer R-F1): a non-public item link's FRAME words are not denied (an unreachable link
 // no longer refuses a plain question or the template's frame); ownerGate (an owner's approved question, plan 09 D7)
-export const BOUNDARY_VERSION = "pd0b-1";
+// pd0b-2 (rw-boundary-ideas round 2, tester T1): DENY entries normalised like a question (denyKeys); a token that is 2-3
+// deny entries written together is denied (segmentsIntoDeny); an identity's adjacent parts joined / initialled (identityJoins)
+export const BOUNDARY_VERSION = "pd0b-2";
 export const COPY_RUN = 4;
 export const MIN_TOKENS = 3;
 export const MAX_TOKENS = 60;
@@ -59,17 +61,54 @@ export function stem(w: string): string {
 }
 export const JOIN_MAX = 3;
 
+/** Round 3 (tester T1): the DENY entries in ONE normal form - each entry is cleaned and tokenised exactly as a
+ *  question is (NFKC, zero-width / soft hyphen / every Cf stripped, lowercased, separators dropped), and both its parts
+ *  and its separator-free join are kept, each also by stem. A hand-built set ("Dana Quillfeather") and denySet's own
+ *  tokens therefore meet a question token the same way. */
+export function denyKeys(deny: ReadonlySet<string>): Set<string> {
+  const keys = new Set<string>();
+  const put = (w: string) => { if (w) { keys.add(w); keys.add(stem(w)); } };
+  for (const d of deny) {
+    const parts = tokens(d);
+    for (const p of parts) put(p);
+    if (parts.length > 1) put(parts.join(""));
+  }
+  return keys;
+}
+
+/** Round 3 (tester T1): `w` read as 2..JOIN_MAX deny entries written together with no separator ("danaquillfeather",
+ *  "quillfeatherdana") - every piece a deny key of 2 or more characters and at least one of 3 or more. */
+function segmentsIntoDeny(w: string, keys: ReadonlySet<string>): boolean {
+  if (w.length < 4) return false;
+  // best[i] = the fewest pieces covering w[0..i), with whether a piece of 3+ was used (both tracked)
+  const reach: Array<Map<number, boolean>> = Array.from({ length: w.length + 1 }, () => new Map());
+  reach[0].set(0, false);
+  for (let i = 0; i < w.length; i++) {
+    for (const [n, long] of reach[i]) {
+      if (n >= JOIN_MAX) continue;
+      for (let j = i + 2; j <= w.length; j++) {
+        if (!keys.has(w.slice(i, j))) continue;
+        const l = long || j - i >= 3;
+        if (!reach[j].has(n + 1) || (l && !reach[j].get(n + 1))) reach[j].set(n + 1, l);
+      }
+    }
+  }
+  for (const [n, long] of reach[w.length]) if (n >= 2 && long) return true;
+  return false;
+}
+
 /** The indices of `t` that a DENY entry matches: a token itself, or a run of 2-3 tokens whose concatenation does,
- *  each compared by stem. */
+ *  each compared by stem - and (round 3, T1) a token or run that is 2-3 deny entries written together. gate(),
+ *  ownerGate(), the template and the link-path rule all use this one function, so they deny the same tokens. */
 export function deniedIndices(t: string[], deny: ReadonlySet<string>): Set<number> {
-  const stems = new Set<string>();
-  for (const d of deny) stems.add(stem(d));
+  const keys = denyKeys(deny);
+  const matches = (s: string) => keys.has(s) || keys.has(stem(s)) || segmentsIntoDeny(s, keys) || segmentsIntoDeny(stem(s), keys);
   const hit = new Set<number>();
   for (let i = 0; i < t.length; i++) {
     let joined = "";
     for (let n = 0; n < JOIN_MAX && i + n < t.length; n++) {
       joined += t[i + n];
-      if (stems.has(stem(joined)) || deny.has(joined)) for (let k = i; k <= i + n; k++) hit.add(k);
+      if (matches(joined)) for (let k = i; k <= i + n; k++) hit.add(k);
     }
   }
   return hit;
@@ -180,6 +219,26 @@ export interface DenyInput {
   id?: string;                        // the private inlet id
 }
 
+/** Round 3 (tester T1): an identity string's ADJACENT parts written together - every run of 2-3 consecutive parts
+ *  joined ("danaquillfeather"), and the same with one part cut to its initial ("dquillfeather", "danaq") while another
+ *  part of 3+ letters stays whole. deniedIndices also reads a token as deny entries written together in any order; these
+ *  add the initialled forms no plain segmentation can reach. */
+export function identityJoins(s: string): string[] {
+  const parts = tokens(s).filter((p) => /^\p{L}+$/u.test(p));
+  const out = new Set<string>();
+  for (let i = 0; i < parts.length; i++) {
+    for (let n = 2; n <= JOIN_MAX && i + n <= parts.length; n++) {
+      const run = parts.slice(i, i + n);
+      out.add(run.join(""));
+      for (let k = 0; k < run.length; k++) {
+        if (run[k].length < 2 || !run.some((p, m) => m !== k && p.length >= 3)) continue;
+        out.add(run.map((p, m) => (m === k ? p[0] : p)).join(""));
+      }
+    }
+  }
+  return [...out];
+}
+
 export function denySet(d: DenyInput): Set<string> {
   const out = new Set<string>();
   const add = (s: string) => { for (const w of tokens(s)) out.add(w); };
@@ -187,6 +246,7 @@ export function denySet(d: DenyInput): Set<string> {
   for (const s of d.identity) {
     add(s);
     // an email's local part and domain arrive as tokens already; a display name's parts too
+    for (const v of identityJoins(s)) out.add(v);
   }
   if (d.id) add(d.id);
   for (const f of Object.values(d.fields)) for (const w of tokens(f)) if (idShaped(w)) out.add(w);

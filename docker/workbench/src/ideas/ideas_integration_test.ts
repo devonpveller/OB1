@@ -159,9 +159,28 @@ t("I2: idea(id) shows its revisions, dossier, draft, every session and its ONE r
   assertEquals([r.json.room.state, r.json.room.room_id, r.json.room.dossiers], ["current", d1[0].o.room_id, 2], "I2 line 138");
   assertEquals(r.json.refinery.members.room, d1[0].o.room_id, "I2 line 139");
   assertEquals([r.json.draft.state, r.json.draft.text], ["current", "the accreting draft"], "I2 line 140");
-  // every session it spun off: each revision's job is listed (a queued run coalesces an edit onto it, P4a)
-  const sess = new Set(r.json.sessions.map((x: any) => x.id));
-  assert(r.json.sessions.length >= 1 && r.json.revisions.every((v: any) => !v.research_job_id || sess.has(v.research_job_id)), "every session it spun off");
+  // rw-boundary-ideas round 2 (tester T5): with slot 580 a capture or an edit makes NO job - it queues one private
+  // hand-back (the edit folds onto it) and the research service's drain forms the de-personalised question later. So
+  // before the drain the idea has no session, and exactly one pending hand-back on the latest revision ...
+  assertEquals(r.json.sessions.length, 0, "no session before the drain (580: the capture queues a hand-back, not a job)");
+  assert(r.json.revisions.every((v: any) => !v.research_job_id), "no revision names a job before the drain");
+  // (read through the owner's review function, as the app role: 420's static check keeps the table's name to its list)
+  const pend = await asApp<{ id: string; revision: number; state: string }>(
+    `SELECT handback_id::text AS id, revision, state FROM public.idea_handback_review($1, $2::uuid)`, [sub(A), id]);
+  assertEquals(pend.map((h) => [h.state, h.revision]), [["pending", 2]], "one pending hand-back, on the edited revision");
+  // ... then the drain's outcome, as the research service settles it (a queued DERIVED job, stamped on the idea)
+  const STAMP = JSON.stringify({ version: "pd0b-2", lexicon: "a".repeat(64), verdict_id: "b".repeat(64), evidence: [] });
+  const job = (await sql<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, caller, query, anchor, options, request_kind, boundary)
+     VALUES ('queued', 'manual', 'boundary', 'What is known about room designs?', 'What is known about room designs?', '{"public_links":[],"queue_origin":"manual"}'::jsonb, 'derived', $1::jsonb) RETURNING id::text AS id`, [STAMP]))[0].id;
+  const settled = await asApp<{ ok: boolean }>(`SELECT public.idea_handback_settle($1::uuid, 2, $2::uuid, 'queued', '{}'::jsonb, NULL) AS ok`, [pend[0].id, job]);
+  assertEquals(settled[0].ok, true, "the drain settles the pending hand-back");
+  // every session it spun off: after the drain the stamped derived job is listed, once, and the revision names it
+  const after = await idea(id);
+  assertEquals(after.status, 200, after.text);
+  assertEquals(after.json.sessions.map((x: any) => x.id), [job], "the drained job is the idea's one session");
+  assertEquals(after.json.revisions.map((v: any) => v.research_job_id ?? null), [null, job], "revision 2 (the one the question was formed from) names it");
+  const sess = new Set(after.json.sessions.map((x: any) => x.id));
+  assert(after.json.revisions.every((v: any) => !v.research_job_id || sess.has(v.research_job_id)), "every session it spun off");
   const rm = await call("GET", `/workbench/rooms/${d1[0].o.room_id}`);
   assertEquals(rm.json.entries.filter((e: any) => e.kind === "dossier").map((e: any) => e.body), ["first dossier", "second dossier"], "I2 line 143");
 });
@@ -666,4 +685,27 @@ t("I17 (rw-report-isolation): a non-idea research report is still a shared sourc
     assertEquals((c.json.claims as any[]).map((x) => [x.id, x.synthesis_id]), [[claim, src]], "the claim points at its shared report");
   }
   assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.sources WHERE id = $1 AND content_type = 'research_synthesis'`, [src]))[0].n, 1);
+});
+
+t("I18 (rw-boundary-ideas round 2): a 'dossier delivered' event (entity idea:<id>:dossier:<source>) reaches its owner only - B never sees it", async () => {
+  const id = await captured(sub(A), `dossier note ${rnd()}`);
+  const since = (await sql<{ t: string }>(`SELECT (now() - interval '1 second')::text AS t`))[0].t;
+  // what the research service's delivery does: the idea's dossier source is set, trg_ideas_notify posts the event
+  await sql(`UPDATE public.ideas SET dossier_source_id = $2 WHERE id = $1`, [id, FX.synthesis]);
+  const entity = `idea:${id}:dossier:${FX.synthesis}`;
+  assertEquals((await sql(`SELECT 1 FROM public.research_notifications WHERE entity = $1`, [entity])).length, 1,
+    "the dossier-shaped event exists (non-vacuous: the filter's :dossier: branch is exercised)");
+  const read = async (who: Record<string, string>) => {
+    const r = await call("GET", `/workbench/contract/notifications?limit=500&since=${encodeURIComponent(since)}`, undefined, who);
+    assertEquals(r.status, 200, r.text);
+    return r;
+  };
+  const a = await read(A);
+  assert((a.json.notifications as any[]).some((n) => n.entity === entity), "the owner reads the dossier event");
+  const b = await read(B);
+  assertEquals((b.json.notifications as any[]).filter((n) => String(n.entity ?? "").includes(id)), [], "B reads no event naming A's idea");
+  assertEquals([b.text.includes(id), b.text.includes(entity)], [false, false], "A's idea id appears nowhere in B's answer");
+  // and the lane (no identity header): the shared default subject reads none of it either
+  const lane = await read({});
+  assertEquals(lane.text.includes(id), false, "the lane reads no event naming A's idea");
 });

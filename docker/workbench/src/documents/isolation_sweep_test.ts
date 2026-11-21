@@ -303,10 +303,16 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // review of a refused question, each a marker) - no route may read it; a service:shared-key prompt on an unclassified
   // job (the 88 live ones' shape: hidden from every non-admin, D5) - A must not read it; and a DERIVED job, whose
   // question is public: A must read it (the positive control). Skipped on a base without slot 420.
-  const bnd = { inlet: `HandbackInlet${rnd()}`, deliver: `HandbackDeliver${rnd()}`, view: `HandbackView${rnd()}`, svc: `SvcPromptSecret${rnd()}`, pub: `DerivedPublic${rnd()}` };
+  const bnd = { inlet: `HandbackInlet${rnd()}`, deliver: `HandbackDeliver${rnd()}`, view: `HandbackView${rnd()}`, svc: `SvcPromptSecret${rnd()}`, pub: `DerivedPublic${rnd()}`, ideaTitle: `HandbackIdeaTitle${rnd()}` };
   const has420 = (await sql<{ ok: boolean }>(`SELECT to_regclass('public.research_handbacks') IS NOT NULL AS ok`))[0].ok;
   let bHandback = "", derivedJob = "";
   if (has420) {
+    // rw-boundary-ideas round 2 (tester T4): slot 580 binds an idea hand-back to a REAL idea of its owner
+    // (trg_research_handbacks_idea_owner), so the inlet is a real idea of B's - planted bare (no revision, so no
+    // pending hand-back of its own), its id and its title both markers A must never read. On a base without 580 the
+    // same row is simply an idea B owns.
+    bnd.inlet = crypto.randomUUID();
+    await sql(`INSERT INTO public.ideas (id, title, owner_sub) VALUES ($1::uuid, $2, $3)`, [bnd.inlet, bnd.ideaTitle, bSub]);
     bHandback = (await sql<{ id: string }>(
       `SELECT public.handback_open($1, 'idea', $2, 1, 'idea-research', NULL, 'awaiting_owner', '{}'::jsonb, jsonb_build_object('candidate', $3::text), jsonb_build_object('idea_id', $4::text))::text AS id`,
       [bSub, bnd.inlet, bnd.view, bnd.deliver]))[0].id;
@@ -387,7 +393,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
     exportSecret, leadSecret, ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])),
     privReport: privMk.text, privTitle: privMk.title, privKey: privMk.key, privReportId: bReport,
-    ...(bHandback ? { handbackInlet: bnd.inlet, handbackDeliver: bnd.deliver, handbackView: bnd.view, handbackId: bHandback } : {}),
+    ...(bHandback ? { handbackInlet: bnd.inlet, handbackIdeaTitle: bnd.ideaTitle, handbackDeliver: bnd.deliver, handbackView: bnd.view, handbackId: bHandback } : {}),
     ...(!aIsAdmin ? { svcPrompt: bnd.svc } : {}),
     roomEntry: room.entry, roomDraft: room.draft, roomId: bRoom, ideaEdit: ideaMk.edit, ideaDossier: ideaMk.dossier, ideaDraft: ideaMk.draft, sessionRoomId: bSessRoom, ...(bChat.status === 201 ? { roomChat: room.chat } : {}) };
   const doorName = (d: string) => d === BASE ? "workbench" : "viewer";
@@ -474,7 +480,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const named = (v: string) =>
     v === bJob ? "<B job>" : v === bHeld ? "<B held>" : v === bRefId ? "<B ref>" : v === bRefinery ? "<B refinery>" : bExports.includes(v) ? "<B export>"
       : v === bRoom ? "<B room>" : v === bSessRoom ? "<B session room>" : bCleanup.includes(v) ? "<B cleanup action>" : v;
-  const realIds = [...new Set([bJob, bHeld, bRefId, bRefinery, ...bExports, bRoom, bSessRoom, ...bCleanup, FX_ACTIVE, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
+  const realIds = [...new Set([bJob, bHeld, bRefId, bRefinery, ...bExports, bRoom, bSessRoom, ...bCleanup, ...(bHandback ? [bnd.inlet] : []), FX_ACTIVE, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
     .slice(0, 40);
   for (const r of reads.filter((x) => x.path.includes(":"))) {
     for (const v of realIds) {

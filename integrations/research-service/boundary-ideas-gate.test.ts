@@ -55,5 +55,59 @@ Deno.test("ownerGate (D7): the owner's own words pass; identity, ids, markers an
   for (const [q, why] of bad) assertFalse(G.ownerGate(q, d).ok, why);
   const named = G.ownerGate(`Is ${OWNER.email} a good baker?`, d);
   assert(!named.ok && named.tokens.includes("quillfeather"), "the failing tokens are named");
-  assertEquals(G.BOUNDARY_VERSION, "pd0b-1");
+  assertEquals(G.BOUNDARY_VERSION, "pd0b-2");
+});
+
+// ── round 2 (tester T1): the owner's name MERGED into one token ─────────────────────────────────────────────────────
+// deniedIndices joined 2-3 QUESTION tokens to meet one deny entry, but never met one question token made of 2-3 deny
+// entries: `DanaQuillfeather` (camel / zero-width / soft-hyphen joined) passed ownerGate and was stored on a shared
+// derived job. Each variant must be refused by ownerGate AND by the automatic gate with the SAME code (denied_token),
+// and the template must drop it.
+const T1_VARIANTS: Array<[string, string]> = [
+  ["DanaQuillfeather", "camel-joined (the tester's)"],
+  ["Dana\u200BQuillfeather", "zero-width-joined (the tester's)"],
+  ["Dana\u00ADQuillfeather", "soft-hyphen-joined"],
+  ["Dana\u2060Quillfeather", "word-joiner-joined"],
+  ["danaQuillfeather", "lower camel"],
+  ["DANAQUILLFEATHER", "upper, merged"],
+  ["ＤａｎａＱｕｉｌｌｆｅａｔｈｅｒ", "fullwidth, merged (NFKC)"],
+  ["DanaQuillfeathers", "merged plural"],
+  ["QuillfeatherDana", "merged, reversed order"],
+  ["Danaquill feather", "re-split at the wrong place"],
+  ["Dana.Quillfeather", "dotted"],
+  ["Dana-Quillfeather", "hyphenated"],
+  ["D.Quillfeather", "initial, dotted"],
+  ["DQuillfeather", "initial, merged"],
+  ["DanaQ", "first name + surname initial, merged"],
+  ["DanaQ.", "first name + surname initial, dotted"],
+];
+
+Deno.test("T1: a merged / joined / initialled owner name is refused by ownerGate and by the automatic gate alike", () => {
+  const d = G.denySet({ ...base, links: [] });
+  const failed: string[] = [];
+  for (const [name, why] of T1_VARIANTS) {
+    const q = `What heating suits ${name} barns?`;
+    const og = G.ownerGate(q, d);
+    const ag = G.gate(q, EV, d, lex, []);
+    if (og.ok) failed.push(`ownerGate accepted ${why}`);
+    if (ag.ok || ag.code !== "denied_token") failed.push(`gate did not deny ${why} (${ag.ok ? "ok" : ag.code})`);
+    if (!og.ok && !ag.ok && og.code !== ag.code) failed.push(`codes differ for ${why}: ${og.code} vs ${ag.code}`);
+    const tq = G.templateQuestion(`Heating for ${name} barns`, d);
+    if (tq && G.tokens(tq.question).some((w) => w.includes("quillfeather") || w.startsWith("dana"))) failed.push(`template kept ${why}`);
+  }
+  assertEquals(failed, []);
+});
+
+Deno.test("T1: a deny set built by hand (entries with separators or invisibles) is normalised the same way", () => {
+  const raw = new Set(["Dana Quillfeather", "Quill\u200Bfeather"]);
+  for (const q of ["What suits DanaQuillfeather barns?", "What suits Dana Quillfeather barns?", "What suits quillfeather barns?"]) {
+    assertFalse(G.ownerGate(q, raw).ok, q);
+  }
+});
+
+Deno.test("T1 controls: ordinary words that merely contain or neighbour a name part still pass", () => {
+  const d = G.denySet({ ...base, links: [] });
+  for (const q of ["How do sourdough starters behave in a Bramblecote kitchen?", "What heating suits mundane barns?",
+    "What is known about community solar roofs?"]) assert(G.ownerGate(q, d).ok, q);
+  assert(G.gate("What is known about community solar roofs?", EV, d, lex, []).ok);
 });

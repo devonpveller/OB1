@@ -345,6 +345,13 @@ try {
   if ($errs.Count) { Save 'initdb-errors.log' ($errs -join "`n") }
   $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) 'ob_app_memory (non-superuser, service_role) - the production shape'
+  # rw-boundary-ideas round 2 (tester t-pd0b-1): the boundary slots grant EXECUTE to ob_app_memory only, and initdb ran
+  # them before the role existed - re-run each one the chain mounted (idempotent, as production does after the role)
+  foreach ($m in @($chain | Where-Object { $_[1] -match '^[0-9]{3}-init-(request-boundary|boundary-digest|boundary-ideas)\.sql$' })) {
+    $null = Dk cp (Join-Path $stage $m[1]) "${db}:/tmp/$($m[1])"
+    $null = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -q -f "/tmp/$($m[1])"
+    Check ($script:rc -eq 0) "$($m[1]) re-run after ob_app_memory exists (its grants)"
+  }
   $null = Stamp-Guard 'DISABLE'   # rw-inlet-stamp: the fixtures are legacy-shaped (an unowned idea thought)
   $null = Dk cp (Join-Path $ct 'fixtures.sql') "${db}:/tmp/fixtures.sql"
   $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/fixtures.sql
