@@ -126,6 +126,12 @@ ok(!/ALPHA/.test(await ev(`document.documentElement.outerHTML`)), "bob's page so
 for (const sch of ["light", "dark"]) { await scheme(sch); await axe(`${sch} Home as bob`); }
 await scheme("light");
 
+// ---- 5b. a non-owner admin: can_act on everything and sees the text, but Home lists only what they own
+await setMode("admin"); await go("/");
+ok(!/ALPHA|SERVICE/.test(await ev(`document.body.innerText`)) && !!(await ev(`!!document.querySelector('[data-testid=empty-research]')`)), "admin who owns no session: Home shows no one else's session text and the Research card is empty");
+ok(!/[0-9]/.test(await ev(`document.querySelector('[data-testid=card-research]').textContent`)), "admin: no count or hint on the Research card");
+await scheme("dark"); await axe("dark Home as a non-owner admin"); await scheme("light");
+
 // ---- 6. a failing read blanks one card
 await setMode("broken"); await go("/");
 ok((await read("[data-testid=failed-podcasts]")).length === 1 && JSON.stringify(await titles("docs")).includes("ALPHA newest draft"), "podcasts fail alone: that card says so, the others load");

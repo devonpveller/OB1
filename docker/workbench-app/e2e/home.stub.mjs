@@ -9,8 +9,8 @@ import http from "node:http";
 const KEY = process.env.LAB_KEY || "";
 const H = 3600 * 1000, D = 24 * H;
 const ago = (ms) => new Date(Date.now() - ms).toISOString();
-const card = (id, status, query, can, tree, waiting, fin) => ({
-  id, status, query, can_act: can, waiting_on: waiting, tree: Array.from({ length: tree }, () => ({})),
+const card = (id, status, query, can, tree, waiting, fin, mine = can) => ({
+  id, status, query, can_act: can, mine, waiting_on: waiting, tree: Array.from({ length: tree }, () => ({})),
   created_at: ago(H), started_at: ago(H), finished_at: fin ? ago(5 * H) : null,
 });
 const FOREIGN = card("s1", "running", "", false, 3, { kind: "branches", detail: "2 open branches" });
@@ -39,9 +39,10 @@ const PEOPLE = {
   },
   nobody: { documents: [], ideas: [], episodes: [], requests: [], sessions: [FOREIGN] },
 };
+PEOPLE.admin = { documents: [], ideas: [], episodes: [], requests: [], sessions: [card("s1", "running", "ALPHA admin can read this", true, 3, { kind: "branches", detail: "2 open branches" }, false, false), card("s7", "running", "SERVICE job text", true, 1, { kind: "stage", detail: "plan" }, false, false)] };
 PEOPLE.broken = PEOPLE.alice;
-const NAME = { alice: "Alice Lab", bob: "Bob Builder", nobody: "Nina Nobody", broken: "Alice Lab" };
-const SUB = { alice: "u-alice", bob: "u-bob", nobody: "u-nobody", broken: "u-alice" };
+const NAME = { admin: "Ada Admin", alice: "Alice Lab", bob: "Bob Builder", nobody: "Nina Nobody", broken: "Alice Lab" };
+const SUB = { admin: "u-admin", alice: "u-alice", bob: "u-bob", nobody: "u-nobody", broken: "u-alice" };
 const LIB = {
   timeline: [
     { at: ago(D), kind: "source_revision", ref: "a@1", summary: "revision 1 by original", source_id: "a", lifecycle: "active" },

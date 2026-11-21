@@ -7,7 +7,7 @@ import { setFetcher, requestLog, clearRequestLog } from "../src/lib/api";
 import { resetState } from "../src/lib/state";
 import { ago } from "../src/screens/home/home-data";
 
-type Id = "alice" | "bob" | "nobody";
+type Id = "alice" | "bob" | "nobody" | "admin";
 const NOW = Date.now();
 const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
 const H = 3600 * 1000, D = 24 * H;
@@ -27,16 +27,17 @@ const DB = {
       { id: "r2", team_id: "t", title: "ALPHA digest episode", state: "done", episode_id: "e1", error: null, turns: 3, created_at: iso(H), updated_at: iso(H) },
     ],
     sessions: [
-      { id: "s1", status: "running", query: "ALPHA which CPUs fit", can_act: true, waiting_on: { kind: "branches", detail: "2 open branches" }, tree: [{}, {}, {}], created_at: iso(H), started_at: iso(H), finished_at: null },
-      { id: "s2", status: "done", query: "ALPHA finished question", can_act: true, waiting_on: { kind: "nothing", detail: "done" }, tree: [{}], created_at: iso(D), started_at: iso(D), finished_at: iso(5 * H) },
+      { id: "s1", status: "running", query: "ALPHA which CPUs fit", can_act: true, mine: true, waiting_on: { kind: "branches", detail: "2 open branches" }, tree: [{}, {}, {}], created_at: iso(H), started_at: iso(H), finished_at: null },
+      { id: "s2", status: "done", query: "ALPHA finished question", can_act: true, mine: true, waiting_on: { kind: "nothing", detail: "done" }, tree: [{}], created_at: iso(D), started_at: iso(D), finished_at: iso(5 * H) },
     ],
   },
   bob: {
     documents: [{ title: "BRAVO plan", path: "documents/bravo.md", updated: iso(H), outbound_links: [] }],
     ideas: [], episodes: [], requests: [],
-    sessions: [{ id: "s9", status: "running", query: "BRAVO own question", can_act: true, waiting_on: { kind: "stage", detail: "plan" }, tree: [{}], created_at: iso(H), started_at: iso(H), finished_at: null }],
+    sessions: [{ id: "s9", status: "running", query: "BRAVO own question", can_act: true, mine: true, waiting_on: { kind: "stage", detail: "plan" }, tree: [{}], created_at: iso(H), started_at: iso(H), finished_at: null }],
   },
   nobody: { documents: [], ideas: [], episodes: [], requests: [], sessions: [] },
+  admin: { documents: [], ideas: [], episodes: [], requests: [], sessions: [] },
 } as const;
 
 // The shared library: the same for every identity.
@@ -57,7 +58,9 @@ const LIB = {
   ],
 };
 // Alice's running session as Bob's read returns it: another user's card has an empty question and can_act false.
-const FOREIGN = { id: "s1", status: "running", query: "", can_act: false, waiting_on: { kind: "branches", detail: "2 open branches" }, tree: [{}, {}, {}], created_at: iso(H), started_at: iso(H), finished_at: null };
+// a service job an admin may act on: can_act true, question visible, but not the admin's own
+const SERVICE = { id: "s7", status: "running", query: "SERVICE job text", can_act: true, mine: false, waiting_on: { kind: "stage", detail: "plan" }, tree: [{}], created_at: iso(H), started_at: iso(H), finished_at: null };
+const FOREIGN = { id: "s1", status: "running", query: "", can_act: false, mine: false, waiting_on: { kind: "branches", detail: "2 open branches" }, tree: [{}, {}, {}], created_at: iso(H), started_at: iso(H), finished_at: null };
 
 let who: Id = "alice";
 let failing: string[] = [];
@@ -78,7 +81,7 @@ function stub() {
     if (path === "/workbench/contract/podcasts/requests") return j({ requests: me.requests });
     if (path === "/workbench/contract/sessions") {
       const own = me.sessions as readonly unknown[];
-      return j({ sessions: who === "bob" ? [...own, FOREIGN] : who === "nobody" ? [FOREIGN] : own });
+      return j({ sessions: who === "bob" ? [...own, FOREIGN] : who === "nobody" ? [FOREIGN] : who === "admin" ? [{ ...FOREIGN, query: "ALPHA admin can read this", can_act: true }, SERVICE] : own });
     }
     if (path === "/workbench/contract/timeline") return j({ events: LIB.timeline });
     if (path === "/workbench/contract/claims") return j({ count: LIB.claims.length, claims: LIB.claims });
@@ -227,6 +230,21 @@ describe("two identities, planted data (acceptance 3)", () => {
     cleanup(); who = "bob";
     await renderHome();
     expect(document.body.textContent).not.toMatch(A);
+  });
+  it("a non-owner admin: every session comes back with can_act true and readable text, but Home lists none of them", async () => {
+    who = "admin";
+    await renderHome();
+    expect(document.body.textContent).not.toMatch(/ALPHA|SERVICE/);
+    expect(screen.getByTestId("empty-research")).toBeTruthy();
+    expect(card("research").textContent).not.toMatch(/[0-9]/);
+  });
+  it("a card without the owner flag is not shown (no guess)", async () => {
+    who = "alice";
+    const own = DB.alice.sessions as unknown as any[];
+    const saved = own.map((x) => x.mine);
+    own.forEach((x) => delete x.mine);
+    try { await renderHome(); expect(screen.getByTestId("empty-research")).toBeTruthy(); }
+    finally { own.forEach((x, i) => (x.mine = saved[i])); }
   });
   it("a subject with nothing sees Alice's session neither as a row nor as a count", async () => {
     who = "nobody";

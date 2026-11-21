@@ -10,7 +10,7 @@ import type { Db } from "../contracts/db.ts";
 import { adminSeesOwnerless, FOREIGN_JOB, ownerlessOwner, type Viewer } from "../documents/ownership.ts";
 import { identityConfig } from "../middleware/identity.ts";
 import {
-  adminOf, type BranchRow, cardOf, type Card, type EventRow, type EventView, type InletRef, isOpen, mayActOn, redactEvents,
+  adminOf, type BranchRow, cardOf, type Card, type EventRow, type EventView, type InletRef, isOpen, mayActOn, ownsSession, redactEvents,
 } from "./cards.ts";
 
 export interface Who extends Viewer {
@@ -147,7 +147,7 @@ export async function card(db: Db, id: string, who: Who, owui: string): Promise<
     id: j.id, status: j.status, origin: j.origin, caller: j.caller, inlet_ref: j.inlet_ref, refinery_id: j.refinery_id,
     query: j.query, progress: { phase: j.phase ?? j.status }, created_at: j.created_at, started_at: j.started_at,
     finished_at: j.finished_at, queue_position: j.queue_position, foreign: j.foreign_, idea_inlet: j.idea_inlet,
-    can_act: canAct, own_steers: own, branches: tree, events: ev,
+    can_act: canAct, mine: ownsSession(j.owner_sub, who, ownerlessOwner()), own_steers: own, branches: tree, events: ev,
   }, owui);
   return { card: c, rootId: j.root_id, foreign: j.foreign_, view, own, owner: j.owner_sub };
 }

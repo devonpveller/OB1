@@ -30,13 +30,12 @@ export async function readDocuments(): Promise<DocRow[]> {
 }
 
 // contract/sessions (state=recent: open sessions + those finished in the last day). The read returns every
-// user's sessions (research is shared); another user's card has an empty question and can_act false.
-// Home shows only the cards the signed-in subject may act on (their own), so nothing of anyone else's
-// appears, not even a count.
+// user's sessions (research is shared). Each card carries `mine` (the viewer owns it); Home shows only those,
+// so nothing of anyone else's appears, not even a count, and an admin sees only their own.
 export async function readSessions(): Promise<SessionRow[]> {
   const { data } = await api("GET", "/workbench/contract/sessions?state=recent&limit=50");
   return arr(data?.sessions)
-    .filter((s) => s?.can_act === true && typeof s.query === "string" && s.query.trim() !== "")
+    .filter((s) => s?.mine === true) // the server's owner flag: an admin acting on someone else's or a service job is not "mine"
     .map((s) => ({
       id: String(s.id), query: String(s.query), status: String(s.status ?? ""),
       waiting: String(s.waiting_on?.kind === "nothing" ? "" : s.waiting_on?.detail ?? ""),

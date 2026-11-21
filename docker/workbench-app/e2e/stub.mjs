@@ -9,17 +9,23 @@ const FX = {
   alice: {
     whoami: { subject_sub: "u-alice", actor_sub: "u-alice", name: "Alice Lab" },
     me: { mode: "forward-auth", signed_in: true, kind: "user", subject_sub: "u-alice", name: "Alice Lab" },
-    sessions: 2, jobs: [["retry"], ["cancel"], ["cancel"], []], total: 3, candidates: [true, false],
+    sessions: 2, foreign: 1, jobs: [["retry"], ["cancel"], ["cancel"], []], total: 3, candidates: [true, false],
   },
   bob: {
     whoami: { subject_sub: "u-bob", actor_sub: "u-bob", name: "Bob Builder" },
     me: { mode: "forward-auth", signed_in: true, kind: "user", subject_sub: "u-bob", name: "Bob Builder" },
-    sessions: 0, jobs: [["retry"], ["retry"]], total: 7, candidates: [],
+    sessions: 0, foreign: 3, jobs: [["retry"], ["retry"]], total: 7, candidates: [],
   },
   default: {
     whoami: { subject_sub: "operator", actor_sub: "operator", name: "operator" },
     me: { mode: "default", signed_in: true, kind: "default", subject_sub: "operator", name: "operator" },
-    sessions: 1, jobs: [], total: 0, candidates: [],
+    sessions: 1, foreign: 0, jobs: [], total: 0, candidates: [],
+  },
+  // header mode, no identity header on the request: the default subject, kind "default", mode "header"
+  header: {
+    whoami: { subject_sub: "operator", actor_sub: "operator", name: "operator", kind: "default" },
+    me: { mode: "header", signed_in: true, kind: "default", subject_sub: "operator", name: "operator" },
+    sessions: 0, foreign: 2, jobs: [], total: 0, candidates: [],
   },
 };
 let mode = "alice";
@@ -34,7 +40,7 @@ http.createServer((req, res) => {
   const p = req.url.split("?")[0];
   if (p === "/workbench/workspace/whoami") return json(f.whoami);
   if (p === "/workbench/auth/me") return json(f.me);
-  if (p === "/workbench/contract/sessions") return json({ sessions: Array.from({ length: f.sessions }, (_, i) => ({ id: "s" + i })) });
+  if (p === "/workbench/contract/sessions") return json({ sessions: [...Array.from({ length: f.sessions }, (_, i) => ({ id: "s" + i, mine: true, can_act: true })), ...Array.from({ length: f.foreign }, (_, i) => ({ id: "f" + i, mine: false, can_act: false }))] });
   if (p === "/workbench/intake/jobs") return json({ jobs: f.jobs.map((a, i) => ({ id: "j" + i, detail: { actions: a } })) });
   if (p === "/workbench/contract/cleanup/sources") return json({ sources: [], total: f.total });
   if (p === "/workbench/contract/cleanup/reopen-candidates") return json({ candidates: f.candidates.map((e) => ({ evidence: e ? [{}] : [] })) });

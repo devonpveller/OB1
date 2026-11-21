@@ -1,7 +1,7 @@
 // Screen 0, "What moved where": static content from the approved Overview mockup. No reads.
 import { Link } from "./Link";
 
-type Need = "nothing" | "a document" | "upkeep";
+type Need = "nothing" | "a document" | "housekeeping";
 const ROWS: [string, string, Need][] = [
   ["Search", "The search bar on every screen (Ctrl K)", "nothing"],
   ["Documents, Document", "Documents, and the document view", "nothing"],
@@ -14,9 +14,9 @@ const ROWS: [string, string, Need][] = [
   ["Refinery", "Inside the document: Refine (when it came from an idea)", "a document"],
   ["Properties, History, Export", "Inside the document: Details, History, Export", "a document"],
   ["Queue research, Gap session", "\"Research this\" in the document toolbar and on selected text", "a document"],
-  ["Intake", "Housekeeping, Imports", "upkeep"],
-  ["Trail, Cleanup", "Housekeeping, Removals and trail, Cleanup", "upkeep"],
-  ["Settings", "Housekeeping, Settings", "upkeep"],
+  ["Intake", "Housekeeping, Imports", "housekeeping"],
+  ["Trail, Cleanup", "Housekeeping, Removals and trail, Cleanup", "housekeeping"],
+  ["Settings", "Housekeeping, Settings", "housekeeping"],
 ];
 
 export function Overview() {
@@ -32,7 +32,7 @@ export function Overview() {
             {ROWS.map(([from, to, need]) => (
               <tr key={from}>
                 <td>{from}</td><td>{to}</td>
-                <td><span className={"chip " + (need === "a document" ? "chip-doc" : need === "upkeep" ? "chip-up" : "chip-all")}>{need}</span></td>
+                <td><span className={"chip " + (need === "a document" ? "chip-doc" : need === "housekeeping" ? "chip-up" : "chip-all")}>{need === "housekeeping" ? "nothing" : need}</span></td>
               </tr>
             ))}
           </tbody>
