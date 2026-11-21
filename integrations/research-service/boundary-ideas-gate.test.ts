@@ -55,7 +55,7 @@ Deno.test("ownerGate (D7): the owner's own words pass; identity, ids, markers an
   for (const [q, why] of bad) assertFalse(G.ownerGate(q, d).ok, why);
   const named = G.ownerGate(`Is ${OWNER.email} a good baker?`, d);
   assert(!named.ok && named.tokens.includes("quillfeather"), "the failing tokens are named");
-  assertEquals(G.BOUNDARY_VERSION, "pd0b-3");
+  assertEquals(G.BOUNDARY_VERSION, "pd0b-4");
 });
 
 // ── round 2 (tester T1): the owner's name MERGED into one token ─────────────────────────────────────────────────────
@@ -158,6 +158,23 @@ const T6_NAME_FORMS: Array<[string, string]> = [
   ["truncated surname, 6 letters", "What heating suits Quillf barns?"],
   ["truncated + homoglyph", "What heating suits Qu\u0456llfeath barns?"],
   ["digit-zero homoglyph in the email local part", "What heating suits danaqu1llfeather barns?"],
+  // round 4 (tester T7): leetspeak - digits and symbols for letters (3 e, 4 a, 5 s, 7 t, 8 b, 9 g, @ a, $ s, | l, ! i)
+  ["leet: D4na (the tester's)", "What heating suits D4na barns?"],
+  ["leet: Dan4 (the tester's)", "What heating suits Dan4 barns?"],
+  ["leet: Quillf3ather (the tester's)", "What heating suits Quillf3ather barns?"],
+  ["leet: Quillfeath3r (the tester's)", "What heating suits Quillfeath3r barns?"],
+  ["leet: Qu1llf3ath3r (the tester's)", "What heating suits Qu1llf3ath3r barns?"],
+  ["leet: Qu1llfe4ther", "What heating suits Qu1llfe4ther barns?"],
+  ["leet: D4na Qu1llfeather", "What heating suits D4na Qu1llfeather barns?"],
+  ["leet: D4n4", "What heating suits D4n4 barns?"],
+  ["leet: d@na", "What heating suits d@na barns?"],
+  ["leet: D@naQuillfe@ther", "What heating suits D@naQuillfe@ther barns?"],
+  ["leet: Qu|llfeather", "What heating suits Qu|llfeather barns?"],
+  ["leet: Qu!llfeather", "What heating suits Qu!llfeather barns?"],
+  ["leet: Quillfeather$ (plural)", "What heating suits the Quillfeather$ barns?"],
+  ["leet: QU1LLF3ATH3R", "What heating suits QU1LLF3ATH3R barns?"],
+  ["leet: D4na's", "What heating suits D4na's barns?"],
+  ["leet: 7-free Quillfea7her", "What heating suits Quillfea7her barns?"],
 ];
 
 Deno.test("T6: every name form is refused by ownerGate AND gate, both with denied_token (table-driven)", () => {
@@ -176,7 +193,10 @@ Deno.test("T6 controls: common words are not over-denied, and both gates agree o
   const bad: string[] = [];
   for (const q of ["What networks suit old barns?", "What is a danah feather pillow?", "How do quills and feathers differ?",
     "How does feathering a roof work?", "Which quilts suit a cold cabin?", "What is known about the Danube and Canada?",
-    "Is a mundane roof design cheaper?", "What heating suits old cold barns?", "How does a quiller tool work?"]) {
+    "Is a mundane roof design cheaper?", "What heating suits old cold barns?", "How does a quiller tool work?",
+    // round 4: digits and symbols in ordinary questions are not turned into the owner's name
+    "Do 3d printed roofs cost less?", "Which 5g networks suit rural barns?", "What do 4x4 roof trusses cost?",
+    "Is a $5 roof repair kit any good?", "What does a 2024 survey say about roofs?", "Is solar worth it! for barns?"]) {
     const o = G.ownerGate(q, d);
     if (!o.ok) bad.push(`ownerGate refused: ${q} ${JSON.stringify(o.tokens)}`);
     const a = G.gate(q, EV, d, lex, []);
@@ -194,4 +214,9 @@ Deno.test("T6: the skeleton maps Latin / Cyrillic / Greek / fullwidth look-alike
   same("\u0414\u0410NA", "dana");
   same(G.tokens("\uFF24\uFF41\uFF4E\uFF41")[0], "dana");
   assertEquals(G.skeleton("dana"), "dana");
+  same("d4n4", "dana");
+  same("qu1llf3ath3r", "quillfeather");
+  same("quillfea7her", "quillfeather");
+  same(G.tokens("d@na")[0], "dana");
+  same(G.tokens("qu|llfe!ther")[0], "quillfeither");
 });

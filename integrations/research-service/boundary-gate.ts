@@ -30,7 +30,8 @@ import { LEXICON_COUNT, LEXICON_SHA256, LEXICON_SOURCE, LEXICON_WORDS } from "./
 // deny entries written together is denied (segmentsIntoDeny); an identity's adjacent parts joined / initialled (identityJoins)
 // pd0b-3 (round 3, tester T6 - the coordinator's stopping rule): the confusable skeleton on both sides (skeleton); a
 // token containing a 5+ letter identity part or a 6+ letter prefix of one (containsIdentity); initials in any position
-export const BOUNDARY_VERSION = "pd0b-3";
+// pd0b-4 (round 4, tester T7): the leetspeak digits 3 4 5 7 8 9 in the skeleton; @ $ | ! inside a word read as a letter (tokens)
+export const BOUNDARY_VERSION = "pd0b-4";
 export const COPY_RUN = 4;
 export const MIN_TOKENS = 3;
 export const MAX_TOKENS = 60;
@@ -45,9 +46,17 @@ export function cleanText(s: string): string {
   return String(s ?? "").normalize("NFKC").replace(/[\p{Default_Ignorable_Code_Point}\p{Cf}]/gu, "").normalize("NFKC");
 }
 
+/** Round 4 (tester T7): a leetspeak SYMBOL standing for a letter INSIDE a word (`d@na`, `qu|llfeather`, `qu!llfeather`,
+ *  `quill$feather`) is read as that letter, so the word stays one token and meets the deny list (and the skeleton).
+ *  Only between two letters / digits: `$5`, `a@`, a sentence's `!` are untouched; and an EMAIL's @ (one followed by a
+ *  domain, `x@example.net`) is left alone, so an address still splits into its local part and its domain. */
+const LEET_SYMBOL: Record<string, string> = { "@": "a", "$": "s", "|": "l", "!": "i" };
+const LEET_INSIDE = /(?<=[\p{L}\p{N}])(?:[$|!]|@(?![\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.\p{L}{2,}))+(?=[\p{L}\p{N}])/gu;
+
 export function tokens(s: string): string[] {
   const out: string[] = [];
-  for (const m of cleanText(s).toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) out.push(m[0]);
+  const t = cleanText(s).toLowerCase().replace(LEET_INSIDE, (m) => [...m].map((c) => LEET_SYMBOL[c]).join(""));
+  for (const m of t.matchAll(/[\p{L}\p{N}]+/gu)) out.push(m[0]);
   return out;
 }
 
@@ -84,6 +93,8 @@ const CONFUSABLE: Record<string, string> = {
   "\u1D0D": "m", "\u1D18": "p", "\u1D1B": "t", "\u1D1C": "u", "\u1D20": "v", "\u1D21": "w", "\u028F": "y", "\u1D22": "z",
   "\u00F8": "o", "\u0142": "l", "\u0111": "d", "\u0127": "h", "\u00DF": "ss", "\u00E6": "ae", "\u0153": "oe",
   "0": "o", "1": "l",
+  // round 4 (tester T7): the rest of the leetspeak digits (the symbols @ $ | ! are joined into their word by tokens())
+  "3": "e", "4": "a", "5": "s", "7": "t", "8": "b", "9": "g",
   // i, l, 1 and their look-alikes are ONE letter here (UTS #39 folds 1 / I / | into l; a leet "qu1llfeather" writes 1
   // for i): the skeleton is only ever compared with another skeleton, so the merge costs nothing but a rare over-deny
   "i": "l",
