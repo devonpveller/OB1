@@ -10,6 +10,7 @@ import { DefaultSubjectBanner } from "./shell/Banner";
 import { SearchOverlay } from "./shell/SearchOverlay";
 import { Placeholder, NotFound } from "./shell/Placeholder";
 import { Overview } from "./shell/Overview";
+import { Home } from "./screens/home/Home";
 import { ToastProvider, useToast } from "./shell/Toast";
 
 const NEXT: Record<ThemeChoice, ThemeChoice> = { system: "light", light: "dark", dark: "system" };
@@ -22,7 +23,7 @@ function Shell({ load }: { load: Load }) {
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
   const [searching, setSearching] = useState(false);
   const toast = useToast();
-  const def = matchRoute(route.path);
+  const def = route.bad ? null : matchRoute(route.path);
 
   // Ctrl+K (or Cmd+K) opens the overlay on every screen; Esc is handled inside the overlay.
   useEffect(() => {
@@ -55,7 +56,7 @@ function Shell({ load }: { load: Load }) {
         <Rail path={route.path} d={d} locked={locked} last={last} theme={theme}
           onTheme={() => { const n = NEXT[theme]; applyTheme(n); setTheme(n); }} />
         <main className="main" id="main" tabIndex={-1} data-testid="main">
-          {def === "overview" ? <Overview /> : def ? <Placeholder def={def} /> : <NotFound path={route.path} />}
+          {def === "overview" ? <Overview /> : def?.path === "/" ? <Home subject={d.who?.subject ?? null} whoAnswered={d.whoDone === true} /> : def ? <Placeholder def={def} /> : <NotFound path={route.path} />}
         </main>
       </div>
       </div>

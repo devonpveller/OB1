@@ -748,6 +748,21 @@ export type QualitySource = {
   claim: string | null;
 };
 
+export type RecentSource = {
+  id: string;
+  title: string;
+  url: string | null;
+  content_type: string;
+  created_at: string;
+};
+
+export type RecentSources = {
+  days: number;
+  sources_total: number;
+  claims_total: number;
+  sources: Array<RecentSource>;
+};
+
 export type Reference = {
   id: string;
   kind: string; /** registry: node_kinds */
@@ -1324,4 +1339,15 @@ export type UserSourceRemoved = {
   source_id: string;
   removed: boolean;
   tombstoned: boolean;
+};
+
+export type WaitingClaim = {
+  id: string;
+  text: string;
+  created_at: string;
+};
+
+export type WaitingClaims = {
+  total: number;
+  claims: Array<WaitingClaim>;
 };

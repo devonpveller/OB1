@@ -56,7 +56,7 @@ describe("every menu entry opens its route (acceptance 1)", () => {
     expect(MENU.filter((r) => r.group === "everywhere").map((r) => r.label)).toEqual(["Home", "Research", "Chat", "Documents", "Ideas", "Podcasts", "Library"]);
     expect(MENU.filter((r) => r.group === "housekeeping").map((r) => r.label)).toEqual(["Imports", "Removals and trail", "Cleanup", "Settings"]);
   });
-  for (const r of MENU) {
+  for (const r of MENU.filter((m) => m.path !== "/")) { // Home is a real screen now: home.test.tsx
     it(`${r.label}: click opens ${r.path}, a heading and a plain "coming in phase ${r.phase}" state`, () => {
       render(<App load={load()} />);
       fireEvent.click(within(screen.getByRole("navigation", { name: "Main" })).getByText(r.label));
@@ -104,6 +104,7 @@ describe("the counts match the reads (acceptance 2)", () => {
       sources: { total: 3 },
       candidates: [{ evidence: [{}] }, { evidence: [] }],
     });
+    window.history.pushState({}, "", "/research"); // not Home: Home makes its own reads (home.test.tsx)
     render(<App />);
     await waitFor(() => expect(screen.getByTestId("count-research").textContent).toBe("2 running"));
     expect(screen.getByTestId("count-imports").textContent).toBe("1 failed");
