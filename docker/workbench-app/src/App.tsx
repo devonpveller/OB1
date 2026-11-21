@@ -23,7 +23,7 @@ function Shell({ load }: { load: Load }) {
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
   const [searching, setSearching] = useState(false);
   const toast = useToast();
-  const def = matchRoute(route.path);
+  const def = route.bad ? null : matchRoute(route.path);
 
   // Ctrl+K (or Cmd+K) opens the overlay on every screen; Esc is handled inside the overlay.
   useEffect(() => {
@@ -56,7 +56,7 @@ function Shell({ load }: { load: Load }) {
         <Rail path={route.path} d={d} locked={locked} last={last} theme={theme}
           onTheme={() => { const n = NEXT[theme]; applyTheme(n); setTheme(n); }} />
         <main className="main" id="main" tabIndex={-1} data-testid="main">
-          {def === "overview" ? <Overview /> : def?.path === "/" ? <Home /> : def ? <Placeholder def={def} /> : <NotFound path={route.path} />}
+          {def === "overview" ? <Overview /> : def?.path === "/" ? <Home subject={d.who?.subject ?? null} /> : def ? <Placeholder def={def} /> : <NotFound path={route.path} />}
         </main>
       </div>
       </div>

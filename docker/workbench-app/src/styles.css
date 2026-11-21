@@ -114,7 +114,7 @@ button.danger { background: var(--danger); border-color: var(--danger); color: v
 a.row:hover { background: var(--bg); }
 .row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .row-title { overflow-wrap: anywhere; }
-.meta { font-size: 12px; color: var(--muted); }
+.meta { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .empty { color: var(--fg-2); }
 .pill { font-family: var(--font-mono); font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line-strong); color: var(--fg-2); white-space: nowrap; }
 .pill.run { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }

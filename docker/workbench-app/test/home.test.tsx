@@ -6,6 +6,8 @@ import { App } from "../src/App";
 import { setFetcher, requestLog, clearRequestLog } from "../src/lib/api";
 import { resetState } from "../src/lib/state";
 import { ago } from "../src/screens/home/home-data";
+import { parseRoute } from "../src/lib/router";
+import { matchRoute } from "../src/routes";
 
 type Id = "alice" | "bob" | "nobody" | "admin";
 const NOW = Date.now();
@@ -64,6 +66,8 @@ const FOREIGN = { id: "s1", status: "running", query: "", can_act: false, mine: 
 
 let who: Id = "alice";
 let failing: string[] = [];
+let malformed: string[] = []; // answers 200 with something that is not the expected JSON
+let hanging: string[] = [];   // never answers
 let seenInit: RequestInit[] = [];
 function stub() {
   seenInit = [];
@@ -71,6 +75,8 @@ function stub() {
     seenInit.push(init ?? {});
     const path = u.split("?")[0];
     if (failing.some((f) => path.endsWith(f))) return new Response("{}", { status: 500 });
+    if (malformed.some((f) => path.endsWith(f))) return new Response("<html>please sign in</html>", { status: 200 });
+    if (hanging.some((f) => path.endsWith(f))) return new Promise<Response>(() => {});
     const j = (o: unknown) => new Response(JSON.stringify(o), { status: 200 });
     const me = DB[who];
     if (path === "/workbench/workspace/whoami") return j({ subject_sub: "u-" + who, actor_sub: "u-" + who, name: who });
@@ -103,13 +109,13 @@ const card = (id: string) => screen.getByTestId("card-" + id);
 const rowTitles = (id: string) => within(card(id)).queryAllByTestId(/^row-/).map((r) => r.querySelector(".row-title")!.textContent);
 
 beforeEach(() => {
-  cleanup(); clearRequestLog(); resetState(); who = "alice"; failing = [];
+  cleanup(); clearRequestLog(); resetState(); who = "alice"; failing = []; malformed = []; hanging = [];
   document.documentElement.removeAttribute("data-theme");
   window.localStorage.clear(); window.sessionStorage.clear();
   window.history.pushState({}, "", "/");
   stub();
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("each card lists the same items as its source read (acceptance 1)", () => {
   it("Continue writing: the document listing, newest edit first, with reference counts", async () => {
@@ -122,14 +128,14 @@ describe("each card lists the same items as its source read (acceptance 1)", () 
     await renderHome();
     expect(rowTitles("research")).toEqual(["ALPHA which CPUs fit", "ALPHA finished question"]);
     const [a, b] = within(card("research")).getAllByTestId("row-session");
-    expect(a.textContent).toMatch(/2 branches · 2 open branches/);
+    expect(a.textContent).toMatch(/2 open branches/);
     expect(a.textContent).toMatch(/running/);
     expect(b.textContent).toMatch(/report ready/);
     expect(b.textContent).toMatch(/finished/);
   });
   it("Podcasts: episodes and requests still in flight (a request that became an episode is listed once)", async () => {
     await renderHome();
-    expect(rowTitles("podcasts")).toEqual(["ALPHA rendering now", "ALPHA digest episode"]);
+    expect(rowTitles("podcasts")).toEqual(["ALPHA digest episode", "ALPHA rendering now"]);
     const t = card("podcasts").textContent!;
     expect(t).toMatch(/rendering/);
     expect(t).toMatch(/yours · 14 min/);
@@ -345,5 +351,98 @@ describe("ago()", () => {
     expect(ago("2026-11-19T12:00:00Z", n)).toBe("yesterday");
     expect(ago("2026-11-17T12:00:00Z", n)).toBe("3 days ago");
     expect(ago("", n)).toBe("");
+  });
+});
+
+describe("round 3 (tester attempt 1)", () => {
+  it("F1: the shell's refresh shows another person: Home drops the previous person's cards and reads again for the new one", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderHome();
+    expect(document.body.textContent).toMatch(/ALPHA newest draft/);
+    who = "bob";
+    await vi.advanceTimersByTimeAsync(31000);
+    await waitFor(() => expect(screen.getByTestId("avatar").getAttribute("aria-label")).toMatch(/bob/i));
+    await waitFor(() => expect(screen.queryAllByText("Loading...").length).toBe(0));
+    expect(document.body.textContent).not.toMatch(/ALPHA|alice/i);
+    expect(rowTitles("docs")).toEqual(["BRAVO plan"]);
+  });
+  it("F1: no card is drawn until the subject is known", async () => {
+    setFetcher(async (u) => (u.startsWith("/workbench/workspace/whoami") ? new Promise<Response>(() => {}) : new Response("{}", { status: 404 })));
+    render(<App />);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByTestId("card-docs")).toBeNull();
+    expect(requestLog().some((r) => r.url.startsWith("/workbench/contract/documents"))).toBe(false);
+  });
+  it("F2: a document row (its path holds a slash) lands on the document screen, not No such screen", async () => {
+    await renderHome();
+    fireEvent.click(within(card("docs")).getAllByTestId("row-doc")[0]);
+    expect(screen.queryByTestId("not-found")).toBeNull();
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Document");
+    expect(screen.getByTestId("coming").textContent).toMatch(/phase 1/);
+    // and on a reload of that URL
+    cleanup(); await renderHome();
+    expect(screen.queryByTestId("not-found")).toBeNull();
+  });
+  it("F2: parseRoute splits first, then decodes each segment; a decode error is not found", () => {
+    const r = parseRoute("/documents/documents%2Falpha-new.md");
+    expect(r.segments).toEqual(["documents", "documents/alpha-new.md"]);
+    expect(matchRoute(r.path)).not.toBeNull();
+    expect((matchRoute(r.path) as any).path).toBe("/documents/:id");
+    expect(parseRoute("/a%20b/c").segments).toEqual(["a b", "c"]);
+    const bad = parseRoute("/documents/%E0%A4%A");
+    expect(bad.bad).toBe(true);
+  });
+  it("F4: a 200 that is not the expected JSON shows Could not load on every card, never an empty state", async () => {
+    malformed = ["/contract/documents", "/contract/sessions", "/contract/podcasts", "/contract/ideas", "/contract/timeline", "/contract/claims"];
+    await renderHome();
+    for (const id of ["docs", "research", "podcasts", "ideas", "library", "claims"]) {
+      expect(screen.getByTestId("failed-" + id), id).toBeTruthy();
+      expect(screen.queryByTestId("empty-" + id), id).toBeNull();
+    }
+  });
+  it("F6: a read that never answers becomes Could not load with Try again after the timeout", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    hanging = ["/contract/ideas"];
+    render(<App />);
+    await waitFor(() => expect(rowTitles("docs")).toHaveLength(3));
+    await vi.advanceTimersByTimeAsync(21000);
+    await waitFor(() => expect(screen.getByTestId("failed-ideas")).toBeTruthy());
+    expect(rowTitles("docs")).toHaveLength(3);
+    hanging = [];
+    fireEvent.click(within(screen.getByTestId("failed-ideas")).getByText("Try again"));
+    await waitFor(() => expect(rowTitles("ideas")).toHaveLength(1));
+  });
+  it("F7: a running session with open branches does not repeat the count", async () => {
+    await renderHome();
+    const a = within(card("research")).getAllByTestId("row-session")[0].textContent!;
+    expect(a).toMatch(/2 open branches/);
+    expect(a).not.toMatch(/\d+ branches?/);
+  });
+  it("F8: an own card whose question is null shows (untitled), not null", async () => {
+    (DB.alice.sessions as unknown as any[])[0].query = null as any;
+    try { await renderHome(); expect(rowTitles("research")[0]).toBe("(untitled)"); }
+    finally { (DB.alice.sessions as unknown as any[])[0].query = "ALPHA which CPUs fit"; }
+  });
+  it("F9: ready episodes come first; requests older than seven days do not push them off", async () => {
+    const old = Array.from({ length: 6 }, (_, i) => ({ id: "o" + i, team_id: "t", title: "OLD request " + i, state: "queued", episode_id: null, error: null, turns: 1, created_at: iso(10 * D), updated_at: iso(10 * D) }));
+    const keep = DB.alice.requests;
+    (DB.alice as any).requests = [...old, ...keep];
+    try {
+      await renderHome();
+      expect(rowTitles("podcasts")).toEqual(["ALPHA digest episode", "ALPHA rendering now"]);
+      expect(card("podcasts").textContent).not.toMatch(/OLD request/);
+    } finally { (DB.alice as any).requests = keep; }
+  });
+  it("F3 (decision): another user's shared episode is listed, labelled shared, with no author", async () => {
+    (DB.bob as any).episodes = [{ id: "e9", title: "Shared by someone", seconds: 60, shared: true, mine: false, created_at: iso(H) }];
+    try {
+      who = "bob"; await renderHome();
+      const t = card("podcasts").textContent!;
+      expect(t).toMatch(/Shared by someone/); expect(t).toMatch(/shared/); expect(t).not.toMatch(/alice|u-alice/i);
+    } finally { (DB.bob as any).episodes = []; }
+  });
+  it("F5: .meta wraps long unbroken text", async () => {
+    const { readFileSync } = await import("node:fs");
+    expect(readFileSync("src/styles.css", "utf8")).toMatch(/\.meta\s*\{[^}]*overflow-wrap:\s*anywhere/);
   });
 });

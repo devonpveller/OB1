@@ -51,6 +51,7 @@ const LIB = {
   ],
   claims: [
     { id: "k1", text: "Shared claim backed by one source", status: "active", corroborations: 0, contradicted: false, contradicted_by_newer: false, sources: [{ source_id: "a", lifecycle: "active", edge_type: "states" }] },
+    { id: "k3", text: "Claim with a long unbroken address https://example.org/" + "a".repeat(300), status: "active", corroborations: 0, contradicted: false, contradicted_by_newer: false, sources: [{ source_id: "b", lifecycle: "active", edge_type: "states" }] },
     { id: "k2", text: "Shared claim corroborated", status: "active", corroborations: 1, contradicted: false, contradicted_by_newer: false, sources: [{ source_id: "a", lifecycle: "active", edge_type: "states" }, { source_id: "b", lifecycle: "active", edge_type: "corroborates" }] },
   ],
 };

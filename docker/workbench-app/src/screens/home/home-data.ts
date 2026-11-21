@@ -11,7 +11,7 @@ export const SHOW = 5; // rows a card lists; the card title opens the screen wit
 export const WEEK_MS = 7 * 24 * 3600 * 1000;
 
 export type DocRow = { title: string; path: string; updated: string; refs: number };
-export type SessionRow = { id: string; query: string; status: string; waiting: string; branches: number; at: string };
+export type SessionRow = { id: string; query: string; status: string; waiting: string; waitKind: string; branches: number; at: string };
 export type PodcastRow = { id: string; title: string; kind: "episode" | "request"; label: string; detail: string; at: string };
 export type IdeaRow = { id: string; title: string; status: string; at: string };
 export type NewInLibrary = { sources: number; claims: number; capped: boolean };
@@ -19,12 +19,18 @@ export type ClaimsWaiting = { count: number; capped: boolean; samples: { id: str
 export type SearchHit = { kind: string; id: string; title: string; snippet: string };
 
 const arr = (x: unknown): any[] => (Array.isArray(x) ? x : []);
+// The list a read must hold. A 200 that is not the expected JSON (a login page, a wrong shape) is a FAILURE of
+// the card, never an empty list: api() turns unparsable text into {text}, which has no such key.
+const listOf = (data: any, key: string): any[] => {
+  if (!data || typeof data !== "object" || !Array.isArray(data[key])) throw new Error("unexpected answer: no " + key);
+  return data[key];
+};
 const time = (s: unknown) => { const t = Date.parse(String(s ?? "")); return Number.isFinite(t) ? t : 0; };
 
 // contract/documents lists the signed-in subject's own documents (title, path, updated, outbound links).
 export async function readDocuments(): Promise<DocRow[]> {
   const { data } = await api("GET", "/workbench/contract/documents?limit=100");
-  return arr(data?.documents)
+  return listOf(data, "documents")
     .map((d) => ({ title: String(d.title ?? ""), path: String(d.path ?? ""), updated: String(d.updated ?? ""), refs: arr(d.outbound_links).length }))
     .sort((a, b) => time(b.updated) - time(a.updated));
 }
@@ -34,26 +40,26 @@ export async function readDocuments(): Promise<DocRow[]> {
 // so nothing of anyone else's appears, not even a count, and an admin sees only their own.
 export async function readSessions(): Promise<SessionRow[]> {
   const { data } = await api("GET", "/workbench/contract/sessions?state=recent&limit=50");
-  return arr(data?.sessions)
+  return listOf(data, "sessions")
     .filter((s) => s?.mine === true) // the server's owner flag: an admin acting on someone else's or a service job is not "mine"
     .map((s) => ({
-      id: String(s.id), query: String(s.query), status: String(s.status ?? ""),
-      waiting: String(s.waiting_on?.kind === "nothing" ? "" : s.waiting_on?.detail ?? ""),
+      id: String(s.id), query: typeof s.query === "string" ? s.query : "", status: String(s.status ?? ""),
+      waiting: String(s.waiting_on?.kind === "nothing" ? "" : s.waiting_on?.detail ?? ""), waitKind: String(s.waiting_on?.kind ?? ""),
       branches: Math.max(0, arr(s.tree).length - 1), at: String(s.finished_at ?? s.started_at ?? s.created_at ?? ""),
     }));
 }
 
 // contract/podcasts (the caller's own episodes and the shared renders) + contract/podcasts/requests (the
 // caller's own requests). A request that is already an episode is not listed twice.
-export async function readPodcasts(): Promise<PodcastRow[]> {
+export async function readPodcasts(now = Date.now()): Promise<PodcastRow[]> {
   const [eps, reqs] = await Promise.all([
     api("GET", "/workbench/contract/podcasts?limit=20"),
     api("GET", "/workbench/contract/podcasts/requests?limit=20"),
   ]);
-  const episodes = arr(eps.data?.podcasts);
+  const episodes = listOf(eps.data, "podcasts");
   const have = new Set(episodes.map((e) => String(e.id)));
-  const pending: PodcastRow[] = arr(reqs.data?.requests)
-    .filter((r) => !(r.episode_id && have.has(String(r.episode_id))) && r.state !== "done")
+  const pending: PodcastRow[] = listOf(reqs.data, "requests")
+    .filter((r) => !(r.episode_id && have.has(String(r.episode_id))) && r.state !== "done" && now - time(r.created_at) < WEEK_MS) // an old request never pushes an episode off the card
     .map((r) => ({
       id: "req-" + String(r.id), title: String(r.title ?? ""), kind: "request" as const,
       label: r.state === "failed" ? "failed" : r.state === "rendering" ? "rendering" : "queued",
@@ -64,13 +70,13 @@ export async function readPodcasts(): Promise<PodcastRow[]> {
     detail: [e.mine ? "yours" : e.shared ? "shared" : "", typeof e.seconds === "number" ? Math.max(1, Math.round(e.seconds / 60)) + " min" : ""].filter(Boolean).join(" · "),
     at: String(e.created_at ?? ""),
   }));
-  return [...pending, ...done];
+  return [...done, ...pending]; // ready episodes first, requests in flight after
 }
 
 // contract/ideas: the caller's own ideas, newest first.
 export async function readIdeas(): Promise<IdeaRow[]> {
   const { data } = await api("GET", "/workbench/contract/ideas?limit=20");
-  return arr(data?.ideas).map((i) => ({ id: String(i.id), title: String(i.title ?? ""), status: String(i.status ?? ""), at: String(i.updated_at ?? "") }));
+  return listOf(data, "ideas").map((i) => ({ id: String(i.id), title: String(i.title ?? ""), status: String(i.status ?? ""), at: String(i.updated_at ?? "") }));
 }
 
 // "New in the library this week": the timeline from seven days ago. A source is new when its first revision
@@ -79,7 +85,7 @@ export async function readIdeas(): Promise<IdeaRow[]> {
 export async function readNewInLibrary(now = Date.now()): Promise<NewInLibrary> {
   const from = new Date(now - WEEK_MS).toISOString();
   const { data } = await api("GET", "/workbench/contract/timeline?from=" + encodeURIComponent(from) + "&limit=200");
-  const ev = arr(data?.events);
+  const ev = listOf(data, "events");
   const sources = new Set<string>();
   let claims = 0;
   for (const e of ev) {
@@ -93,7 +99,7 @@ export async function readNewInLibrary(now = Date.now()): Promise<NewInLibrary> 
 // source and no corroborator (the claims read's own corroborations count).
 export async function readClaimsWaiting(): Promise<ClaimsWaiting> {
   const { data } = await api("GET", "/workbench/contract/claims?status=active&limit=200");
-  const all = arr(data?.claims);
+  const all = listOf(data, "claims");
   const waiting = all.filter((c) => {
     const act = new Set(arr(c.sources).filter((s) => s.lifecycle === "active" && s.edge_type !== "contradicts").map((s) => String(s.source_id)));
     return c.corroborations === 0 && !c.contradicted && !c.contradicted_by_newer && act.size === 1;
@@ -104,16 +110,20 @@ export async function readClaimsWaiting(): Promise<ClaimsWaiting> {
 // The ask box, in phase 0: a library search (pages, claims and sources; never a user document).
 export async function runSearch(q: string): Promise<SearchHit[]> {
   const { data } = await api("GET", "/workbench/contract/search?q=" + encodeURIComponent(q) + "&limit=10");
-  return arr(data?.results).map((r) => ({ kind: String(r.kind), id: String(r.id), title: String(r.title ?? ""), snippet: String(r.snippet ?? "").replace(/<<\/?HL>>/g, "") }));
+  return listOf(data, "results").map((r) => ({ kind: String(r.kind), id: String(r.id), title: String(r.title ?? ""), snippet: String(r.snippet ?? "").replace(/<<\/?HL>>/g, "") }));
 }
 
 // One read per card, its own state, a retry.
+export const READ_TIMEOUT_MS = 20000;
+const withTimeout = <T,>(p: Promise<T>, ms: number): Promise<T> =>
+  new Promise<T>((res, rej) => { const t = setTimeout(() => rej(new Error("timeout")), ms); p.then((v) => { clearTimeout(t); res(v); }, (e) => { clearTimeout(t); rej(e); }); });
+
 export function useCard<T>(read: () => Promise<T>): [CardState<T>, () => void] {
   const [s, setS] = useState<CardState<T>>({ state: "loading" });
   const live = useRef(true);
   const run = useCallback(() => {
     setS({ state: "loading" });
-    read().then((data) => { if (live.current) setS({ state: "ok", data }); }, () => { if (live.current) setS({ state: "failed" }); });
+    withTimeout(read(), READ_TIMEOUT_MS).then((data) => { if (live.current) setS({ state: "ok", data }); }, () => { if (live.current) setS({ state: "failed" }); });
   }, [read]);
   useEffect(() => { live.current = true; run(); return () => { live.current = false; }; }, [run]);
   return [s, run];

@@ -90,7 +90,15 @@ function AskBox() {
   );
 }
 
-export function Home() {
+// Home is drawn for ONE known subject. The cards live under a key made of that subject, so when the shell
+// shows another person (its periodic whoami read) every card, every read in flight and the ask box are dropped
+// and read again for the new person; before the subject is known nothing is drawn or read.
+export function Home({ subject }: { subject: string | null }) {
+  if (!subject) return <div className="screen home" data-testid="home"><h1 className="sr-only">Home</h1><p className="meta" role="status" data-testid="home-waiting">Checking who you are...</p></div>;
+  return <HomeCards key={subject} />;
+}
+
+function HomeCards() {
   const [docs, rDocs] = useCard(readDocuments);
   const [ses, rSes] = useCard(readSessions);
   const [pod, rPod] = useCard(readPodcasts);
@@ -117,7 +125,7 @@ export function Home() {
           {s?.slice(0, SHOW).map((x) => {
             const [label, kind] = pillOf(x.status, x.waiting);
             const meta = x.status === "done" ? "report ready · " + ago(x.at)
-              : [x.branches ? x.branches + (x.branches === 1 ? " branch" : " branches") : "", x.waiting].filter(Boolean).join(" · ");
+              : (x.waitKind === "branches" ? [x.waiting] : [x.branches ? x.branches + (x.branches === 1 ? " branch" : " branches") : "", x.waiting]).filter(Boolean).join(" · ");
             return <Row key={x.id} id="session" to="/research" title={x.query} meta={meta} pill={label} kind={kind} />;
           })}
         </Card>

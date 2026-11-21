@@ -56,10 +56,10 @@ await scheme("light"); await setMode("alice"); await go("/");
 ok((await ev(`document.querySelector('h1')?.textContent`)) === "What do you want to know?", "Home heading is the ask-box question");
 ok(JSON.stringify(await titles("docs")) === JSON.stringify(["ALPHA newest draft", "ALPHA middle", "ALPHA older note"]), "Continue writing lists alice's three documents, newest edit first");
 ok(JSON.stringify(await titles("research")) === JSON.stringify(["ALPHA which CPUs fit", "ALPHA finished question"]), "Research lists alice's two sessions");
-ok(JSON.stringify(await titles("podcasts")) === JSON.stringify(["ALPHA rendering now", "ALPHA digest episode"]), "Podcasts lists the pending request and the episode (once)");
+ok(JSON.stringify(await titles("podcasts")) === JSON.stringify(["ALPHA digest episode", "ALPHA rendering now"]), "Podcasts lists the episode first, then the pending request (the done request once)");
 ok(JSON.stringify(await titles("ideas")) === JSON.stringify(["ALPHA pantry idea"]), "Ideas lists alice's idea");
 ok(/2 new sources, 1 new claim/.test(await ev(`document.querySelector('[data-testid=new-counts]')?.textContent||''`)), "New in the library: 2 new sources, 1 new claim");
-ok(/1 claim backed by one source only/.test(await ev(`document.querySelector('[data-testid=claims-waiting]')?.textContent||''`)), "Claims waiting for a second source: 1");
+ok(/2 claims backed by one source only/.test(await ev(`document.querySelector('[data-testid=claims-waiting]')?.textContent||''`)), "Claims waiting for a second source: 2");
 ok(problems().length === 0, `no console errors/warnings/exceptions (${problems().length})` + JSON.stringify(problems().map((e) => e.params?.entry?.text || e.params?.exceptionDetails?.text)));
 const rq = reqs();
 ok(rq.every((r) => r.url.startsWith(origin + "/")) && rq.filter((r) => /\/workbench\//.test(r.url)).every((r) => r.method === "GET"), `every request same-origin, every read a GET (${rq.length})`);
@@ -79,6 +79,9 @@ for (const [t, path] of TITLES) {
 await go("/");
 await ev(`document.querySelector('[data-testid=card-docs] [data-testid=row-doc]').click()`); await sleep(150);
 ok((await ev(`location.pathname`)) === "/documents/documents%2Falpha-new.md", "a document row opens /documents/<its path>");
+ok((await ev(`document.querySelector('h1')?.textContent`)) === "Document" && !!(await ev(`!!document.querySelector('[data-testid=coming]')`)), "...and lands on the document screen (not No such screen)");
+await send("Page.navigate", { url: origin + "/documents/documents%2Falpha-new.md" }); await sleep(1500);
+ok((await ev(`document.querySelector('h1')?.textContent`)) === "Document", "...also when that URL is loaded fresh");
 await go("/");
 await ev(`[...document.querySelectorAll('[data-testid=ask] a')].find(a=>a.textContent==='Start research').click()`); await sleep(150);
 ok((await ev(`location.pathname`)) === "/research/start", "Start research opens /research/start");
@@ -126,6 +129,18 @@ ok(!/ALPHA/.test(await ev(`document.documentElement.outerHTML`)), "bob's page so
 for (const sch of ["light", "dark"]) { await scheme(sch); await axe(`${sch} Home as bob`); }
 await scheme("light");
 
+// ---- 5a. live switch: alice has Home open, the identity changes, the shell's 30 s whoami refresh shows bob
+await setMode("alice"); await go("/");
+ok((await titles("docs")).some((t) => /ALPHA/.test(t)), "live switch: alice's Home is showing her documents");
+await setMode("bob");
+let sw = false;
+for (let i = 0; i < 80 && !sw; i++) { await sleep(500); sw = await ev(`/Bob/.test(document.querySelector('[data-testid=avatar]')?.getAttribute('aria-label')||'')`); }
+ok(sw, "live switch: the top bar now says bob (the shell's refresh)");
+for (let i = 0; i < 20 && (await ev(`document.querySelectorAll('[data-testid=home] [role=status]').length`)) > 0; i++) await sleep(250);
+ok(!/ALPHA|alice/i.test(await ev(`document.body.innerText`)) && JSON.stringify(await titles("docs")) === JSON.stringify(["BRAVO plan"]), "live switch: Home dropped alice's cards and shows bob's own, no ALPHA anywhere");
+await scheme("dark"); await axe("dark Home after a live switch"); await scheme("light");
+await setMode("alice");
+
 // ---- 5b. a non-owner admin: can_act on everything and sees the text, but Home lists only what they own
 await setMode("admin"); await go("/");
 ok(!/ALPHA|SERVICE/.test(await ev(`document.body.innerText`)) && !!(await ev(`!!document.querySelector('[data-testid=empty-research]')`)), "admin who owns no session: Home shows no one else's session text and the Research card is empty");
@@ -149,6 +164,11 @@ await viewport(800, 900); await go("/");
 const ov = JSON.parse(await ev(`JSON.stringify({sw:document.querySelector('main').scrollWidth,cw:document.querySelector('main').clientWidth,cols:getComputedStyle(document.querySelector('.grid3')).gridTemplateColumns.split(' ').length})`));
 ok(ov.sw <= ov.cw && ov.cols === 1, `at 800px wide: no horizontal scroll (${ov.sw}/${ov.cw}), cards stack in one column (${ov.cols})`);
 await axe("light Home at 800px");
+await viewport(400, 800); await go("/");
+const ov4 = JSON.parse(await ev(`JSON.stringify({sw:document.querySelector('main').scrollWidth,cw:document.querySelector('main').clientWidth})`));
+ok(ov4.sw <= ov4.cw, `at 400px wide with a long unbroken address in a claim: no inner horizontal scroll (${ov4.sw}/${ov4.cw})`);
+await axe("light Home at 400px");
+await viewport(1440, 900);
 await viewport(1440, 900); await go("/");
 await ev(`document.activeElement.blur()`);
 const stops = [];
