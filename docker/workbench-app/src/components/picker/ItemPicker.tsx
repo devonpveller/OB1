@@ -259,7 +259,7 @@ export function ItemPicker(props: ItemPickerProps) {
                   </span>
                   <span className="ip-side">
                     {i.quality && <span className={"ip-tag q-" + i.quality.toLowerCase()}>{i.quality}</span>}
-                    {i.citedBy != null && <span className="ip-meta">{i.citedBy ? `cited by ${i.citedBy}` : "not cited yet"}</span>}
+                    {i.citedBy != null && <span className="ip-meta">{i.citedBy ? `in ${i.citedBy} of your documents` : "not in your documents"}</span>}
                   </span>
                 </li>
               );

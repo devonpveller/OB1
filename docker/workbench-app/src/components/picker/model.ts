@@ -19,7 +19,7 @@ export type PickerItem = {
   topics?: string[];
   date?: string | null; // ISO date or datetime
   quality?: "High" | "Medium" | "Low" | null;
-  citedBy?: number | null;
+  citedBy?: number | null; // how many of the CALLER's own documents cite it (never anyone else's)
   private?: boolean; // true = visible only to its owner (own thoughts, held sources)
 };
 
@@ -96,7 +96,8 @@ function passes(i: PickerItem, f: Filters, c: Ctx, skip?: FacetKey): boolean {
 export function inScope(i: PickerItem, scope: PickerScope): boolean {
   if (scope.kind !== "document" || scope.topics.length === 0) return true;
   if (!i.topics || i.topics.length === 0) return true; // no topic data: not dropped (degrades to the library)
-  return i.topics.some((t) => scope.topics.includes(t));
+  const want = scope.topics.map((t) => t.toLowerCase());
+  return i.topics.some((t) => want.includes(t.toLowerCase()));
 }
 
 export function applyFilters(items: PickerItem[], f: Filters, c: Ctx): PickerItem[] {
@@ -149,8 +150,17 @@ export type SearchHit = {
   author?: unknown; topics?: unknown; date?: unknown; quality?: unknown; cited_by?: unknown;
 };
 const strs = (v: unknown): string[] | undefined => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : undefined);
+// The search returns quality as a 0..1 number (a claim's confidence, a source's stamped admission score). The picker
+// shows and filters it as a band; these cut-offs are presentation only (the number itself is what is stored).
+export const QUALITY_HIGH = 0.75;
+export const QUALITY_MEDIUM = 0.5;
+export function qualityBand(v: unknown): "High" | "Medium" | "Low" | null {
+  if (typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1) return v >= QUALITY_HIGH ? "High" : v >= QUALITY_MEDIUM ? "Medium" : "Low";
+  if (typeof v === "string") { const q = v.charAt(0).toUpperCase() + v.slice(1).toLowerCase(); return q === "High" || q === "Medium" || q === "Low" ? q : null; }
+  return null;
+}
 export function itemFromHit(h: SearchHit): PickerItem {
-  const q = typeof h.quality === "string" ? h.quality.charAt(0).toUpperCase() + h.quality.slice(1).toLowerCase() : null;
+  const q = qualityBand(h.quality);
   return {
     kind: h.kind, id: h.id, title: h.title || h.id, snippet: h.snippet ?? "", state: h.state ?? null, lifecycle: h.lifecycle ?? null,
     type: h.page_class ?? null,

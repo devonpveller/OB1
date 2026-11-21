@@ -1157,6 +1157,53 @@ t("P7a the three appendix stubs are backed: their not_implemented registry entri
   for (const p of ["/podcasts", "/presenters", "/teams"]) assertEquals((await call("GET", p)).status, 200, p);
 });
 
+// ── rwr-picker: the fields a list of hits filters and sorts on, and the two-identity rule for cited_by ──────
+t("search hits carry topics, date, quality, cited_by and author - additive, from the rows themselves", async () => {
+  const tag = `pk${uuid().slice(0, 8)}`;
+  const src = uuid(), cl = uuid(), th = uuid();
+  await sql(`INSERT INTO public.sources (id, url, title, content, tags, metadata) VALUES ($1, $2, $3, $3, ARRAY['cooling','vrm'], $4::jsonb)`,
+    [src, `https://example.org/${tag}`, `${tag} source`, JSON.stringify({ author: "Ada Lovelace", credibility: { score: 0.8, family: "general" } })]);
+  await sql(`INSERT INTO public.threads (id, name) VALUES ($1, $2)`, [th, `${tag} thread`]);
+  await sql(`INSERT INTO public.claims (id, text, thread_id, confidence) VALUES ($1, $2, $3, 0.6)`, [cl, `${tag} claim text`, th]);
+  const r = await call("GET", `/search?q=${tag}`);
+  assertEquals(r.status, 200);
+  assert(K.Search.safeParse(r.json).success, JSON.stringify(K.Search.safeParse(r.json).error?.issues?.slice(0, 2)));
+  const s1 = r.json.results.find((h: any) => h.id === src);
+  const c1 = r.json.results.find((h: any) => h.id === cl);
+  assertEquals([s1.topics, s1.quality, s1.author, s1.cited_by], [["cooling", "vrm"], 0.8, "Ada Lovelace", 0]);
+  assert(Date.parse(s1.date) > 0);
+  assertEquals([c1.topics, c1.quality, c1.cited_by, c1.author], [[`${tag} thread`], 0.6, null, null]);
+  assert(Date.parse(c1.date) > 0);
+  // a source with no stamp, no author: nulls, never a derived number
+  const plain = await newSource({ title: `${tag} plain` });
+  const p = (await call("GET", `/search?q=${tag}%20plain&kinds=source`)).json.results.find((h: any) => h.id === plain);
+  assertEquals([p.quality, p.author, p.topics], [null, null, []]);
+  // the same hits, the same order, with the fields as without (the fields add nothing to matching)
+  const ids = r.json.results.map((h: any) => h.id);
+  assertEquals(ids.includes(src) && ids.includes(cl), true);
+});
+
+t("cited_by counts only the CALLER's own documents: another user's private documents never change a count", async () => {
+  const src = await newSource({ title: `pkcite ${uuid().slice(0, 8)}` });
+  const A = `pk-a-${uuid().slice(0, 8)}`, Bu = `pk-b-${uuid().slice(0, 8)}`, C = `pk-c-${uuid().slice(0, 8)}`;
+  await sql(`UPDATE public.sources SET metadata = '{"share":"cloud"}'::jsonb WHERE id = $1`, [src]);
+  const link = JSON.stringify([{ kind: "source", id: src, pin: null, reference_id: null }]);
+  await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1, 'a1', $4::jsonb, $5), ($2, 'b1', $4::jsonb, $6), ($3, 'b2', $4::jsonb, $6)`,
+    [`documents/pk-${uuid()}.md`, `documents/pk-${uuid()}.md`, `documents/pk-${uuid()}.md`, link, A, Bu]);
+  const title = (await sql<{ title: string }>(`SELECT title FROM public.sources WHERE id = $1`, [src]))[0].title;
+  const count = async (as: string, qs = "") => (await call("GET", `/search?q=${encodeURIComponent(title)}&kinds=source${qs}`, undefined, { as })).json.results.find((h: any) => h.id === src).cited_by;
+  assertEquals(await count(A), 1);   // A's one document, not B's two
+  assertEquals(await count(Bu), 2);  // B's two, not A's one
+  assertEquals(await count(C), 0);   // C holds none: no inference from A or B
+  // a document of B's that does not link the source changes nothing for anyone
+  await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1, 'b3', '[]'::jsonb, $2)`, [`documents/pk-${uuid()}.md`, Bu]);
+  assertEquals([await count(A), await count(C)], [1, 0]);
+  // under a metadata filter (the cloud door) no document count is read at all
+  const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));
+  const filtered = (await call("GET", `/search?q=${encodeURIComponent(title)}&kinds=source&metadata_filter=${f}`, undefined, { as: A })).json.results;
+  assertEquals(filtered.length > 0 && filtered.every((h: any) => h.cited_by === null), true);
+});
+
 Deno.test({ name: "close the pool", ignore, fn: async () => {
   await pool!.end();
   await legacy?.pool.end();

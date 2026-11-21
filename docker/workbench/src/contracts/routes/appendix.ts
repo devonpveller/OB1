@@ -205,7 +205,7 @@ function registerKnowledgeReads(app: ContractApp, deps: ContractDeps) {
       const refinery = q.refinery_id && await requireIdea(deps.db, q.refinery_id, owner).then(() => q.refinery_id, () => null);
       return send(c, Search, await kn.search(deps.db, {
         q: q.q.trim(), kinds: parseList(q.kinds), refinery_id: refinery || null, limit: parseLimit(q.limit, 25, 50),
-        evidenceOnly: parseFlag(q.evidence_only), filter: parseMetadataFilter(q.metadata_filter),
+        evidenceOnly: parseFlag(q.evidence_only), filter: parseMetadataFilter(q.metadata_filter), owner,
       }));
     } catch (e) {
       return fail(c, e);

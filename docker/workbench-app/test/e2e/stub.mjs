@@ -8,7 +8,8 @@ import http from "node:http";
 const ID = process.env.ID || "A";
 const KEY = process.env.LAB_KEY;
 const MY_REFINERY = `refinery-${ID.toLowerCase()}`;
-const SHARED = [
+const day = (n) => new Date(Date.now() - n * 86400000).toISOString();
+const RAW = [
   { kind: "source", id: "s-alpha", title: "X299 VRM thermals under load", snippet: "VRMs reach 105 C: <<HL>>vrm<</HL>> data", state: "current", lifecycle: "active", page_class: null },
   { kind: "source", id: "s-beta", title: "Board vendor VRM power stage", snippet: "rated 165 W", state: "current", lifecycle: "active", page_class: null },
   { kind: "source", id: "s-gamma", title: "Retracted VRM forum post", snippet: "withdrawn", state: "current", lifecycle: "retracted", page_class: null },
@@ -18,7 +19,19 @@ const SHARED = [
   { kind: "page", id: "cooling", title: "Cooling and VRM thermals", snippet: "cooling", state: "current", lifecycle: null, page_class: "concept" },
   { kind: "source", id: "s-delta", title: "Noctua support reply on VRM airflow", snippet: "airflow", state: "current", lifecycle: "active", page_class: null },
 ];
-const HELD = { kind: "source", id: `held-${ID}`, title: `HELD-${ID} idea note on vrm`, snippet: "held", state: "held", lifecycle: "held", page_class: null };
+// the contract's added hit fields (rwr-picker): topics, date, quality (0..1), cited_by (the CALLER's own documents only), author
+const EXTRA = {
+  "source:s-alpha": { topics: ["cooling", "vrm"], date: day(3), quality: 0.8, cited_by: ID === "A" ? 1 : 2, author: "Ada Lovelace" },
+  "source:s-beta": { topics: ["vrm"], date: day(100), quality: 0.6, cited_by: 0, author: null },
+  "source:s-gamma": { topics: [], date: "2024-01-01T00:00:00.000Z", quality: 0.3, cited_by: 0, author: null },
+  "source:s-delta": { topics: ["airflow"], date: day(20), quality: 0.76, cited_by: 0, author: null },
+  "claim:c-1": { topics: ["cooling"], date: day(10), quality: 0.9, cited_by: null, author: null },
+  "claim:c-2": { topics: ["cooling"], date: day(400), quality: 0.5, cited_by: null, author: null },
+  "page:workstation-hardware": { topics: ["hardware"], date: day(1), quality: null, cited_by: null, author: null },
+  "page:cooling": { topics: ["cooling"], date: day(2), quality: null, cited_by: null, author: null },
+};
+const SHARED = RAW.map((r) => ({ ...r, ...(EXTRA[r.kind + ":" + r.id] ?? {}) }));
+const HELD = { kind: "source", id: `held-${ID}`, title: `HELD-${ID} idea note on vrm`, snippet: "held", state: "held", lifecycle: "held", page_class: null, topics: [], date: day(5), quality: null, cited_by: null, author: null };
 const MINE = [{ kind: "thought", id: `t-${ID}`, title: `${ID === "A" ? "A-SECRET alpha" : "B-OWN bravo"} plan thought`, snippet: "", state: "current", lifecycle: null, type: null }];
 const log = [];
 

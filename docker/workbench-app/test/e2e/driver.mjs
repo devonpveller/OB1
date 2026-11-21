@@ -104,7 +104,7 @@ ok((await b.ev(`document.querySelector('[data-testid=picker-nsel]').textContent`
 // B asks inside A's refinery id: the route scopes nothing; no held source, no private count
 await b.open(`${APP_B}/picker-harness.html?mode=multi&scope=document&refinery=refinery-a`);
 await b.typeText("vrm");
-ok(await b.waitFor(`${keys}.length===8`), "B: B's document scope (A's refinery id) lists only the 8 shared results");
+ok(await b.waitFor(`${keys}.length===5`), "B: B's document scope (A's refinery id) lists only shared results (5 after the topic narrowing), no held source");
 const bKeys = await b.ev(keys);
 ok(!bKeys.includes("source:held-A") && !/HELD-A/.test(await b.ev(`document.body.innerText`)), "B: A's held source is not offered or shown");
 ok((await b.ev(`document.querySelector('[role=group][aria-label="Who can see it"]')`)) === null, "B: no 'Who can see it' facet and so no private count at all (nothing private to count)");
@@ -112,6 +112,39 @@ const logB = JSON.stringify(await stubLog(STUB_B));
 ok(!/A-SECRET|held-A/.test(logB), "B: B's upstream never saw A's private text or ids");
 ok(await b.ev(`document.documentElement.outerHTML.indexOf('A-SECRET')`) === -1, "B: A's text is nowhere in B's DOM");
 await b.close();
+
+
+// ---------------- the contract's new hit fields: filters and sorts light up (identity A, then B's own cited_by) ----------------
+const f = await session();
+await f.open(`${APP_A}/picker-harness.html?mode=multi&scope=library`);
+await f.typeText("vrm");
+ok(await f.waitFor(`${keys}.length===8`), "fields: A's library search lists 8");
+ok(await f.ev(`!document.querySelector('[data-testid=picker-missing]')`), "fields: no 'filters appear when the search returns them' note: the search returns them");
+const groups = await f.ev(`[...document.querySelectorAll('[role=group]')].map(g=>g.getAttribute('aria-label'))`);
+ok(["Topics (any of)", "When", "Quality"].every((g) => groups.includes(g)), `fields: Topics, When and Quality groups appear (${JSON.stringify(groups)})`);
+const clickBtn = (label, group) => f.ev(`[...document.querySelectorAll('${group ? "[role=group][aria-label=\"" + group + "\"] " : ""}button')].find(b=>b.textContent.startsWith(${JSON.stringify(label)})).click()`);
+await clickBtn("High only");
+ok(JSON.stringify(await f.ev(keys)) === JSON.stringify(["source:s-alpha", "source:s-delta", "claim:c-1"].sort((a, b) => direct.indexOf(a) - direct.indexOf(b))), "fields: Quality 'High only' (0.8, 0.76 and 0.9 are at or over the 0.75 cut-off) keeps s-alpha, s-delta and c-1");
+await clickBtn("Clear all filters");
+await clickBtn("Last 30 days");
+ok(JSON.stringify((await f.ev(keys)).sort()) === JSON.stringify(["claim:c-1", "page:cooling", "page:workstation-hardware", "source:s-alpha", "source:s-delta"]), "fields: 'Last 30 days' keeps the five recent rows");
+await clickBtn("Clear all filters");
+await clickBtn("airflow", "Topics (any of)");
+ok(JSON.stringify(await f.ev(keys)) === JSON.stringify(["source:s-delta"]), "fields: Topics 'airflow' keeps s-delta");
+await clickBtn("Clear all filters");
+await clickBtn("Newest");
+const newest = await f.ev(keys);
+ok(newest[0] === "page:workstation-hardware" && newest.at(-1) === "source:s-gamma", `fields: sort Newest puts the 1-day-old page first and the 2024 source last (${newest[0]} ... ${newest.at(-1)})`);
+ok((await f.ev(`document.querySelector('[data-key="source:s-alpha"]').textContent`)).includes("Ada Lovelace") && (await f.ev(`document.querySelector('[data-key="source:s-alpha"]').textContent`)).includes("in 1 of your documents"), "fields: A's row shows the author and 'in 1 of your documents'");
+await clickBtn("Most cited");
+ok((await f.ev(keys))[0] === "source:s-alpha", "fields: sort Most cited puts s-alpha first");
+await f.close();
+const fb = await session();
+await fb.open(`${APP_B}/picker-harness.html?mode=multi&scope=library`);
+await fb.typeText("vrm");
+ok(await fb.waitFor(`${keys}.length===8`), "fields: B's library search lists 8");
+ok((await fb.ev(`document.querySelector('[data-key="source:s-alpha"]').textContent`)).includes("in 2 of your documents"), "fields: B sees ITS OWN count (2), not A's (1) and not 3");
+await fb.close();
 
 // ---------------- accessibility: axe, light and dark ----------------
 for (const theme of ["light", "dark"]) {

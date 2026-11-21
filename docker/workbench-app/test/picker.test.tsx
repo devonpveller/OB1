@@ -130,7 +130,7 @@ describe("the picker", () => {
     await waitFor(() => expect(keys().length).toBe(2));
     expect(screen.queryByTestId("picker-missing")).toBeNull();
     expect(row("source:r1").textContent).toMatch(/Gamers Nexus/);
-    expect(row("source:r1").textContent).toMatch(/cited by 4/);
+    expect(row("source:r1").textContent).toMatch(/in 4 of your documents/);
     fireEvent.click(screen.getByRole("button", { name: /^Firmware/ }));
     expect(keys()).toEqual(["source:r2"]);
     fireEvent.click(screen.getByRole("button", { name: /Clear all filters/ }));
@@ -232,6 +232,59 @@ describe("the picker", () => {
     render(<ItemPicker {...props} />);
     type("vrm");
     await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/boom/));
+  });
+});
+
+describe("the contract's new hit fields light the filters and sorts up (no picker change)", () => {
+  const NOW = Date.parse("2026-11-20");
+  const rich = [
+    hit("source", "r1", "Rich vrm one", { topics: ["cooling", "vrm"], date: "2026-11-15T10:00:00.000Z", quality: 0.8, cited_by: 3, author: "Ada Lovelace" }),
+    hit("source", "r2", "Plain vrm two", { topics: ["firmware"], date: "2024-01-01T00:00:00.000Z", quality: 0.3, cited_by: 0, author: null }),
+    hit("claim", "r3", "Mid vrm claim", { topics: ["cooling"], date: "2026-06-01T00:00:00.000Z", quality: 0.6, cited_by: null, author: null }),
+    hit("page", "r4", "Bare vrm page", { topics: [], date: null, quality: null, cited_by: null, author: null }),
+  ];
+  it("topic, when and quality groups appear, the missing-filters note does not, and each filter and sort works", async () => {
+    libFetcher(rich);
+    render(<ItemPicker {...props} now={NOW} />);
+    type("vrm");
+    await waitFor(() => expect(keys().length).toBe(4));
+    expect(screen.queryByTestId("picker-missing")).toBeNull();
+    for (const g of ["Topics (any of)", "When", "Quality"]) expect(screen.getByRole("group", { name: g })).toBeTruthy();
+    expect(row("source:r1").textContent).toMatch(/Ada Lovelace/);
+    expect(row("source:r1").textContent).toMatch(/High/);
+    expect(row("source:r1").textContent).toMatch(/in 3 of your documents/);
+    expect(row("source:r2").textContent).toMatch(/Low/);
+    expect(row("claim:r3").textContent).toMatch(/Medium/);
+    // topics (any of), with live counts
+    const topics = within(screen.getByRole("group", { name: "Topics (any of)" }));
+    expect(topics.getByRole("button", { name: /^cooling/ }).textContent).toMatch(/2$/);
+    fireEvent.click(topics.getByRole("button", { name: /^firmware/ }));
+    expect(keys()).toEqual(["source:r2"]);
+    fireEvent.click(screen.getByRole("button", { name: /Clear all filters/ }));
+    // date
+    fireEvent.click(screen.getByRole("button", { name: /^Last 30 days/ }));
+    expect(keys()).toEqual(["source:r1"]);
+    fireEvent.click(screen.getByRole("button", { name: /Clear all filters/ }));
+    // quality bands from the 0..1 number: 0.8 High, 0.6 Medium, 0.3 Low
+    fireEvent.click(screen.getByRole("button", { name: /^Medium or better/ }));
+    expect(keys()).toEqual(["source:r1", "claim:r3"]);
+    fireEvent.click(screen.getByRole("button", { name: /^High only/ }));
+    expect(keys()).toEqual(["source:r1"]);
+    fireEvent.click(screen.getByRole("button", { name: /Clear all filters/ }));
+    // sorts
+    expect(screen.getByRole("button", { name: "Newest" }).hasAttribute("disabled")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Newest" }));
+    expect(keys()).toEqual(["source:r1", "claim:r3", "source:r2", "page:r4"]);
+    fireEvent.click(screen.getByRole("button", { name: "Most cited" }));
+    expect(keys()).toEqual(["source:r1", "source:r2", "claim:r3", "page:r4"]);
+  });
+  it("a document scope narrows by the returned topics (case-insensitive)", async () => {
+    libFetcher(rich);
+    render(<ItemPicker {...props} scope={{ kind: "document", label: "My doc", topics: ["Cooling"] }} />);
+    type("vrm");
+    await waitFor(() => expect(keys().length).toBe(3));
+    expect(keys()).toEqual(["source:r1", "claim:r3", "page:r4"]); // r2 (firmware) out; r4 has no topics: kept (degrades)
+    expect(screen.getByTestId("picker-scope-note").textContent).not.toMatch(/whole library/);
   });
 });
 

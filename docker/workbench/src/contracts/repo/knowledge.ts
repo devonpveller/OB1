@@ -261,9 +261,95 @@ export interface SearchQuery {
   limit: number;
   evidenceOnly: boolean;
   filter: MetadataFilter;
+  /** the caller's subject, for cited_by (the caller's own documents only); absent = cited_by is null */
+  owner?: string | null;
 }
 
-type Hit = { kind: string; id: string; title: string; snippet: string; state: string; lifecycle: string | null; page_class: string | null };
+type BaseHit = { kind: string; id: string; title: string; snippet: string; state: string; lifecycle: string | null; page_class: string | null };
+type Hit = BaseHit & {
+  topics?: string[]; date?: string | null; quality?: number | null; cited_by?: number | null; author?: string | null;
+};
+const UUID_RX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const strList = (v: unknown, max = 8): string[] =>
+  (Array.isArray(v) ? v : []).filter((x): x is string => typeof x === "string" && x.trim() !== "").slice(0, max);
+const iso = (v: unknown): string | null => {
+  if (v === null || v === undefined) return null;
+  const d = v instanceof Date ? v : new Date(String(v));
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+};
+const unit = (v: unknown): number | null => {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  return Number.isFinite(n) && n >= 0 && n <= 1 ? n : null;
+};
+
+// rwr-picker: the fields a list of hits filters and sorts on, read in ONE query per kind for the hits already
+// chosen (no change to which rows match or their order). Every field is shared knowledge EXCEPT cited_by, which
+// counts only the caller's own documents (user_document_listings.owner_sub = caller). Held sources (the caller's
+// own refinery) get a date only. Under a metadata filter (the cloud door) nothing outside the rows' own columns
+// is read: no thread name, no document count.
+async function enrich(db: Db, hits: Hit[], s: SearchQuery): Promise<Hit[]> {
+  const sources = hits.filter((h) => h.kind === "source" && h.lifecycle !== "held" && UUID_RX.test(h.id));
+  const held = hits.filter((h) => h.kind === "source" && h.lifecycle === "held" && UUID_RX.test(h.id));
+  const claims = hits.filter((h) => h.kind === "claim" && UUID_RX.test(h.id));
+  const pages = hits.filter((h) => h.kind === "page");
+  const by = new Map<string, Partial<Hit>>();
+  const key = (h: { kind: string; id: string }) => `${h.kind}:${h.id}`;
+  if (sources.length) {
+    const rows = await db.query<{ id: string; tags: string[] | null; created_at: unknown; author: unknown; score: unknown }>(
+      `SELECT x.id::text AS id, x.tags, x.created_at, x.metadata -> 'author' AS author, x.metadata #> '{credibility,score}' AS score
+         FROM public.sources x WHERE x.id = ANY($1::uuid[])`,
+      [sources.map((h) => h.id)],
+    );
+    for (const r of rows) {
+      by.set(`source:${r.id}`, {
+        topics: strList(r.tags), date: iso(r.created_at), quality: unit(r.score),
+        author: typeof r.author === "string" && r.author.trim() ? r.author.trim().slice(0, 200) : null,
+      });
+    }
+    if (s.owner && !s.filter) {
+      const cites = await db.query<{ id: string; n: number }>(
+        `SELECT lk ->> 'id' AS id, count(DISTINCT l.path)::int AS n
+           FROM public.user_document_listings l, jsonb_array_elements(l.outbound_links) lk
+          WHERE l.owner_sub = $2 AND lk ->> 'kind' = 'source' AND lk ->> 'id' = ANY($1::text[])
+          GROUP BY 1`,
+        [sources.map((h) => h.id), s.owner],
+      );
+      const n = new Map(cites.map((c) => [c.id, Number(c.n)]));
+      for (const h of sources) by.set(key(h), { ...by.get(key(h)), cited_by: n.get(h.id) ?? 0 });
+    }
+  }
+  if (held.length && s.refinery_id) {
+    const rows = await db.query<{ id: string; created_at: unknown }>(
+      `SELECT h.id::text AS id, h.created_at FROM public.held_sources h WHERE h.id = ANY($1::uuid[]) AND h.refinery_id = $2::uuid`,
+      [held.map((h) => h.id), s.refinery_id],
+    );
+    for (const r of rows) by.set(`source:${r.id}`, { date: iso(r.created_at) });
+  }
+  if (claims.length) {
+    const rows = await db.query<{ id: string; created_at: unknown; confidence: unknown; thread: string | null }>(
+      s.filter
+        ? `SELECT c.id::text AS id, c.created_at, c.confidence, NULL::text AS thread FROM public.claims c WHERE c.id = ANY($1::uuid[])`
+        : `SELECT c.id::text AS id, c.created_at, c.confidence, t.name AS thread
+             FROM public.claims c LEFT JOIN public.threads t ON t.id = c.thread_id WHERE c.id = ANY($1::uuid[])`,
+      [claims.map((h) => h.id)],
+    );
+    for (const r of rows) by.set(`claim:${r.id}`, { topics: r.thread ? [r.thread] : [], date: iso(r.created_at), quality: unit(r.confidence) });
+  }
+  if (pages.length) {
+    const rows = await db.query<{ slug: string; tags: unknown; updated_at: unknown }>(
+      `SELECT w.slug, w.tags, w.updated_at FROM public.wiki_pages w WHERE w.slug = ANY($1::text[])`,
+      [pages.map((h) => h.id)],
+    );
+    for (const r of rows) by.set(`page:${r.slug}`, { topics: strList(r.tags), date: iso(r.updated_at) });
+  }
+  return hits.map((h) => {
+    const e = by.get(key(h)) ?? {};
+    return {
+      ...h, topics: e.topics ?? [], date: e.date ?? null, quality: e.quality ?? null, cited_by: e.cited_by ?? null, author: e.author ?? null,
+    };
+  });
+}
+
 
 // search(query, kinds[], scope). Pages: the weighted tsvector (wiki_pages). Claims and sources:
 // ILIKE on text / title. User documents are never searched - their bodies are not in the
@@ -298,7 +384,7 @@ export async function search(db: Db, s: SearchQuery) {
     // out of scope whatever their own metadata says (rw-p0-contract2 attempt 2).
     if (s.refinery_id && !s.evidenceOnly && !s.filter) hits.push(...await searchHeld(db, s.q, s.refinery_id, s.limit, mf));
   }
-  return { query: s.q, kinds: s.kinds, scope: { refinery_id: s.refinery_id }, count: hits.length, results: hits };
+  return { query: s.q, kinds: s.kinds, scope: { refinery_id: s.refinery_id }, count: hits.length, results: await enrich(db, hits, s) };
 }
 
 async function searchPages(db: Db, q: string, limit: number): Promise<Hit[]> {
