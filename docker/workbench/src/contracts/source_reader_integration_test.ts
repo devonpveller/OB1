@@ -1,7 +1,7 @@
 // deno test src/contracts/source_reader_integration_test.ts - rwr-source-reader-api over a REAL database.
 //
 // SKIPPED unless CONTRACT_TEST_DB_HOST (a DISPOSABLE database) is set; contract-test/run-contract-tests.ps1 [4a2]
-// sets it, running the workbench side as ob_app_memory (the production role) and planting as a superuser
+// sets it, running the workbench side as ob_workbench (slot 480's role, the workbench's) and planting as a superuser
 // (SR_ADMIN_USER / SR_ADMIN_PASSWORD) because the owner-private stores are readable by no app role. Never point it at
 // a live database: it plants rows (and removes them again).
 // Identity: the contract is served behind the identity seam with WORKSPACE_IDENTITY_HEADER = X-Test-Sub, so a request
@@ -291,14 +291,25 @@ t("acceptance 7: nothing private from this item is on a shared surface - the pla
   assertEquals((await db!.query(`SELECT * FROM public.inlet_private_reader_claims($1::uuid, $2)`, [W.priv, W.subA])).length, 2);
 });
 
-t("the migration's functions are executable by ob_app_memory only (no PUBLIC, no other role)", async () => {
-  const rows = await sql<{ proname: string; grantee: string }>(
-    `SELECT p.proname, coalesce(r.rolname, 'PUBLIC') AS grantee
-       FROM pg_proc p, aclexplode(p.proacl) a LEFT JOIN pg_roles r ON r.oid = a.grantee
-      WHERE p.proname IN ('inlet_private_reader_chunks', 'inlet_private_reader_claims') AND a.privilege_type = 'EXECUTE'`);
-  assertEquals(rows.length >= 2, true, "the grants are recorded");
-  for (const r of rows) assert(["ob_app_memory", "postgres"].includes(r.grantee), `${r.proname} is executable by ${r.grantee}`);
-  assertNotEquals(rows.some((r) => r.grantee === "PUBLIC"), true);
+t("the migration's functions are executable by ob_workbench alone (480's pattern): not PUBLIC, not ob_app_memory (a role ten services log in as), not service_role or anon", async () => {
+  const sigs = ["public.inlet_private_reader_chunks(uuid,text)", "public.inlet_private_reader_claims(uuid,text)"];
+  for (const sig of sigs) {
+    const r = (await sql<{ wb: boolean; app: boolean; svc: boolean; anon: boolean; pub: boolean; def: boolean; cfg: string }>(
+      `SELECT has_function_privilege('ob_workbench', p.oid, 'EXECUTE') AS wb,
+              has_function_privilege('ob_app_memory', p.oid, 'EXECUTE') AS app,
+              has_function_privilege('service_role', p.oid, 'EXECUTE') AS svc,
+              coalesce((SELECT has_function_privilege('anon', p.oid, 'EXECUTE') FROM pg_roles WHERE rolname = 'anon'), false) AS anon,
+              EXISTS (SELECT 1 FROM aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) x WHERE x.grantee = 0 AND x.privilege_type = 'EXECUTE') AS pub,
+              p.prosecdef AS def, array_to_string(p.proconfig, ',') AS cfg
+         FROM pg_proc p WHERE p.oid = to_regprocedure($1)`, [sig]))[0];
+    assert(r, `${sig} exists`);
+    assertEquals([r.wb, r.app, r.svc, r.anon, r.pub], [true, false, false, false, false], `${sig}: who may execute`);
+    assertEquals(r.def, true);
+    assertEquals(r.cfg, "search_path=public, pg_temp");
+  }
+  // the app role of this run is ob_workbench itself (or a superuser in a plain lab): it runs them; ob_app_memory is refused at the SQL level
+  const who = (await db!.query<{ u: string }>(`SELECT current_user AS u`))[0].u;
+  assert(["ob_workbench", "postgres"].includes(who), `the test must run as ob_workbench (the workbench's role), not ${who}`);
 });
 
 Deno.test({

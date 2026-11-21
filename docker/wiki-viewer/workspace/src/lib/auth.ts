@@ -20,6 +20,8 @@ export interface Me {
   admin: boolean;
   impersonating: { sub: string; name: string; reason: string; since: string; until?: string | null } | null;
   logout: string | null; // Authentik's sign-out URL (forward-auth), else null
+  // rw-owner-private-view (D4): to whom the private views are served (absent on an older workbench)
+  private_views?: "signed-in" | "default-identity" | "off";
 }
 
 let me: Me | null = null;

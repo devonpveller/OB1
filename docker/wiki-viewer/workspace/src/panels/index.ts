@@ -24,3 +24,5 @@ import "./ideas/IdeasPanel";
 import "./ideas/IdeaPanel";
 // research-workbench rw-settings-store: the Settings panel (opened from the title bar)
 import "./settings/SettingsPanel";
+// rw-owner-private-view (slot 480): my private material (claims, search over my moved sources, my seeded research)
+import "./private/PrivatePanel";

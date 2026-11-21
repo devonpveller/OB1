@@ -92,6 +92,38 @@ export const EX = {
     by_url: { "https://example.org/suppressed": { id: "22222222-2222-4222-8222-222222222222", url: "https://example.org/suppressed", lifecycle: "suppressed", tombstone_id: null } },
   },
   cancel: { job_id: "99999999-9999-4999-8999-999999999999", status: "cancelling" },
+  // rw-owner-private-view (slot 480): hand-written in the served shape (Dredd validates the list ops' schema; the
+  // [5s] lab, src/inlet/owner_private_view_integration_test.ts, exercises the content as the owner)
+  privateClaims: {
+    private: true, next: null,
+    claims: [{
+      id: "f5100000-0000-4000-8000-000000000001", kind: "private", text: "Fixture private claim.", status: "active", epistemic_tag: "sourced",
+      confidence: 0.5, contradicted: false, created_at: "2026-10-17T12:00:00.000Z",
+      private_sources: [{ id: "f5000000-0000-4000-8000-000000000001", title: "Fixture email body", kind: "email", created_at: "2026-10-17T12:00:00.000Z" }],
+      private_parents: [], shared_sources: [],
+    }],
+  },
+  privateClaim: {
+    private: true,
+    claim: {
+      id: "f5100000-0000-4000-8000-000000000003", kind: "mixed", text: "Fixture mixed claim.", status: "active", epistemic_tag: "sourced",
+      confidence: 0.6, contradicted: false, created_at: "2026-10-17T12:00:00.000Z",
+      private_sources: [{ id: "f5000000-0000-4000-8000-000000000001", title: "Fixture email body", kind: "email", created_at: "2026-10-17T12:00:00.000Z" }],
+      private_parents: [], shared_sources: [{ id: "11111111-1111-4111-8111-111111111111", title: "Active fixture source", url: "https://example.org/active" }],
+    },
+  },
+  privateHits: {
+    private: true, mode: "text",
+    hits: [{ source_id: "f5000000-0000-4000-8000-000000000001", title: "Fixture email body", kind: "email", created_at: "2026-10-17T12:00:00.000Z", idx: 0, snippet: "a <<HL>>fixture<</HL>> line", score: 0.1 }],
+  },
+  privateJobs: {
+    private: true, next: null,
+    jobs: [{ id: "f5200000-0000-4000-8000-000000000001", root_job_id: null, created_at: "2026-10-17T12:00:00.000Z", state: "done", query: "fixture private question" }],
+  },
+  privateJob: {
+    private: true,
+    job: { id: "f5200000-0000-4000-8000-000000000001", query: "fixture private question", result: { synthesis: "fixture private synthesis" }, progress: { phase: "done" }, error: null },
+  },
   notImplemented: (operation: string, landsIn: string) => ({
     status: "not_implemented", operation, lands_in: landsIn,
     message: `${operation} is part of the contract; its backing lands in ${landsIn}`,

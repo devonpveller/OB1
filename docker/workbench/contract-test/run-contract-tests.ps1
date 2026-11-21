@@ -286,13 +286,21 @@ try {
   $null = Dk cp $snapSql "${dbA}:/tmp/sr-snap.sql"; $null = Dk cp $readerSql "${dbA}:/tmp/sr-reader.sql"
   $null = Dk cp (Join-Path $dockerDir 'init-source-reader.sql') "${dbA}:/tmp/sr-fwd.sql"
   $null = Dk cp (Join-Path $dockerDir 'revert-source-reader.sql') "${dbA}:/tmp/sr-rev.sql"
-  # The lab creates ob_app_memory AFTER the initdb chain, so the grants a slot gives it only when the role exists (440's
-  # inlet_private_source, 520's two functions) did not apply here; a live apply happens with the role in place. Put the
-  # same grants in place first: 520 forward again (its own grants), and 440's function by hand.
+  # The lab creates ob_app_memory AFTER the initdb chain, so what slots 480 and 520 do only when that role exists (480: ob_workbench
+  # joins ob_app_memory) is not in place here, and ob_workbench has no password. A live apply happens with the roles in place and
+  # 480 first: give the lab role a password, re-run 480 (membership; the grants of PD1's two reads) and then 520 (its own grants),
+  # and run the reader's tests AS ob_workbench - the workbench's role once 480 is live.
+  $wbPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+  $null = Dk cp (Join-Path $dockerDir 'init-owner-private-view.sql') "${dbA}:/tmp/sr-480.sql"
+  $null = Dk cp (Join-Path $dockerDir 'check-source-reader.sql') "${dbA}:/tmp/sr-check.sql"
+  $null = Dk exec $dbA psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/sr-480.sql
+  $null = Dk exec $dbA psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "ALTER ROLE ob_workbench PASSWORD '$wbPw'"
   $null = Dk exec $dbA psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/sr-fwd.sql
-  $null = Dk exec $dbA psql -U postgres -d openbrain -X -q -c 'GRANT EXECUTE ON FUNCTION public.inlet_private_source(uuid,text) TO ob_app_memory'
-  $o = Dk run --rm --label $label --network $net -e "CONTRACT_TEST_DB_HOST=$dbA" -e CONTRACT_TEST_DB_USER=ob_app_memory `
-    -e "CONTRACT_TEST_DB_PASSWORD=$appPw" -e SR_ADMIN_USER=postgres -e "SR_ADMIN_PASSWORD=$pw" `
+  $chk = (Dk exec $dbA psql -X -A -t -q -U postgres -d openbrain -f /tmp/sr-check.sql).Trim()
+  Save 'source-reader-check.log' $chk
+  Check ($chk -match 'check: OK') "check-source-reader.sql: ob_workbench alone executes the two reader functions ($(($chk -split "`n")[-1]))"
+  $o = Dk run --rm --label $label --network $net -e "CONTRACT_TEST_DB_HOST=$dbA" -e CONTRACT_TEST_DB_USER=ob_workbench `
+    -e "CONTRACT_TEST_DB_PASSWORD=$wbPw" -e SR_ADMIN_USER=postgres -e "SR_ADMIN_PASSWORD=$pw" `
     $testTag deno test --allow-net --allow-env --allow-read src/contracts/source_reader_integration_test.ts
   Save 'source-reader-integration.log' $o
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
@@ -301,6 +309,8 @@ try {
   $before = (Dk @psql -f /tmp/sr-snap.sql).Trim(); $readerBefore = (Dk @psql -f /tmp/sr-reader.sql).Trim()
   $o = Dk @psql -f /tmp/sr-rev.sql; Save 'source-reader-revert.log' $o; $rcRev = $script:rc
   $afterRev = (Dk @psql -f /tmp/sr-snap.sql).Trim(); $readerRev = (Dk @psql -f /tmp/sr-reader.sql).Trim()
+  $chkRev = (Dk @psql -f /tmp/sr-check.sql).Trim()
+  Check ($chkRev -match 'check: FAIL' -and $chkRev -match 'reader function MISSING') 'check-source-reader.sql reports both functions MISSING after the revert (it can fail)'
   Check (($rcRev -eq 0) -and $readerRev -match '^0 ' -and $afterRev -eq $before) "slot 520 revert drops exactly the two reader functions (functions left: $readerRev; every other function, ACL and column unchanged: $($afterRev -eq $before))"
   $o = Dk @psql -f /tmp/sr-fwd.sql; Save 'source-reader-forward.log' $o; $rcFwd = $script:rc
   $afterFwd = (Dk @psql -f /tmp/sr-snap.sql).Trim(); $readerFwd = (Dk @psql -f /tmp/sr-reader.sql).Trim()
@@ -448,7 +458,8 @@ try {
   # rw-p8a2-cleanup: dredd-hooks.js also skips the cleanup writes and the per-user action read (CLEANUP_WRITE there;
   # cleanup_integration_test.ts exercises them in run-workspace-tests.ps1) - the same five paths, counted here
   $hookSkipped = @($docJson.paths.PSObject.Properties | Where-Object { $_.Name -match '/sessions/\{id\}/(steer|cancel)$' -or
-    $_.Name -match '/cleanup/(sources/\{id\}/(sever|erase)|process-all|tombstones/\{id\}/lift|actions/\{id\})$' }).Count
+    $_.Name -match '/cleanup/(sources/\{id\}/(sever|erase)|process-all|tombstones/\{id\}/lift|actions/\{id\})$' -or
+    $_.Name -match '/private/(claims|jobs)/\{id\}$' }).Count  # rw-owner-private-view: the owner-only by-id reads (PRIVATE_BY_ID)
   Check ($dm.Success -and $dm.Groups[2].Value -eq '0' -and $dm.Groups[3].Value -eq '0' -and [int]$dm.Groups[1].Value -eq ($ops - $hookSkipped)) "Dredd: $($dm.Value) (operations in the document: $ops; skipped by the hooks: $hookSkipped)"
 
   # ---------------------------------------------------------------- 6. eleven-router smoke
