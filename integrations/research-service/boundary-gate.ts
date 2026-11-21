@@ -24,7 +24,9 @@ import { LEXICON_COUNT, LEXICON_SHA256, LEXICON_SOURCE, LEXICON_WORDS } from "./
 
 /** Bumped on any change to the rules here; every verdict records it. */
 // pd0c-1 (rw-boundary-digest round 2): the private-host list gained the meeting / invite / share-link rule (shareLink)
-export const BOUNDARY_VERSION = "pd0c-1";
+// pd0b-1 (rw-boundary-ideas, 420 reviewer R-F1): a non-public item link's FRAME words are not denied (an unreachable link
+// no longer refuses a plain question or the template's frame); ownerGate (an owner's approved question, plan 09 D7)
+export const BOUNDARY_VERSION = "pd0b-1";
 export const COPY_RUN = 4;
 export const MIN_TOKENS = 3;
 export const MAX_TOKENS = 60;
@@ -202,7 +204,10 @@ export function denySet(d: DenyInput): Set<string> {
       } catch { /* */ }
       continue;
     }
-    add(l);
+    // rw-boundary-ideas (420 reviewer R-F1): every token of a link that is not one of the request's public links is
+    // denied EXCEPT the frame vocabulary - a frame word names nothing, so an unreachable `https://news.example.org/about`
+    // in an item no longer refuses "What is known about ..." nor the template's own frame ("what ... about")
+    for (const w of tokens(l)) if (!FRAME.has(w)) out.add(w);
   }
   return out;
 }
@@ -366,6 +371,20 @@ export function templateQuestion(title: string, deny: ReadonlySet<string>): { qu
   if (!kept.length) return null;
   const t = kept.join(" ");
   return { question: `What is publicly known about "${t}"?`, topic: t.slice(0, MAX_TOPIC_CHARS).trim() };
+}
+
+/** rw-boundary-ideas (plan 09 D7): THE OWNER'S approved question on an idea that could not be phrased. The owner
+ *  consents to its words, so the lexicon / evidence / copy rules do not apply - but the identity deny list does, and so
+ *  do ids and the length rule: a DENY token (the owner's identity, the item's ids, a non-public link's words) or an
+ *  id-shaped token anywhere refuses it. PURE, like gate(). */
+export function ownerGate(candidate: string, deny: ReadonlySet<string>): GateResult {
+  const c = cleanText(candidate).trim();
+  const t = tokens(c);
+  if (t.length < MIN_TOKENS || t.length > MAX_TOKENS || c.length > MAX_CHARS) return { ok: false, code: "length", tokens: [] };
+  const di = deniedIndices(t, deny);
+  const denied = t.filter((w, i) => di.has(i) || idShaped(w));
+  if (denied.length) return { ok: false, code: "denied_token", tokens: [...new Set(denied)] };
+  return { ok: true };
 }
 
 /** A topic label for an accepted model question: its own (gate-passed) tokens, at most 80 characters. */

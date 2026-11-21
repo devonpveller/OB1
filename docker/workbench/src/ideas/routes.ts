@@ -5,6 +5,9 @@
 //                                           text: outcome unchanged); research is queued by the database
 //   POST /workbench/ideas/:id/research-now  research now through idea_research()
 //   PUT  /workbench/ideas/:id/draft         {text} - the accreting draft, a field on the idea's one room
+//   GET  /workbench/ideas/:id/research               rw-boundary-ideas: the research state; the owner's review while
+//   POST /workbench/ideas/:id/research/approve       it waits (approve an edited question: it runs derived, shared;
+//   POST /workbench/ideas/:id/research/private       or run it privately: 'personal', the report the owner's) - review.ts
 //
 // `create document` is the documents API's POST /workbench/documents/seed (P2b's seed action), which moves the
 // idea to promoted through idea_promote(). Every route acts for the identity seam's subject; another user's idea
@@ -14,10 +17,13 @@ import type { Context } from "hono";
 import type { Db } from "../contracts/db.ts";
 import { identityOf, type Identity } from "../middleware/identity.ts";
 import * as ideas from "./repo.ts";
+import * as review from "./review.ts";
 
 export interface IdeasDeps {
   db: Db;
   embed: (t: string) => Promise<number[]>;
+  /** the research service's approval door (review.ts approveClient); null = shipped inert (503-like 502 naming the env) */
+  approve?: review.ApproveCall | null;
 }
 
 async function body(c: Context): Promise<Record<string, unknown>> {
@@ -53,6 +59,22 @@ export function ideasRouter(deps: IdeasDeps) {
   r.post("/:id/research-now", wrap(async (c, who) => {
     const id = ideas.ideaId(c.req.param("id"));
     return c.json(await ideas.researchIdea(db, id, who), 202);
+  }));
+
+  r.get("/:id/research", wrap(async (c, who) => {
+    const id = ideas.ideaId(c.req.param("id"));
+    return c.json(await review.researchState(db, id, who));
+  }));
+
+  r.post("/:id/research/approve", wrap(async (c, who) => {
+    const id = ideas.ideaId(c.req.param("id"));
+    const o = await review.approveQuestion(db, id, review.parseQuestion(await body(c)), who, deps.approve === undefined ? review.approveClient() : deps.approve);
+    return c.json(o.body, o.status);
+  }));
+
+  r.post("/:id/research/private", wrap(async (c, who) => {
+    const id = ideas.ideaId(c.req.param("id"));
+    return c.json(await review.runPrivately(db, id, review.parseQuestion(await body(c)), who), 202);
   }));
 
   r.put("/:id/draft", wrap(async (c, who) => {

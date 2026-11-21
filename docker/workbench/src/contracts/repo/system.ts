@@ -37,9 +37,11 @@ export async function notifications(db: Db, cls: string | null, since: string | 
              OR starts_with(n.entity, 'document:documents/' || $5 || '/')
              OR EXISTS (SELECT 1 FROM public.user_document_listings d
                          WHERE 'document:' || d.path = n.entity AND d.owner_sub = $4))
-        -- an idea (refinery) event is its owner's too: another user's refinery id never rides the stream
+        -- an idea (refinery) event is its owner's too: another user's refinery id never rides the stream.
+        -- rw-boundary-ideas: by the idea id it NAMES (entity idea:<id> or idea:<id>:dossier:<source>) - a 'dossier
+        -- delivered' event would otherwise tie another user's idea to a derived job's SHARED report source
         AND (n.entity IS NULL OR NOT starts_with(n.entity, 'idea:')
-             OR NOT EXISTS (SELECT 1 FROM public.ideas i WHERE 'idea:' || i.id::text = n.entity AND i.owner_sub <> $4))
+             OR EXISTS (SELECT 1 FROM public.ideas i WHERE i.id::text = split_part(n.entity, ':', 2) AND i.owner_sub = $4))
       ORDER BY n.last_seen DESC LIMIT $3`,
     [cls, since, limit, who.sub, who.key],
   );

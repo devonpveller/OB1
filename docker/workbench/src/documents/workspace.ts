@@ -18,8 +18,9 @@ export async function acknowledge(db: Db, id: string, who: Identity) {
              OR starts_with(n.entity, 'document:documents/' || $4 || '/')
              OR EXISTS (SELECT 1 FROM public.user_document_listings d
                          WHERE 'document:' || d.path = n.entity AND d.owner_sub = $2))
+        -- rw-boundary-ideas: by the idea id the entity NAMES (idea:<id> or idea:<id>:dossier:<source>)
         AND (n.entity IS NULL OR NOT starts_with(n.entity, 'idea:')
-             OR NOT EXISTS (SELECT 1 FROM public.ideas i WHERE 'idea:' || i.id::text = n.entity AND i.owner_sub <> $2))
+             OR EXISTS (SELECT 1 FROM public.ideas i WHERE i.id::text = split_part(n.entity, ':', 2) AND i.owner_sub = $2))
      ON CONFLICT (owner_sub, notification_id) DO UPDATE SET acked_at = now(), actor_sub = EXCLUDED.actor_sub
      RETURNING notification_id::text AS id, acked_at`,
     [id, who.sub, who.actor, who.key],

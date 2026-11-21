@@ -21,6 +21,7 @@ export interface Outcome {
   revision?: number;
   title?: string;
   job_id?: string;
+  request_id?: string;   // rw-boundary-ideas (slot 580): research now queues a private request, formed into a public question
   document_path?: string;
 }
 
@@ -71,7 +72,8 @@ export async function researchIdea(client: IdeaClient, owner: string, ideaId: st
   if (o.outcome === "not_found") throw new Error(NOT_FOUND(ideaId));
   if (o.outcome === "archived") return { text: ARCHIVED, isError: true };
   return { text:
-    `Queued idea ${ideaId} for immediate research (job ${o.job_id}). ` +
+    `Queued idea ${ideaId} for immediate research (request ${o.request_id ?? o.job_id}). Its research question is formed ` +
+    `from the idea without its private text; if it cannot be, the workspace asks you to approve one. ` +
     `Findings will land in the idea's room in the research workspace (private to you) — follow along there.` };
 }
 
