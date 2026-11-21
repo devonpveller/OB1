@@ -619,6 +619,20 @@ A thread an idea job's filing named or described (the base's curator) is re-desc
 only (a minted one also renamed and relabelled), its embedding cleared for `backfill-thread-embeddings.ts`.
 Revert: `revert-report-isolation.sql`.
 
+**The claims drawn from a private report are private too (rw-private-report-claims, slot 570; operator 2026-11-21).**
+Slot 570 reverses 390's "the claims stay shared": a claim a private report links (whatever made the report private - the
+rule keys on the report, not the job kind) moves into its owner's store, PD1's `inlet_private_claims` with its edges in
+`inlet_private_claim_sources` - the one private-claim representation, read by nothing shared, so every shared read
+(contract claims / search / neighbours / timeline / quality / dependence / chunk context / references, the wiki compile,
+the research service's reuse and the MCP tools over them) excludes it by construction. A claim a shared synthesis also
+filed stays shared ("mixed"); one with no single owner (an ownerless report, two owners) is withheld. The shared rows that
+named a moved claim are archived and fixed: its edges, the contradicts edges onto shared claims, job results' claim lists
+(and `claims_reused`), wiki pages carrying its text (withheld and guarded), and a private run's corroboration lines
+(neutral keyed text; a guard on `source_corroborations`). `idea(id)` lists the owner's private claims through
+`private_report_claims_of_idea(idea, sub)` (owner-checked). A guard refuses linking a shared claim to a private report.
+Check: `check-private-report-claims.sql`; lab: `contract-test/run-private-report-claims-lab.ps1`; revert:
+`revert-private-report-claims.sql` (first, before 480 / 470 / 440 / 390).
+
 **Existing personal data is its owner's, and private (rw-inlet-owner, plan 08 PD1, slot 440, after 430).** `init-inlet-owner.sql`
 (run with `-v owner_sub=<WORKSPACE_DEFAULT_SUB>`; the subject is recorded once in `inlet_owner`) gives every thought an
 owner (`thoughts.user_id`; only that column changes), moves the email-body sources (url mail.google.com) and the podcast

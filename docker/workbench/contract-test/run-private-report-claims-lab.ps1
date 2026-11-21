@@ -1,0 +1,294 @@
+# run-private-report-claims-lab.ps1 - rw-private-report-claims (slot 570) in a DISPOSABLE lab.
+#
+#   powershell -NoProfile -File OB1/docker/workbench/contract-test/run-private-report-claims-lab.ps1 -Id wt-rw-private-report-claims -Subnet 10.247.57.0/24 [-Evidence <empty dir>]
+#
+# What it does, and ONLY this (every docker call through the shim below: the run's --internal network on the pinned
+# /25, :wt-<id> tags, the ai-stack.harness.owner label, no published port, no :local image, no compose):
+#   [1] stages the REAL initdb chain from OB1/docker/docker-compose.yml (570 included) and starts it
+#   [2] builds the workbench (its build test gate) and its test stage as :wt-<id> tags
+#   [3] starts PostgREST + the openbrain-rest Caddy, a stub embedder and TWO workbenches: identity header (users A and
+#       B, the lane, a service key) and Authentik forward-auth (A, B and the admin C, signed in by a lab signer)
+#   [4] reverts the chain's 570 (back to the 390 model: the link's foreign key, no guards) and plants
+#       (src/inlet/private_report_claims_integration_test.ts, phase plant), then hashes every table 570 touches
+#   [5] RED: before 570 the [leak] and [db] cases FAIL and the check script says FAIL
+#   [6] 570 twice (the second has nothing to move), revert twice (the second has nothing to restore): byte-identical
+#       to [4]'s hashes; 570 again; the check script says OK
+#   [7] GREEN: every case passes (a new filing the curator's way included)
+#   [8] the last revert puts the post-570 filing back in the shared table (the 390 model) and the key back on
+# Exit 0 = every check passed. Counts, route names and pass/fail only - never a claim's text. Never the live stack.
+param(
+  [string]$Id = 'wt-rw-private-report-claims',
+  [string]$Subnet = '',
+  [string]$Evidence = '',
+  [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
+  [string]$PgrstImage = 'postgrest/postgrest:v12.2.3',
+  [string]$CaddyImage = 'caddy:2-alpine',
+  [switch]$KeepImages
+)
+$ErrorActionPreference = 'Continue'
+if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
+. (Join-Path $PSScriptRoot 'harness-subnet.ps1')
+$w = Test-HarnessSubnet $Subnet
+if ($w) { Write-Host "REFUSED: $w"; exit 2 }
+$subnets = Split-HarnessSubnet $Subnet
+if ($Evidence -and (Test-Path $Evidence) -and @(Get-ChildItem -Force $Evidence).Count) { Write-Host "REFUSED: -Evidence $Evidence is not empty"; exit 2 }
+
+$label = "ai-stack.harness.owner=$Id"
+$ct = $PSScriptRoot
+$wb = Split-Path -Parent $ct
+$dockerDir = Split-Path -Parent $wb
+$ob1 = Split-Path -Parent $dockerDir
+$short = ($Id -replace '^wt-', '')
+$rand = -join ((48..57 + 97..102) | Get-Random -Count 6 | ForEach-Object { [char]$_ })
+$P = "rwprc-$rand"
+$net = "$P-net"
+$db = "$P-db"
+$wbTag = "openbrain-workbench:wt-$short"; $wbTestTag = "openbrain-workbench:wt-$short-test"
+$pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+$appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+$key = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+$door = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+$svcKey = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+$faSecret = -join ((48..57 + 97..122) | Get-Random -Count 48 | ForEach-Object { [char]$_ })
+$rr = -join ((97..122) | Get-Random -Count 10 | ForEach-Object { [char]$_ })
+$subA = "prc-ay-$rr"; $subB = "prc-bee-$rr"; $subC = "prc-admin-$rr"
+$faIssuer = 'https://authentik.lab.invalid/application/o/prc/'; $faClient = "prc-client-$rr"
+if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "$P-evidence" }
+New-Item -ItemType Directory -Force $Evidence | Out-Null
+$stage = Join-Path $env:TEMP "$P-initdb"
+$script:fail = 0
+$script:made = @{ net = $false; containers = @(); images = @() }
+function Pass([string]$m) { Write-Host "  PASS  $m" }
+function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
+function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
+function Save([string]$name, [string]$text) { [System.IO.File]::WriteAllText((Join-Path $Evidence $name), $text, (New-Object System.Text.UTF8Encoding $false)) }
+
+# -- the lab docker shim (run-workspace-tests.ps1's rules) --------------------------------------------------------
+function Test-LabDockerArgs([string[]]$a) {
+  $all = ($a -join ' ')
+  if ($a.Count -and $a[0] -eq 'compose') { return 'docker compose is never used by the lab' }
+  if ($all -match '192\.168\.') { return 'a 192.168.x address' }
+  if ($all -match '(^|[\s=:/])(ai-stack_|open-brain_)') { return 'an ai-stack_* / open-brain_* name' }
+  for ($i = 0; $i -lt $a.Count; $i++) {
+    $x = $a[$i]
+    if ($x -match '^(-p|-P|--publish|--publish-all)$' -or $x -match '^--publish(-all)?=' -or $x -match '^-p\d') { return "a published port ($x)" }
+    if ($x -match '^--net(work)?$') { $v = $a[$i + 1]; if ($v -ne $net -and $v -ne 'none') { return "network '$v' is not this run's" } }
+    if ($x -match '^--net(work)?=(.+)$') { if ($Matches[2] -ne $net -and $Matches[2] -ne 'none') { return "network '$($Matches[2])' is not this run's" } }
+    if ($x -match '(^|[/=])[^ ]*:local$' -and $a[0] -notin @('images', 'image')) { return "a :local image ($x)" }
+  }
+  if ($all -match 'macvlan|ipvlan') { return 'a macvlan / ipvlan driver' }
+  if ($a.Count -ge 2 -and $a[0] -eq 'network' -and $a[1] -eq 'create') {
+    if ($a -notcontains '--internal') { return 'a network that is not --internal' }
+    if (($a -join ' ') -notmatch [regex]::Escape("--subnet $($subnets.run)")) { return 'a network not on the pinned subnet' }
+  }
+  if ($a.Count -and $a[0] -eq 'build') {
+    for ($i = 0; $i -lt $a.Count; $i++) {
+      if ($a[$i] -eq '-t' -and $a[$i + 1] -notmatch ":wt-$([regex]::Escape($short))(-[a-z0-9]+)?$") { return "a build tag that is not :wt-$short ($($a[$i + 1]))" }
+    }
+  }
+  return ''
+}
+function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
+  $why = Test-LabDockerArgs $a
+  if ($why) { Write-Host "  SHIM REFUSED: $why"; $script:rc = 2; $script:fail++; return "REFUSED: $why" }
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = 'docker'
+  $psi.Arguments = ($a | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join ' '
+  $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false
+  $p = [System.Diagnostics.Process]::Start($psi)
+  $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
+  if (-not $p.WaitForExit($TimeoutSec * 1000)) { try { $p.Kill() } catch { }; $script:rc = 124; return "TIMEOUT after ${TimeoutSec}s" }
+  $p.WaitForExit()
+  $script:rc = $p.ExitCode
+  return (($out.Result + $err.Result) -replace "`r", '').TrimEnd()
+}
+function Dk { Lab-Docker 300 ([string[]]$args) }
+function DkLong { Lab-Docker 2400 ([string[]]$args) }
+function Run-Detached([string]$name, [string[]]$extra) {
+  $o = Dk run -d --name $name --label $label --network $net @extra
+  if ($script:rc -ne 0) { Fail "$name did not start: $o"; return $false }
+  $script:made.containers += $name
+  return $true
+}
+function Q([string]$q) { return ((Dk exec $db psql -U postgres -d openbrain -X -A -t -q -c $q) | Out-String).Trim() }
+function Psql-File([string]$path, [string]$tag) {
+  $null = Dk cp $path "${db}:/tmp/prc.sql"
+  $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/prc.sql
+  $rc = $script:rc
+  $msg = (($o -split "`n") | Where-Object { $_ -match 'NOTICE|WARNING|ERROR' } | ForEach-Object { $_ -replace '^.*?(NOTICE|WARNING|ERROR):\s*', '$1 ' }) -join ' | '
+  Write-Host "    [$tag] exit ${rc}: $msg"
+  $script:log += "[$tag] exit ${rc}: $msg"
+  return @{ rc = $rc; msg = $msg }
+}
+function Check-Script {
+  $null = Dk cp (Join-Path $dockerDir 'check-private-report-claims.sql') "${db}:/tmp/prccheck.sql"
+  return ((Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/prccheck.sql) | Out-String).Trim()
+}
+# every table slot 570 touches, hashed (the revert's byte-identical bar); the link's foreign key's definition too
+$hashQ = @"
+SELECT string_agg(t || '=' || h, ' ' ORDER BY t) FROM (
+  SELECT 'claims' AS t, md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) AS h FROM public.claims x
+  UNION ALL SELECT 'claim_sources', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.claim_sources x
+  UNION ALL SELECT 'links', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.report_id, x.claim_id), '')) FROM public.research_private_report_claims x
+  UNION ALL SELECT 'jobs', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.research_jobs x
+  UNION ALL SELECT 'wiki_pages', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.slug), '')) FROM public.wiki_pages x
+  UNION ALL SELECT 'corroborations', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.source_corroborations x
+  UNION ALL SELECT 'private_claims', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.inlet_private_claims x
+  UNION ALL SELECT 'private_edges', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.claim_id, x.edge_ref, x.batch), '')) FROM public.inlet_private_claim_sources x
+  UNION ALL SELECT 'link_fk', md5(coalesce((SELECT string_agg(conname || ' ' || pg_get_constraintdef(oid), '|' ORDER BY conname) FROM pg_constraint
+                                           WHERE conrelid = 'public.research_private_report_claims'::regclass AND contype = 'f'), ''))
+) s
+"@
+$hashQ = ($hashQ -split "`r?`n") -join ' '
+function Invoke-Test([string]$phase) {
+  $a = @('run', '--rm', '--label', $label, '--network', $net,
+    '-e', "PRC_PHASE=$phase", '-e', "PRC_WB=http://$P-wb:8000", '-e', "PRC_WB_FA=http://$P-wbfa:8000",
+    '-e', "PRC_KEY=$key", '-e', "PRC_DOOR=$door", '-e', "PRC_SVC_KEY=$svcKey",
+    '-e', "PRC_FA_ISSUER=$faIssuer", '-e', "PRC_FA_CLIENT=$faClient", '-e', "PRC_FA_SECRET=$faSecret",
+    '-e', "PRC_A=$subA", '-e', "PRC_B=$subB", '-e', "PRC_C=$subC",
+    '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/inlet/private_report_claims_integration_test.ts')
+  $o = Lab-Docker 900 $a
+  $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+  Save "test-$phase.log" ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED|ignored)|^(ok|FAILED) \||error:|AssertionError|Values are not equal|carries a|=>' } | Select-Object -First 400) -join "`n")
+  foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
+  return @{ out = $clean; m = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean) }
+}
+function Case-Results([string]$out) {
+  $r = @{}
+  foreach ($l in ($out -split "`n")) { $mm = [regex]::Match($l, '^(\[[^\]]+\] .+?) \.\.\. (ok|FAILED)'); if ($mm.Success) { $r[$mm.Groups[1].Value.Trim()] = $mm.Groups[2].Value } }
+  return $r
+}
+
+$script:log = @()
+try {
+  Write-Host "== rw-private-report-claims lab  owner=$Id  net=$net  evidence=$Evidence"
+  $sha = (& git -C $ob1 rev-parse HEAD).Trim()
+  # ---------------------------------------------------------------- [1] the chain
+  Write-Host '[1] the initdb chain, from docker-compose.yml'
+  $compose = Get-Content -Raw (Join-Path $dockerDir 'docker-compose.yml')
+  $rx = [regex]'(\.{1,2}/[A-Za-z0-9_./-]+\.sql):/docker-entrypoint-initdb\.d/([0-9]{3}-[a-z0-9.-]+\.sql)'
+  New-Item -ItemType Directory -Force $stage | Out-Null
+  $chain = @($rx.Matches($compose) | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
+  foreach ($m in $chain) { Copy-Item (Join-Path $dockerDir $m[0]) (Join-Path $stage $m[1]) }
+  Check (@($chain | Where-Object { $_[1] -eq '570-init-private-report-claims.sql' }).Count -eq 1) "the chain mounts 570-init-private-report-claims.sql ($($chain.Count) migrations)"
+  $null = Dk network create --driver bridge --internal --subnet $subnets.run --label $label $net
+  Check ($script:rc -eq 0) "network $net (internal, $($subnets.run))"
+  if ($script:rc -ne 0) { throw 'network' }
+  $script:made.net = $true
+  # ---------------------------------------------------------------- [2] images
+  Write-Host '[2] images'
+  $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" -t $wbTag $wb; Save 'build-workbench.log' ($o -split "`n" | Select-Object -Last 60 | Out-String)
+  Check ($script:rc -eq 0) "$wbTag built (its test gate passed)"
+  if ($script:rc -ne 0) { throw 'build workbench' }
+  $script:made.images += $wbTag
+  $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb; Save 'build-workbench-test.log' ($o -split "`n" | Select-Object -Last 40 | Out-String)
+  Check ($script:rc -eq 0) "$wbTestTag (the test stage) built"
+  if ($script:rc -ne 0) { throw 'build test' }
+  $script:made.images += $wbTestTag
+  # ---------------------------------------------------------------- [3] the lab
+  Write-Host '[3] the lab'
+  if (-not (Run-Detached $db @('--network-alias', 'openbrain-db', '-e', "POSTGRES_PASSWORD=$pw", '-e', 'POSTGRES_DB=openbrain', '-v', "${stage}:/docker-entrypoint-initdb.d:ro", $PgImage))) { throw 'db' }
+  for ($i = 0; $i -lt 150; $i++) { if ((Dk logs $db) -match 'PostgreSQL init process complete') { break }; Start-Sleep -Seconds 2 }
+  for ($i = 0; $i -lt 60; $i++) { $null = Dk exec $db pg_isready -h 127.0.0.1 -U postgres -d openbrain; if ($script:rc -eq 0) { break }; Start-Sleep -Seconds 2 }
+  $logs = Dk logs $db
+  Check ($logs -match 'PostgreSQL init process complete') 'the database ran the initdb chain'
+  $errs = @(($logs -split "`n") | Where-Object { $_ -match 'ERROR:' })
+  Check ($errs.Count -eq 0) "initdb logged no ERROR ($($errs.Count))"
+  if ($errs.Count) { Save 'initdb-errors.log' ($errs -join "`n") }
+  Check ($logs -match 'private report claims: nothing to move') 'on a fresh volume slot 570 has nothing to move'
+  $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
+  Check ($script:rc -eq 0) 'ob_app_memory (non-superuser, service_role) - the production shape'
+  # the role exists only now (production creates it before 570): 570 again grants it its functions
+  $r0 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570 again, once ob_app_memory exists'
+  Check ($r0.rc -eq 0 -and $r0.msg -match 'nothing to move') '570 re-run on the fresh lab: nothing to move, the grants made'
+  $ctMount = "${ct}:/ct:ro"
+  $null = Run-Detached "$P-embed" @('--network-alias', 'stub-embed', '-v', $ctMount, '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '/ct/stub-embed.ts')
+  $null = Run-Detached "$P-postgrest" @('--network-alias', 'openbrain-postgrest', '-e', "PGRST_DB_URI=postgres://postgres:$pw@openbrain-db:5432/openbrain",
+      '-e', 'PGRST_DB_SCHEMAS=public', '-e', 'PGRST_DB_ANON_ROLE=service_role', '-e', 'PGRST_DB_POOL=4', '-e', 'PGRST_SERVER_PORT=3000', $PgrstImage)
+  $null = Run-Detached "$P-rest" @('--network-alias', 'openbrain-rest', '-v', "$(Join-Path $dockerDir 'Caddyfile'):/etc/caddy/Caddyfile:ro", $CaddyImage)
+  $common = @('-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$key", '-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw",
+      '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid',
+      '-e', 'WIKI_GIT_DIR=/wiki', '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://unreachable.invalid',
+      '-e', "WORKSPACE_SERVICE_KEYS=prc-test=$svcKey", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
+  $null = Run-Detached "$P-wb" (@('--network-alias', "$P-wb") + $common + @('-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub', $wbTag))
+  $null = Run-Detached "$P-wbfa" (@('--network-alias', "$P-wbfa") + $common + @('-e', "WORKSPACE_DOOR_KEY=$door",
+      '-e', "WORKSPACE_FORWARD_AUTH_ISSUER=$faIssuer", '-e', "WORKSPACE_FORWARD_AUTH_CLIENT_ID=$faClient", '-e', "WORKSPACE_FORWARD_AUTH_CLIENT_SECRET=$faSecret",
+      '-e', 'WORKSPACE_FORWARD_AUTH_ADMIN_GROUP=lab-admins', $wbTag))
+  foreach ($h in @("$P-wb", "$P-wbfa")) {
+    $up = $false
+    for ($i = 0; $i -lt 60; $i++) {
+      $null = Dk run --rm --label $label --network $net --entrypoint deno $wbTag eval "const r = await fetch('http://${h}:8000/health').catch(() => null); Deno.exit(r && r.status < 500 ? 0 : 1)"
+      if ($script:rc -eq 0) { $up = $true; break }
+      Start-Sleep -Seconds 2
+    }
+    Check $up "the workbench $h is up"
+    if (-not $up) { Save "$h.log" ((Dk logs $h) | Out-String) }
+  }
+  # ---------------------------------------------------------------- [4] back to the 390 model, plant, hash
+  Write-Host '[4] revert the chain''s 570 (the 390 model), plant, hash'
+  $rv0 = Psql-File (Join-Path $dockerDir 'revert-private-report-claims.sql') 'revert the chain''s 570'
+  Check ($rv0.rc -eq 0 -and $rv0.msg -match 'foreign key restored') 'the revert puts the link''s foreign key back (the 390 model)'
+  $c0 = Check-Script; Save 'check-before-plant.log' $c0
+  $pt = Invoke-Test 'plant'
+  Check ($pt.m.Success -and $pt.m.Groups[1].Value -eq 'ok' -and [int]$pt.m.Groups[2].Value -eq 1) "planted the 390-shaped private-report claims and everything naming them ($($pt.m.Value))"
+  $h0 = Q $hashQ; Save 'hash-planted.txt' $h0
+  # ---------------------------------------------------------------- [5] RED
+  Write-Host '[5] RED: before 570'
+  $red = Invoke-Test 'red'
+  $redCases = Case-Results $red.out
+  $leakRed = @($redCases.Keys | Where-Object { $_ -match '\[leak\]' -and $redCases[$_] -eq 'FAILED' })
+  $dbRed = @($redCases.Keys | Where-Object { $_ -match '\[db\]' -and $redCases[$_] -eq 'FAILED' })
+  $ctlRed = @($redCases.Keys | Where-Object { $_ -match '\[(control|owner)\]' -and $redCases[$_] -eq 'FAILED' })
+  Save 'red-cases.txt' (($redCases.Keys | Sort-Object | ForEach-Object { "$($redCases[$_])  $_" }) -join "`n")
+  Check ($leakRed.Count -ge 6) "RED: $($leakRed.Count) [leak] read path(s) fail before 570 (B's claims reach A, the lane, a service, A signed in or the admin)"
+  Check ($dbRed.Count -eq @($redCases.Keys | Where-Object { $_ -match '\[db\]' }).Count -and $dbRed.Count -ge 7) "RED: every [db] case fails before 570 ($($dbRed.Count))"
+  Check ($ctlRed.Count -eq 0) "RED: the controls and the owner's read pass before 570 ($($ctlRed.Count) failed)"
+  $cr = Check-Script; Save 'check-red.log' $cr
+  Check ($cr -match 'check: FAIL' -and $cr -match 'in the shared table=[1-9]') 'RED: the check script reports private-report claims on a shared surface and FAILS'
+  # ---------------------------------------------------------------- [6] init x2, revert x2, init
+  Write-Host '[6] 570 x2, revert x2 (byte-identical), 570'
+  $i1 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570'
+  Check ($i1.rc -eq 0 -and $i1.msg -match '3 claim\(s\) moved to their owner''s store' -and $i1.msg -match '2 withheld' -and $i1.msg -match '1 claim\(s\) a shared synthesis also filed stay shared' -and $i1.msg -match '1 job result\(s\) stripped' -and $i1.msg -match '1 wiki page\(s\) withheld' -and $i1.msg -match '1 corroboration line') "570 moves B's 2 + A's 1 claims, withholds the two-owner and the ownerless claim, keeps the mixed one, strips the job, withholds the page, neutralises the line (counts only)"
+  $i2 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570 again'
+  Check ($i2.rc -eq 0 -and $i2.msg -match 'nothing to move' -and $i2.msg -notmatch 'corroboration line') '570 a second time: nothing to move'
+  $c1 = Check-Script; Save 'check-after-570.log' $c1
+  Check ($c1 -match 'check: OK') 'after 570 the check script says OK'
+  $v1 = Psql-File (Join-Path $dockerDir 'revert-private-report-claims.sql') 'revert'
+  Check ($v1.rc -eq 0 -and $v1.msg -match '5 claim\(s\) restored' -and $v1.msg -match 'foreign key restored') 'the revert restores the 5 claims, the edges, the job, the page, the line and the key'
+  $v2 = Psql-File (Join-Path $dockerDir 'revert-private-report-claims.sql') 'revert again'
+  Check ($v2.rc -eq 0 -and $v2.msg -match 'nothing to restore') 'a second revert has nothing to restore'
+  $h1 = Q $hashQ; Save 'hash-reverted.txt' $h1
+  Check ($h1 -eq $h0) "after the revert every touched table is byte-identical to the planted state"
+  if ($h1 -ne $h0) { Save 'hash-diff.txt' ("planted:  $h0`nreverted: $h1") }
+  $i3 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570 once more'
+  Check ($i3.rc -eq 0 -and $i3.msg -match '3 claim\(s\) moved') '570 after the revert moves the same claims again'
+  $c2 = Check-Script; Save 'check-green.log' $c2
+  Check ($c2 -match 'check: OK') 'the check script says OK'
+  # ---------------------------------------------------------------- [7] GREEN
+  Write-Host '[7] GREEN: after 570'
+  $green = Invoke-Test 'migrated'
+  Check ($green.m.Success -and $green.m.Groups[1].Value -eq 'ok' -and [int]$green.m.Groups[3].Value -eq 0) "GREEN: every case passes after 570 ($($green.m.Value))"
+  $greenCases = Case-Results $green.out
+  Save 'green-cases.txt' (($greenCases.Keys | Sort-Object | ForEach-Object { "$($greenCases[$_])  $_" }) -join "`n")
+  $c3 = Check-Script; Save 'check-after-green.log' $c3
+  Check ($c3 -match 'check: OK') 'after the green run (a new filing, guard probes) the check script still says OK'
+  # ---------------------------------------------------------------- [8] the last revert
+  Write-Host '[8] the revert with a post-570 filing'
+  $v3 = Psql-File (Join-Path $dockerDir 'revert-private-report-claims.sql') 'revert with a curator filing'
+  Check ($v3.rc -eq 0 -and $v3.msg -match '1 curator filing\(s\) made shared again' -and $v3.msg -match 'foreign key restored') 'the revert puts the post-570 filing back in the shared table (the 390 model) and the key back on'
+  $fk = Q "SELECT count(*) FROM pg_constraint WHERE conrelid = 'public.research_private_report_claims'::regclass AND contype = 'f' AND confrelid = 'public.claims'::regclass"
+  Check ($fk -eq '1') "the link's foreign key onto claims is back ($fk)"
+} catch {
+  Fail "aborted: $($_.Exception.Message)"
+} finally {
+  Save 'psql.log' ($script:log -join "`n")
+  foreach ($c in $script:made.containers) { $null = Dk rm -f $c }
+  if ($script:made.net) { $null = Dk network rm $net }
+  if (-not $KeepImages) { foreach ($i in $script:made.images) { $null = Dk rmi $i } }
+  if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+  $left = (Dk ps -a --filter "label=$label" --format '{{.Names}}' | Out-String).Trim()
+  Check (-not $left) "nothing labelled $label is left running ($left)"
+}
+Write-Host ''
+if ($script:fail -eq 0) { Write-Host "ALL PASSED  (evidence: $Evidence)"; exit 0 } else { Write-Host "$($script:fail) FAILED  (evidence: $Evidence)"; exit 1 }
