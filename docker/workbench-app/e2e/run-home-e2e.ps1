@@ -21,12 +21,12 @@ function Clean { $e = $ErrorActionPreference; $ErrorActionPreference = "Continue
 Clean
 $code = 1
 try {
-  docker network create --internal --subnet 10.250.85.0/24 $net | Out-Null
-  docker run -d --name "$Tag-stub" --network $net --ip 10.250.85.20 --network-alias stub -e LAB_KEY=$labKey -v "${here}:/lab:ro" node:22-slim node /lab/home.stub.mjs | Out-Null
-  docker run -d --name "$Tag-app" --network $net --ip 10.250.85.10 -e WORKBENCH_URL=http://stub:9000 -e WORKBENCH_KEY=$labKey -e WIKI_VIEWER_ALLOWED_HOSTS=10.250.85.10 $Image | Out-Null
-  docker run -d --name "$Tag-chrome" --network $net --ip 10.250.85.30 chromedp/headless-shell:latest | Out-Null
+  docker network create --internal --subnet 10.250.95.0/24 $net | Out-Null
+  docker run -d --name "$Tag-stub" --network $net --ip 10.250.95.20 --network-alias stub -e LAB_KEY=$labKey -v "${here}:/lab:ro" node:22-slim node /lab/home.stub.mjs | Out-Null
+  docker run -d --name "$Tag-app" --network $net --ip 10.250.95.10 -e WORKBENCH_URL=http://stub:9000 -e WORKBENCH_KEY=$labKey -e WIKI_VIEWER_ALLOWED_HOSTS=10.250.95.10 $Image | Out-Null
+  docker run -d --name "$Tag-chrome" --network $net --ip 10.250.95.30 chromedp/headless-shell:latest | Out-Null
   Start-Sleep -Seconds 6
-  docker run --rm --name "$Tag-driver" --network "container:$Tag-chrome" -e APP_IP=10.250.85.10 -e CH=127.0.0.1 -e LAB_KEY=$labKey `
+  docker run --rm --name "$Tag-driver" --network "container:$Tag-chrome" -e APP_IP=10.250.95.10 -e CH=127.0.0.1 -e LAB_KEY=$labKey `
     -v "${here}:/lab:ro" -v "${axe}:/axe/axe.min.js:ro" node:22-slim timeout $TimeoutSec node /lab/home.e2e.mjs
   $code = $LASTEXITCODE
 } finally {
