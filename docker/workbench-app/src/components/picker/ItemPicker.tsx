@@ -7,7 +7,7 @@
 // carries a "private" tag; the selected tray holds items in component state only.
 // Keyboard: the search box is a combobox over the result list - Up/Down move, Enter picks, Ctrl+Enter confirms,
 // Esc cancels; every filter, sort, tray and footer control is a button in the tab order.
-import { useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   NO_FILTERS, anyFilter, applyFilters, bucketCount, countBy, inScope, keyOf, kindLabel, missingFacets, snippetParts, sortAvailable, sortItems,
   type DateBucket, type Filters, type PickerItem, type PickerScope, type QualityFloor, type SortKey, type Visibility,
@@ -82,6 +82,9 @@ export function ItemPicker(props: ItemPickerProps) {
   const [sel, setSel] = useState<Map<string, PickerItem>>(() => new Map((props.defaultSelected ?? []).map((i) => [keyOf(i), i])));
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const trayRef = useRef<HTMLUListElement>(null);
+  const trayHeadRef = useRef<HTMLElement>(null);
+  const focusAfter = useRef<number | null>(null); // tray index to focus after a keyboard removal (-1 = the heading)
 
   const found = useLibrarySearch(query, scope, { mineSearch, debounceMs: props.debounceMs });
   const ctx = useMemo(() => ({ now: props.now ?? Date.now(), linked: alreadyLinked }), [props.now, alreadyLinked]);
@@ -106,8 +109,20 @@ export function ItemPicker(props: ItemPickerProps) {
     if (m.has(k)) m.delete(k); else m.set(k, i);
     setSelection(m);
   };
-  const remove = (k: string) => { const m = new Map(sel); m.delete(k); setSelection(m); };
-  const clearSel = () => setSelection(new Map());
+  const remove = (k: string) => {
+    const at = [...sel.keys()].indexOf(k);
+    focusAfter.current = sel.size <= 1 ? -1 : Math.min(at, sel.size - 2); // the item that takes its place, else the one before
+    const m = new Map(sel); m.delete(k); setSelection(m);
+  };
+  const clearSel = () => { focusAfter.current = -1; setSelection(new Map()); };
+  // the removed button is gone: put keyboard focus on the next tray item (or the tray heading), never on <body>
+  useEffect(() => {
+    const at = focusAfter.current;
+    if (at === null) return;
+    focusAfter.current = null;
+    const btns = trayRef.current?.querySelectorAll<HTMLElement>("button");
+    (at >= 0 && btns && btns[at] ? btns[at] : trayHeadRef.current)?.focus();
+  }, [sel]);
   const chosen = [...sel.values()];
   const confirm = () => { if (chosen.length) onConfirm(chosen); };
 
@@ -270,11 +285,11 @@ export function ItemPicker(props: ItemPickerProps) {
 
         <aside className="ip-tray" aria-label="Selected">
           <div className="ip-trayh">
-            <strong data-testid="picker-nsel">Selected ({n})</strong>
+            <strong data-testid="picker-nsel" ref={trayHeadRef} tabIndex={-1}>Selected ({n})</strong>
             {n > 0 && <button type="button" className="ip-btn" onClick={clearSel}>Clear</button>}
           </div>
           <span className="ip-meta">{n ? (mode === "single" ? "Picking another one replaces it." : "Review before using; × takes one out.") : mode === "single" ? "Pick one." : "Pick as many as you like. They stay here while you search and filter."}</span>
-          <ul className="ip-tl" data-testid="picker-tray">
+          <ul className="ip-tl" data-testid="picker-tray" ref={trayRef}>
             {chosen.map((i) => (
               <li key={keyOf(i)} className="ip-ti" data-key={keyOf(i)}>
                 <span className="ip-main">

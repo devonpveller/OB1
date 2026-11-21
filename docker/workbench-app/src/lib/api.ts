@@ -76,6 +76,7 @@ export async function api<T = any>(method: string, url: string, body?: unknown):
     headers: body === undefined ? {} : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
     credentials: "same-origin",
+    cache: "no-store", // the answers are one person's data: the browser must not keep them in its HTTP cache
   });
   const text = await r.text();
   let data: any = {};
@@ -92,5 +93,5 @@ export async function api<T = any>(method: string, url: string, body?: unknown):
 export async function raw(url: string): Promise<Response> {
   const target = guard(url);
   log.push({ method: "GET", url: target });
-  return await fetcher(target, { method: "GET", credentials: "same-origin" });
+  return await fetcher(target, { method: "GET", credentials: "same-origin", cache: "no-store" });
 }

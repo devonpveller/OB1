@@ -146,6 +146,31 @@ ok(await fb.waitFor(`${keys}.length===8`), "fields: B's library search lists 8")
 ok((await fb.ev(`document.querySelector('[data-key="source:s-alpha"]').textContent`)).includes("in 2 of your documents"), "fields: B sees ITS OWN count (2), not A's (1) and not 3");
 await fb.close();
 
+
+// ---------------- the browser's HTTP cache keeps nothing of a private search (round 3) ----------------
+const probe = (u) => `fetch(${JSON.stringify(u)}, { cache: 'only-if-cached', mode: 'same-origin' }).then(async r => ({ hit: true, status: r.status, held: (await r.text()).includes('HELD-') })).catch(() => ({ hit: false }))`;
+const hc = await session();
+await hc.open(`${APP_A}/picker-harness.html?mode=multi&scope=document&refinery=refinery-a`);
+await hc.typeText("vrm");
+ok(await hc.waitFor(`${keys}.includes('source:held-A')`), "cache: A's picker listed A's held source");
+const privUrl = "/workbench/contract/search?q=vrm&limit=50&refinery_id=refinery-a";
+const miss = await hc.ev(probe(privUrl));
+ok(miss.hit === false, `cache: only-if-cached for the private search URL MISSES after the picker's search (${JSON.stringify(miss)})`);
+// control: a read made with the DEFAULT cache mode IS kept and the probe does find it (the probe can hit)
+await hc.ev(`fetch("/workbench/contract/search?q=ctl&limit=50").then(r => r.text())`);
+const ctl = await hc.ev(probe("/workbench/contract/search?q=ctl&limit=50"));
+ok(ctl.hit === true, `cache control: a default-mode fetch of the same kind of URL IS in the cache, so the probe works (${JSON.stringify(ctl)})`);
+await hc.close();
+const hb = await session();
+await hb.open(`${APP_B}/picker-harness.html?mode=multi&scope=library`);
+await hb.typeText("vrm");
+ok(await hb.waitFor(`${keys}.length===8`), "cache: B's picker listed the shared rows");
+const cch = await hb.ev(`fetch("/workbench/contract/search?q=vrm&limit=50").then(r => r.headers.get("cache-control"))`);
+ok(cch === "no-store, private", `cache: the route's header reaches the browser through the forwarder (${cch})`);
+const missB = await hb.ev(probe("/workbench/contract/search?q=vrm&limit=50"));
+ok(missB.hit === false, `cache: B's answer is not in the HTTP cache either (${JSON.stringify(missB)})`);
+await hb.close();
+
 // ---------------- accessibility: axe, light and dark ----------------
 for (const theme of ["light", "dark"]) {
   const s = await session();

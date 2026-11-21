@@ -40,7 +40,10 @@ http.createServer((req, res) => {
   if (u.pathname === "/__log") { res.writeHead(200, { "content-type": "application/json" }); return res.end(JSON.stringify(log)); }
   log.push({ method: req.method, url: req.url, keyOk: req.headers["x-brain-key"] === KEY });
   const q = (u.searchParams.get("q") || "").toLowerCase();
-  const send = (o, st = 200) => { res.writeHead(st, { "content-type": "application/json" }); res.end(JSON.stringify(o)); };
+  // identity A's stub sends NO cache header (so the browser-side `cache: "no-store"` is what is tested); identity B's stub sends
+  // the header the real route sends (so the forwarder passing it through is tested). Cacheable otherwise: a validator-less
+  // answer is still kept by Chrome's HTTP cache and returned for only-if-cached.
+  const send = (o, st = 200) => { res.writeHead(st, { "content-type": "application/json", ...(ID === "B" && st === 200 ? { "cache-control": "no-store, private" } : {}) }); res.end(JSON.stringify(o)); };
   if (u.pathname === "/workbench/contract/search") {
     let results = SHARED.filter((r) => (r.title + " " + r.snippet).toLowerCase().includes(q));
     // the route: a held source is returned only inside the CALLER's own refinery; another user's refinery scopes nothing

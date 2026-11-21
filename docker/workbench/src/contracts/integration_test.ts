@@ -70,7 +70,7 @@ async function call(method: string, path: string, body?: unknown, opts: { asDefa
   try {
     json = JSON.parse(text);
   } catch { /* SSE */ }
-  return { status: r.status, json, text };
+  return { status: r.status, json, text, headers: r.headers };
 }
 const uuid = () => crypto.randomUUID();
 async function newSource(over: { url?: string | null; title?: string; content?: string } = {}) {
@@ -1181,6 +1181,14 @@ t("search hits carry topics, date, quality, cited_by and author - additive, from
   // the same hits, the same order, with the fields as without (the fields add nothing to matching)
   const ids = r.json.results.map((h: any) => h.id);
   assertEquals(ids.includes(src) && ids.includes(cl), true);
+});
+
+t("a search answer is never cacheable by the browser: Cache-Control no-store, private on its 2xx", async () => {
+  const ok = await call("GET", `/search?q=fixture`);
+  assertEquals(ok.status, 200);
+  assertEquals(ok.headers.get("cache-control"), "no-store, private");
+  const held = await call("GET", `/search?q=refinery&kinds=source&refinery_id=${FX.idea}`);
+  assertEquals([held.status, held.headers.get("cache-control")], [200, "no-store, private"]);
 });
 
 t("cited_by counts only the CALLER's own documents: another user's private documents never change a count", async () => {

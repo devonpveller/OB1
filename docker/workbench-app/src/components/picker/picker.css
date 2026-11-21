@@ -52,3 +52,4 @@
 .ip-kbd { margin-right: auto; }
 .ip-btn.pri { background: var(--accent-strong); border-color: var(--accent-strong); color: var(--bg); }
 .ip-btn.pri:disabled { background: var(--sunken); border-color: var(--line-strong); color: var(--muted); }
+.ip [tabindex="-1"]:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }

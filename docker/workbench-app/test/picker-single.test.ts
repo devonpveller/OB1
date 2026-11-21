@@ -1,51 +1,84 @@
-// rwr-picker acceptance 1: there is exactly ONE picker / list-search implementation. This is an import check over
-// the whole app source: it fails if a second picker or list-search component is added anywhere under src/.
-// If it fails for a legitimate reason, the answer is to extend components/picker, not to add another list.
+// rwr-picker acceptance 1: there is exactly ONE picker / list-search implementation. The guard is STRUCTURAL
+// (test/guard/structure.ts): it parses every source file, resolves imports, and applies rules R1-R5. This file runs it
+// on the real tree (must be clean) and on the real tree plus each planted bypass (each must turn it red) - including the
+// six the tester of attempt 1 found getting past the earlier name-shaped guard.
 import { describe, it, expect } from "vitest";
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { check, readApp, SEARCH_ALLOW, type Files } from "./guard/structure";
 
-const SRC = join(__dirname, "..", "src");
-const PICKER = join(SRC, "components", "picker") + sep;
-function walk(dir: string): string[] {
-  return readdirSync(dir).flatMap((n) => {
-    const p = join(dir, n);
-    return statSync(p).isDirectory() ? walk(p) : [p];
-  });
-}
-const all = walk(SRC).filter((p) => /\.(ts|tsx|css)$/.test(p));
-const outside = all.filter((p) => !p.startsWith(PICKER));
-const rel = (p: string) => relative(SRC, p).split(sep).join("/");
+const ROOT = join(__dirname, "..");
+const real = readApp(ROOT);
+const plus = (extra: Record<string, string>, opts?: Parameters<typeof check>[1]) => check(new Map([...real, ...Object.entries(extra)]) as Files, opts);
+const red = (extra: Record<string, string>, rule: RegExp, opts?: Parameters<typeof check>[1]) => {
+  const v = plus(extra, opts);
+  expect(v.length, `expected a violation, got none for ${Object.keys(extra)}`).toBeGreaterThan(0);
+  expect(v.some((x) => rule.test(x)), v.join("\n")).toBe(true);
+};
 
-describe("one picker, one list search", () => {
-  it("no file outside components/picker is named like a picker or a list search", () => {
-    const bad = outside.map(rel).filter((p) => /(picker|chooser|selector|combobox|autocomplete|typeahead|listsearch|itemlist|searchlist|multiselect)/i.test(p.split("/").pop()!));
-    expect(bad).toEqual([]);
+describe("one picker, one list search (structural)", () => {
+  it("the real app is clean", () => {
+    expect(check(real)).toEqual([]);
   });
-  it("no file outside components/picker declares a picker-like component or hook", () => {
-    const re = /\b(?:function|const|class)\s+(\w*(?:Picker|Chooser|Combobox|Typeahead|Autocomplete|MultiSelect|ListSearch|ItemList|SearchList|useLibrarySearch|useSearch\w*)\w*)/;
-    const bad = outside.filter((p) => !p.endsWith(".css")).flatMap((p) => { const m = re.exec(readFileSync(p, "utf8")); return m ? [`${rel(p)}: ${m[1]}`] : []; });
-    expect(bad).toEqual([]);
+  it("walks every script kind under src/ (the guard sees .ts .tsx .css-free sources, and the harness)", () => {
+    expect([...real.keys()]).toContain("src/components/picker/ItemPicker.tsx");
+    expect([...real.keys()]).toContain("src/components/picker/harness/main.tsx");
+    expect([...real.keys()].every((k) => /\.(ts|tsx|js|jsx|mjs|mts|cjs)$/.test(k))).toBe(true);
   });
-  it("the contract search route is called from one place: components/picker/search.ts", () => {
-    const callers = all.filter((p) => /contract\/search|\/workbench\/search/.test(readFileSync(p, "utf8"))).map(rel);
-    expect(callers).toEqual(["components/picker/search.ts"]);
+
+  describe("the tester's six bypasses of the name-shaped guard now turn it red", () => {
+    it("B1 a .jsx file with its own listbox", () => red({ "src/components/OtherPicker.jsx": `export const X = () => <ul role="listbox"><li role="option">a</li></ul>;` }, /R1/));
+    it("B2 a relative import of ./picker/ItemPicker that skips the index", () =>
+      red({ "src/components/Wrap.tsx": `import { ItemPicker } from "./picker/ItemPicker"; export const W = () => <ItemPicker mode="single" onConfirm={() => {}} />;` }, /R3.*ItemPicker\.tsx/));
+    it("B3 a screen using useLibrarySearch with its own listbox", () =>
+      red({ "src/screens/Voices.tsx": `import { useLibrarySearch } from "../components/picker";\nexport function VoicesScreen(){ const s = useLibrarySearch("a",{kind:"library"}); return <ul role="listbox">{s.items.map(i=><li key={i.id} role="option">{i.title}</li>)}</ul>; }` }, /R2.*useLibrarySearch/));
+    it("B4 an own fetch with the route string split", () =>
+      red({ "src/components/SourceFinder.tsx": `import { api } from "../lib/api";\nexport const find = (q: string) => api("GET", "/workbench/contract/" + "search?q=" + q);` }, /R4/));
+    it("B5 a re-export of ItemPicker under another name", () =>
+      red({ "src/components/Alias.ts": `export { ItemPicker as Chooser2 } from "./picker";` }, /R3.*re-exports/));
+    it("B6 a screen importing SEARCH_URL and calling the route itself with its own listbox", () =>
+      red({ "src/screens/Cast.tsx": `import { SEARCH_URL } from "../components/picker";\nimport { api } from "../lib/api";\nexport const go = (q: string) => api("GET", \`\${SEARCH_URL}?q=\${q}\`);\nexport const L = () => <div role="listbox"><div role="option" /></div>;` }, /R2.*SEARCH_URL/));
   });
-  it("outside the picker folder, the picker is reached only through its index", () => {
-    const bad = outside.filter((p) => p.endsWith(".ts") || p.endsWith(".tsx")).flatMap((p) =>
-      [...readFileSync(p, "utf8").matchAll(/from\s+["']([^"']*components\/picker\/[^"']+)["']/g)].map((m) => `${rel(p)}: ${m[1]}`));
-    expect(bad).toEqual([]);
-  });
-  it("inside the folder there is exactly one component file and one search file (the harness only mounts it)", () => {
-    const inside = all.filter((p) => p.startsWith(PICKER)).map(rel);
-    expect(inside.filter((p) => /\.tsx$/.test(p) && !p.includes("/harness/"))).toEqual(["components/picker/ItemPicker.tsx"]);
-    expect(inside.filter((p) => /search\.ts$/.test(p))).toEqual(["components/picker/search.ts"]);
-    const h = readFileSync(join(PICKER, "harness", "main.tsx"), "utf8");
-    expect(h).toMatch(/<ItemPicker/);
-    expect(h).not.toMatch(/role="listbox"|role="option"/);
-  });
-  it("the harness page is not part of the production build", () => {
-    const cfg = readFileSync(join(SRC, "..", "vite.config.ts"), "utf8");
-    expect(cfg).toMatch(/PICKER_HARNESS === "1"/);
+
+  describe("further shapes", () => {
+    it("an import through a tsconfig-style alias resolves to the picker's files", () =>
+      red({ "src/screens/A.tsx": `import { searchLibrary } from "@picker/search";` }, /R2.*searchLibrary|R3/, { paths: { "@picker/*": ["src/components/picker/*"] }, baseUrl: "." }));
+    it("an alias import of the index is fine for ItemPicker, red for the search exports", () => {
+      const opts = { paths: { "@picker": ["src/components/picker/index.ts"] }, baseUrl: "." };
+      expect(plus({ "src/screens/Ok.tsx": `import { ItemPicker } from "@picker";\nexport const X = ItemPicker;` }, opts)).toEqual([]);
+      red({ "src/screens/Bad.tsx": `import { SEARCH_URL } from "@picker";` }, /R2/, opts);
+    });
+    it("a namespace import or an export * of the picker counts as importing the search exports", () => {
+      red({ "src/screens/Ns.tsx": `import * as P from "../components/picker"; export const u = P.SEARCH_URL;` }, /R2/);
+      red({ "src/screens/Star.ts": `export * from "../components/picker";` }, /R2|R3/);
+    });
+    it("a dynamic import or require of the picker's search file", () => {
+      red({ "src/screens/Dyn.ts": `export const f = () => import("../components/picker/search");` }, /R3|R2/);
+      red({ "src/screens/Req.js": `const s = require("../components/picker/search.ts");` }, /R3|R2/);
+    });
+    it("React.createElement with a role, a spread, a native <select> / <datalist>", () => {
+      red({ "src/screens/Ce.tsx": `import { createElement } from "react"; export const x = createElement("ul", { role: "listbox" });` }, /R1/);
+      red({ "src/screens/Sel.tsx": `export const x = () => <select multiple><option>a</option></select>;` }, /R1.*select/);
+      red({ "src/screens/Dl.tsx": `export const x = () => <datalist id="d" />;` }, /R1.*datalist/);
+      red({ "src/screens/Ad.tsx": `export const x = (p: object) => <input aria-activedescendant="x" {...p} />;` }, /R1.*activedescendant/);
+    });
+    it("other ways to split the route", () => {
+      red({ "src/a1.ts": `export const u = ["/workbench", "contract", "search"].join("/");` }, /R4/);
+      red({ "src/a2.ts": `export const u = \`/workbench/contract/\${"search"}\`;` }, /R4/);
+      red({ "src/a3.ts": `export const u = "/workbench/contract/".concat("search");` }, /R4/);
+      red({ "src/a4.ts": `const base = "/workbench/contract/"; export const u = base + dyn(); function dyn(){ return "search"; }` }, /R4/);
+      red({ "src/a5.mjs": `export const u = "/workbench/contract/search?q=";` }, /R4/);
+    });
+    it("legitimate neighbours stay green: another contract route, the picker through its index, a search word in a label", () => {
+      expect(plus({
+        "src/screens/Refs.tsx": `import { api } from "../lib/api";\nimport { ItemPicker } from "../components/picker";\nexport const r = (id: string) => api("GET", "/workbench/contract/references/" + id);\nexport const L = () => <label>Search for it<ItemPicker mode="multi" onConfirm={() => {}} /></label>;`,
+      })).toEqual([]);
+    });
+    it("the allow-list is the picker's own files only", () => {
+      expect(SEARCH_ALLOW.every((f) => f.startsWith("src/components/picker/"))).toBe(true);
+    });
+    it("the harness page stays out of the production build", () => {
+      expect(readFileSync(join(ROOT, "vite.config.ts"), "utf8")).toMatch(/PICKER_HARNESS === "1"/);
+    });
   });
 });

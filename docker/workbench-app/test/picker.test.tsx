@@ -5,7 +5,7 @@ import {
   ItemPicker, searchLibrary, searchUrl, applyFilters, countBy, sortItems, snippetParts, missingFacets, NO_FILTERS, keyOf,
   type PickerItem, type MineSearch,
 } from "../src/components/picker";
-import { setFetcher, requestLog, clearRequestLog } from "../src/lib/api";
+import { setFetcher, requestLog, clearRequestLog, api, raw } from "../src/lib/api";
 
 const hit = (kind: string, id: string, title: string, extra: Record<string, unknown> = {}) => ({
   kind, id, title, snippet: `about <<HL>>${title}<</HL>> here`, state: "current",
@@ -285,6 +285,68 @@ describe("the contract's new hit fields light the filters and sorts up (no picke
     await waitFor(() => expect(keys().length).toBe(3));
     expect(keys()).toEqual(["source:r1", "claim:r3", "page:r4"]); // r2 (firmware) out; r4 has no topics: kept (degrades)
     expect(screen.getByTestId("picker-scope-note").textContent).not.toMatch(/whole library/);
+  });
+});
+
+describe("the browser keeps nothing of a search answer (round 3)", () => {
+  it("every read through the door, and the picker's search, asks for cache: no-store", async () => {
+    const inits: (RequestInit | undefined)[] = [];
+    setFetcher(async (_u, i) => { inits.push(i); return new Response(JSON.stringify({ results: [] }), { status: 200 }); });
+    await searchLibrary({ q: "vrm", scope: { kind: "library" } });
+    await api("GET", "/workbench/x");
+    await raw("/workbench/y");
+    expect(inits.map((i) => i?.cache)).toEqual(["no-store", "no-store", "no-store"]);
+  });
+  it("a LIBRARY-level cache leaks across identities: B must not get A's held source (fails if search.ts keeps answers)", async () => {
+    const held = hit("source", "held-A", "HELD-A idea note", { lifecycle: "held", state: "held" });
+    const scope = { kind: "document" as const, label: "d", topics: [], refineryId: "refinery-a" };
+    // identity A: the library answers with A's own held source for A's refinery id
+    setFetcher(async () => new Response(JSON.stringify({ results: [hit("source", "s1", "shared vrm"), held] }), { status: 200 }));
+    const a = render(<ItemPicker {...props} scope={scope} />);
+    type("vrm");
+    await waitFor(() => expect(keys()).toContain("source:held-A"));
+    a.unmount();
+    cleanup();
+    // identity B: the SAME url, the library answers with the shared rows only (another user's refinery scopes nothing)
+    setFetcher(async () => new Response(JSON.stringify({ results: [hit("source", "s1", "shared vrm")] }), { status: 200 }));
+    const b = render(<ItemPicker {...props} scope={scope} />);
+    type("vrm");
+    await waitFor(() => expect(keys()).toContain("source:s1"));
+    expect(keys()).not.toContain("source:held-A");
+    expect(b.container.textContent).not.toMatch(/HELD-A/);
+  });
+});
+
+describe("keyboard focus after removing a tray item (round 3)", () => {
+  const pickTwo = async () => {
+    libFetcher();
+    render(<ItemPicker {...props} />);
+    type("vrm");
+    await waitFor(() => expect(keys().length).toBe(5));
+    fireEvent.click(row("source:s1"));
+    fireEvent.click(row("source:s2"));
+    fireEvent.click(row("claim:c1"));
+  };
+  const removeBtns = () => [...document.querySelectorAll("[data-testid=picker-tray] button")] as HTMLElement[];
+  it("removing a tray item moves focus to the next tray item, then the previous, then the tray heading", async () => {
+    await pickTwo();
+    removeBtns()[0].focus();
+    fireEvent.click(removeBtns()[0]); // remove s1 -> focus the item now first (s2)
+    await waitFor(() => expect(document.activeElement).toBe(removeBtns()[0]));
+    expect(document.activeElement?.getAttribute("aria-label")).toBe("Remove Board vendor power stage");
+    removeBtns()[1].focus();
+    fireEvent.click(removeBtns()[1]); // remove the LAST (c1) -> focus the previous item
+    await waitFor(() => expect(document.activeElement).toBe(removeBtns()[0]));
+    fireEvent.click(removeBtns()[0]); // remove the only one -> the tray heading
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("picker-nsel")));
+    expect(document.activeElement).not.toBe(document.body);
+  });
+  it("Clear all moves focus to the tray heading too", async () => {
+    await pickTwo();
+    const clear = screen.getByRole("button", { name: "Clear" });
+    clear.focus();
+    fireEvent.click(clear);
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByTestId("picker-nsel")));
   });
 });
 
