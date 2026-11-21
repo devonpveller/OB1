@@ -82,10 +82,13 @@ try {
     & tar -xf $tar -C $redDir
     $chainDir = Join-Path $redDir 'docker'
   }
-  $chain = @(Get-Chain $chainDir | Where-Object { $_[1] -ne '580-init-boundary-ideas.sql' })
+  # pairs stay pairs: a pipeline would flatten them
+  $all = Get-Chain $chainDir
+  $chain = New-Object System.Collections.ArrayList
+  foreach ($m in $all) { if ($m[1] -ne '580-init-boundary-ideas.sql') { [void]$chain.Add($m) } }
   foreach ($m in $chain) { Copy-Item (Join-Path $chainDir $m[0]) (Join-Path $stage $m[1]) }
   Check ($chain.Count -ge 50) "staged $($chain.Count) migrations (580 held back)"
-  if (-not $Red) { Check (@(Get-Chain $dockerDir | Where-Object { $_[1] -eq '580-init-boundary-ideas.sql' }).Count -eq 1) 'the compose chain mounts 580-init-boundary-ideas.sql' }
+  if (-not $Red) { $n580 = 0; foreach ($m in (Get-Chain $dockerDir)) { if ($m[1] -eq '580-init-boundary-ideas.sql') { $n580++ } }; Check ($n580 -eq 1) 'the compose chain mounts 580-init-boundary-ideas.sql' }
 
   Write-Host '[2] disposable internal network (a documentation range)'
   $sub = ''
@@ -188,6 +191,10 @@ try {
   $stray = @($names | Where-Object { $listed -notmatch [regex]::Escape("'$_'") -and $_ -notmatch '^docker/(init|revert)-inlet-stamp\.sql$' })
   Save 'handback-readers.txt' (($names | Sort-Object) -join "`n")
   Check ($stray.Count -eq 0) "every file naming the hand-back is on 420's allow-list ($($names.Count) files; outside: $($stray -join ', '))"
+}
+catch {
+  # an exception is a failure, never a silent stop before the checks ran
+  Fail "the run stopped: $($_.Exception.Message)"
 }
 finally {
   Write-Host '[7] teardown'

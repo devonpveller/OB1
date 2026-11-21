@@ -269,7 +269,9 @@ try {
     # delivering service: idea_handback_deliverables + handback_delivered, design 2.8) and the idea lab's own files
     'docker/init-boundary-ideas.sql', 'docker/revert-boundary-ideas.sql', 'integrations/research-service/boundary-ideas.ts',
     'integrations/research-service/boundary-ideas.e2e.test.ts', 'integrations/research-service/run-boundary-ideas-lab.ps1',
-    'integrations/research-service/fixtures/boundary-ideas-drill-check.sql', 'integrations/openbrain-idea-refinery/index.ts')
+    'integrations/research-service/fixtures/boundary-ideas-drill-check.sql', 'integrations/openbrain-idea-refinery/index.ts',
+    'integrations/openbrain-idea-refinery/deliver.ts', 'integrations/openbrain-idea-refinery/deliver.test.ts',
+    'integrations/research-service/boundary-ideas.test.ts', 'docker/workbench/src/ideas/review_test.ts')
   $names = @(Get-ChildItem -Path $ob1 -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\(node_modules|\.git|archive)\\' -and $_.Length -lt 5MB } |
     Where-Object { Select-String -Path $_.FullName -Pattern 'research_handbacks|handback_(open|pending|claim|deliverables|delivered|owned|deliver)' -Quiet } |
     ForEach-Object { $_.FullName.Substring($ob1.Length + 1).Replace('\', '/') })

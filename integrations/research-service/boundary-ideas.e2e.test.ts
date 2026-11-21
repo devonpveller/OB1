@@ -316,7 +316,8 @@ Deno.test({ name: "D. the drain, the owner's review, run privately, the delivery
       assertEquals((await q(app, `SELECT * FROM public.research_job_report_owner($1::uuid)`, [j])).length, 0, "a derived job's report has no owner: it is shared");
       const r = await read(`/research/jobs/${j}`);
       assertEquals(r.status, 200);
-      assert(String(JSON.parse(r.text).result?.synthesis ?? "").includes("Community solar roofs"), "the second user reads the shared report");
+      const stored = (await q<{ s: string | null }>(su, `SELECT result ->> 'synthesis' AS s FROM public.research_jobs WHERE id = $1::uuid`, [j]))[0].s ?? "";
+      assert(stored.length > 0 && JSON.parse(r.text).result?.synthesis === stored, "the second user reads the shared report, whole");
     }
     const curated = st.log.curator.filter((x) => x.includes(L.last) || x.includes(okJob));
     out.push(`derived reports: shared (no report owner), the second user reads both; curator packages for them: ${curated.length}`);
