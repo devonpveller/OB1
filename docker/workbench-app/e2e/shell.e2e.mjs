@@ -83,7 +83,9 @@ let c = JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('[data
 ok(JSON.stringify(c) === JSON.stringify([["count-research", "2 running"], ["count-imports", "1 failed"], ["count-cleanup", "4 to review"]]), `counts as the reads: ${JSON.stringify(c)}`);
 const lg = await stub("/__log");
 const seenPaths = [...new Set(lg.map((x) => x.url.split("?")[0]))].sort();
-ok(seenPaths.length === 6 && lg.every((x) => x.method === "GET" && x.keyOk), `the stub saw 6 GET reads, all with the door key: ${seenPaths.join(", ")}`);
+const shellReads = seenPaths.filter((p) => !/^\/workbench\/(settings|documents\/)/.test(p));
+ok(shellReads.length === 6 && lg.every((x) => x.method === "GET" && x.keyOk), `the stub saw the shell's 6 GET reads, all with the door key: ${shellReads.join(", ")}`);
+ok(seenPaths.filter((p) => !shellReads.includes(p)).join() === "/workbench/documents/file,/workbench/documents/state,/workbench/settings", `and the account's reads (settings, then the locked document's state and title): ${seenPaths.filter((p) => !shellReads.includes(p)).join(", ")}`);
 
 // ---- 3. Ctrl+K opens, Esc closes, over every screen (real key events)
 for (const [path] of ALL) {
