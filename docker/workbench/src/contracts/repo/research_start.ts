@@ -38,6 +38,9 @@ export function doorClient(env = (k: string) => Deno.env.get(k)): DoorClient | n
     } catch {
       throw new Unavailable("the research service did not answer");
     }
+    // only the door's own answers (200 / 202 / 409) carry a body to the caller; any other status is the status alone -
+    // an upstream error's text never rides out (rw-identity-harden2 D8: a client never hands its caller a service's error text)
+    if (![200, 202, 409].includes(r.status)) { await r.body?.cancel(); return { status: r.status, body: {} }; }
     const j = await r.json().catch(() => ({}));
     return { status: r.status, body: (j && typeof j === "object" ? j : {}) as Record<string, unknown> };
   };

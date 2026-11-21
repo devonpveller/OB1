@@ -29,7 +29,7 @@ export interface StartSeams {
 }
 
 export function registerResearchStart(app: ContractApp, deps: ContractDeps, seams: StartSeams = {}) {
-  const door = seams.door === undefined ? doorClient() : seams.door;
+  const door = "door" in seams ? (seams.door ?? null) : doorClient();
   const who = seams.identity ?? identityOf;
   const sd: StartDeps = {
     db: deps.db, door,
