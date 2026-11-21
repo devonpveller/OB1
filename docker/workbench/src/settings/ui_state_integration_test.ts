@@ -192,7 +192,8 @@ t("U4: values the registry refuses are 400 and nothing is stored: bad screen, do
 });
 
 t("U5: the database refuses the same whoever writes: the app role inserting a bad ref_list or screen directly", async () => {
-  const w = (k: string, v: unknown) => codeAsApp(`INSERT INTO public.user_settings (owner_sub, key, value) VALUES ($1, $2, $3::jsonb)`, [sub(A), k, JSON.stringify(v)]);
+  const fresh = `ui-d-${rnd()}`; // a subject with no rows: only the guard can refuse (not the primary key)
+  const w = (k: string, v: unknown) => codeAsApp(`INSERT INTO public.user_settings (owner_sub, key, value) VALUES ($1, $2, $3::jsonb)`, [fresh, k, JSON.stringify(v)]);
   assertEquals(await w(K.recent, [{ kind: "document", id: "a", title: "text" }]), "22023");
   assertEquals(await w(K.recent, items(25)), "22023");
   assertEquals(await w(K.start, "nowhere"), "22023");
