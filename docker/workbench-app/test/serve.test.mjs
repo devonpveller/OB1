@@ -40,6 +40,7 @@ before(async () => {
   await writeFile(join(dist, "index.html"), "<!doctype html><title>INDEX</title>");
   await writeFile(join(dist, "assets", "index-abc123.js"), "console.log(1)");
   await writeFile(join(dist, "assets", "index-abc123.css"), "a{}");
+  await writeFile(join(dist, "assets", "THIRD-PARTY-NOTICES.txt"), "notices");
   await writeFile(join(dist, "favicon.svg"), "<svg/>");
   seen = [];
   up = await listen((req, res) => {
@@ -172,4 +173,30 @@ test("an empty build answers /__health 503 and the index 503", async () => {
   assert.equal(await st("/__health"), 503);
   assert.equal(await st("/"), 503);
   s.server.close(); await rm(empty, { recursive: true, force: true });
+});
+
+// round 2 (tester attempt 1, finding 4): only a file whose NAME carries a content hash is immutable
+test("an unhashed asset (the notices file) is revalidated, never immutable", async () => {
+  const r = await get("/assets/THIRD-PARTY-NOTICES.txt");
+  assert.equal(r.status, 200);
+  assert.equal(r.headers["cache-control"], "no-cache");
+  assert.equal(r.body, "notices");
+});
+
+// round 2 (tester attempt 1, finding 6): a Content-Security-Policy on the app's HTML
+test("the HTML carries a Content-Security-Policy: same-origin only, no framing", async () => {
+  const csp = (await get("/")).headers["content-security-policy"];
+  assert.ok(csp, "the index has a CSP");
+  const d = Object.fromEntries(csp.split(";").map((x) => x.trim()).filter(Boolean).map((x) => { const [k, ...v] = x.split(/\s+/); return [k, v.join(" ")]; }));
+  assert.equal(d["default-src"], "'self'");
+  assert.equal(d["script-src"], "'self'");
+  assert.equal(d["style-src"], "'self'");
+  assert.equal(d["img-src"], "'self' data:");
+  assert.equal(d["font-src"], "'self'");
+  assert.equal(d["connect-src"], "'self'");
+  assert.equal(d["frame-ancestors"], "'none'");
+  assert.equal(d["base-uri"], "'none'");
+  assert.equal(d["form-action"], "'self'");
+  assert.ok(!/unsafe-inline|unsafe-eval|\*/.test(csp.replace(/'self'/g, "")), "no wildcard, no unsafe-*");
+  for (const p of ["/documents/x", "/research/abc?y=1"]) assert.equal((await get(p)).headers["content-security-policy"], csp, p);
 });

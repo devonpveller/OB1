@@ -269,3 +269,65 @@ test("rw-identity round 5: a non-canonical spelling of /workbench is still the w
   }
   for (const p of ["/workspace/", "/content/x", "/workbenchx", "/"]) assert.equal(isWorkbenchPath(p), false, p);
 });
+
+// rwr-app-scaffold round 2 (tester attempt 1, finding 2): the forwarder built new URL(cfg.url + req.url),
+// which RESOLVES dot-segments, so /workbench/../admin reached the upstream as /admin WITH the door key.
+// Every spelling below must be refused with 400 and never reach the upstream; and the ordinary calls pass.
+async function pathLab(extra = {}) {
+  const seen = [];
+  const up = await serve((req, res) => {
+    seen.push(req.url);
+    if (req.url === "/workbench/redirect-abs") { res.writeHead(302, { location: `http://${req.headers.host}/workbench/next?x=1#h` }); return res.end(); }
+    if (req.url === "/workbench/redirect-rel") { res.writeHead(302, { location: "/workbench/next" }); return res.end(); }
+    if (req.url === "/workbench/redirect-foreign") { res.writeHead(302, { location: "https://elsewhere.example/x" }); return res.end(); }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  const cfg = proxyConfig({ WORKBENCH_URL: up.url, WORKBENCH_KEY: "k", ...extra });
+  const front = await serve((req, res) => proxyWorkbench(req, res, cfg));
+  const port = front.server.address().port;
+  const send = (path) => new Promise((resolve, reject) => {
+    const r = http.request({ host: "127.0.0.1", port, path, method: "GET", setHost: true }, (res) => {
+      res.resume(); res.on("end", () => resolve({ status: res.statusCode, headers: res.headers }));
+    });
+    r.on("error", reject); r.end();
+  });
+  return { seen, send, close: () => { up.server.close(); front.server.close(); } };
+}
+
+test("a path that resolves outside /workbench/ is refused 400 and never reaches the upstream", async () => {
+  const l = await pathLab();
+  try {
+    const bad = ["/workbench/../admin", "/workbench/%2e%2e/admin", "/workbench/.%2e/admin", "/workbench/%2e./admin", "/workbench/%2E%2E/admin",
+      "/workbench\\..\\admin", "/workbench/..\\admin", "/WORKBENCH/../admin", "/Workbench/x", "/%77orkbench/../admin", "/%77orkbench/x",
+      "/workbench;/../admin", "//workbench/../admin", "//workbench/x", "/workbench/x/../../admin", "/workbench/./x", "/workbench/x%2f..%2f..%2fadmin",
+      "/workbench/%252e%252e/admin", "/workbench/..%5cadmin", "/workbench/%5c", "/workbench", "/workbench?x=/../admin", "/workbench/a%00b", "/workbench/a%0d%0ab",
+      "/workbench/.%09./admin", "/workbench/..%0a/admin"];
+    for (const p of bad) {
+      const r = await l.send(p);
+      assert.equal(r.status, 400, p);
+    }
+    assert.deepEqual(l.seen, [], "nothing reached the upstream");
+    for (const p of ["/workbench/documents?path=a/../b", "/workbench/a..b/x", "/workbench/x/..foo", "/workbench/a%20b", "/workbench/export/x.pdf", "/workbench/"]) {
+      assert.equal((await l.send(p)).status, 200, p);
+    }
+    assert.deepEqual(l.seen, ["/workbench/documents?path=a/../b", "/workbench/a..b/x", "/workbench/x/..foo", "/workbench/a%20b", "/workbench/export/x.pdf", "/workbench/"]);
+  } finally {
+    l.close();
+  }
+});
+
+test("an upstream absolute Location is rewritten to a relative path (or dropped when foreign); relative passes", async () => {
+  const l = await pathLab();
+  try {
+    const a = await l.send("/workbench/redirect-abs");
+    assert.equal(a.status, 302);
+    assert.equal(a.headers.location, "/workbench/next?x=1#h");
+    assert.equal((await l.send("/workbench/redirect-rel")).headers.location, "/workbench/next");
+    const f = await l.send("/workbench/redirect-foreign");
+    assert.equal(f.status, 302);
+    assert.equal(f.headers.location, undefined, "a foreign absolute Location is dropped, never an address of the upstream");
+  } finally {
+    l.close();
+  }
+});
