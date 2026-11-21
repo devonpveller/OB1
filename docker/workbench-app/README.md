@@ -26,3 +26,16 @@ image, `openbrain-workbench-app`. Later items fill it in. Not a stack service ye
   `WIKI_VIEWER_ALLOWED_HOSTS` - this service's own host name must be listed - and `WIKI_VIEWER_ALLOWED_ORIGINS`).
 - Build gate (fails the image): `tsc`, `vitest`, `node scripts/notices.mjs --check`, `node --test`.
   Locally: `npm ci && npm run test && npm run test:serve && npm run notices:check`.
+
+## The item picker (`rwr-picker`)
+
+`src/components/picker/` is THE picker: one searchable, filterable, single- or multi-select list for choosing
+library items (kind / type / state / topic / date / quality / private filters with live counts, sort, a selected tray
+that survives filtering, a private tag on every private row, keyboard use, a `scope` prop). Screens import it only from
+`components/picker` (`ItemPicker`); the Ctrl+K overlay is built on the same `useLibrarySearch` and `model.ts`.
+`test/picker-single.test.ts` fails if a second picker or list-search component appears. It asks the contract search
+route through `lib/api.ts` only, caches nothing and writes nothing to the browser.
+
+- Tests: `npx vitest run` (unit + component + two-identity), and the headless-Chromium e2e with axe on an `--internal`
+  network: build with `--build-arg PICKER_HARNESS=1` (adds the dev-only `/picker-harness.html`; the default image has
+  none) then `test/e2e/run-picker-lab.ps1`.
