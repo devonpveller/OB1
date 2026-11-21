@@ -1,15 +1,27 @@
-// rwr-own-thoughts-search-api: WHO may search their own thoughts. One rule, decided from the identity the seam
-// resolved (middleware/identity.ts) and never from anything the request names: a PERSON acting as themselves.
-//   yes: a signed-in user (kind "user"); the configured default identity or the edge identity header while sign-in is
-//        off (kind "default" / "header" - the one person the workbench serves then).
-//   no:  a service key (a service is nobody's owner), an on-behalf caller (openbrain-mcp's user token, Open WebUI's
-//        intake), no identity at all (a router mounted without the seam), an anonymous request, an admin who is not the
-//        owner or is impersonating one (actor !== sub: an admin gets nothing of anyone else's thoughts), a blank subject.
+// rwr-own-thoughts-search-api: WHO may search their own thoughts - slot 480's rule (identity/private_view.ts on
+// rw-owner-private-view, restated here so this item does not depend on that branch's source), decided from the identity
+// the seam resolved and the workbench's identity MODE, never from anything the request names:
+//   * sign-in configured (WORKSPACE_FORWARD_AUTH_*): a signed-in user acting as themselves - kind "user", actor === sub, not
+//     impersonating. An admin impersonating (or not the owner), a service, an on-behalf caller (openbrain-mcp's lane, Open
+//     WebUI's intake) or no sign-in: no.
+//   * sign-in NOT configured: the ONE default identity, WORKSPACE_DEFAULT_SUB - kind "default" with the default subject SET
+//     and equal to the caller's subject. A header identity is never eligible; a blank default subject (the seam's
+//     placeholder "operator") is nobody's.
+// The database function (slot 530) applies the subject's shape rule again (owner_private_subject_ok): two locks, one key.
+import { forwardAuthConfig } from "./forward_auth.ts";
 import type { Identity } from "../middleware/identity.ts";
 
-export function ownThoughtsEligible(who: Identity | undefined): boolean {
-  if (!who) return false;
-  if (who.kind !== "user" && who.kind !== "default" && who.kind !== "header") return false;
-  if (!who.sub || who.sub !== who.actor) return false;
-  return !who.impersonating;
+export interface OwnThoughtsConfig {
+  signIn: boolean;
+  defaultSub: string; // "" when WORKSPACE_DEFAULT_SUB is blank
+}
+
+export function ownThoughtsConfig(env: (k: string) => string | undefined = (k) => Deno.env.get(k)): OwnThoughtsConfig {
+  return { signIn: forwardAuthConfig(env) !== null, defaultSub: (env("WORKSPACE_DEFAULT_SUB") ?? "").trim() };
+}
+
+export function ownThoughtsEligible(who: Identity | undefined, cfg: OwnThoughtsConfig): boolean {
+  if (!who || !who.sub || who.sub !== who.actor || who.impersonating) return false;
+  if (cfg.signIn) return who.kind === "user";
+  return who.kind === "default" && !!cfg.defaultSub && who.sub === cfg.defaultSub;
 }

@@ -37,17 +37,20 @@ const ROWS: Row[] = [
   { id: 2, user_id: "bob", content: `Bob private idea about gardens ${MARK_B}`, created_at: "2026-11-02T10:00:00.000Z" },
   { id: 3, user_id: null, content: "A shared thought about gardens (no owner)", created_at: "2026-11-03T10:00:00.000Z" },
 ];
-// the fake thoughts table: answers what `WHERE user_id = $1 AND content ILIKE '%' || $2 || '%'` would. The pattern
-// arrives LIKE-escaped (backslash), so it is unescaped before the comparison. Every call is recorded.
+// the fake of owner_private_thoughts_search(p_sub, p_q, p_limit): answers what the function does - nothing for an unusable
+// subject, `user_id = p_sub` rows whose text holds the query (case-insensitive, no wildcards), newest first. Every call recorded.
+const unusable = (sub: string) => !sub || /^(service|system|anonymous):/i.test(sub) || sub.toLowerCase() === "operator";
 function fakeDb() {
   const calls: { sql: string; args: unknown[] }[] = [];
   const db: Db = {
     query: <T>(sql: string, args: unknown[] = []) => {
       calls.push({ sql, args });
       const [sub, q, n] = args as [string, string, number];
-      const needle = String(q).replace(/\\(.)/g, "$1").toLowerCase();
-      const rows = ROWS.filter((r) => r.user_id !== null && r.user_id === sub && r.content.toLowerCase().includes(needle)).slice(0, Number(n));
-      return Promise.resolve(rows.map((r) => ({ id: String(r.id), content: r.content, created_at: r.created_at })) as unknown as T[]);
+      const needle = String(q).trim().toLowerCase();
+      const rows = unusable(sub) || needle.length < 2 ? [] : ROWS.filter((r) => r.user_id !== null && r.user_id === sub && r.content.toLowerCase().includes(needle)).slice(0, Number(n));
+      return Promise.resolve(rows.map((r) => ({
+        thought_id: String(r.id), title: r.content.split(/\r?\n/)[0].slice(0, 120), snippet_src: r.content.slice(0, 600), created_at: r.created_at,
+      })) as unknown as T[]);
     },
     tx: (fn) => fn(db),
   };
@@ -56,11 +59,12 @@ function fakeDb() {
 
 async function build(e: Record<string, string> = FA) {
   const { registerOwnThoughts } = await import("./routes/own_thoughts.ts");
+  const { ownThoughtsConfig } = await import("../identity/own_thoughts.ts");
   const { db, calls } = fakeDb();
   const app = new Hono();
   app.use("/workbench/*", identitySeam(seamDeps(null, env(e))));
   const contract = newApp();
-  registerOwnThoughts(contract, { db } as never);
+  registerOwnThoughts(contract, { db, ownThoughtsCfg: ownThoughtsConfig(env(e)) } as never);
   app.route("/", contract);
   return { app, calls };
 }
@@ -84,6 +88,7 @@ Deno.test("the owner finds their own thought, marked private to you", async () =
   assertEquals(h.private, true);
   assertEquals(h.marker, "private to you");
   assert(h.snippet.includes("<<HL>>gardens<</HL>>"), h.snippet);
+  assertEquals(h.title, "Alice private idea about gardens PLANTED-A-7f3c9e and compost");
   assertEquals(h.state, "current");
   assertEquals(h.lifecycle, null);
   assertEquals(h.date, "2026-11-01T10:00:00.000Z");
@@ -147,22 +152,48 @@ Deno.test("no sign-in (anonymous) is refused before the route; no query", async 
   assertEquals(calls.length, 0);
 });
 
-Deno.test("who may use it: persons acting as themselves only (service, on-behalf, anonymous, an impersonating admin, a blank sub: no)", async () => {
+Deno.test("who may use it: persons acting as themselves, by slot 480's rule (service, on-behalf, anonymous, impersonating or non-owner admin, header identity, a blank default: no)", async () => {
   const { ownThoughtsEligible } = await import("../identity/own_thoughts.ts");
   const base = { sub: "alice", actor: "alice", name: "Alice", key: "alice", admin: false, impersonating: null } as const;
   const id = (o: Partial<Identity>): Identity => ({ ...base, kind: "user", ...o } as Identity);
-  assertEquals(ownThoughtsEligible(id({})), true);
-  assertEquals(ownThoughtsEligible(id({ kind: "default" })), true);
-  assertEquals(ownThoughtsEligible(id({ kind: "header" })), true);
-  assertEquals(ownThoughtsEligible(undefined), false);
-  assertEquals(ownThoughtsEligible(id({ kind: "service", sub: "service:digest", actor: "service:digest" })), false);
-  assertEquals(ownThoughtsEligible(id({ kind: "on-behalf", actor: "service:mcp" })), false);
-  assertEquals(ownThoughtsEligible(id({ kind: "anonymous" })), false);
-  assertEquals(ownThoughtsEligible(id({ kind: undefined })), false);
-  // an admin who is not the owner (and one impersonating the owner) gets nothing either
-  assertEquals(ownThoughtsEligible(id({ admin: true, actor: "root", impersonating: { reason: "support", since: "2026-11-20T00:00:00Z" } })), false);
-  assertEquals(ownThoughtsEligible(id({ actor: "root" })), false);
-  assertEquals(ownThoughtsEligible(id({ sub: "", actor: "" })), false);
+  const on = { signIn: true, defaultSub: "" }, off = { signIn: false, defaultSub: "alice" };
+  // sign-in on: a signed-in user acting as themselves, nobody else
+  assertEquals(ownThoughtsEligible(id({}), on), true);
+  assertEquals(ownThoughtsEligible(id({ kind: "default" }), on), false);
+  assertEquals(ownThoughtsEligible(id({ kind: "header" }), on), false);
+  // sign-in off: the ONE default identity with a set default subject; a header identity never
+  assertEquals(ownThoughtsEligible(id({ kind: "default" }), off), true);
+  assertEquals(ownThoughtsEligible(id({ kind: "default" }), { signIn: false, defaultSub: "" }), false);
+  assertEquals(ownThoughtsEligible(id({ kind: "default", sub: "operator", actor: "operator" }), { signIn: false, defaultSub: "" }), false);
+  assertEquals(ownThoughtsEligible(id({ kind: "default", sub: "bob", actor: "bob" }), off), false);
+  assertEquals(ownThoughtsEligible(id({ kind: "header" }), off), false);
+  for (const cfg of [on, off]) {
+    assertEquals(ownThoughtsEligible(undefined, cfg), false);
+    assertEquals(ownThoughtsEligible(id({ kind: "service", sub: "service:digest", actor: "service:digest" }), cfg), false);
+    assertEquals(ownThoughtsEligible(id({ kind: "on-behalf", actor: "service:mcp" }), cfg), false);
+    assertEquals(ownThoughtsEligible(id({ kind: "anonymous" }), cfg), false);
+    assertEquals(ownThoughtsEligible(id({ kind: undefined }), cfg), false);
+    // an admin who is not the owner (and one impersonating the owner) gets nothing either
+    assertEquals(ownThoughtsEligible(id({ admin: true, actor: "root", impersonating: { reason: "support", since: "2026-11-20T00:00:00Z" } }), cfg), false);
+    assertEquals(ownThoughtsEligible(id({ actor: "root" }), cfg), false);
+    assertEquals(ownThoughtsEligible(id({ sub: "", actor: "" }), cfg), false);
+  }
+});
+
+Deno.test("sign-in off: the default identity (WORKSPACE_DEFAULT_SUB set) finds its own; blank default or a header identity: empty and no query", async () => {
+  const set = { WORKBENCH_KEY: "internal-key-0123456789", WORKSPACE_DEFAULT_SUB: "alice" };
+  const a = await build(set);
+  const r = await get(a.app, "gardens", { "x-brain-key": set.WORKBENCH_KEY });
+  assertEquals(r.status, 200, r.text);
+  assertEquals(JSON.parse(r.text).results.map((h: { id: string }) => h.id), ["1"]);
+  const blank = await build({ WORKBENCH_KEY: "internal-key-0123456789" });
+  const r2 = await get(blank.app, "gardens", { "x-brain-key": "internal-key-0123456789" });
+  assertEquals(JSON.parse(r2.text).results, []);
+  assertEquals(blank.calls.length, 0);
+  const hdr = await build({ ...set, WORKSPACE_IDENTITY_HEADER: "X-Test-Sub" });
+  const r3 = await get(hdr.app, "gardens", { "x-brain-key": set.WORKBENCH_KEY, "x-test-sub": "alice" });
+  assertEquals(JSON.parse(r3.text).results, []);
+  assertEquals(hdr.calls.length, 0);
 });
 
 Deno.test("a non-owner admin (an admin token, another subject's thoughts): nothing - the filter is the admin's own subject", async () => {
@@ -177,7 +208,7 @@ Deno.test("the handler mounted without the seam is refused (no identity), never 
   const { registerOwnThoughts } = await import("./routes/own_thoughts.ts");
   const { db, calls } = fakeDb();
   const contract = newApp();
-  registerOwnThoughts(contract, { db } as never);
+  registerOwnThoughts(contract, { db, ownThoughtsCfg: { signIn: false, defaultSub: "alice" } } as never);
   const r = await contract.request(`http://h${PATH}?q=gardens`);
   assertEquals(r.status, 403);
   assertEquals(calls.length, 0);
@@ -199,12 +230,12 @@ Deno.test("the query and the thought text never reach a log", async () => {
   assert(!lines.join("\n").includes("compost"));
 });
 
-Deno.test("a LIKE wildcard in the query is a literal; the minimum is two characters; the limit is capped", async () => {
+Deno.test("a wildcard character in the query is just text; the minimum is two characters; the limit is capped", async () => {
   const { app, calls } = await build();
   const h = await as("alice");
   const all = JSON.parse((await get(app, "%%", h)).text);
   assertEquals(all.results, [], "% is not a wildcard");
-  assertEquals(calls[0].args[1], "\\%\\%");
+  assertEquals(calls[0].args[1], "%%"); // raw: the database function compares text, it has no wildcards
   const one = await get(app, "a", h);
   assertEquals(one.status, 400);
   const r = await app.request(`http://h${PATH}?q=gardens&limit=9999`, { headers: h });
