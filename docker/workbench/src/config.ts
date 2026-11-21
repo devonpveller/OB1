@@ -29,6 +29,10 @@ export const config = {
   embedding: {
     base: (Deno.env.get("EMBEDDING_API_BASE") || "http://llama-cpp-embed:8080/v1").replace(/\/+$/, ""),
     key: Deno.env.get("EMBEDDING_API_KEY") || "not-needed",
+    // rw-owner-private-view: the private views' query embeddings use the workbench's OWN LiteLLM key
+    // (compose: PRIVATE_EMBEDDING_API_KEY = OB_WORKBENCH_EMBED_LLM_KEY, the same 'workbench-embed' virtual key, with NO
+    // fallback to the MCP key). Blank = private semantic search is off (503, no embedding call).
+    privateKey: (Deno.env.get("PRIVATE_EMBEDDING_API_KEY") ?? "").trim(),
     model: Deno.env.get("EMBEDDING_MODEL") || "local-embed",
     dimension: parseInt(Deno.env.get("EMBEDDING_DIMENSION") || "1024", 10),
     // Starting char budget per embedding call; embed() halves on a

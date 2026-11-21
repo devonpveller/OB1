@@ -10,12 +10,22 @@
 import { config } from "../config.ts";
 import { logRefusal } from "../identity/refusal_log.ts";
 
-export async function embed(text: string): Promise<number[]> {
+export function embed(text: string): Promise<number[]> {
+  return embedWith(config.embedding.key, text);
+}
+
+// rw-owner-private-view: the owner's private search embeds ONLY the query (never a stored row), with the workbench's
+// own key (config.embedding.privateKey); null when that key is blank - the caller answers 503 and calls nothing.
+export function privateEmbedder(key: string = config.embedding.privateKey): ((text: string) => Promise<number[]>) | null {
+  return key ? (text: string) => embedWith(key, text) : null;
+}
+
+async function embedWith(key: string, text: string): Promise<number[]> {
   let input = String(text || "").slice(0, config.embedding.maxChars);
   for (let attempt = 0; attempt < 6; attempt++) {
     const r = await fetch(`${config.embedding.base}/embeddings`, {
       method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${config.embedding.key}` },
+      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
       body: JSON.stringify({ model: config.embedding.model, input }),
     });
     if (r.ok) {

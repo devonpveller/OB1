@@ -24,6 +24,10 @@ export interface ContractDeps {
   // P7a: where a render request is handed to openbrain-podcast (POST {"request_id"}); "" = inert
   podcastRenderUrl?: string;
   podcastRenderKey?: string; // sent as X-Brain-Key to the render service (WORKBENCH_KEY)
+  // rw-owner-private-view: the private search's query embedder (the workbench's own key, no fallback); null = off
+  privateEmbed?: ((text: string) => Promise<number[]>) | null;
+  // rw-owner-private-view: who may see the private views (the identity mode; identity/private_view.ts)
+  privateView?: import("../../identity/private_view.ts").PrivateViewConfig;
 }
 
 export const PREFIX = "/workbench/contract";

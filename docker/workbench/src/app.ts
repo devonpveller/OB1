@@ -66,6 +66,7 @@ import { settingsRouter } from "./settings/routes.ts";
 import { refetchClient, researchClient } from "./documents/clients.ts";
 import { createContractApp, openApiDocument } from "./contracts/app.ts";
 import { contractDeps } from "./contracts/wiring.ts";
+import { privateViewsMode } from "./identity/private_view.ts";
 
 // deno-postgres returns BIGINT columns (e.g. entities.id, thoughts.id) as JS
 // BigInt, which JSON.stringify cannot serialize → every response carrying one
@@ -145,6 +146,7 @@ app.route("/workbench/ideas", ideasRouter({ db: cdeps.db, embed: cdeps.embed }))
 app.route("/workbench/settings", settingsRouter({ db: cdeps.db, reg: cdeps.registry, mountsRoot: cdeps.mountsRoot })); // rw-settings-store - my settings, and the shared ones (admins)
 app.route("/workbench/auth", authRouter({ // rw-identity — who am I, impersonation, the audit log
   db: cdeps.db, fa: seam.fa, mode: seam.fa ? "forward-auth" : seam.cfg.header ? "header" : "default",
+  privateViews: cdeps.privateView ? privateViewsMode(cdeps.privateView) : "off",
 }));
 app.get("/workbench/openapi.json", (c) => c.json(contractDoc)); // research-workbench P0
 app.route("/", contract); // research-workbench P0 — /workbench/contract/* (paths are absolute)

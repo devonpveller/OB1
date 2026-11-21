@@ -414,7 +414,8 @@ try {
   # rw-p8a2-cleanup: dredd-hooks.js also skips the cleanup writes and the per-user action read (CLEANUP_WRITE there;
   # cleanup_integration_test.ts exercises them in run-workspace-tests.ps1) - the same five paths, counted here
   $hookSkipped = @($docJson.paths.PSObject.Properties | Where-Object { $_.Name -match '/sessions/\{id\}/(steer|cancel)$' -or
-    $_.Name -match '/cleanup/(sources/\{id\}/(sever|erase)|process-all|tombstones/\{id\}/lift|actions/\{id\})$' }).Count
+    $_.Name -match '/cleanup/(sources/\{id\}/(sever|erase)|process-all|tombstones/\{id\}/lift|actions/\{id\})$' -or
+    $_.Name -match '/private/(claims|jobs)/\{id\}$' }).Count  # rw-owner-private-view: the owner-only by-id reads (PRIVATE_BY_ID)
   Check ($dm.Success -and $dm.Groups[2].Value -eq '0' -and $dm.Groups[3].Value -eq '0' -and [int]$dm.Groups[1].Value -eq ($ops - $hookSkipped)) "Dredd: $($dm.Value) (operations in the document: $ops; skipped by the hooks: $hookSkipped)"
 
   # ---------------------------------------------------------------- 6. eleven-router smoke
