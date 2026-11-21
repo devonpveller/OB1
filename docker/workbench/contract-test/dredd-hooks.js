@@ -22,6 +22,10 @@ const NEEDS_RESEARCH = /\/sessions\/\{id\}\/(steer|cancel)/;
 //    is the caller's own or 404). The other cleanup READS are checked here.
 const CLEANUP_WRITE = /\/cleanup\/(sources\/\{id\}\/(sever|erase)|process-all|tombstones\/\{id\}\/lift|actions\/\{id\})/;
 
+// 7. rwr-flags-api: a flag by id is a per-user row the fixture does not seed (the caller's own or 404); GET/PATCH /flags/{id}
+//    are exercised by src/contracts/flags_integration_test.ts (run-flags-tests.ps1). Create and list are checked here.
+const FLAG_BY_ID = /\/flags\/\{id\}/;
+
 // 6. rw-inlet-stamp (slot 470): the podcast model's fixtures belong to a real-shaped lab subject, lab-podcaster-0001 (an
 //    owner is never the literal 'operator'); its operations are called as that subject through the seam's test
 //    identity header (the lab workbench runs with WORKSPACE_IDENTITY_HEADER=X-Test-Sub).
@@ -32,7 +36,7 @@ hooks.beforeEach((transaction, done) => {
     transaction.request.headers['X-Test-Sub'] = 'lab-podcaster-0001';
   }
   const code = String(transaction.expected && transaction.expected.statusCode);
-  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || ''));
+  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || FLAG_BY_ID.test(String(transaction.name || ''));
   done();
 });
 

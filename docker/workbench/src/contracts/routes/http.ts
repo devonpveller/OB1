@@ -82,9 +82,9 @@ export function fail(c: Context, err: unknown) {
   // selector, an unregistered kind, a target that is not a source
   if (pg?.code === "OBR01") return c.json({ error: pg.message ?? "reference refused", detail: { rule: "reference" } }, 422);
   // A value the database cannot cast (a non-uuid id on a path or in a query parameter: 22P02
-  // invalid_text_representation, 22007/22008 bad datetimes, 22003 out of range) is the caller's
+  // invalid_text_representation, 22007/22008 bad datetimes, 22003 out of range, 22021 an invalid byte sequence such as a NUL) is the caller's
   // error: 400, and the body carries no database text (rw-p0-contract2 attempt 2, tester finding N3).
-  if (pg?.code && ["22P02", "22007", "22008", "22003"].includes(pg.code)) {
+  if (pg?.code && ["22P02", "22007", "22008", "22003", "22021"].includes(pg.code)) {
     return c.json({ error: "invalid request: a parameter is not a valid value for its type" }, 400);
   }
   // Anything else is logged here and answered without its text: the database's or the runtime's

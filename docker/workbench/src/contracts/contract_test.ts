@@ -73,7 +73,8 @@ Deno.test("every registry in registry.ts is seeded by the migrations (when the m
     // research-workbench P3a declares (init-research-credibility.sql, rw-p3a-entail).
     sql = await Deno.readTextFile(new URL("../../../init-research-contract.sql", import.meta.url)) +
       await Deno.readTextFile(new URL("../../../init-references.sql", import.meta.url)) +
-      await Deno.readTextFile(new URL("../../../init-research-credibility.sql", import.meta.url));
+      await Deno.readTextFile(new URL("../../../init-research-credibility.sql", import.meta.url)) +
+      await Deno.readTextFile(new URL("../../../init-flags.sql", import.meta.url)); // rwr-flags-api
   } catch {
     return; // inside the image the migrations are not in the build context
   }

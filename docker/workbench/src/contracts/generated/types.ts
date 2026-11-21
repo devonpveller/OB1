@@ -353,6 +353,43 @@ export type Error = {
   detail?: Record<string, unknown>;
 };
 
+export type Flag = {
+  id: string;
+  item_kind: string; /** registry: flag_item_kinds */
+  item_id: string;
+  reason: string; /** registry: flag_reasons */
+  note: string;
+  from: FlagFrom;
+  state: string; /** registry: flag_states */
+  created_at: string;
+  updated_at: string;
+  flagged_by: string | null;
+};
+
+export type FlagCreate = {
+  item_kind: string; /** registry: flag_item_kinds */
+  item_id: string;
+  reason: string; /** registry: flag_reasons */
+  note?: string;
+  from: FlagFrom;
+};
+
+export type FlagFrom = {
+  kind: string; /** registry: flag_from_kinds */
+  ref: string;
+};
+
+export type FlagUpdate = {
+  reason?: string; /** registry: flag_reasons */
+  note?: string;
+  state?: string; /** registry: flag_states */
+};
+
+export type Flags = {
+  flags: Array<Flag>;
+  total: number;
+};
+
 export type Flow = {
   session_id: string;
   running: boolean;
