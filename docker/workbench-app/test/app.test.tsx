@@ -78,6 +78,7 @@ describe("the fetch door: same-origin /workbench/* only (asserted over the reque
       "/workbench/x/.\r./.\r./admin", "/workbench/%2e\t%2e/admin",
       "/workbench/.%09./admin", "/workbench/.%0a./admin", "/workbench/.%0d./admin", "/workbench/%2e%09%2e/admin",
       "/workbench/%09../admin", "/workbench/..%0a/admin", "/workbench/a b", "/workbench/a%20b/../../admin", "/workbench/a/./b",
+      "/workbench/%25%252e%252e/../admin", "/workbench/a%25b/%252e%252e/%252e%252e/admin", "/workbench/%252e%252e/admin", "/workbench/100%25%0a",
       "/workbench/\u0000x", "/workbench/%00", "/workbench/x\u007f", "/workbench/%7f"];
     for (const u of bad) {
       expect(isWorkbenchUrl(u), JSON.stringify(u)).toBe(false);
@@ -86,6 +87,23 @@ describe("the fetch door: same-origin /workbench/* only (asserted over the reque
     }
     expect(sent).toEqual([]);
     expect(requestLog()).toEqual([]);
+  });
+  // rwr-app-scaffold round 3 (tester attempt 2, Case 13b): real ids and note paths hold spaces and a literal %.
+  it("accepts real id and note-path shapes: %20, a decoded space, a literal % as %25", async () => {
+    const sent: string[] = [];
+    setFetcher(async (u) => { sent.push(u); return new Response("{}"); });
+    const enc = encodeURIComponent;
+    const good = ["/workbench/notes/Research/My%20Note.md", "/workbench/notes/" + "a/100% done.md".split("/").map(enc).join("/"),
+      "/workbench/sources/src%20abc", "/workbench/notebooks/thread%201%2F2", "/workbench/ideas/id%201/draft", "/workbench/notes/a%20b",
+      "/workbench/notes/50%25.md", "/workbench/notes/a/%25%20", "/workbench/documents/file?path=My%20Doc.md", "/workbench/search?q=hello%20world%20..%2Fx",
+      "/workbench/nav?folder=Research%2FMy%20Notes", "/workbench/notes/a/..hidden.md", "/workbench/notes/a/b.md", "/workbench/contract/documents/doc%3A1",
+      "/workbench/notes/a/caf%C3%A9.md", "/workbench/notes/a/x%2Fy", "/workbench/sources/3f2c0a9e-1111-4222-8333-444455556666"];
+    for (const u of good) {
+      expect(isWorkbenchUrl(u), u).toBe(true);
+      await api("GET", u);
+    }
+    expect(sent).toEqual(good);
+    expect(requestLog().map((x) => x.url)).toEqual(good);
   });
   it("what is sent and logged is the RESOLVED path, always under /workbench/", async () => {
     const sent: string[] = [];

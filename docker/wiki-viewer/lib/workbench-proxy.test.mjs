@@ -301,8 +301,12 @@ test("a path that resolves outside /workbench/ is refused 400 and never reaches 
     const bad = ["/workbench/../admin", "/workbench/%2e%2e/admin", "/workbench/.%2e/admin", "/workbench/%2e./admin", "/workbench/%2E%2E/admin",
       "/workbench\\..\\admin", "/workbench/..\\admin", "/WORKBENCH/../admin", "/Workbench/x", "/%77orkbench/../admin", "/%77orkbench/x",
       "/workbench;/../admin", "//workbench/../admin", "//workbench/x", "/workbench/x/../../admin", "/workbench/./x", "/workbench/x%2f..%2f..%2fadmin",
-      "/workbench/%252e%252e/admin", "/workbench/..%5cadmin", "/workbench/%5c", "/workbench", "/workbench?x=/../admin", "/workbench/a%00b", "/workbench/a%0d%0ab",
-      "/workbench/.%09./admin", "/workbench/..%0a/admin"];
+      "/workbench/%252e%252e/admin", "/workbench/..%5cadmin", "/workbench/%5c", "/workbench/a%00b", "/workbench/a%0d%0ab",
+      "/workbench/.%09./admin", "/workbench/..%0a/admin",
+      // round 3: a literal % must not hide a traversal that a LATER decode pass would reveal
+      "/workbench/50%25/%2e%2e/admin", "/workbench/a%25%5c..%5cadmin", "/workbench/%25/%252e%252e/admin", "/workbench/a%25b/%252e%252e/%252e%252e/admin",
+      "/workbench/50%25.md/..%2fadmin", "/workbench/50%25%0d%0a", "/workbench/%252e%252e/admin",
+      "/workbenchx", "/workbench%2fx", "/workbench;x"];
     for (const p of bad) {
       const r = await l.send(p);
       assert.equal(r.status, 400, p);
@@ -327,6 +331,34 @@ test("an upstream absolute Location is rewritten to a relative path (or dropped 
     const f = await l.send("/workbench/redirect-foreign");
     assert.equal(f.status, 302);
     assert.equal(f.headers.location, undefined, "a foreign absolute Location is dropped, never an address of the upstream");
+  } finally {
+    l.close();
+  }
+});
+
+// rwr-app-scaffold round 3 (tester attempt 2, Case 13): the live viewer's real /workbench request shapes
+// (NotesEditor builds "/workbench/notes/" + path.split("/").map(encodeURIComponent).join("/")). A note name
+// holding a literal % encodes to %25; the guard's later decode pass threw on it and refused the request.
+// Every shape the old (0545343) forwarder forwarded is forwarded again; "/workbench" and "/workbench?x=1" too.
+test("round 3: every real /workbench request shape of the live viewer is forwarded (literal %, spaces, bare /workbench)", async () => {
+  const l = await pathLab();
+  try {
+    const enc = encodeURIComponent;
+    const notePath = (p) => "/workbench/notes/" + p.split("/").map(enc).join("/");
+    const shapes = [
+      "/workbench", "/workbench?x=1", "/workbench/", "/workbench/health", "/workbench/nav?folder=" + enc("Research/My Notes"),
+      "/workbench/search?q=" + enc("100% sure ../x") + "&limit=5", "/workbench/export?path=" + enc("a/../b.md") + "&format=pdf",
+      notePath("Research/My Note.md"), notePath("Research/100% done.md"), notePath("50%.md"), notePath("a/100%41.md"),
+      notePath("a/Q&A #1 (draft).md"), notePath("a/café ✓.md"), notePath("a/..hidden.md"), notePath("a/....md"),
+      notePath("a/.obsidian/x.md"), notePath("a/b."), notePath("a/it's [x] {y}.md"), notePath("a/back\slash.md"), "/workbench/notes/a/" + enc("x/y"),
+      "/workbench/sources/3f2c0a9e-1111-4222-8333-444455556666", "/workbench/sources/" + enc("src:abc 123"), "/workbench/notebooks/" + enc("thread 1/2"),
+      "/workbench/grounding/" + enc("a b"), "/workbench/documents/file?path=" + enc("My Doc.md"), "/workbench/contract/documents/" + enc("doc:1"),
+      "/workbench/jobs/123", "/workbench/sources/abc/replace-from-upload", "/workbench/idea-schedule/research-now/" + enc("id 1"),
+      "/workbench/notes/a%20b", "/workbench/a..b/x", "/workbench/ping?q=1", "/workbench/notes/50%25.md", "/workbench/notes/Research/100%25%20done.md",
+      "/workbench?x=/../admin",
+    ];
+    for (const s of shapes) assert.equal((await l.send(s)).status, 200, s);
+    assert.deepEqual(l.seen, shapes, "each one reached the upstream exactly as sent");
   } finally {
     l.close();
   }

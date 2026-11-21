@@ -25,16 +25,32 @@ export class ApiError extends Error {
 
 // The URL that will actually leave, or null. fetch() strips ASCII tab / CR / LF from a URL BEFORE it
 // resolves dot-segments, so a guard that reads the raw string can be walked past ("/workbench/.<TAB>./admin"
-// is /admin on the wire). So: any control character (C0, DEL), space or backslash is refused outright,
-// raw or percent-encoded; a dot-segment is refused outright; and what is judged and logged is the RESOLVED
-// URL: same origin, pathname under /workbench/. Returns pathname + search of that resolved URL.
-const BAD_CHAR = /[\u0000-\u0020\u007f\\]/;
+// is /admin on the wire). So: any control character (C0, DEL) or backslash is refused outright, raw or
+// percent-encoded, in any decoding; a dot-segment is refused outright, in any decoding; and what is judged
+// and logged is the RESOLVED URL: same origin, pathname under /workbench/. A space is NOT a hazard: ids and
+// note paths hold them (sent as %20), and a literal "%" is sent as %25 - so a later decode pass that meets
+// such a bare "%" ends the decoding instead of refusing (only the FIRST decode must succeed). A raw
+// (unencoded) space in the URL is still refused: callers encode. Returns pathname + search of the resolved URL.
+const BAD_CHAR = /[\u0000-\u001f\u007f\\]/;
+const RAW_BAD = /[\u0000-\u0020\u007f\\]/;
+const dotSegment = (p: string) => p.split("/").some((s) => s === ".." || s === ".");
 export function resolveWorkbenchUrl(url: string): string | null {
-  if (typeof url !== "string" || !url.startsWith("/workbench/") || url.startsWith("//") || BAD_CHAR.test(url)) return null;
+  if (typeof url !== "string" || !url.startsWith("/workbench/") || url.startsWith("//") || RAW_BAD.test(url)) return null;
   const [pathPart] = url.split(/[?#]/);
-  let decoded: string;
-  try { decoded = decodeURIComponent(pathPart); } catch { return null; }
-  if (BAD_CHAR.test(decoded) || !decoded.startsWith("/workbench/") || decoded.split("/").some((s) => s === ".." || s === ".")) return null;
+  let p = pathPart;
+  for (let i = 0; i < 6; i++) {
+    if (BAD_CHAR.test(p) || !p.startsWith("/workbench/") || dotSegment(p)) return null;
+    let d: string;
+    try {
+      d = decodeURIComponent(p);
+    } catch {
+      if (i === 0) return null;
+      // a later pass met a literal "%": decode the well-formed %XX escapes one by one, so a traversal behind it is still seen
+      d = p.replace(/%[0-9a-f]{2}/gi, (m) => String.fromCharCode(parseInt(m.slice(1), 16)));
+    }
+    if (d === p) break;
+    p = d;
+  }
   let u: URL;
   try { u = new URL(url, location.origin); } catch { return null; }
   if (u.origin !== location.origin || !u.pathname.startsWith("/workbench/")) return null;

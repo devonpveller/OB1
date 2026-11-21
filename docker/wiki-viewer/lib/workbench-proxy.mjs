@@ -96,14 +96,22 @@ export function bodyCap(path) {
 // (raw or percent-encoded, to any depth), and no dot-segment in any decoding. null = fine, else a reason.
 function pathRefusal(rawUrl, cfg) {
   const url = String(rawUrl || "");
-  if (!url.startsWith("/workbench/")) return "only /workbench/... is forwarded";
+  if (!(url.startsWith("/workbench/") || url === "/workbench" || url.startsWith("/workbench?"))) return "only /workbench/... is forwarded";
   const pathPart = url.split(/[?#]/)[0];
   let p = pathPart;
-  for (let i = 0; i < 5; i++) {
+  // round 3: only a FIRST decode that fails is refused. A later pass that throws (a literal "%" the first
+  // pass produced: "50%25.md" -> "50%.md") is not refused: it falls back to a lenient per-escape decode and
+  // stops when the string stops changing. A dot-segment / backslash / control character in any pass that did decode still refuses.
+  for (let i = 0; i < 6; i++) {
     if (/[\u0000-\u001f\u007f\\]/.test(p)) return "a backslash or control character in the path";
     if (p.split("/").some((s) => s === ".." || s === ".")) return "a dot-segment in the path";
     let d;
-    try { d = decodeURIComponent(p); } catch { return "a path that does not decode"; }
+    try { d = decodeURIComponent(p); } catch {
+      if (i === 0) return "a path that does not decode";
+      // a later pass hit a bare "%": decode the well-formed %XX escapes one by one (never throws), so a
+      // traversal hidden behind a literal "%" is still seen; stop once that changes nothing
+      d = p.replace(/%[0-9a-f]{2}/gi, (m) => String.fromCharCode(parseInt(m.slice(1), 16)));
+    }
     if (d === p) break;
     p = d;
   }
@@ -111,7 +119,7 @@ function pathRefusal(rawUrl, cfg) {
   let target;
   try { target = new URL(cfg.url + url); } catch { return "a path that does not resolve"; }
   const base = new URL(cfg.url).pathname.replace(/\/+$/, "");
-  if (!target.pathname.startsWith(base + "/workbench/")) return "the path resolves outside /workbench/";
+  if (target.pathname !== base + "/workbench" && !target.pathname.startsWith(base + "/workbench/")) return "the path resolves outside /workbench/";
   return null;
 }
 
