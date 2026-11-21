@@ -53,7 +53,6 @@ import { isWorkbenchPath, proxyConfig, proxyWorkbench } from "./lib/workbench-pr
 import { allowSameOriginFraming, withSecurityHeaders } from "./lib/security-headers.mjs";
 
 const BUNDLE = process.env.WIKI_BUNDLE_DIR || "/viewer/bundle"; // the frozen bundle (committed, D7)
-const WORKSPACE = process.env.WIKI_WORKSPACE_DIR || "/viewer/workspace"; // the workspace app's build (Dockerfile stage `workspace`)
 // /workbench/* forwarded with the key, server-side (rw-p2b-workspace: the edge targets the viewer alone)
 const WB_PROXY = proxyConfig();
 const PORT = parseInt(process.env.PORT || "8080", 10);
@@ -282,28 +281,12 @@ async function proxyNav(req, res) {
   }
 }
 
-// /workspace: the app's index.html for the app's own URLs, its hashed assets from the build. The
-// build carries no page and reads no vault file; the app talks to /workbench/* like every panel.
-async function serveWorkspace(req, res, path) {
-  const rel = path.replace(/^\/workspace\/?/, "");
-  const isAsset = /^assets\/[A-Za-z0-9._-]+$/.test(rel);
-  const file = normalize(join(WORKSPACE, isAsset ? rel : "index.html"));
-  if (!file.startsWith(WORKSPACE + "/")) { res.writeHead(400); res.end(); return; }
-  let st;
-  try { st = await stat(file); } catch { st = null; }
-  if (!st?.isFile()) {
-    res.writeHead(isAsset ? 404 : 503, { "content-type": "text/plain", "cache-control": "no-store" });
-    res.end(isAsset ? "not found" : "the workspace is not in this image");
-    return;
-  }
-  const ext = extname(file);
-  // hashed asset names never change content: cache them; index.html revalidates
-  const headers = { ...baseHeaders(st, ext), "content-type": MIME[ext] || "application/octet-stream", "content-length": st.size,
-    "cache-control": isAsset ? "public, max-age=31536000, immutable" : "no-cache, must-revalidate", "x-wiki-render": "workspace" };
-  if (notModified(req, st)) { res.writeHead(304, headers); res.end(); return; }
-  res.writeHead(200, headers);
-  if (req.method === "HEAD") { res.end(); return; }
-  createReadStream(file).pipe(res);
+// /workspace: the old workspace app was removed (rwr-remove-workspace); the new app has its own door
+// (openbrain-workbench-app). A plain 404 rather than a redirect: the new door's address is the operator's
+// edge config, not this image's, so there is nothing true to redirect to.
+function workspaceRemoved(res) {
+  res.writeHead(404, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+  res.end("the old /workspace app was removed; the research workbench has its own address now\n");
 }
 
 async function handle(req, res) {
@@ -317,9 +300,8 @@ async function handle(req, res) {
   }
   const path = url.split("?")[0];
   if (path === "/__nav") return proxyNav(req, res);
-  // The workspace (research-workbench P2b): the Vite + React app at /workspace. Its notifications
-  // bell replaced the P1b strip and its /__notifications routes (D13, moved to the title bar 2026-09-25).
-  if (path === "/workspace" || path.startsWith("/workspace/")) return serveWorkspace(req, res, path);
+  // The old workspace app is gone (rwr-remove-workspace): /workspace answers a plain 404.
+  if (path === "/workspace" || path.startsWith("/workspace/")) return workspaceRemoved(res);
   // rw-identity round 5: any spelling that decodes to /workbench is forwarded (the workbench judges it)
   if (isWorkbenchPath(path)) return proxyWorkbench(req, res, WB_PROXY);
   // The full index, LIVE from wiki_pages, for its one remaining lazy reader

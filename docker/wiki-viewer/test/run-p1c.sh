@@ -122,8 +122,8 @@ true'
 g="$(T 120 docker run --rm --network none --entrypoint sh "$IMG" -c "$probe" 2>&1)"; echo "GREEN image: [${g}]"
 hist="$(docker history --no-trunc --format '{{.CreatedBy}}' "$IMG" | grep -iE "quartz build|git clone|esbuild|patches/|npx quartz|sed -i" | head -5)"
 echo "GREEN image history build steps naming Quartz/patches: [${hist}]"
-# rw-p2b-workspace: the `workspace` stage builds the separate Vite app (its own lockfile, no Quartz, no
-# wiki bundle) - skipped here; every other stage, the runtime one included, must carry no build/patch step
+# (the old Vite `workspace` stage, removed by rwr-remove-workspace, was skipped here; every stage, the runtime one included,
+# must carry no build/patch step)
 df="$(awk '/^FROM /{ws=($0 ~ / AS workspace\r?$/)} !ws{print NR": "$0}' "$VIEWER_W/Dockerfile" | grep -E "quartz build|git clone|esbuild|npx|sed -i|patches/" | head -5)"; echo "viewer Dockerfile build/patch steps outside the workspace stage: [${df}]"
 wsq="$(awk '/^FROM /{ws=($0 ~ / AS workspace\r?$/)} ws' "$VIEWER_W/Dockerfile" | grep -iE "quartz|git clone|patches/" | head -3)"; echo "workspace stage naming Quartz: [${wsq}]"; df="$df$wsq"
 pk="$(grep -ic quartz "$VIEWER_W/package.json" "$VIEWER_W/package-lock.json" | tr '\n' ' ')"; echo "package manifest quartz mentions: $pk"

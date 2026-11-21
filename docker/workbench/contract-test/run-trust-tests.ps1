@@ -212,7 +212,7 @@ try {
     $script:made.images += $wbTag
     $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --build-context "recipes=$(Join-Path $ob1 'recipes')" -t $viewerTag $viewerDir
     Save 'build-viewer.log' ($o -split "`n" | Select-Object -Last 80 | Out-String)
-    Check ($script:rc -eq 0) "$viewerTag built (its workspace stage: vitest incl. test/trust-panels.test.tsx, notices, tsc + vite build)"
+    Check ($script:rc -eq 0) "$viewerTag built (its build gate: the renderer's node tests)"
     if ($script:rc -ne 0) { throw 'build viewer' }
     $script:made.images += $viewerTag
     $vt = ([regex]'Tests\s+(\d+) passed').Match(($o -replace '\x1b\[[0-9;]*m', ''))

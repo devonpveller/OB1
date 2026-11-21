@@ -100,7 +100,7 @@ $usersJson = (ConvertTo-Json -Compress -Depth 4 @($users | ForEach-Object { [psc
 $daveSub = ($users | Where-Object { $_.login -eq 'dave' }).sub
 $profSub = ($users | Where-Object { $_.login -eq 'prof' }).sub
 $umaSub = ($users | Where-Object { $_.login -eq 'uma' }).sub
-# the lab proxy provider (Authentik's stand-in): the token's iss and aud, the sign-out the workspace links to
+# the lab proxy provider (Authentik's stand-in): the token's iss and aud, the sign-out the app links to
 $issuer = 'https://authentik.lab.invalid/application/o/research-lab/'
 $faClient = 'research-proxy-lab'
 $signOut = "http://$P-viewer:8080/outpost.goauthentik.io/sign_out"
@@ -249,7 +249,7 @@ try {
     $script:made.images += $wbTag
     $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --build-context "recipes=$(Join-Path $ob1 'recipes')" -t $viewerTag $viewerDir
     Save 'build-viewer.log' (($o -split "`n" | Select-Object -Last 120) -join "`n")
-    Check ($script:rc -eq 0) "$viewerTag built (its node tests incl. the forwarder's identity cases; the workspace's vitest)"
+    Check ($script:rc -eq 0) "$viewerTag built (its node tests incl. the forwarder's identity cases)"
     if ($script:rc -ne 0) { throw 'build viewer' }
     $script:made.images += $viewerTag
     $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" -t $rsTag $rsDir; Save 'build-research.log' (($o -split "`n" | Select-Object -Last 40) -join "`n")

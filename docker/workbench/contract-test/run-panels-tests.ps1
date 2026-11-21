@@ -3,7 +3,7 @@
 # timeline / page graph, POST /contract/source-states). Modelled on run-workspace-tests.ps1 (P2b): the same
 # lab docker shim, network, images and teardown.
 #
-#   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-panels-tests.ps1 -Subnet <x.y.z.0/24> [-Id <owner>] [-Evidence <dir>] [-Red] [-Cases E1,E4]
+#   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-panels-tests.ps1 -Subnet <x.y.z.0/24> [-Id <owner>] [-Evidence <dir>] [-Red]
 #
 # -Subnet is REQUIRED (harness-subnet.ps1: exactly a /24 outside Docker's default pools and 192.168.0.0/16);
 # -Evidence must be absent or empty. -Red builds the workbench and the viewer from -BaseSha (the development
@@ -19,12 +19,12 @@
 #   1. stages the REAL initdb chain from docker-compose.yml
 #   2. one internal network on the pinned subnet
 #   3. builds openbrain-workbench:wt-<id> (+ its test stage: the image test gate), openbrain-wiki-viewer:wt-<id>
-#      (its workspace stage: tsc, vitest, the D9 notices check) and the e2e runner; -Red: workbench + viewer from -BaseSha
+#      (its build gate: bundle manifest, dependency resolution, node tests); -Red: workbench + viewer from -BaseSha
 #   4. the lab (as P2b's): database (chain + fixtures.sql, ob_app_memory), stub embedder, stub research, the
-#      lab target + stub gate, PostgREST + the rest Caddy, the viewer as the front door, the workbench, Chromium
+#      lab target + stub gate, PostgREST + the rest Caddy, the viewer as the front door, the workbench
 #   5. a) src/contracts/panels_integration_test.ts against the :wt workbench (two users by X-Test-Sub)
-#      b) the panels e2e (e2e/panels.e2e.mjs) in the headless Chromium through the front door
-#      c) GREEN only: P2b's workspace e2e (regression) and the route-wide two-user isolation sweep
+#      b) (REMOVED by rwr-remove-workspace: the panels e2e drove the old workspace UI in a headless Chromium)
+#      c) GREEN only: the route-wide two-user isolation sweep
 #         (src/documents/isolation_sweep_test.ts, B's leads planted), response walk on and off
 #   6. the evidence gate (evidence-gate.ps1), then teardown and the leftover checks
 # It never touches the live stack. Exit 0 = every check passed (with -Red: every case FAILED).
@@ -37,11 +37,9 @@ param(
   [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
   [string]$PgrstImage = 'postgrest/postgrest:v12.2.3',
   [string]$CaddyImage = 'caddy:2-alpine',
-  [string]$ChromeImage = 'chromedp/headless-shell@sha256:53cc0f33c0598ff244f6e45458f6dfaf0ae4206d388ae7364903afd1d9d14f0a',
   [string]$BaseSha = 'deb9053',
   [switch]$Red,
   [switch]$WalkOff,
-  [string]$Cases = '',
   [switch]$KeepImages,
   # rw-p8a1-core: the open-brain lease is held only while the lab RUNS, never while building. -BuildOnly builds
   # this run's images and stops (they are kept); -Prebuilt runs the lab on images a -BuildOnly run left (same
@@ -64,13 +62,12 @@ $dockerDir = Split-Path -Parent $wb
 $ob1 = Split-Path -Parent $dockerDir
 $repo = Split-Path -Parent $ob1
 $viewerDir = Join-Path $dockerDir 'wiki-viewer'
-$wsDir = Join-Path $viewerDir 'workspace'
 $short = ($Id -replace '^wt-', '')
 $rand = -join ((48..57 + 97..102) | Get-Random -Count 6 | ForEach-Object { [char]$_ })
 $P = "rwp8a1-$rand"
 $net = "$P-net"
 $wbTag = "openbrain-workbench:wt-$short"; $wbTestTag = "openbrain-workbench:wt-$short-test"
-$viewerTag = "openbrain-wiki-viewer:wt-$short"; $e2eTag = "openbrain-workspace-e2e:wt-$short"
+$viewerTag = "openbrain-wiki-viewer:wt-$short"
 if ($Red) { $wbTag = "openbrain-workbench:wt-$short-base"; $wbTestTag = "openbrain-workbench:wt-$short-test"; $viewerTag = "openbrain-wiki-viewer:wt-$short-base" }
 $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
@@ -79,7 +76,6 @@ $wsKey = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [ch
 $gateKey = -join ((48..57 + 97..122) | Get-Random -Count 40 | ForEach-Object { [char]$_ })
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "$P-evidence" }
 $evStage = Join-Path $env:TEMP "$P-evstage"; New-Item -ItemType Directory -Force $evStage | Out-Null
-$shots = Join-Path $env:TEMP "$P-shots"; New-Item -ItemType Directory -Force $shots | Out-Null
 $stage = Join-Path $env:TEMP "$P-initdb"
 $vault = Join-Path $env:TEMP "$P-vault"; New-Item -ItemType Directory -Force $vault | Out-Null
 # the vault files of fixtures.sql's wiki_pages rows, written BEFORE the rows (older than them): a row
@@ -94,7 +90,7 @@ foreach ($fx in @(@('content/tool/tool-fixture', 'Tool Fixture', 'An entity page
 . (Join-Path $PSScriptRoot 'evidence-gate.ps1')
 
 $script:fail = 0
-$script:made = @{ net = $false; containers = @(); images = @(); dirs = @($evStage, $stage, $vault, $shots) }
+$script:made = @{ net = $false; containers = @(); images = @(); dirs = @($evStage, $stage, $vault) }
 function Pass([string]$m) { Write-Host "  PASS  $m" }
 function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
@@ -222,7 +218,7 @@ try {
   # ---------------------------------------------------------------- 3. images
   Write-Host '[3] images'
   if ($Prebuilt) {
-    foreach ($img in @($wbTag, $viewerTag, $wbTestTag, $e2eTag)) {
+    foreach ($img in @($wbTag, $viewerTag, $wbTestTag)) {
       $null = Dk image inspect $img
       Check ($script:rc -eq 0) "prebuilt $img is present"
       if ($script:rc -ne 0) { throw "prebuilt $img missing (run -BuildOnly first)" }
@@ -243,19 +239,14 @@ try {
       $script:made.images += $wbTag
       $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --build-context "recipes=$(Join-Path $ob1 'recipes')" -t $viewerTag $viewerDir
       Save 'build-viewer.log' ($o -split "`n" | Select-Object -Last 120 | Out-String)
-      Check ($script:rc -eq 0) "$viewerTag built (its workspace stage: vitest, the D9 notices check, tsc + vite build)"
+      Check ($script:rc -eq 0) "$viewerTag built (its build gate: bundle manifest, dependency resolution, the renderer's node tests)"
       if ($script:rc -ne 0) { throw 'build viewer' }
       $script:made.images += $viewerTag
-      $vt = ([regex]'Tests\s+(\d+) passed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
-      if ($vt.Success) { Pass "workspace unit tests in the image build: $($vt.Groups[1].Value) passed" }
     }
     # the integration test runs from THIS tree's test stage in both modes (RED: against the base workbench)
     $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb; Save 'build-workbench-test.log' ($o -split "`n" | Select-Object -Last 40 | Out-String)
     Check ($script:rc -eq 0) "$wbTestTag (the test stage) built"
     $script:made.images += $wbTestTag
-    $o = DkLong build --label $label -t $e2eTag (Join-Path $wsDir 'e2e'); Save 'build-e2e.log' ($o -split "`n" | Select-Object -Last 20 | Out-String)
-    Check ($script:rc -eq 0) "$e2eTag (playwright-core + pg, lab only) built"
-    $script:made.images += $e2eTag
 
   }
   if ($BuildOnly) { $KeepImages = $true; Write-Host '  -BuildOnly: images built and kept; no lab ran'; throw 'BUILD-ONLY' }
@@ -311,12 +302,10 @@ try {
   # the front door is the viewer itself (rw-identity-harden): the portal Caddy's (wiki_app) snippet no
   # longer has a /workbench/* route, and the edge (Traefik) targets the viewer alone
   $front = "http://${P}-viewer:8080"
-  $null = Run-Detached "$P-chrome" @('--shm-size=1g', $ChromeImage)
   Check (Wait-Http "http://$P-wb:8000/health" 90) 'the workbench is up'
-  # /workspace/, not /__health: the viewer's health reports the lab wiki's reconcile state, not the door
+  # /workspace/ (a plain 404 since rwr-remove-workspace; Wait-Http accepts any status under 500), not /__health: the viewer's health reports the lab wiki's reconcile state, not the door
   Check (Wait-Http "$front/workspace/" 90) 'the front door (the viewer) answers'
-  # the new edge (operator 2026-10-28): Traefik targets the VIEWER alone - it serves /workspace and
-  # forwards /workbench/* with the key server-side, dropping any key a client sends
+  # the new edge (operator 2026-10-28): Traefik targets the VIEWER alone - it forwards /workbench/* with the key server-side, dropping any key a client sends
   $edge = Dk run --rm --label $label --network $net --entrypoint node $viewerTag --input-type=module -e "
     const v = 'http://$P-viewer:8080';
     const ws = await fetch(v + '/workspace/'); const wsBody = await ws.text();
@@ -332,12 +321,10 @@ try {
     const ownBody = await own.text();
     console.log('guard csrf', csrf.status, 'no-origin', noOrigin.status, 'rebind', rebind, 'own-origin', /viewer's own origin|answers for/.test(ownBody) ? 'GUARDED' : 'reached-workbench');"
   Save 'edge-viewer.log' $edge
-  # P8a-1: the base (deb9053, after P2b) serves /workspace too - the RED is in the panels, not the shell
-  Check ($edge -match 'workspace 200 workspace true') 'the viewer serves /workspace (x-wiki-render: workspace)'
+  # rwr-remove-workspace: the old /workspace app is gone; the removed route answers a plain 404 (the base image of a -Red run is older and still serves it)
+  if (-not $Red) { Check ($edge -match 'workspace 404 null false') 'the removed /workspace answers a plain 404' }
   Check ($edge -match 'forwarded 200 direct-with-forged-key 401') 'the viewer forwards /workbench/* with the key injected server-side; a client key is never trusted'
   if (-not $Red) { Check ($edge -match 'guard csrf 403 no-origin 403 rebind 421 own-origin reached-workbench') 'the forwarder refuses a cross-origin or Origin-less write (403) and a rebound Host (421); a write from the viewer''s own origin reaches the workbench' }
-  $chromeIp = (Dk inspect -f "{{(index .NetworkSettings.Networks `"$net`").IPAddress}}" "$P-chrome").Trim()
-  Check ($chromeIp -match '^\d+\.\d+\.\d+\.\d+$') 'the headless Chromium is on the network'
 
   # ---------------------------------------------------------------- 5. the tests
   Write-Host '[5a] the panels integration test (src/contracts/panels_integration_test.ts) against the workbench, two users by X-Test-Sub'
@@ -352,25 +339,10 @@ try {
   if ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -le 1) "RED: the panels integration cases fail on the base ($($sum.Value); at most the held-source probe, which the base also answers with nothing, may pass)" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 5) "the panels integration test ($($sum.Value))" }
 
-  Write-Host '[5b] the panels e2e in a headless Chromium, through the front door'
-  $o = Lab-Docker 1200 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${shots}:/ev", '-e', "FRONT=$front",
-    '-e', "CDP=http://${chromeIp}:9222", '-e', "PGHOST=$db", '-e', "PGPASSWORD=$pw", '-e', "CASES=$Cases", $e2eTag, 'panels.e2e.mjs')
-  Save 'panels-e2e.log' ((($o -replace '\x1b\[[0-9;]*m', '') -split "`n" | Where-Object { $_ -match '^\s+(PASS|FAIL)|^E2E:|800-page graph' }) -join "`n")
-  foreach ($l in ($o -split "`n") | Where-Object { $_ -match '^\s+(PASS|FAIL)|^E2E:|800-page graph' }) { Write-Host "    $l" }
-  $e2e = ([regex]'E2E: (\d+) passed, (\d+) failed').Match($o)
-  if ($Red) { Check ($e2e.Success -and [int]$e2e.Groups[1].Value -eq 0) "RED: every panels e2e case fails on the base ($($e2e.Value))" }
-  else { Check ($e2e.Success -and [int]$e2e.Groups[2].Value -eq 0 -and [int]$e2e.Groups[1].Value -ge 6) "the panels e2e ($($e2e.Value))" }
-  if (-not $e2e.Success) { Save 'panels-e2e-tail.log' (($o -split "`n" | Select-Object -Last 40) -join "`n") }
+  # [5b] the panels e2e (headless Chromium over the old workspace's panels) was removed with the workspace (rwr-remove-workspace);
+  # the back-end panels suite is [5a] above and the isolation sweep is [5d] below.
 
   if (-not $Red) {
-    Write-Host '[5c] regression: the P2b workspace e2e through the same front door'
-    $o = Lab-Docker 1200 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${shots}:/ev", '-e', "FRONT=$front",
-      '-e', "CDP=http://${chromeIp}:9222", '-e', "PGHOST=$db", '-e', "PGPASSWORD=$pw", $e2eTag, 'workspace.e2e.mjs')
-    Save 'workspace-e2e.log' ((($o -replace '\x1b\[[0-9;]*m', '') -split "`n" | Where-Object { $_ -match '^\s+(PASS|FAIL)|^E2E:' }) -join "`n")
-    foreach ($l in ($o -split "`n") | Where-Object { $_ -match '^\s+FAIL|^E2E:' }) { Write-Host "    $l" }
-    $w2 = ([regex]'E2E: (\d+) passed, (\d+) failed').Match($o)
-    Check ($w2.Success -and [int]$w2.Groups[2].Value -eq 0) "the P2b workspace e2e still passes ($($w2.Value))"
-
     foreach ($walk in @('on', 'off')) {
       if ($walk -eq 'off') {
         $null = Dk rm -f "$P-wb"

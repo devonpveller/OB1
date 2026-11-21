@@ -1,7 +1,10 @@
-# run-workspace-tests.ps1 - the disposable lab run for research-workbench P2b (rw-p2b-workspace):
-# the workspace, the documents API and the viewer that serves /workspace.
+# run-workspace-tests.ps1 - the disposable lab run for research-workbench P2b (rw-p2b-workspace): the documents API and
+# the back-end suites that grew on it (cleanup, intake, ideas, settings, privacy, inlet-owner), the viewer as the front door
+# and the two-user isolation sweep. The file keeps its historic name; rwr-remove-workspace deleted the old /workspace UI,
+# so its headless-Chromium e2e ([5b]) and the e2e runner image are gone, and the grammar byte-identity check ([5c]) is
+# SUSPENDED until rwr-doc-editor lands the new app's grammar copy. Every back-end suite below still runs.
 #
-#   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-workspace-tests.ps1 -Subnet <x.y.z.0/24> [-Id <owner>] [-Evidence <dir>] [-Red] [-Cases C1,C7]
+#   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-workspace-tests.ps1 -Subnet <x.y.z.0/24> [-Id <owner>] [-Evidence <dir>] [-Red]
 #
 # -Subnet is REQUIRED (harness-subnet.ps1: exactly a /24 outside Docker's default pools and
 # 192.168.0.0/16); -Evidence must be absent or empty. -Red runs the SAME tests against images built
@@ -23,21 +26,20 @@
 #   1. stages the REAL initdb chain from docker-compose.yml (P2b's 270 slot included)
 #   2. one internal network on the pinned /25
 #   3. builds openbrain-workbench:wt-<id> (+ its test stage), openbrain-wiki-viewer:wt-<id> (its
-#      `workspace` stage runs the workspace's type check, unit tests (vitest) and D9 notices check)
-#      and the e2e runner image; with -Red the workbench and viewer come from -BaseSha instead
+#      build gate runs the renderer's own node tests); with -Red the workbench and viewer come from -BaseSha instead
 #   4. the lab: database (chain + fixtures.sql, ob_app_memory non-superuser), stub embedder, stub
 #      research service (origin by key), the lab target + stub search gate (a held link's replace), PostgREST + the OB1 rest Caddy, the
 #      viewer (WIKI_BUILDER=0) as the front door (rw-identity-harden: the portal Caddy's /workbench
 #      route is gone, so the viewer's own forwarder is the only door), the workbench (vault = a temp
-#      dir), a headless Chromium
+#      dir)
 #   5. the documents API integration test (src/documents/documents_integration_test.ts) as
-#      ob_app_memory against the :wt workbench; the workspace e2e (workspace.e2e.mjs) through the
-#      front door in the headless Chromium; the grammar copy byte-identity check
+#      ob_app_memory against the :wt workbench (the old workspace e2e is gone and the grammar copy
+#      byte-identity check is suspended, see above)
 #   6. the evidence gate (evidence-gate.ps1), then teardown and the leftover checks
 # rw-p5a-intake adds [5e]: the intake and queue panel's integration test (src/intake/intake_integration_test.ts)
 # with a stub extractor (stub-extract.ts), the stub research service's POST /intake/fetch and Open WebUI's
 # service key (WORKSPACE_SERVICE_KEYS owui=<key>); the isolation sweep plants B's intake jobs. -IntakeOnly runs
-# [5e] and the sweep alone (skips [5a]/[5b]: their RED expectations are P2b's, against a pre-P2b -BaseSha).
+# [5e] and the sweep alone (skips [5a]: its RED expectations are P2b's, against a pre-P2b -BaseSha).
 # rw-p8a4-ideas adds [5h]: the ideas panel's and the refinery view's integration test (src/ideas/ideas_integration_test.ts):
 # the owner-checked idea functions (slot 370) as two users and as the app role, the refinery's dossier into the room,
 # archive, the user source list. -IdeasOnly runs [5h] and the sweep alone; with -Red -IdeasOnly the initdb chain is
@@ -64,11 +66,9 @@ param(
   [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
   [string]$PgrstImage = 'postgrest/postgrest:v12.2.3',
   [string]$CaddyImage = 'caddy:2-alpine',
-  [string]$ChromeImage = 'chromedp/headless-shell@sha256:53cc0f33c0598ff244f6e45458f6dfaf0ae4206d388ae7364903afd1d9d14f0a',
   [string]$BaseSha = '767c461',
   [switch]$Red,
   [switch]$WalkOff,
-  [string]$Cases = '',
   [switch]$KeepImages,
   [switch]$IntakeOnly,
   [switch]$IdeasOnly,
@@ -114,13 +114,12 @@ $dockerDir = Split-Path -Parent $wb
 $ob1 = Split-Path -Parent $dockerDir
 $repo = Split-Path -Parent $ob1
 $viewerDir = Join-Path $dockerDir 'wiki-viewer'
-$wsDir = Join-Path $viewerDir 'workspace'
 $short = ($Id -replace '^wt-', '')
 $rand = -join ((48..57 + 97..102) | Get-Random -Count 6 | ForEach-Object { [char]$_ })
 $P = "rwp2b-$rand"
 $net = "$P-net"
 $wbTag = "openbrain-workbench:wt-$short"; $wbTestTag = "openbrain-workbench:wt-$short-test"
-$viewerTag = "openbrain-wiki-viewer:wt-$short"; $e2eTag = "openbrain-workspace-e2e:wt-$short"
+$viewerTag = "openbrain-wiki-viewer:wt-$short"
 if ($Red) { $wbTag = "openbrain-workbench:wt-$short-base"; $wbTestTag = "openbrain-workbench:wt-$short-test"; $viewerTag = "openbrain-wiki-viewer:wt-$short-base" }
 $refTag = "openbrain-idea-refinery:wt-$short-refinery" # rw-settings-store [5k]
 $baseChain = $IdeasOnly -or $SettingsOnly # the -Red run's chain comes from -BaseSha (the base has neither slot 370 nor 400)
@@ -135,7 +134,6 @@ $svcKey = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [c
 $owuiKey = -join ((48..57 + 97..122) | Get-Random -Count 40 | ForEach-Object { [char]$_ })
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "$P-evidence" }
 $evStage = Join-Path $env:TEMP "$P-evstage"; New-Item -ItemType Directory -Force $evStage | Out-Null
-$shots = Join-Path $env:TEMP "$P-shots"; New-Item -ItemType Directory -Force $shots | Out-Null
 $stage = Join-Path $env:TEMP "$P-initdb"
 $vault = Join-Path $env:TEMP "$P-vault"; New-Item -ItemType Directory -Force $vault | Out-Null
 # the vault files of fixtures.sql's wiki_pages rows, written BEFORE the rows (older than them): a row
@@ -150,7 +148,7 @@ foreach ($fx in @(@('content/tool/tool-fixture', 'Tool Fixture', 'An entity page
 . (Join-Path $PSScriptRoot 'evidence-gate.ps1')
 
 $script:fail = 0
-$script:made = @{ net = $false; containers = @(); images = @(); dirs = @($evStage, $stage, $vault, $shots) }
+$script:made = @{ net = $false; containers = @(); images = @(); dirs = @($evStage, $stage, $vault) }
 function Pass([string]$m) { Write-Host "  PASS  $m" }
 function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
@@ -319,19 +317,14 @@ try {
     $script:made.images += $wbTag
     $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --build-context "recipes=$(Join-Path $ob1 'recipes')" -t $viewerTag $viewerDir
     Save 'build-viewer.log' ($o -split "`n" | Select-Object -Last 120 | Out-String)
-    Check ($script:rc -eq 0) "$viewerTag built (its workspace stage: vitest, the D9 notices check, tsc + vite build)"
+    Check ($script:rc -eq 0) "$viewerTag built (its build gate: bundle manifest, dependency resolution, the renderer's node tests)"
     if ($script:rc -ne 0) { throw 'build viewer' }
     $script:made.images += $viewerTag
-    $vt = ([regex]'Tests\s+(\d+) passed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
-    if ($vt.Success) { Pass "workspace unit tests in the image build: $($vt.Groups[1].Value) passed" }
   }
   # the integration test runs from THIS tree's test stage in both modes (RED: against the base workbench)
   $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb; Save 'build-workbench-test.log' ($o -split "`n" | Select-Object -Last 40 | Out-String)
   Check ($script:rc -eq 0) "$wbTestTag (the test stage) built"
   $script:made.images += $wbTestTag
-  $o = DkLong build --label $label -t $e2eTag (Join-Path $wsDir 'e2e'); Save 'build-e2e.log' ($o -split "`n" | Select-Object -Last 20 | Out-String)
-  Check ($script:rc -eq 0) "$e2eTag (playwright-core + pg, lab only) built"
-  $script:made.images += $e2eTag
   if (-not $Red) {
     # rw-settings-store [5k]: the idea refinery's own image (its Dockerfile: dependencies cached, deno check)
     $o = DkLong build --label $label -t $refTag (Join-Path $ob1 'integrations/openbrain-idea-refinery'); Save 'build-refinery.log' ($o -split "`n" | Select-Object -Last 20 | Out-String)
@@ -391,12 +384,11 @@ try {
   # the front door is the viewer itself (rw-identity-harden): the portal Caddy's (wiki_app) snippet no
   # longer has a /workbench/* route, and the edge (Traefik) targets the viewer alone
   $front = "http://${P}-viewer:8080"
-  $null = Run-Detached "$P-chrome" @('--shm-size=1g', $ChromeImage)
   Check (Wait-Http "http://$P-wb:8000/health" 90) 'the workbench is up'
-  # /workspace/, not /__health: the viewer's health reports the lab wiki's reconcile state, not the door
+  # /workspace/ (a plain 404 since rwr-remove-workspace; Wait-Http accepts any status under 500), not /__health: the viewer's
+  # health reports the lab wiki's reconcile state, not the door
   Check (Wait-Http "$front/workspace/" 90) 'the front door (the viewer) answers'
-  # the new edge (operator 2026-10-28): Traefik targets the VIEWER alone - it serves /workspace and
-  # forwards /workbench/* with the key server-side, dropping any key a client sends
+  # the new edge (operator 2026-10-28): Traefik targets the VIEWER alone - it forwards /workbench/* with the key server-side, dropping any key a client sends
   $edge = Dk run --rm --label $label --network $net --entrypoint node $viewerTag --input-type=module -e "
     const v = 'http://$P-viewer:8080';
     const ws = await fetch(v + '/workspace/'); const wsBody = await ws.text();
@@ -413,11 +405,9 @@ try {
     console.log('guard csrf', csrf.status, 'no-origin', noOrigin.status, 'rebind', rebind, 'own-origin', /viewer's own origin|answers for/.test(ownBody) ? 'GUARDED' : 'reached-workbench');"
   Save 'edge-viewer.log' $edge
   if ($Red -and -not $baseChain) { Check ($edge -match 'workspace \d+ ' -and $edge -notmatch 'workspace 200 workspace true') 'RED: the base viewer does not serve /workspace' }
-  else { Check ($edge -match 'workspace 200 workspace true') 'the viewer serves /workspace (x-wiki-render: workspace)' }
+  else { Check ($edge -match 'workspace 404 null false') 'the removed /workspace answers a plain 404 (rwr-remove-workspace)' }
   Check ($edge -match 'forwarded 200 direct-with-forged-key 401') 'the viewer forwards /workbench/* with the key injected server-side; a client key is never trusted'
   if (-not $Red) { Check ($edge -match 'guard csrf 403 no-origin 403 rebind 421 own-origin reached-workbench') 'the forwarder refuses a cross-origin or Origin-less write (403) and a rebound Host (421); a write from the viewer''s own origin reaches the workbench' }
-  $chromeIp = (Dk inspect -f "{{(index .NetworkSettings.Networks `"$net`").IPAddress}}" "$P-chrome").Trim()
-  Check ($chromeIp -match '^\d+\.\d+\.\d+\.\d+$') 'the headless Chromium is on the network'
 
   # ---------------------------------------------------------------- 5. the tests
   if (-not $IntakeOnly -and -not $IdeasOnly -and -not $SettingsOnly) {
@@ -447,15 +437,7 @@ try {
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the cleanup view integration test ($($sum.Value))" }
   if ($sum.Success -and [int]$sum.Groups[3].Value -gt 0) { Save 'cleanup-integration-tail.log' (($clean -split "`n" | Select-Object -Last 60) -join "`n") }
 
-  Write-Host '[5b] the workspace e2e in a headless Chromium, through the front door'
-  $o = Lab-Docker 1200 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${shots}:/ev", '-e', "FRONT=$front",
-    '-e', "CDP=http://${chromeIp}:9222", '-e', "PGHOST=$db", '-e', "PGPASSWORD=$pw", '-e', "CASES=$Cases", $e2eTag)
-  Save 'workspace-e2e.log' ((($o -replace '\x1b\[[0-9;]*m', '') -split "`n" | Where-Object { $_ -match '^\s+(PASS|FAIL)|^E2E:' }) -join "`n")
-  foreach ($l in ($o -split "`n") | Where-Object { $_ -match '^\s+(PASS|FAIL)|^E2E:' }) { Write-Host "    $l" }
-  $e2e = ([regex]'E2E: (\d+) passed, (\d+) failed').Match($o)
-  if ($Red) { Check ($e2e.Success -and [int]$e2e.Groups[1].Value -eq 0) "RED: every e2e case fails on the base ($($e2e.Value))" }
-  else { Check ($e2e.Success -and [int]$e2e.Groups[2].Value -eq 0) "the workspace e2e ($($e2e.Value))" }
-  if (-not $e2e.Success) { Save 'workspace-e2e-tail.log' (($o -split "`n" | Select-Object -Last 40) -join "`n") }
+  # [5b] the workspace e2e (headless Chromium over the old UI) was removed with the workspace (rwr-remove-workspace).
   }
 
   # rw-p8a4-ideas: the ideas panel and the refinery view over the real workbench and database (two users + the app role)
@@ -1323,10 +1305,10 @@ try {
     Check ($rv.Count -eq 6 -and @($rv | Where-Object { $_ -match 'REVERT-CHECK OK' }).Count -eq 2 -and @($rv | Where-Object { $_ -notmatch 'exit 0' }).Count -eq 0) 'the intake revert removes only its own rows, and init + revert re-run cleanly'
   }
 
-  Write-Host '[5c] the grammar copy'
-  $a = [System.IO.File]::ReadAllBytes((Join-Path $wb 'src/documents/grammar.ts'))
-  $b = [System.IO.File]::ReadAllBytes((Join-Path $wsDir 'src/lib/grammar.ts'))
-  Check ([Convert]::ToBase64String($a) -eq [Convert]::ToBase64String($b)) 'the workspace grammar is byte-identical to the documents API grammar'
+  # [5c] SUSPENDED (rwr-remove-workspace): the grammar byte-identity check compared src/documents/grammar.ts with the old
+  # workspace's copy (wiki-viewer/workspace/src/lib/grammar.ts), deleted with the workspace. It returns, pointed at the new
+  # app's copy, when rwr-doc-editor lands it. Until then the editor grammar has ONE copy and nothing to drift from.
+  Write-Host '[5c] the grammar copy byte-identity check: SUSPENDED until rwr-doc-editor lands the new app''s copy (the old workspace twin is deleted)'
 
   # D12 at the end of everything: no user document became a page
   $rows = (Dk exec $db psql -U postgres -d openbrain -tAc "select count(*) from wiki_pages where slug like 'documents/%'").Trim()
