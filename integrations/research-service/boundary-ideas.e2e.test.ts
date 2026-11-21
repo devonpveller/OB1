@@ -280,8 +280,8 @@ Deno.test({ name: "D. the drain, the owner's review, run privately, the delivery
     assertEquals((await approve("Which roofs suit a cabin?", BEE)).status, 404, "another user: like no review at all");
     const withName = await (await approve(`What roof would ${OWNER.name} like for a cabin?`)).json();
     assertEquals(withName.refused, "identity_token", "the identity deny list still holds on an owner's approval");
-    // round 2 (tester T1): the owner's name MERGED into one token (camel, zero-width-joined) is refused over HTTP too
-    for (const merged of ["DanaQuillfeather", "Dana\u200BQuillfeather", "DQuillfeather"]) {
+    // round 2 (T1) + round 3 (T6): merged, homoglyph, trailing-initial and truncated forms of the name are refused over HTTP
+    for (const merged of ["DanaQuillfeather", "Dana\u200BQuillfeather", "DQuillfeather", "D\u0430naQuillfeather", "QuillfeatherD", "Quillf\u0435ather", "Quillfeath"]) {
       const r = await approve(`What heating suits ${merged} barns?`);
       assertEquals([r.status, (await r.json()).refused], [200, "identity_token"], `the merged name refused: ${JSON.stringify(merged)}`);
     }

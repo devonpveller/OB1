@@ -28,7 +28,9 @@ import { LEXICON_COUNT, LEXICON_SHA256, LEXICON_SOURCE, LEXICON_WORDS } from "./
 // no longer refuses a plain question or the template's frame); ownerGate (an owner's approved question, plan 09 D7)
 // pd0b-2 (rw-boundary-ideas round 2, tester T1): DENY entries normalised like a question (denyKeys); a token that is 2-3
 // deny entries written together is denied (segmentsIntoDeny); an identity's adjacent parts joined / initialled (identityJoins)
-export const BOUNDARY_VERSION = "pd0b-2";
+// pd0b-3 (round 3, tester T6 - the coordinator's stopping rule): the confusable skeleton on both sides (skeleton); a
+// token containing a 5+ letter identity part or a 6+ letter prefix of one (containsIdentity); initials in any position
+export const BOUNDARY_VERSION = "pd0b-3";
 export const COPY_RUN = 4;
 export const MIN_TOKENS = 3;
 export const MAX_TOKENS = 60;
@@ -61,6 +63,61 @@ export function stem(w: string): string {
 }
 export const JOIN_MAX = 3;
 
+/** Round 4 (tester T6, the coordinator's stopping rule 1): THE confusable skeleton every deny comparison uses, on both
+ *  sides - a vetted subset of Unicode UTS #39 confusables (confusables.txt, the targets Latin): Cyrillic and Greek
+ *  letters that look like a Latin letter (lowercase, and the lowercase of the capitals that do), the small-capital /
+ *  IPA Latin look-alikes, and the digits 0 -> o, 1 -> l (and i -> l, below). Fullwidth and other compatibility forms are already folded by
+ *  NFKC (cleanText); combining marks are dropped (NFD, then every \p{M}), so an accent cannot hide a name either. */
+const CONFUSABLE: Record<string, string> = {
+  // Cyrillic
+  "\u0430": "a", "\u0432": "b", "\u0435": "e", "\u0451": "e", "\u0450": "e", "\u0454": "e", "\u0456": "l", "\u0457": "l",
+  "\u0458": "j", "\u043A": "k", "\u043C": "m", "\u043D": "h", "\u043E": "o", "\u0440": "p", "\u0441": "c", "\u0442": "t",
+  "\u0443": "y", "\u0445": "x", "\u0455": "s", "\u04BB": "h", "\u0501": "d", "\u051B": "q", "\u051D": "w", "\u04AF": "y",
+  "\u04CF": "l", "\u0475": "v", "\u0461": "w", "\u0491": "r", "\u0433": "r", "\u0434": "d", "\u043F": "n", "\u0438": "u",
+  // Greek
+  "\u03B1": "a", "\u03B2": "b", "\u03B3": "y", "\u03B5": "e", "\u03B7": "n", "\u03B9": "l", "\u03BA": "k", "\u03BD": "v",
+  "\u03BF": "o", "\u03C1": "p", "\u03C4": "t", "\u03C5": "u", "\u03C7": "x", "\u03C9": "w", "\u03F2": "c", "\u03F3": "j",
+  "\u03B6": "z", "\u03BC": "u", "\u03C2": "c", "\u03C3": "o",
+  // Latin look-alikes and digits
+  "\u0131": "l", "\u0237": "j", "\u0251": "a", "\u0261": "g", "\u0269": "l", "\u029F": "l", "\u026A": "l", "\u1D00": "a",
+  "\u0280": "r", "\u0274": "n", "\u1D04": "c", "\u1D0F": "o", "\u0299": "b", "\u0262": "g", "\u029C": "h", "\u1D0B": "k",
+  "\u1D0D": "m", "\u1D18": "p", "\u1D1B": "t", "\u1D1C": "u", "\u1D20": "v", "\u1D21": "w", "\u028F": "y", "\u1D22": "z",
+  "\u00F8": "o", "\u0142": "l", "\u0111": "d", "\u0127": "h", "\u00DF": "ss", "\u00E6": "ae", "\u0153": "oe",
+  "0": "o", "1": "l",
+  // i, l, 1 and their look-alikes are ONE letter here (UTS #39 folds 1 / I / | into l; a leet "qu1llfeather" writes 1
+  // for i): the skeleton is only ever compared with another skeleton, so the merge costs nothing but a rare over-deny
+  "i": "l",
+};
+export function skeleton(w: string): string {
+  let out = "";
+  for (const ch of String(w ?? "").toLowerCase().normalize("NFD").replace(/\p{M}/gu, "")) out += CONFUSABLE[ch] ?? ch;
+  return out.normalize("NFC");
+}
+/** The deny matcher's tokens: the question's own tokens, each through the skeleton. */
+const skelTokens = (s: string): string[] => tokens(s).map(skeleton);
+
+/** Round 4 (stopping rule 2): the owner's IDENTITY parts (display name parts, an email's LOCAL part - not its domain),
+ *  skeletonised, letters only. denySet attaches them to the set it returns; a hand-built set has none attached, so
+ *  every alphabetic part of its entries counts. */
+export const IDENTITY_CONTAINS_MIN = 5;   // a token CONTAINING a part this long is denied
+export const IDENTITY_PREFIX_MIN = 6;     // a token that is a prefix this long of a part is denied (truncation)
+export interface DenyEntries extends ReadonlySet<string> { identityParts?: readonly string[] }
+export function identityPartsOf(identity: string[]): string[] {
+  const out = new Set<string>();
+  for (const s of identity) {
+    const c = cleanText(s);
+    const local = c.includes("@") ? c.slice(0, c.indexOf("@")) : c;
+    for (const p of skelTokens(local)) if (/^\p{L}+$/u.test(p)) out.add(p);
+  }
+  return [...out];
+}
+function partsOf(deny: DenyEntries): string[] {
+  if (deny.identityParts) return [...deny.identityParts];
+  const out = new Set<string>();
+  for (const d of deny) for (const p of skelTokens(d)) if (/^\p{L}+$/u.test(p)) out.add(p);
+  return [...out];
+}
+
 /** Round 3 (tester T1): the DENY entries in ONE normal form - each entry is cleaned and tokenised exactly as a
  *  question is (NFKC, zero-width / soft hyphen / every Cf stripped, lowercased, separators dropped), and both its parts
  *  and its separator-free join are kept, each also by stem. A hand-built set ("Dana Quillfeather") and denySet's own
@@ -69,45 +126,64 @@ export function denyKeys(deny: ReadonlySet<string>): Set<string> {
   const keys = new Set<string>();
   const put = (w: string) => { if (w) { keys.add(w); keys.add(stem(w)); } };
   for (const d of deny) {
-    const parts = tokens(d);
+    const parts = skelTokens(d);
     for (const p of parts) put(p);
     if (parts.length > 1) put(parts.join(""));
   }
   return keys;
 }
 
-/** Round 3 (tester T1): `w` read as 2..JOIN_MAX deny entries written together with no separator ("danaquillfeather",
- *  "quillfeatherdana") - every piece a deny key of 2 or more characters and at least one of 3 or more. */
-function segmentsIntoDeny(w: string, keys: ReadonlySet<string>): boolean {
-  if (w.length < 4) return false;
-  // best[i] = the fewest pieces covering w[0..i), with whether a piece of 3+ was used (both tracked)
+/** Round 3 (tester T1) + round 4 (stopping rule 3): `w` read as deny entries written together with no separator
+ *  ("danaquillfeather", "quillfeatherdana"), where an identity part's INITIAL may stand for it in any position
+ *  ("quillfeatherd", "qdana", "dquillfeatherq"): 2..SEG_MAX pieces, each a deny key of 2+ characters or one initial,
+ *  at least one a key of 3+. */
+const SEG_MAX = 4;
+function segmentsIntoDeny(w: string, keys: ReadonlySet<string>, initials: ReadonlySet<string>): boolean {
+  if (w.length < 3) return false;
   const reach: Array<Map<number, boolean>> = Array.from({ length: w.length + 1 }, () => new Map());
   reach[0].set(0, false);
   for (let i = 0; i < w.length; i++) {
     for (const [n, long] of reach[i]) {
-      if (n >= JOIN_MAX) continue;
-      for (let j = i + 2; j <= w.length; j++) {
-        if (!keys.has(w.slice(i, j))) continue;
-        const l = long || j - i >= 3;
+      if (n >= SEG_MAX) continue;
+      const step = (j: number, isLong: boolean) => {
+        const l = long || isLong;
         if (!reach[j].has(n + 1) || (l && !reach[j].get(n + 1))) reach[j].set(n + 1, l);
-      }
+      };
+      if (initials.has(w[i])) step(i + 1, false);
+      for (let j = i + 2; j <= w.length; j++) if (keys.has(w.slice(i, j))) step(j, j - i >= 3);
     }
   }
   for (const [n, long] of reach[w.length]) if (n >= 2 && long) return true;
   return false;
 }
 
+/** Round 4 (stopping rule 2): ONE token that CONTAINS an identity part of 5+ letters, or is a 6+ letter prefix of one
+ *  (by stem too). Single tokens only: a join of two innocent neighbours ("big rant" for Grant) is not judged this way. */
+function containsIdentity(w: string, parts: readonly string[]): boolean {
+  for (const s of new Set([w, stem(w)])) {
+    for (const p of parts) {
+      if (p.length >= IDENTITY_CONTAINS_MIN && s.includes(p)) return true;
+      if (s.length >= IDENTITY_PREFIX_MIN && s.length < p.length && p.startsWith(s)) return true;
+    }
+  }
+  return false;
+}
+
 /** The indices of `t` that a DENY entry matches: a token itself, or a run of 2-3 tokens whose concatenation does,
  *  each compared by stem - and (round 3, T1) a token or run that is 2-3 deny entries written together. gate(),
  *  ownerGate(), the template and the link-path rule all use this one function, so they deny the same tokens. */
-export function deniedIndices(t: string[], deny: ReadonlySet<string>): Set<number> {
+export function deniedIndices(t: string[], deny: DenyEntries): Set<number> {
   const keys = denyKeys(deny);
-  const matches = (s: string) => keys.has(s) || keys.has(stem(s)) || segmentsIntoDeny(s, keys) || segmentsIntoDeny(stem(s), keys);
+  const parts = partsOf(deny);
+  const initials = new Set(parts.map((p) => p[0]));
+  const matches = (s: string) => keys.has(s) || keys.has(stem(s)) || segmentsIntoDeny(s, keys, initials) || segmentsIntoDeny(stem(s), keys, initials);
+  const sk = t.map(skeleton);
   const hit = new Set<number>();
-  for (let i = 0; i < t.length; i++) {
+  for (let i = 0; i < sk.length; i++) {
+    if (containsIdentity(sk[i], parts)) hit.add(i);
     let joined = "";
-    for (let n = 0; n < JOIN_MAX && i + n < t.length; n++) {
-      joined += t[i + n];
+    for (let n = 0; n < JOIN_MAX && i + n < sk.length; n++) {
+      joined += sk[i + n];
       if (matches(joined)) for (let k = i; k <= i + n; k++) hit.add(k);
     }
   }
@@ -239,8 +315,8 @@ export function identityJoins(s: string): string[] {
   return [...out];
 }
 
-export function denySet(d: DenyInput): Set<string> {
-  const out = new Set<string>();
+export function denySet(d: DenyInput): Set<string> & { identityParts: string[] } {
+  const out = Object.assign(new Set<string>(), { identityParts: identityPartsOf(d.identity) });
   const add = (s: string) => { for (const w of tokens(s)) out.add(w); };
   add(d.ownerSub);
   for (const s of d.identity) {
