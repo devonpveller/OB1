@@ -1,0 +1,28 @@
+{
+  "name": "openbrain-workbench-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "research workbench redesign: the new app (rwr-app-scaffold), served by serve.mjs in the openbrain-workbench-app image",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && vite build && node -e \"require('node:fs').copyFileSync('THIRD-PARTY-NOTICES.md','dist/assets/THIRD-PARTY-NOTICES.txt')\"",
+    "test": "vitest run",
+    "test:serve": "node --test test/*.test.mjs",
+    "notices": "node scripts/notices.mjs",
+    "notices:check": "node scripts/notices.mjs --check"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/react": "16.3.3",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "5.2.0",
+    "happy-dom": "21.0.4",
+    "typescript": "5.9.3",
+    "vite": "7.3.7",
+    "vitest": "3.2.4"
+  }
+}

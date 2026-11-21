@@ -1,0 +1,13 @@
+@import "./theme/tokens.css";
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-sans); font-size: 15px; line-height: 1.5; }
+button { font: inherit; color: inherit; background: var(--panel); border: 1px solid var(--line-strong); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+a { color: var(--accent); }
+.frame { min-height: 100%; display: flex; flex-direction: column; }
+.frame-bar { display: flex; align-items: center; gap: 12px; padding: 10px 20px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.frame-bar h1 { font-size: 16px; font-weight: 600; margin: 0; flex: 1; }
+.frame-main { flex: 1; padding: 32px 20px; max-width: 720px; }
+.frame-main p { color: var(--muted); }
+code { font-family: var(--font-mono); font-size: 13px; background: var(--sunken); padding: 1px 5px; border-radius: 4px; }

@@ -1,0 +1,78 @@
+/* Colour tokens for the research workbench redesign. Light values come from the approved mockups
+   (ground #f6f5f1, teal accent #0f6e6e, amber #b06a00); the dark set is derived from them (same hues,
+   lifted for contrast on a dark ground). One set of names, three ways in:
+     - no choice made: prefers-color-scheme decides;
+     - data-theme="light" / "dark" on <html>: the person's explicit choice wins over the system. */
+:root {
+  --bg: #f6f5f1;
+  --panel: #ffffff;
+  --panel-2: #faf9f6;
+  --sunken: #f0eee8;
+  --fg: #1d2327;
+  --fg-2: #3d474f;
+  --muted: #5b6670;
+  --faint: #8a949c;
+  --line: #dedbd2;
+  --line-strong: #cfcbc0;
+  --accent: #0f6e6e;
+  --accent-strong: #0b5555;
+  --accent-soft: #e3f1f0;
+  --amber: #b06a00;
+  --amber-text: #6e4100;
+  --amber-soft: #fbf1df;
+  --amber-line: #e6c992;
+  --danger: #9b2c1f;
+  --danger-soft: #fbe9e7;
+  --focus: #0f6e6e;
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14181a;
+    --panel: #1b2124;
+    --panel-2: #181d20;
+    --sunken: #111516;
+    --fg: #e6e9eb;
+    --fg-2: #c3cbd0;
+    --muted: #9aa6ae;
+    --faint: #6f7b83;
+    --line: #2c353a;
+    --line-strong: #3a454b;
+    --accent: #4fb3b0;
+    --accent-strong: #7fd0cd;
+    --accent-soft: #15302f;
+    --amber: #e0a23c;
+    --amber-text: #f0c984;
+    --amber-soft: #33270f;
+    --amber-line: #6b4d17;
+    --danger: #ee8a7c;
+    --danger-soft: #3a1c17;
+    --focus: #7fd0cd;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14181a;
+  --panel: #1b2124;
+  --panel-2: #181d20;
+  --sunken: #111516;
+  --fg: #e6e9eb;
+  --fg-2: #c3cbd0;
+  --muted: #9aa6ae;
+  --faint: #6f7b83;
+  --line: #2c353a;
+  --line-strong: #3a454b;
+  --accent: #4fb3b0;
+  --accent-strong: #7fd0cd;
+  --accent-soft: #15302f;
+  --amber: #e0a23c;
+  --amber-text: #f0c984;
+  --amber-soft: #33270f;
+  --amber-line: #6b4d17;
+  --danger: #ee8a7c;
+  --danger-soft: #3a1c17;
+  --focus: #7fd0cd;
+  color-scheme: dark;
+}
