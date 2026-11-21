@@ -62,12 +62,14 @@ export function ideaScheduleRouter(db: Db) {
     const id = c.req.param("id") ?? "";
     if (!/^[0-9a-f-]{36}$/i.test(id)) return c.json({ error: "not an idea id" }, 400);
     // rw-p8a4-ideas: the owner-checked function the research_idea MCP tool calls too (slot 370)
-    const o = (await db.query<{ o: { outcome: string; job_id?: string } }>(
+    // rw-boundary-ideas (slot 580, reviewer R4-2): idea_research queues a private hand-back and answers its request_id
+    // (there is no job until the research service forms a de-personalised question)
+    const o = (await db.query<{ o: { outcome: string; request_id?: string } }>(
       `SELECT public.idea_research($1::uuid, $2, $3) AS o`, [id, who.sub, who.actor],
     ))[0].o;
     if (o.outcome === "not_found") return c.json({ error: "no idea with this id" }, 404);
     if (o.outcome !== "queued") return c.json({ error: "the idea is archived" }, 409);
-    return c.json({ queued: true, job_id: o.job_id });
+    return c.json({ queued: true, request_id: o.request_id });
   });
   return r;
 }

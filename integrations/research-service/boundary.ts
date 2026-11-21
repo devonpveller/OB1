@@ -14,7 +14,7 @@
  * `request-boundary`, D9); the pure gate DECIDES; the title template is the fallback. A refusal starts no job.
  */
 import {
-  BOUNDARY_VERSION, canonicalLink, cleanText, deniedIndices, denySet, type Evidence, gate, type GateCode, lexicon, type Lexicon,
+  BOUNDARY_VERSION, canonicalLink, cleanText, deniedIn, denySet, type Evidence, gate, type GateCode, lexicon, type Lexicon,
   linkPathRefusal, ownerGate, type PublicPage, templateQuestion, tokens, topicOf,
 } from "./boundary-gate.ts";
 import { judgeAddresses } from "./intake-fetch.ts";
@@ -174,7 +174,7 @@ export async function formDerivedRequest(item: PersonalItem, purpose: Purpose, d
     const question = cleanText(cand.q).trim();
     const topic = (cand.topic ?? (pages[0] ? templateQuestion(pages[0].title, deny)?.topic : null) ?? topicOf(question)) || topicOf(question);
     // belt and braces (section 2.3, "an identity token present after the fallback"): neither string holds a DENY token
-    if (deniedIndices(tokens(question), deny).size || deniedIndices(tokens(topic), deny).size || question !== cleanText(question)) return refuse("identity_token", best);
+    if (deniedIn(question, deny).size || deniedIn(topic, deny).size || question !== cleanText(question)) return refuse("identity_token", best);
     record.accepted_by = cand.by;
     record.candidate_sha256 = await sha256Hex(question);
     const verdict_id = await sha256Hex(canonicalJson(record));
@@ -210,7 +210,7 @@ export async function formOwnerApprovedRequest(item: PersonalItem, question: str
   record.codes.push(g.ok ? "ok" : g.code);
   if (!g.ok) return refuse(g.code === "length" ? "empty" : "identity_token", { candidate: q.slice(0, 300), failing: g.tokens.slice(0, 20), code: g.code });
   const topic = topicOf(q);
-  if (deniedIndices(tokens(topic), deny).size || q !== cleanText(q)) return refuse("identity_token", { candidate: q.slice(0, 300), failing: [], code: "denied_token" });
+  if (deniedIn(topic, deny).size || q !== cleanText(q)) return refuse("identity_token", { candidate: q.slice(0, 300), failing: [], code: "denied_token" });
   record.accepted_by = "owner";
   record.candidate_sha256 = await sha256Hex(q);
   const verdict_id = await sha256Hex(canonicalJson(record));

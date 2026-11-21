@@ -31,7 +31,9 @@ import { LEXICON_COUNT, LEXICON_SHA256, LEXICON_SOURCE, LEXICON_WORDS } from "./
 // pd0b-3 (round 3, tester T6 - the coordinator's stopping rule): the confusable skeleton on both sides (skeleton); a
 // token containing a 5+ letter identity part or a 6+ letter prefix of one (containsIdentity); initials in any position
 // pd0b-4 (round 4, tester T7): the leetspeak digits 3 4 5 7 8 9 in the skeleton; @ $ | ! inside a word read as a letter (tokens)
-export const BOUNDARY_VERSION = "pd0b-4";
+// pd0b-5 (round 5, reviewer R4-1): tokens() splits on @ $ | ! again; the deny checks read a symbol inside a word BOTH
+// as a separator and as its leet letter (deniedIn), and deny when either reading matches
+export const BOUNDARY_VERSION = "pd0b-5";
 export const COPY_RUN = 4;
 export const MIN_TOKENS = 3;
 export const MAX_TOKENS = 60;
@@ -46,18 +48,31 @@ export function cleanText(s: string): string {
   return String(s ?? "").normalize("NFKC").replace(/[\p{Default_Ignorable_Code_Point}\p{Cf}]/gu, "").normalize("NFKC");
 }
 
-/** Round 4 (tester T7): a leetspeak SYMBOL standing for a letter INSIDE a word (`d@na`, `qu|llfeather`, `qu!llfeather`,
- *  `quill$feather`) is read as that letter, so the word stays one token and meets the deny list (and the skeleton).
- *  Only between two letters / digits: `$5`, `a@`, a sentence's `!` are untouched; and an EMAIL's @ (one followed by a
- *  domain, `x@example.net`) is left alone, so an address still splits into its local part and its domain. */
+/** Round 4 (tester T7) + round 5 (reviewer R4-1): a leetspeak SYMBOL between two letters / digits (`d@na`,
+ *  `qu|llfeather`, `qu!llfeather`) may stand for a letter - or may be a separator (`dana@home`, `dana!harbor`). The
+ *  DENY checks read BOTH ways and deny when either matches (deniedIn); every other use of tokens() - the lexicon and
+ *  evidence rules, the stored topic, the template's words - keeps the plain split on the symbol. `$5`, a sentence's
+ *  `!` and an EMAIL's @ (one followed by a domain) are never read as letters. Each symbol maps to ONE letter, so the
+ *  two readings share character offsets. */
 const LEET_SYMBOL: Record<string, string> = { "@": "a", "$": "s", "|": "l", "!": "i" };
 const LEET_INSIDE = /(?<=[\p{L}\p{N}])(?:[$|!]|@(?![\p{L}\p{N}-]+(?:\.[\p{L}\p{N}-]+)*\.\p{L}{2,}))+(?=[\p{L}\p{N}])/gu;
+const TOKEN_RX = /[\p{L}\p{N}]+/gu;
+
+interface Span { w: string; start: number; end: number }
+function spans(s: string): Span[] {
+  const out: Span[] = [];
+  for (const m of s.matchAll(TOKEN_RX)) out.push({ w: m[0], start: m.index!, end: m.index! + m[0].length });
+  return out;
+}
+const lowered = (s: string) => cleanText(s).toLowerCase();
+const leetText = (low: string) => low.replace(LEET_INSIDE, (m) => [...m].map((c) => LEET_SYMBOL[c]).join(""));
 
 export function tokens(s: string): string[] {
-  const out: string[] = [];
-  const t = cleanText(s).toLowerCase().replace(LEET_INSIDE, (m) => [...m].map((c) => LEET_SYMBOL[c]).join(""));
-  for (const m of t.matchAll(/[\p{L}\p{N}]+/gu)) out.push(m[0]);
-  return out;
+  return spans(lowered(s)).map((x) => x.w);
+}
+/** The leet reading's tokens (a symbol inside a word read as its letter): `d@na` -> `dana`. */
+export function leetTokens(s: string): string[] {
+  return spans(leetText(lowered(s))).map((x) => x.w);
 }
 
 /** Round 2 (tester TF7): DENY matching normalises plurals - a token and a denied token match when their STEMS match:
@@ -201,6 +216,37 @@ export function deniedIndices(t: string[], deny: DenyEntries): Set<number> {
   return hit;
 }
 
+/** Round 5 (reviewer R4-1): THE deny check over a TEXT. Every symbol inside a word is read BOTH ways - as its leet
+ *  letter and as a separator - in every combination (`d@na!home`: @ a letter, ! a separator), and deniedIndices runs
+ *  over each reading; a hit is mapped back to every plain token it overlaps. Indices are those of tokens(s). Past
+ *  LEET_COMBOS_MAX symbols the readings are: all letters, all separators, and each single symbol flipped from each. */
+export const LEET_COMBOS_MAX = 8;
+export function deniedIn(s: string, deny: DenyEntries): Set<number> {
+  const low = lowered(s);
+  const plain = spans(low);
+  const hit = deniedIndices(plain.map((x) => x.w), deny);
+  const pos: number[] = [];
+  for (const m of low.matchAll(LEET_INSIDE)) for (let k = 0; k < m[0].length; k++) pos.push(m.index! + k);
+  if (!pos.length) return hit;
+  const masks: number[][] = [];
+  if (pos.length <= LEET_COMBOS_MAX) {
+    for (let b = 1; b < 1 << pos.length; b++) masks.push(pos.filter((_p, i) => b & (1 << i)));
+  } else {
+    masks.push(pos);
+    for (const p of pos) { masks.push([p]); masks.push(pos.filter((q) => q !== p)); }
+  }
+  for (const letters of masks) {
+    const chars = [...low.split("")];
+    for (const p of letters) chars[p] = LEET_SYMBOL[chars[p]] ?? chars[p];
+    const reading = spans(chars.join(""));
+    for (const i of deniedIndices(reading.map((x) => x.w), deny)) {
+      const { start, end } = reading[i];
+      plain.forEach((x, k) => { if (x.start < end && x.end > start) hit.add(k); });
+    }
+  }
+  return hit;
+}
+
 /** The frame vocabulary: question and research words a public question may always use (checked in, versioned with
  *  BOUNDARY_VERSION). Every one is also an ordinary common word: none names anything. */
 export const FRAME: ReadonlySet<string> = new Set((`
@@ -277,7 +323,7 @@ export function gate(candidate: string, ev: Evidence, deny: ReadonlySet<string>,
   const t = tokens(c);
   if (t.length < MIN_TOKENS || t.length > MAX_TOKENS || c.length > MAX_CHARS) return { ok: false, code: "length", tokens: [] };
   const e = evidenceTokens(ev);
-  const di = deniedIndices(t, deny);
+  const di = deniedIn(c, deny);
   const denied = t.filter((_w, i) => di.has(i));
   if (denied.length) return { ok: false, code: "denied_token", tokens: [...new Set(denied)] };
   const offList = t.filter((w) => !hasDigit(w) && !FRAME.has(w) && !lex.words.has(w) && !e.set.has(w));
@@ -381,7 +427,7 @@ export function linkPathRefusal(url: string, deny: ReadonlySet<string>): LinkRef
   // the host's labels too: a name is looked up (DNS) before any fetch, so an id or identity in it must not leave either
   const t = tokens(decoded.join(" "));
   if (t.some(idShaped) || tokens(u.hostname).some(idShaped)) return "id_in_path";
-  if (deniedIndices(t, deny).size) return "identity_in_path";
+  if (deniedIn(decoded.join(" "), deny).size) return "identity_in_path";
   return null;
 }
 
@@ -507,7 +553,7 @@ export function templateQuestion(title: string, deny: ReadonlySet<string>): { qu
   const kept: string[] = [];
   const frameLen = tokens("What is publicly known about").length;
   const tt = tokens(title);
-  const di = deniedIndices(tt, deny);
+  const di = deniedIn(title, deny);
   for (const [i, w] of tt.entries()) {
     if (di.has(i)) continue;
     if (kept.length + frameLen >= MAX_TOKENS) break;
@@ -528,7 +574,7 @@ export function ownerGate(candidate: string, deny: ReadonlySet<string>): GateRes
   const c = cleanText(candidate).trim();
   const t = tokens(c);
   if (t.length < MIN_TOKENS || t.length > MAX_TOKENS || c.length > MAX_CHARS) return { ok: false, code: "length", tokens: [] };
-  const di = deniedIndices(t, deny);
+  const di = deniedIn(c, deny);
   const denied = t.filter((w, i) => di.has(i) || idShaped(w));
   if (denied.length) return { ok: false, code: "denied_token", tokens: [...new Set(denied)] };
   return { ok: true };

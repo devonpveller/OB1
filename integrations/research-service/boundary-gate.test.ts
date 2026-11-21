@@ -136,7 +136,7 @@ Deno.test("the template: a fetched title with DENY removed; it passes the gate b
   assertEquals(t.question, `What is publicly known about "hello community solar roofs cut winter bills"?`);
   assert(gate(t.question, EV, deny, lex, personal).ok);
   assertEquals(templateQuestion("Dana Quillfeather", deny), null);
-  assertEquals(BOUNDARY_VERSION, "pd0b-4");
+  assertEquals(BOUNDARY_VERSION, "pd0b-5");
 });
 
 // ── rw-boundary-digest round 2 (tester F1): meeting, invite and share links are never public ──────────────────

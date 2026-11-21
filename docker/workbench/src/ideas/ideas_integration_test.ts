@@ -241,6 +241,8 @@ t("I5: research now is idea_research() for the owner (202 + a queued request); a
   // the older idea-schedule door is the same function
   const s = await call("POST", `/workbench/idea-schedule/research-now/${id}`, {});
   assertEquals(s.status, 200, s.text);
+  // reviewer R4-2: it answers the queued request's id (no job_id: slot 580 makes no job here)
+  assertEquals([s.json.queued, /^[0-9a-f-]{36}$/.test(String(s.json.request_id)), "job_id" in s.json], [true, true, false], s.text);
   assertEquals((await call("POST", `/workbench/ideas/${id}/research-now`, {}, B)).status, 404);
   assertEquals((await call("POST", `/workbench/idea-schedule/research-now/${id}`, {}, B)).status, 404);
 });

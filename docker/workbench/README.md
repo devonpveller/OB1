@@ -585,7 +585,7 @@ performs on its own, cannot happen.
 | route | what |
 |---|---|
 | `POST /workbench/ideas/:id/edit` `{summary, title?}` | a new revision through `idea_edit()` (no thought row: an idea is private); identical text = `unchanged` |
-| `POST /workbench/ideas/:id/research-now` | `idea_research()` (202 + the job); `/workbench/idea-schedule/research-now/:id` is the same call |
+| `POST /workbench/ideas/:id/research-now` | `idea_research()` (202 + the queued request's `request_id`: a private hand-back; slot 580 makes no job until the research service forms a de-personalised question); `/workbench/idea-schedule/research-now/:id` is the same call (200, `{queued, request_id}`) |
 | `PUT /workbench/ideas/:id/draft` `{text}` | the accreting draft - a field on the idea's one room (`workspace_rooms.draft`) |
 | `POST /workbench/documents/seed` `{idea_id}` | `create document` (P2b's seed): seeds the refinery's ONE document, then `idea_promote()` with its path |
 | `POST /workbench/contract/podcasts/requests` `{..., refinery_id?}` | a podcast engaged from inside a refinery is its member (`refinery_engage()`) |

@@ -35,3 +35,16 @@ Deno.test("the router reads and writes only the caller's subject, and research-n
   const bad = await app.request("/s", { method: "PUT", body: JSON.stringify({ mode: "daily" }), headers: { "content-type": "application/json" } });
   assertEquals(bad.status, 400);
 });
+
+Deno.test("rw-boundary-ideas (580, reviewer R4-2): research-now answers the queued request's id, never an undefined job_id", async () => {
+  const REQ = "22222222-2222-4222-8222-222222222222";
+  const db: Db = {
+    query: (sql: string) => Promise.resolve(/idea_research\(/.test(sql) ? [{ o: { outcome: "queued", request_id: REQ } }] : [{ mode: "immediate" }]),
+    tx: (fn: (d: Db) => Promise<unknown>) => fn(db),
+  } as never;
+  const app = new Hono().route("/s", ideaScheduleRouter(db));
+  const r = await app.request("/s/research-now/11111111-1111-1111-1111-111111111111", { method: "POST" });
+  assertEquals(r.status, 200);
+  const body = await r.json();
+  assertEquals(body, { queued: true, request_id: REQ });
+});

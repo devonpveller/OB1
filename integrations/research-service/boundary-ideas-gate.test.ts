@@ -55,7 +55,7 @@ Deno.test("ownerGate (D7): the owner's own words pass; identity, ids, markers an
   for (const [q, why] of bad) assertFalse(G.ownerGate(q, d).ok, why);
   const named = G.ownerGate(`Is ${OWNER.email} a good baker?`, d);
   assert(!named.ok && named.tokens.includes("quillfeather"), "the failing tokens are named");
-  assertEquals(G.BOUNDARY_VERSION, "pd0b-4");
+  assertEquals(G.BOUNDARY_VERSION, "pd0b-5");
 });
 
 // ── round 2 (tester T1): the owner's name MERGED into one token ─────────────────────────────────────────────────────
@@ -217,6 +217,47 @@ Deno.test("T6: the skeleton maps Latin / Cyrillic / Greek / fullwidth look-alike
   same("d4n4", "dana");
   same("qu1llf3ath3r", "quillfeather");
   same("quillfea7her", "quillfeather");
-  same(G.tokens("d@na")[0], "dana");
-  same(G.tokens("qu|llfe!ther")[0], "quillfeither");
+});
+
+// ── round 5 (reviewer R4-1): a symbol between two words is BOTH a separator and a leet letter ────────────────────────
+// Round 4 read `@ ! | $` inside a word only as a letter, so a short name part glued to another word (`dana@home`) became
+// one token (`danaahome`) the exact-name rule missed. The deny checks now run over both readings; either one denies.
+const R4_FORMS: Array<[string, string]> = [
+  ["dana@home (the reviewer's)", "dana@home"], ["dana!harbor (the reviewer's)", "dana!harbor"],
+  ["dana|smith (the reviewer's)", "dana|smith"], ["dana$point (the reviewer's)", "dana$point"],
+  ["d@na", "d@na"], ["D@naQuillfe@ther", "D@naQuillfe@ther"], ["home@dana", "home@dana"], ["d@na!home", "d@na!home"],
+  ["Quillfeather|home", "Quillfeather|home"], ["DANA$POINT", "DANA$POINT"],
+];
+
+Deno.test("R4-1: a name glued to a word by @ ! | $ is denied by ownerGate, gate and the template alike", () => {
+  const d = G.denySet({ ownerSub: OWNER.sub, identity: [OWNER.name, OWNER.email], fields: {}, links: [], publicLinks: [], id: "8b0c4f5e-1d2a-4b3c-9e8f-7a6b5c4d3e2f" });
+  const bad: string[] = [];
+  for (const [why, form] of R4_FORMS) {
+    const q = `What heating suits ${form} barns?`;
+    const o = G.ownerGate(q, d), a = G.gate(q, EV, d, lex, []);
+    const oc = o.ok ? "ACCEPT" : o.code, ac = a.ok ? "ACCEPT" : a.code;
+    if (oc !== "denied_token" || ac !== "denied_token") bad.push(`${why}: ownerGate=${oc} gate=${ac}`);
+    const t = G.templateQuestion(`Heating for ${form} barns`, d);
+    if (t && (G.deniedIn(t.question, d).size || /dana|quillfeather/.test(G.tokens(t.question).map(G.skeleton).join(" ")))) {
+      bad.push(`${why}: the template kept it: ${t.question}`);
+    }
+  }
+  // the reviewer's fifth form, for an owner whose first name is under 5 letters too
+  const lee = G.denySet({ ownerSub: "s-lee", identity: ["Lee Park", "lee.park@example.net"], fields: {}, links: [], publicLinks: [] });
+  for (const form of ["lee@home", "lee!harbor", "park|lee"]) {
+    const q = `What heating suits ${form} barns?`;
+    const o = G.ownerGate(q, lee), a = G.gate(q, EV, lee, lex, []);
+    if (o.ok || o.code !== "denied_token" || a.ok || a.code !== "denied_token") bad.push(`${form}: ownerGate=${o.ok ? "ACCEPT" : o.code} gate=${a.ok ? "ACCEPT" : a.code}`);
+  }
+  assertEquals(bad, []);
+});
+
+Deno.test("R4-1: both readings - the leet letter and the separator - map back to the plain tokens", () => {
+  const d = G.denySet({ ownerSub: OWNER.sub, identity: [OWNER.name, OWNER.email], fields: {}, links: [], publicLinks: [] });
+  assertEquals([...G.deniedIn("what suits d@na barns", d)].sort(), [2, 3], "the leet reading denies both halves of d@na");
+  assertEquals([...G.deniedIn("what suits dana@home barns", d)].sort(), [2], "the separator reading denies dana, not home");
+  assertEquals(G.tokens("dana@home"), ["dana", "home"], "tokens() splits on the symbol again (the stored topic, the lexicon)");
+  const same = (a: string, b: string) => assertEquals(G.skeleton(a), G.skeleton(b), `${a} ~ ${b}`);
+  same(G.leetTokens("d@na")[0], "dana");
+  same(G.leetTokens("qu|llfe!ther")[0], "quillfeither");
 });
