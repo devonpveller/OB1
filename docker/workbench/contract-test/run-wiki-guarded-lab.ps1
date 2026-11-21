@@ -256,7 +256,8 @@ COMMIT;
   Fix 'viewer-green' ($h -and $h.s -eq 'ok' -and $h.d -eq 0) 'the viewer is GREEN (status ok, drift 0) with a refused page''s file in the vault and its slug in the withheld record'
   $slugs = "content/notebooks/lab-$rand/w-refused,content/notebooks/lab-$rand/r-refused,content/notebooks/lab-$rand/v-refused,content/notebooks/lab-$rand/x-refused"
   $rt = Probe-Json (Node-Run 'routes' ($penv + @('MODE=routes', "PROBE_VIEWER=http://$P-viewer:8080", "ROUTE_SLUGS=$slugs")) $sharedDir '/ct/wiki-guarded-probe.mjs')
-  Check ($rt -and $rt.routes.checked -ge 20 -and $rt.routes.showMark -eq 0 -and $rt.routes.renderedDb -eq 0 -and -not $rt.health.namesLab) "two identities (owner A, user B), $($rt.routes.checked) route requests: no response shows the marker, no refused page is rendered from a row, /__health names none"
+  Check ($rt -and $rt.routes.checked -ge 20 -and $rt.routes.showMark -eq 0 -and $rt.routes.renderedDb -eq 0) "two identities (owner A, user B), $($rt.routes.checked) route requests: no response shows the marker, no refused page is rendered from a row"
+  Fix 'health-names-none' ($rt -and -not $rt.health.namesLab) '/__health names no refused page (the base lists them as missing drift)'
 
   Write-Host '[7] [regression] a genuinely missing page still turns the viewer red'
   $gm = Join-Path $vault 'content\source\lab-genuinely-missing.md'
