@@ -9,11 +9,14 @@ import { Iso, uuid } from "./common.ts";
 import { FX } from "./fixtures.ts";
 
 const FLAG = "f1a90000-0000-4000-8000-000000000001";
-const NOTE = z.string().max(2000);
+// a C0 control character (bar tab, newline, carriage return) or DEL is refused here: a NUL would otherwise reach Postgres (22021)
+const CLEAN = (s: string) => !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(s);
+const CLEAN_MSG = { message: "must not contain control characters" };
+const NOTE = z.string().max(2000).refine(CLEAN, CLEAN_MSG);
 
 export const FlagFrom = z.object({
   kind: registryValue(REGISTRY.flagFromKinds, "document", "where the flag was made from: a document or a source"),
-  ref: z.string().min(1).max(1024).openapi({ example: "documents/lab-user/notes.md", description: "the document's vault path, or the source's id" }),
+  ref: z.string().min(1).max(1024).refine(CLEAN, CLEAN_MSG).openapi({ example: "documents/lab-user/notes.md", description: "the document's vault path, or the source's id" }),
 }).strict().openapi("FlagFrom");
 
 export const Flag = z.object({

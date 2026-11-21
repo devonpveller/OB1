@@ -10,6 +10,7 @@ import { limit, pathParam, queryParam } from "../schemas/common.ts";
 import { parseLimit as lim } from "../logic/scope.ts";
 import { body, type ContractApp, type ContractDeps, errors, fail, json, op, PREFIX, send } from "./http.ts";
 import { identityOf } from "../../middleware/identity.ts";
+import { exemptFromWalk } from "../../middleware/owner-scope.ts";
 import { settingsAdmin } from "./system.ts";
 import { REGISTRY, requireRegistered } from "../registry.ts";
 
@@ -73,6 +74,7 @@ export function registerFlags(app: ContractApp, deps: ContractDeps) {
       const admin = settingsAdmin(who) && !who.impersonating;
       if (q.scope !== undefined && q.scope !== "mine" && q.scope !== "all") return c.json({ error: "scope is mine or all" }, 400);
       if (q.scope === "all" && !admin) return c.json({ error: "scope=all is for admins" }, 403);
+      if (q.scope === "all") exemptFromWalk(c, "flags"); // the admin reads each flag's origin as it was made
       if (q.state) await requireRegistered(deps.registry, REGISTRY.flagStates, q.state);
       if (q.item_kind) await requireRegistered(deps.registry, REGISTRY.flagItemKinds, q.item_kind);
       return send(
@@ -94,7 +96,9 @@ export function registerFlags(app: ContractApp, deps: ContractDeps) {
     try {
       const id = c.req.valid("param").id;
       const who = await identityOf(c);
-      const f = UUIDISH.test(id) ? await fl.getFlag(deps.db, who, id, settingsAdmin(who) && !who.impersonating) : null;
+      const admin = settingsAdmin(who) && !who.impersonating;
+      const f = UUIDISH.test(id) ? await fl.getFlag(deps.db, who, id, admin) : null;
+      if (f && admin) exemptFromWalk(c, "flags");
       return f ? send(c, Flag, f) : c.json(NO_SUCH, 404);
     } catch (e) {
       return fail(c, e);

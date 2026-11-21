@@ -116,3 +116,66 @@ Deno.test("migration files: slot 500 is mounted, the revert undoes what the forw
   // the forward touches no shared knowledge table
   assert(!/(ALTER|CREATE (OR REPLACE )?TRIGGER|UPDATE) .*public\.(sources|claims|reference_records)/i.test(fwd));
 });
+
+// ── round 2 (tester attempt 1) ────────────────────────────────────────────────────────────────────
+import { Hono } from "hono";
+import { FlagCreate, FlagUpdate } from "./schemas/flags.ts";
+import { fail } from "./routes/http.ts";
+import { USER_ONLY } from "../middleware/identity.ts";
+import { ownerScope } from "../middleware/owner-scope.ts";
+import { exemptFromWalk } from "../middleware/owner-scope.ts";
+
+Deno.test("R2-1: a NUL or other C0 control in a note or ref is refused by validation; tab and newline stay", () => {
+  const base = { item_kind: "source", item_id: SRC, reason: "other", from: { kind: "source", ref: SRC } };
+  for (const bad of ["a\u0000b", "a\u0001b", "a\u001fb", "a\u007fb"]) {
+    assertEquals(FlagCreate.safeParse({ ...base, note: bad }).success, false, JSON.stringify(bad));
+    assertEquals(FlagUpdate.safeParse({ note: bad }).success, false, JSON.stringify(bad));
+    assertEquals(FlagCreate.safeParse({ ...base, from: { kind: "document", ref: `documents/x/${bad}.md` } }).success, false);
+  }
+  assertEquals(FlagCreate.safeParse({ ...base, note: "line1\n\tline2\r\n" }).success, true);
+});
+
+Deno.test("R2-1: a Postgres 22021 (invalid byte sequence) is the caller's error: 400, no database text", async () => {
+  // deno-lint-ignore no-explicit-any
+  const c: any = { json: (b: unknown, s: number) => ({ b, s }) };
+  // deno-lint-ignore no-explicit-any
+  const r: any = fail(c, { fields: { code: "22021", message: "invalid byte sequence for encoding UTF8: 0x00" } });
+  assertEquals(r.s, 400);
+  assert(!JSON.stringify(r.b).includes("byte sequence"));
+});
+
+Deno.test("R2-2: an admin's flags read keeps from.ref; any other response is still masked", async () => {
+  const noDb: Db = { query: <T>() => Promise.resolve([] as T[]), tx: (fn) => fn(noDb) };
+  const body = { flags: [{ from: { kind: "document", ref: "documents/other-user/x.md" } }] };
+  const app = new Hono();
+  app.use("*", ownerScope(noDb));
+  app.get("/workbench/contract/flags", (c) => c.json(body));
+  app.get("/workbench/contract/flags/admin", (c) => {
+    exemptFromWalk(c, "flags");
+    return c.json(body);
+  });
+  const masked = await (await app.request("/workbench/contract/flags")).json();
+  assertEquals(masked.flags[0].from.ref, "(another user's document)");
+  const kept = await (await app.request("/workbench/contract/flags/admin")).json();
+  assertEquals(kept.flags[0].from.ref, "documents/other-user/x.md");
+});
+
+Deno.test("R2-3: a from of kind source must be an existing shared source: the same refusal as a missing one", async () => {
+  const GONE = "99999999-9999-4999-8999-999999999999";
+  const { db } = recorder();
+  const gone: Db = {
+    query: <T>(sql: string, a?: unknown[]) =>
+      /SELECT EXISTS/.test(sql) && /public\.sources/.test(sql) && a?.[0] === GONE ? Promise.resolve([{ ok: false }] as T[]) : db.query<T>(sql, a),
+    tx: (fn) => fn(gone),
+  };
+  const err = await assertRejects(() => createFlag(gone, reader(gone), WHO, { item_kind: "claim", item_id: SRC, reason: "other", from: { kind: "source", ref: GONE } }));
+  assertEquals((err as Error).message, "no such source");
+  // the same for a flagged source that is missing: one refusal text
+  const err2 = await assertRejects(() => createFlag(gone, reader(gone), WHO, { item_kind: "source", item_id: GONE, reason: "other", from: { kind: "source", ref: SRC } }));
+  assertEquals((err2 as Error).message, "no such source");
+});
+
+Deno.test("R2-4: the flags routes are user-only: a service key reaches none of them", () => {
+  for (const p of ["/workbench/contract/flags", "/workbench/contract/flags/f1a90000-0000-4000-8000-000000000001"]) assert(USER_ONLY.test(p), p);
+  assertEquals(USER_ONLY.test("/workbench/contract/sources"), false);
+});

@@ -91,8 +91,11 @@ async function checkFrom(db: Db, who: Identity, from: { kind: string; ref: strin
     const paths = documentPathsIn(from.ref);
     if (paths.length !== 1 || paths[0] !== from.ref.replace(/\\/g, "/")) throw new BadRequest("from.ref must be a document path (documents/...)");
     if (!(await ownsDocumentPaths(db, paths, who))) throw new NotFound("no such document");
-  } else if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(from.ref)) {
-    throw new BadRequest("from.ref must be a source id");
+  } else {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(from.ref)) throw new BadRequest("from.ref must be a source id");
+    // a shared source that exists: a private or held source id gets the same refusal as a missing one (no oracle)
+    const r = await db.query<{ ok: boolean }>(`SELECT EXISTS (SELECT 1 FROM public.sources WHERE id = $1) AS ok`, [from.ref]);
+    if (!r[0]?.ok) throw new NotFound("no such source");
   }
 }
 

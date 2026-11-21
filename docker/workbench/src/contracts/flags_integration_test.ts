@@ -247,4 +247,18 @@ t("F8: the registries behind the four reasons are exactly four active keys", asy
   assertEquals(r.map((x) => x.key), ["duplicate", "low_quality", "other", "wrong_claim"]);
 });
 
+t("R2: a NUL in a note is 400; an admin keeps from.ref of another user's document; a from source must exist", async () => {
+  const nul = await mk(A, { note: "a\u0000b" });
+  assertEquals(nul.status, 400, nul.text);
+  assertEquals((await call(A, "POST", FL, undefined, '{"item_kind":"source","item_id":"' + SRC + '","reason":"other","note":"x\\u0000y","from":{"kind":"source","ref":"' + SRC + '"}}')).status, 400);
+  const doc = `documents/${A}/r2-${rnd()}.md`;
+  const made = await mk(A, { from: { kind: "document", ref: doc } });
+  assertEquals(made.status, 201, made.text);
+  const list = await call("admin", "GET", `${FL}?scope=all&limit=500`);
+  assertEquals(list.json.flags.find((f: any) => f.id === made.json.id).from.ref, doc, "the admin list keeps the origin");
+  assertEquals((await call("admin", "GET", `${FL}/${made.json.id}`)).json.from.ref, doc, "and so does the admin's by-id read");
+  const gone = await mk(A, { from: { kind: "source", ref: crypto.randomUUID() } });
+  assertEquals(gone.status, 404, gone.text);
+});
+
 Deno.test({ name: "close the pool", ignore, sanitizeOps: false, sanitizeResources: false, fn: async () => { await pool?.end(); } });

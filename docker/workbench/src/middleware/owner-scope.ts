@@ -127,6 +127,14 @@ async function scrub(db: Db, body: unknown, who: Identity): Promise<unknown> {
   return walk(body);
 }
 
+// rwr-flags-api round 2: an admin's read of everyone's flags names the document each was made from; the response walk
+// would mask another user's document path there. A route that returns exactly that, to an admin, says so by name
+// (never a caller-supplied value), and the walk skips ONLY that response.
+const EXEMPT = "owner-scope-walk-exempt";
+export function exemptFromWalk(c: Context, name: "flags"): void {
+  c.set(EXEMPT as never, name as never);
+}
+
 const OFF = () => (Deno.env.get("WORKSPACE_RESPONSE_WALK") ?? "").trim().toLowerCase() === "off";
 
 // The backstop over an event stream: each `data:` line holding JSON is walked as a JSON body is.
@@ -181,7 +189,7 @@ export function ownerScope(db: Db) {
     await next();
     // rw-identity: the sign-in routes answer the caller's own identity and, to an admin, the audit
     // log (whose routes may name any user's document - the log must show them as they were)
-    if (OFF() || route.startsWith("/workbench/auth/")) return;
+    if (OFF() || route.startsWith("/workbench/auth/") || c.get(EXEMPT as never) === "flags") return;
     const type = c.res.headers.get("content-type") ?? "";
     if (type.includes("text/event-stream") && c.res.body) {
       const headers = new Headers(c.res.headers);
