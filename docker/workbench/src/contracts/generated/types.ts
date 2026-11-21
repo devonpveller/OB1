@@ -748,6 +748,35 @@ export type QualitySource = {
   claim: string | null;
 };
 
+export type ReaderChunk = {
+  idx: number;
+  chunk_id: string;
+  section: string | null;
+  content: string;
+  claims: Array<ReaderClaim>;
+};
+
+export type ReaderClaim = {
+  claim_id: string;
+  text: string;
+  edge_type: string; /** registry: claim_edge_types */
+  epistemic_tag: string;
+  status: string;
+  span: ReaderSpan;
+  overlap: number | null;
+};
+
+export type ReaderSection = {
+  name: string;
+  level: number;
+  first_chunk_idx: number | null;
+};
+
+export type ReaderSpan = {
+  start: number;
+  end: number;
+} | null;
+
 export type Reference = {
   id: string;
   kind: string; /** registry: node_kinds */
@@ -1164,6 +1193,20 @@ export type SeverResult = {
   pending_compile: Array<string>;
   lifecycle: string | null; /** registry: source_states */
   blocking: number;
+};
+
+export type SourceReader = {
+  source_id: string;
+  state: string; /** registry: record_states */
+  state_detail: Record<string, unknown>;
+  lifecycle: string | null; /** registry: source_states */
+  revision: number | null;
+  private: boolean;
+  title: string;
+  url: string | null;
+  sections: Array<ReaderSection>;
+  chunks: Array<ReaderChunk>;
+  unplaced_claims: Array<ReaderClaim>;
 };
 
 export type SourceStateRow = {

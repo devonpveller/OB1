@@ -6280,6 +6280,216 @@
         "required": [
           "actions"
         ]
+      },
+      "SourceReader": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "11111111-1111-4111-8111-111111111111",
+            "description": "uuid"
+          },
+          "state": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "record_states",
+            "example": "active",
+            "description": "A key of the `record_states` registry (GET /workbench/contract/registries/record_states)."
+          },
+          "state_detail": {
+            "type": "object",
+            "additionalProperties": {
+              "nullable": true
+            },
+            "example": {},
+            "description": "What the state needs to be read: reason, original context, the action a loading record is waiting on, the last-known value of an unreachable one."
+          },
+          "lifecycle": {
+            "type": "string",
+            "nullable": true,
+            "minLength": 1,
+            "x-registry": "source_states",
+            "example": "active",
+            "description": "A key of the `source_states` registry (GET /workbench/contract/registries/source_states)."
+          },
+          "revision": {
+            "type": "integer",
+            "nullable": true,
+            "minimum": 1,
+            "description": "the source's current revision; null for a private source, which keeps none"
+          },
+          "private": {
+            "type": "boolean",
+            "description": "true when this is the caller's own private (inlet) source"
+          },
+          "title": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string",
+            "nullable": true
+          },
+          "sections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReaderSection"
+            }
+          },
+          "chunks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReaderChunk"
+            },
+            "description": "in source order; empty when the record is omitted for an evidence-only caller"
+          },
+          "unplaced_claims": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReaderClaim"
+            }
+          }
+        },
+        "required": [
+          "source_id",
+          "state",
+          "state_detail",
+          "lifecycle",
+          "revision",
+          "private",
+          "title",
+          "url",
+          "sections",
+          "chunks",
+          "unplaced_claims"
+        ]
+      },
+      "ReaderSection": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "level": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6
+          },
+          "first_chunk_idx": {
+            "type": "integer",
+            "nullable": true,
+            "minimum": 0,
+            "description": "the chunk the heading falls in; null when it cannot be found in the stored chunks"
+          }
+        },
+        "required": [
+          "name",
+          "level",
+          "first_chunk_idx"
+        ]
+      },
+      "ReaderChunk": {
+        "type": "object",
+        "properties": {
+          "idx": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "chunk_id": {
+            "type": "string",
+            "example": "11111111-1111-4111-8111-111111111111:0",
+            "description": "<source uuid>:<idx>, the chunk context call's id"
+          },
+          "section": {
+            "type": "string",
+            "nullable": true,
+            "description": "the heading in force at the start of the chunk; null when the text has none"
+          },
+          "content": {
+            "type": "string"
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReaderClaim"
+            },
+            "description": "claims drawn from this source whose words are found in this chunk"
+          }
+        },
+        "required": [
+          "idx",
+          "chunk_id",
+          "section",
+          "content",
+          "claims"
+        ]
+      },
+      "ReaderClaim": {
+        "type": "object",
+        "properties": {
+          "claim_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+            "description": "uuid"
+          },
+          "text": {
+            "type": "string"
+          },
+          "edge_type": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "claim_edge_types",
+            "example": "states",
+            "description": "how this source stands to the claim"
+          },
+          "epistemic_tag": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "span": {
+            "$ref": "#/components/schemas/ReaderSpan"
+          },
+          "overlap": {
+            "type": "number",
+            "nullable": true,
+            "minimum": 0,
+            "maximum": 1,
+            "description": "the share of the claim's words found in the chunk (1 for a verbatim match); null when not placed"
+          }
+        },
+        "required": [
+          "claim_id",
+          "text",
+          "edge_type",
+          "epistemic_tag",
+          "status",
+          "span",
+          "overlap"
+        ]
+      },
+      "ReaderSpan": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "start": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "first character, an index into the chunk's content"
+          },
+          "end": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "one past the last character, an index into the chunk's content"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "description": "where the claim's own words sit in the chunk; null when it was placed by overlap"
       }
     },
     "parameters": {}
@@ -13643,6 +13853,159 @@
                 },
                 "schema": {
                   "$ref": "#/components/schemas/CleanupAction"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/sources/{id}/reader": {
+      "get": {
+        "operationId": "sourceReader",
+        "tags": [
+          "source reader"
+        ],
+        "summary": "sourceReader(id) - the source's chunks in order with section names, and each claim drawn from it placed in its chunk (with a quote span only where the claim's own words are found verbatim); a private source is its owner's only",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "a source id"
+            },
+            "required": true,
+            "description": "a source id",
+            "name": "id",
+            "in": "path",
+            "example": "11111111-1111-4111-8111-111111111111"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^(true|false)$",
+              "description": "true = an evidence-only caller: suppressed, unlinked, erased and held records are omitted (a single fetch answers state 'omitted'). Default false: they are returned, typed."
+            },
+            "required": false,
+            "description": "true = an evidence-only caller: suppressed, unlinked, erased and held records are omitted (a single fetch answers state 'omitted'). Default false: they are returned, typed.",
+            "name": "evidence_only",
+            "in": "query",
+            "example": "false"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here."
+            },
+            "required": false,
+            "description": "Optional JSON object. When non-empty, only records whose metadata contains it are returned, and a record kind that carries no metadata returns nothing (fail closed). The cloud gateway forces {\"share\":\"cloud\"} here.",
+            "name": "metadata_filter",
+            "in": "query",
+            "example": "{}"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the source's text and its claims",
+            "content": {
+              "application/json": {
+                "example": {
+                  "source_id": "11111111-1111-4111-8111-111111111111",
+                  "state": "active",
+                  "state_detail": {},
+                  "lifecycle": "active",
+                  "revision": 2,
+                  "private": false,
+                  "title": "Active fixture source",
+                  "url": "https://example.org/active",
+                  "sections": [],
+                  "chunks": [
+                    {
+                      "idx": 0,
+                      "chunk_id": "11111111-1111-4111-8111-111111111111:0",
+                      "section": null,
+                      "content": "Alpha fixture text about contract retrieval.",
+                      "claims": []
+                    },
+                    {
+                      "idx": 1,
+                      "chunk_id": "11111111-1111-4111-8111-111111111111:1",
+                      "section": null,
+                      "content": "Beta sentence two.",
+                      "claims": []
+                    },
+                    {
+                      "idx": 2,
+                      "chunk_id": "11111111-1111-4111-8111-111111111111:2",
+                      "section": null,
+                      "content": "Gamma sentence three.",
+                      "claims": []
+                    }
+                  ],
+                  "unplaced_claims": [
+                    {
+                      "claim_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+                      "text": "Fixture claim: contracts own record states.",
+                      "edge_type": "states",
+                      "epistemic_tag": "sourced",
+                      "status": "active",
+                      "span": null,
+                      "overlap": null
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/SourceReader"
                 }
               }
             }
