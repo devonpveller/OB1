@@ -432,8 +432,9 @@ async function writeGroundedClaims(
   privateReport = false,
 ): Promise<WriteClaimsResult | null> {
   const synthesis = (pkg.synthesis || "").trim();
-  // nothing to parse / nowhere to anchor. rw-report-isolation: a private report anchors its claims in
-  // research_private_report_claims (the owner's link back); the claims themselves are shared, synthesis_id NULL
+  // nothing to parse / nowhere to anchor. rw-private-report-claims (slot 570, operator 2026-11-21: "any information
+  // generated from private data remains private"): a private report's claims are filed into the report owner's store
+  // (private_report_claim_file links each to the report) - never the shared claims table, never a shared claim's dedup
   if (!synthesis || (!synthesisId && !privateReport)) return null;
   // P3a: a package without its claim kind files NO claim (loud; the caller reports the loss)
   const claimMetadata = claimMetadataFor(pkg);
@@ -454,21 +455,16 @@ async function writeGroundedClaims(
       metaJudge,
       onMetaSkip: (text, by) =>
         console.log(`claims: META (${by}) - refused "${text.slice(0, 160)}"`),
+      // slot 570: the private write (the database names the owner from the report) - the link is its own
+      privateReport: privateReport ? { researchKey: String(pkg.research_key ?? ""), jobId: String(pkg.job_id ?? "") } : undefined,
     });
-    if (privateReport && res.claimIds.length) {
-      await client.queryObject(
-        `INSERT INTO public.research_private_report_claims (report_id, claim_id)
-         SELECT p.id, c.id FROM public.research_private_reports p, unnest($2::uuid[]) AS c(id)
-          WHERE p.research_key = $1 AND p.job_id = $3::uuid
-         ON CONFLICT DO NOTHING`,
-        [pkg.research_key, res.claimIds, pkg.job_id],
-      );
-    }
     await client.queryArray("COMMIT");
 
     // Conflict auto-detection (#2) — separate txn; LLM judge calls shouldn't hold
     // the write lock. Best-effort: a failure never undoes the committed claims.
-    if (threadId && res.claimIds.length) {
+    // slot 570: never for a private report's claims - a contradicts edge onto a shared claim would carry the private
+    // claim's existence (and cap the shared claim's confidence) onto a shared surface
+    if (threadId && res.claimIds.length && !privateReport) {
       try {
         await client.queryArray("BEGIN");
         const conf = await detectConflicts(client, res.claimIds, threadId, conflictJudge, CONFLICT_DISTANCE);

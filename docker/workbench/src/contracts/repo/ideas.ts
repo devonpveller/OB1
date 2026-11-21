@@ -96,18 +96,23 @@ async function producedOf(db: Db, sessionIds: string[], dossierId: string | null
     [sessionIds, dossierId],
   );
   const claims = await db.query<{ id: string; text: string; confidence: number }>(
-    `SELECT DISTINCT c.id, c.text, c.confidence
-       FROM public.claims c
-      WHERE c.synthesis_id IN (SELECT ss.source_id FROM public.session_sources ss
-                                JOIN public.sources s ON s.id = ss.source_id AND s.content_type = 'research_synthesis'
-                               WHERE ss.session_id = ANY($1::uuid[]))
-         OR c.synthesis_id = $2::uuid
-         -- rw-report-isolation: the claims drawn from the idea's PRIVATE reports (the owner's link back; the claims
-         -- are shared, their synthesis_id NULL)
-         OR c.id IN (SELECT pc.claim_id FROM public.research_private_report_claims pc
-                       JOIN public.research_private_reports p ON p.id = pc.report_id
-                      WHERE p.idea_id = $3::uuid AND p.owner_sub = $4)
-      ORDER BY c.text LIMIT 200`,
+    `SELECT x.id, x.text, x.confidence FROM (
+       SELECT c.id, c.text, c.confidence
+         FROM public.claims c
+        WHERE c.synthesis_id IN (SELECT ss.source_id FROM public.session_sources ss
+                                  JOIN public.sources s ON s.id = ss.source_id AND s.content_type = 'research_synthesis'
+                                 WHERE ss.session_id = ANY($1::uuid[]))
+           OR c.synthesis_id = $2::uuid
+           -- rw-report-isolation: a claim of the idea's PRIVATE report that a shared synthesis also filed (it stays
+           -- shared, slot 570's "mixed" claim), through the owner's link back
+           OR c.id IN (SELECT pc.claim_id FROM public.research_private_report_claims pc
+                         JOIN public.research_private_reports p ON p.id = pc.report_id
+                        WHERE p.idea_id = $3::uuid AND p.owner_sub = $4)
+       UNION
+       -- rw-private-report-claims (slot 570): the claims drawn from the idea's private reports live in the owner's
+       -- store; the owner-checked read gives the owner theirs and nobody else anything
+       SELECT o.id, o.text, o.confidence FROM public.private_report_claims_of_idea($3::uuid, $4) o
+     ) x ORDER BY x.text LIMIT 200`,
     [sessionIds, dossierId, ideaId, owner],
   );
   return { sources, claims: claims.map((c) => ({ ...c, confidence: Number(c.confidence) })) };
