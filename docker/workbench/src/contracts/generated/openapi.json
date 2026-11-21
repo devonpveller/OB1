@@ -5576,6 +5576,90 @@
           "credibility"
         ]
       },
+      "OwnThoughts": {
+        "type": "object",
+        "properties": {
+          "private": {
+            "type": "boolean",
+            "example": true,
+            "description": "always true: this answer is the caller's own thoughts, never shared, cached or fed to the wiki, digest or research"
+          },
+          "query": {
+            "type": "string"
+          },
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OwnThoughtHit"
+            }
+          }
+        },
+        "required": [
+          "private",
+          "query",
+          "results"
+        ]
+      },
+      "OwnThoughtHit": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "example": "thought",
+            "description": "always thought"
+          },
+          "id": {
+            "type": "string",
+            "example": "4711"
+          },
+          "title": {
+            "type": "string",
+            "example": "Compost idea for the allotment"
+          },
+          "snippet": {
+            "type": "string",
+            "example": "Try <<HL>>compost<</HL>> tea on the beans",
+            "description": "inert <<HL>>/<</HL>> markers around matches (escape first, then swap)"
+          },
+          "state": {
+            "type": "string",
+            "example": "current"
+          },
+          "lifecycle": {
+            "nullable": true
+          },
+          "page_class": {
+            "nullable": true
+          },
+          "date": {
+            "type": "string",
+            "example": "2026-11-01T10:00:00.000Z",
+            "description": "when the thought was saved"
+          },
+          "private": {
+            "type": "boolean",
+            "example": true,
+            "description": "always true: visible to its owner only"
+          },
+          "marker": {
+            "type": "string",
+            "example": "private to you",
+            "description": "always the words: private to you"
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "title",
+          "snippet",
+          "state",
+          "lifecycle",
+          "page_class",
+          "date",
+          "private",
+          "marker"
+        ]
+      },
       "CleanupSources": {
         "type": "object",
         "properties": {
@@ -12752,6 +12836,139 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/own-thoughts/search": {
+      "get": {
+        "operationId": "ownThoughtsSearch",
+        "tags": [
+          "owner-private (rwr-own-thoughts-search-api)"
+        ],
+        "summary": "search my own saved thoughts (text): the signed-in person's thoughts only, each marked private to you; a service or any other caller: refused",
+        "description": "Reads only through the identity seam's subject. Never another user's thought, never a count; a search for words only someone else's thought holds answers exactly as a search for nothing. Not offered to a service key, an on-behalf caller or an admin who is not the owner. The shared contract search never returns a thought.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "at least 2 characters"
+            },
+            "required": false,
+            "description": "at least 2 characters",
+            "name": "q",
+            "in": "query",
+            "example": "compost"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,4}$",
+              "description": "1-50, default 25"
+            },
+            "required": false,
+            "description": "1-50, default 25",
+            "name": "limit",
+            "in": "query",
+            "example": "25"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the caller's own thoughts, newest first; no count",
+            "content": {
+              "application/json": {
+                "example": {
+                  "private": true,
+                  "query": "compost",
+                  "results": [
+                    {
+                      "kind": "thought",
+                      "id": "4711",
+                      "title": "Compost idea for the allotment",
+                      "snippet": "Try <<HL>>compost<</HL>> tea on the beans",
+                      "state": "current",
+                      "lifecycle": null,
+                      "page_class": null,
+                      "date": "2026-11-01T10:00:00.000Z",
+                      "private": true,
+                      "marker": "private to you"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/OwnThoughts"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "the caller is not a person (a service, on-behalf, no identity)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "error"
+                  ]
                 }
               }
             }

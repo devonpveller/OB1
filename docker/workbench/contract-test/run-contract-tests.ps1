@@ -73,6 +73,12 @@ param(
   # Re-record src/contracts/schemas/examples.ts from the fixture (then: deno task contract:gen,
   # and run again without the switch). Skips Dredd and the smoke.
   [switch]$RecordExamples,
+  # rwr-own-thoughts-search-api round 2: -Prebuilt uses the images $tag and $testTag that already exist (no build, no research image, no base-sha
+  # build: so it implies no step 4b and no step 6); -DreddOnly stops after Dredd (skips 4, 4b, 5a, 6); -PrivateViewRef names the git ref that holds
+  # slot 480 (rw-owner-private-view) when the compose chain does not mount it yet: 530 needs ob_workbench and owner_private_subject_ok.
+  [switch]$Prebuilt,
+  [switch]$DreddOnly,
+  [string]$PrivateViewRef = '',
   # The interpreter that loads openbrain-gateway/app.py (needs httpx and starlette) for step 5a.
   # Default: <checkout>\.venv, then the main checkout's .venv (a worktree has none), then python.
   [string]$Python = ''
@@ -99,6 +105,7 @@ $tag = "openbrain-workbench:wt-$short"
 $testTag = "openbrain-workbench:wt-$short-test"
 $dreddTag = "rw-dredd:wt-$short"
 $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+$wbPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $key = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
 if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "rwp0-evidence-$rand" }
@@ -163,6 +170,13 @@ function Start-Db([string]$name) {
   # The production DB user shape: not a superuser, no BYPASSRLS, a member of service_role.
   $o = Dk exec $name psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) "$name has ob_app_memory (non-superuser, service_role member)"
+  # slot 480 (rw-owner-private-view) ran in initdb BEFORE ob_app_memory existed (the fresh-volume shape): run it again for the membership, set ob_workbench's lab password
+  if ($has480) {
+    $null = Dk cp (Join-Path $stage '480-init-owner-private-view.sql') "${name}:/tmp/i480.sql"
+    $null = Dk exec $name psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/i480.sql
+    $null = Dk exec $name psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "ALTER ROLE ob_workbench PASSWORD '$wbPw'"
+    Check ($script:rc -eq 0) "${name}: slot 480 run again, ob_workbench has its lab password (the workbench logs in as it)"
+  }
   $null = Dk cp (Join-Path $ct 'fixtures.sql') "${name}:/tmp/fixtures.sql"
   # rw-inlet-stamp (slot 470): fixtures.sql is legacy-shaped (an unowned idea thought); the LAB switches 470's guards off
   # around this load only and on again right after (the migration has no escape hatch)
@@ -231,6 +245,11 @@ try {
   New-Item -ItemType Directory -Force $stage | Out-Null
   $chain = @($rx.Matches($compose) | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
   foreach ($m in $chain) { Copy-Item (Join-Path $dockerDir $m[0]) (Join-Path $stage $m[1]) }
+  $has480 = @($chain | Where-Object { $_[1] -eq '480-init-owner-private-view.sql' }).Count -eq 1
+  if (-not $has480 -and $PrivateViewRef) {
+    $t480 = (& git -C $ob1 show "${PrivateViewRef}:docker/init-owner-private-view.sql" 2>$null) -join "`n"
+    if ($t480) { [System.IO.File]::WriteAllText((Join-Path $stage '480-init-owner-private-view.sql'), $t480, (New-Object System.Text.UTF8Encoding $false)); $has480 = $true }
+  }
   Check ($chain.Count -ge 30) "staged $($chain.Count) migrations"
   Check (@($chain | Where-Object { $_[1] -eq '230-init-research-contract.sql' }).Count -eq 1) 'the chain mounts 230-init-research-contract.sql'
   Check ($compose -match [regex]::Escape('image: ' + $PgImage)) "compose pins openbrain-db to $PgImage"
@@ -247,6 +266,15 @@ try {
   Check (($got -eq $subnets.run) -and (Test-SubnetAllowed $got)) "the network's subnet is the pinned one, outside 192.168.0.0/16 ($got)"
 
   # ---------------------------------------------------------------- 3. the :wt image
+  if ($Prebuilt) {
+    Write-Host "[3] -Prebuilt: $tag and $testTag must exist (built once, by the caller)"
+    $null = Dk image inspect $tag
+    $r1 = $script:rc
+    $null = Dk image inspect $testTag
+    Check (($r1 -eq 0) -and ($script:rc -eq 0)) "the prebuilt images $tag and $testTag exist (nothing is built or removed by this run)"
+    if (($r1 -ne 0) -or ($script:rc -ne 0)) { throw 'prebuilt images missing' }
+    $sha = (& git -C $ob1 rev-parse HEAD).Trim()
+  } else {
   Write-Host "[3] build $tag (the build runs the image test gate)"
   $sha = (& git -C $ob1 rev-parse HEAD).Trim()
   $o = Dk build --build-arg "OB1_SHA=$sha" --label $label -t $tag $wb
@@ -265,7 +293,10 @@ try {
   if ($script:rc -ne 0) { throw 'build test stage' }
   $made.images += $testTag
 
+  }
+
   # ---------------------------------------------------------------- 4. integration tests
+  if (-not $DreddOnly) {
   Write-Host '[4] database A + src/contracts/integration_test.ts (as ob_app_memory)'
   if (-not (Start-Db $dbA)) { throw 'db A' }
   $o = Dk run --rm --label $label --network $net -e "CONTRACT_TEST_DB_HOST=$dbA" -e CONTRACT_TEST_DB_USER=ob_app_memory `
@@ -318,13 +349,15 @@ try {
   Check ($mm.Count -eq 1) "the agent-org mismatch is logged ONCE with the caller named, though sent 3 times ($($mm.Count))"
   $null = Dk rm -f -v $rsName
 
+  }
+
   # ---------------------------------------------------------------- 5. Dredd
   Write-Host '[5] database B + the :wt workbench + Dredd over every example'
   if (-not (Start-Db $dbB)) { throw 'db B' }
   $o = Dk run -d --name $embName --label $label --network $net -v "${ct}:/ct:ro" $tag deno run --allow-net /ct/stub-embed.ts
   if ($script:rc -eq 0) { $made.containers += $embName }
   $o = Dk run -d --name $wbName --label $label --network $net -e PORT=8000 -e "WORKBENCH_KEY=$key" `
-    -e "DB_HOST=$dbB" -e DB_USER=ob_app_memory -e "DB_PASSWORD=$appPw" -e OPEN_BRAIN_URL=http://unreachable.invalid `
+    -e "DB_HOST=$dbB" -e "DB_USER=$(if ($has480) { 'ob_workbench' } else { 'ob_app_memory' })" -e "DB_PASSWORD=$(if ($has480) { $wbPw } else { $appPw })" -e OPEN_BRAIN_URL=http://unreachable.invalid `
     -e "EMBEDDING_API_BASE=http://${embName}:8080/v1" -e WIKI_GIT_DIR=/tmp/wiki -e WIKI_ASSETS_DIR=/tmp/wiki/assets `
     -e CONTRACT_MOUNTS_ROOT=/mounts -e WORKSPACE_IDENTITY_HEADER=X-Test-Sub -v "$(Join-Path $ob1 'recipes'):/recipes:ro" $tag
   Check ($script:rc -eq 0) "workbench $wbName started"
@@ -354,6 +387,7 @@ try {
     Write-Host '  next: deno task contract:gen, then run again without -RecordExamples'
     throw 'recorded'
   }
+  if (-not $DreddOnly) {
   # 5a. the cloud door's forced filter through the adapter (rw-p0-contract2). FIRST the REAL
   # gateway policy (openbrain-gateway/app.py, loaded by contract-scope-calls.py; no server, no
   # network) polices every cloud tool x its argument sets x eight metadata_filter shapes and
@@ -389,6 +423,8 @@ try {
   Check ($line -match 'leaking_calls=0 ') "cloud scoping probe: $(([string]$line).Trim() -replace ' control_hits_by_tool=.*$', '')"
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[2].Value -eq '3' -and $sum.Groups[4].Value -eq '0') "cloud scoping e2e (3 tests; rw-p3b-trust2 adds the verdict case): $($sum.Value)"
 
+  }
+
   $null = Dk image inspect $dreddTag
   if ($script:rc -ne 0) {
     $o = Dk build --label $label -t $dreddTag -f (Join-Path $ct 'dredd.Dockerfile') $ct
@@ -418,6 +454,7 @@ try {
   Check ($dm.Success -and $dm.Groups[2].Value -eq '0' -and $dm.Groups[3].Value -eq '0' -and [int]$dm.Groups[1].Value -eq ($ops - $hookSkipped)) "Dredd: $($dm.Value) (operations in the document: $ops; skipped by the hooks: $hookSkipped)"
 
   # ---------------------------------------------------------------- 6. eleven-router smoke
+  if (-not $DreddOnly -and -not $Prebuilt) {
   Write-Host '[6] the eleven-router smoke against the :wt workbench (capture twice, compare)'
   $smoke = Join-Path $repo 'scripts\checks\smoke-workbench-routers.ps1'
   if (Test-Path $smoke) {
@@ -585,6 +622,7 @@ try {
     Remove-Item $baseSrc, $baseTar -Recurse -Force -ErrorAction SilentlyContinue
   } else {
     Write-Host "  SKIP  $smoke not found (OB1 checked out alone)"
+  }
   }
 } catch {
   if ("$_" -ne 'recorded') { Fail "aborted: $_" }
