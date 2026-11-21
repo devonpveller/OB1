@@ -101,3 +101,55 @@ Deno.test("the refinery never promotes on its own: no statement it runs names `p
   assert(/deliverForIdea\(/.test(idx) && /from "\.\/deliver\.ts"/.test(idx), "index.ts delivers through deliver.ts");
   assert(!/WHERE status='dormant' AND id <> \$1/.test(idx), "the old unscoped nearDormant query is gone");
 });
+
+// ── rw-boundary-ideas (slot 580): the delivery through the hand-back ──────────────────────────────────────────────
+import { deliverHandbacks, type HandbackDeps } from "./deliver.ts";
+
+function hbDeps(rows: unknown[], idea: DeliverIdea | null = IDEA) {
+  const base = deps();
+  const closed: Array<[string, boolean]> = [];
+  const failed: string[] = [];
+  const d: HandbackDeps = {
+    ...base.d,
+    sql: <T>(text: string, args: unknown[] = []) => {
+      if (/idea_handback_deliverables\(/.test(text)) return Promise.resolve(rows as T[]);
+      if (/handback_delivered\(/.test(text)) { closed.push([String(args[0]), args[1] === true || /true\)/.test(text)]); return Promise.resolve([] as T[]); }
+      return base.d.sql<T>(text, args);
+    },
+    idea: () => Promise.resolve(idea),
+    markFailed: (i) => { failed.push(i.id); return Promise.resolve(); },
+  };
+  return { d, closed, failed, log: base.log };
+}
+
+Deno.test("rw-boundary-ideas: a finished hand-back job is delivered into the room under ITS job id, then the hand-back is closed", async () => {
+  const h = hbDeps([{ id: "hb-1", idea_id: IDEA.id, job_id: "job-derived", job_status: "done", result: RESULT, error: null }]);
+  const o = await deliverHandbacks(h.d, 10);
+  eq([o.delivered, o.failed, o.missing], [1, 0, false]);
+  const room = h.log.find((c) => /idea_deliver_dossier\(/.test(c.sql))!;
+  eq(room.args[1], "job-derived", "the dossier names the hand-back's job");
+  eq(h.closed, [["hb-1", true]]);
+});
+
+Deno.test("rw-boundary-ideas: a failed / cancelled job closes its hand-back as failed; the idea is marked only for its CURRENT job", async () => {
+  const cur = hbDeps([{ id: "hb-2", idea_id: IDEA.id, job_id: "job-1", job_status: "error", result: null, error: "x" }]);
+  eq((await deliverHandbacks(cur.d, 10)).failed, 1);
+  eq([cur.closed, cur.failed], [[["hb-2", false]], [IDEA.id]]);
+  const old = hbDeps([{ id: "hb-3", idea_id: IDEA.id, job_id: "job-older", job_status: "cancelled", result: null, error: null }]);
+  await deliverHandbacks(old.d, 10);
+  eq([old.closed, old.failed], [[["hb-3", false]], []]);
+});
+
+Deno.test("rw-boundary-ideas: a database without slot 580 is reported (missing), not an error; a deleted idea's hand-back is closed", async () => {
+  const none: HandbackDeps = { ...hbDeps([]).d, sql: () => Promise.reject(Object.assign(new Error("no function"), { fields: { code: "42883" } })) };
+  eq((await deliverHandbacks(none, 10)).missing, true);
+  const gone = hbDeps([{ id: "hb-4", idea_id: IDEA.id, job_id: "j", job_status: "done", result: RESULT, error: null }], null);
+  await deliverHandbacks(gone.d, 10);
+  eq(gone.closed, [["hb-4", false]]);
+});
+
+Deno.test("rw-boundary-ideas: the legacy pass skips a job queued through a hand-back (no double delivery) - source check", async () => {
+  const src = await source("index.ts");
+  assert(/request_kind NOT IN \('derived', 'personal'\)/.test(src), "selectPending excludes the hand-back kinds");
+  assert(/deliverThroughHandbacks\(\)/.test(src), "the pass delivers through the hand-back first");
+});

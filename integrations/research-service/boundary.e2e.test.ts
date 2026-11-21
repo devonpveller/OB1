@@ -185,7 +185,8 @@ Deno.test({ name: "C. research_handbacks: forced RLS, no app grant, the purpose-
   const a = (await open(OWNER.sub, "gmail", "hb-c-1", "digest-article", job, "queued"))[0].id;
   const again = (await open(OWNER.sub, "gmail", "hb-c-1", "digest-article", job, "queued"))[0].id;
   assertEquals(again, a, "an open row of the same inlet and purpose is brought up to date, not duplicated");
-  await open(BEE, "idea", "hb-c-2", "idea-research", null, "refused");
+  // rw-boundary-ideas (slot 580): an IDEA hand-back is bound to a real idea's owner, so these probes use another purpose
+  await open(BEE, "gmail", "hb-c-2", "digest-gap", null, "refused");
   assert((await refused(app, `SELECT public.handback_open('service:shared-key', 'gmail', 'x', NULL, 'digest-article', NULL, 'refused', NULL, NULL, NULL)`)).length > 0, "a service owner is refused");
   const plain = (await q<{ id: string }>(su, `INSERT INTO public.research_jobs (status, origin, query) VALUES ('done', 'manual', 'typed') RETURNING id::text AS id`))[0].id;
   assert((await refused(app, `SELECT public.handback_open($1, 'gmail', 'x2', NULL, 'digest-article', $2::uuid, 'queued', NULL, NULL, NULL)`, [OWNER.sub, plain])).includes("derived job only"));
@@ -200,8 +201,8 @@ Deno.test({ name: "C. research_handbacks: forced RLS, no app grant, the purpose-
   assert(bees.every((r) => r.inlet_id !== "hb-c-1"), "another user never reads them");
   assertEquals((await q(app, `SELECT * FROM public.handback_owned('')`)).length, 0, "no subject, no rows");
   // the drain's pair (PD0b uses them)
-  const p = (await open(OWNER.sub, "idea", "hb-c-3", "idea-research", null, "pending"))[0].id;
-  const pend = await q<{ id: string }>(app, `SELECT id::text FROM public.handback_pending('idea-research')`);
+  const p = (await open(OWNER.sub, "gmail", "hb-c-3", "digest-gap", null, "pending"))[0].id;
+  const pend = await q<{ id: string }>(app, `SELECT id::text FROM public.handback_pending('digest-gap')`);
   assert(pend.some((r) => r.id === p));
   const j2 = await derivedRow({ status: "'queued'" });
   assertEquals((await q<{ ok: boolean }>(app, `SELECT public.handback_claim($1::uuid, $2::uuid, 'queued', NULL, NULL) AS ok`, [p, j2]))[0].ok, true);
@@ -441,14 +442,22 @@ Deno.test({ name: "D/E/F. the door, the second user's reads and the sweep (hosti
     const answers: string[] = [];
     for (const it of items) {
       const r = await post(svc.base, "/research/derived", it);
+      // rw-boundary-ideas (420 reviewer R-F4): an idea's research is queued by the database and drained by the service,
+      // with the idea's own owner - this door refuses it (boundary-ideas.e2e.test.ts covers the idea path)
+      if (it.purpose === "idea-research") {
+        assertEquals(r.status, 400, "the door refuses an idea");
+        assertFalse((await r.text()).includes(MK.TIT), "the refusal echoes no content");
+        out.push(`door: idea/idea-research -> 400 (ideas are queued by the database)`);
+        continue;
+      }
       const b = await r.json();
       answers.push(JSON.stringify(b));
       if (b.job_id) { assertEquals(r.status, 202); jobs.push(b.job_id); } else { assertEquals(r.status, 200); assert(b.refused && b.handback_id, JSON.stringify(b)); }
       out.push(`door: ${it.item.kind}/${it.purpose} -> ${b.job_id ? "derived job" : `refused (${b.refused})`}`);
     }
     assert(st.log.proposer.length >= 3, `the hostile proposer was asked (${st.log.proposer.length})`);
-    assertEquals(jobs.length, 6, `6 derived jobs (refused: the link-less idea -> awaiting_owner, the body-only email and the bad-links email -> refused): ${answers.join(" ")}`);
-    assertEquals(JSON.parse(answers[6]).refused, "link_not_public", "TF3/TF5/TF6: no link of the bad-links item survives");
+    assertEquals(jobs.length, 5, `5 derived jobs (refused: the body-only email and the bad-links email; the two ideas 400): ${answers.join(" ")}`);
+    assertEquals(JSON.parse(answers[4]).refused, "link_not_public", "TF3/TF5/TF6: no link of the bad-links item survives");
     const rows = await q<{ request_kind: string; caller: string; inlet_ref: unknown; refinery_id: unknown; options: Record<string, unknown>; query: string; anchor: string; boundary: Record<string, unknown>; prompts: number }>(su,
       `SELECT j.request_kind, j.caller, j.inlet_ref, j.refinery_id, j.options, j.query, j.anchor, j.boundary,
               (SELECT count(*)::int FROM public.research_prompts p WHERE p.job_id = j.id) AS prompts

@@ -34,6 +34,7 @@ import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markC
 import { type Caller, callerFor, inletRef, MismatchLog, onBehalfOf, parseCallers, parseServiceCallers, promptOwner, requestKindOf, resolveOrigin } from "./origin.ts";
 import { formDerivedRequest, insertDerivedJob, openHandback, parseDeliveries, parseDoorBody, recordDelivery, parseProposals, PROPOSER_SYSTEM, proposerUser, publicAddress, sha256Hex } from "./boundary.ts";
 import { canonicalLink } from "./boundary-gate.ts";
+import { approveIdeaQuestion, drainIdeaHandbacks } from "./boundary-ideas.ts";
 import { actorOf, FOREIGN_PROMPTS_SQL, HIDDEN_STEER_TEXTS_SQL, nonActorView, LISTED_FOR, MAY_ACT_SQL, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
 import { assess } from "./admission.ts";
@@ -115,6 +116,8 @@ const SERVICE_CALLERS = parseServiceCallers(env("RESEARCH_SERVICE_CALLERS"));
 // the boundary's proposer call (the local model): bounded - the door answers its caller, a slow model means the
 // title template decides
 const BOUNDARY_PROPOSE_TIMEOUT_MS = parseInt(env("BOUNDARY_PROPOSE_TIMEOUT_MS", "120000"), 10);
+// rw-boundary-ideas (plan 09 PD0b): how often the pending idea hand-backs (slot 580) are drained through the boundary
+const IDEA_DRAIN_MS = parseInt(env("BOUNDARY_IDEA_DRAIN_MS", "5000"), 10);
 // Open WebUI async completion callback. A research job outlives the tool call
 // that submitted it, so the finished report is POSTed back into the originating
 // chat message instead of the caller blocking on a poll loop.
@@ -1131,6 +1134,51 @@ const dispatcher = new Dispatcher({
 });
 function wake(): void { dispatcher.wake(); }
 
+// rw-boundary-core / rw-boundary-ideas: what the boundary may use - the local model (proposals only, D9), the anonymous
+// public-page fetch, the owner's identity tokens (the workbench's identity seam records them) and the resolver (TF6)
+const boundaryDeps = {
+  propose: async (it: Parameters<typeof proposerUser>[0], ev: Parameters<typeof proposerUser>[1]) =>
+    parseProposals(await chat(PROPOSER_SYSTEM, proposerUser(it, ev),
+      { json: true, nothink: true, tags: ["request-boundary"], signal: AbortSignal.timeout(BOUNDARY_PROPOSE_TIMEOUT_MS) })),
+  fetchPublic: async (u: string) => {
+    const r = await fetchPage(u);
+    if (!r.page) return null;
+    // a redirect onto a private host or a token path is not a public page
+    if (r.finalUrl && !("url" in canonicalLink(r.finalUrl))) return null;
+    return { title: r.page.title, text: r.page.content };
+  },
+  identity: async (sub: string) => {
+    const c = await pool.connect();
+    try {
+      const r = await c.queryObject<{ name: string; email: string }>(`SELECT name, email FROM public.workspace_users WHERE sub = $1`, [sub]);
+      return r.rows.flatMap((x) => [x.name ?? "", x.email ?? ""]);
+    } catch { return []; } finally { c.release(); }
+  },
+  // round 2 (TF6): the same resolver the intake fetch uses (DoH through the proxy, or the system resolver on direct egress)
+  resolve: intakeResolve,
+};
+
+// rw-boundary-ideas (plan 09 2.5 P1): the drain of the pending idea hand-backs - single-flight, every IDEA_DRAIN_MS. A
+// database without slot 580 (no idea_handback_item) logs once and keeps polling quietly.
+let ideaDraining = false;
+let ideaDrainMissing = false;
+async function ideaDrainTick(): Promise<void> {
+  if (ideaDraining) return;
+  ideaDraining = true;
+  try {
+    const o = await drainIdeaHandbacks(() => pool.connect(), boundaryDeps);
+    ideaDrainMissing = false;
+    if (o.formed) wake();
+    if (o.formed || o.awaiting || o.refused || o.superseded) console.log(`[boundary-ideas] ${JSON.stringify(o)}`);
+  } catch (e) {
+    const code = (e as { fields?: { code?: string } }).fields?.code;
+    if (code === "42883" || code === "42P01") {
+      if (!ideaDrainMissing) console.warn("[boundary-ideas] slot 580 is not applied - idea hand-backs are not drained");
+      ideaDrainMissing = true;
+    } else console.error(`[boundary-ideas] drain failed (${code ?? (e as Error).name})`);
+  } finally { ideaDraining = false; }
+}
+
 // On boot, any row still 'running' was orphaned by a restart/crash (its in-process
 // task is gone) and would hang 'running' forever — fixing a latent bug in the old
 // fire-and-forget dispatch. Requeue so the drain loop re-runs it from the top.
@@ -1345,32 +1393,18 @@ Deno.serve({ port: PORT }, async (req) => {
     const parsed = parseDoorBody(raw);
     if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
     const { item, purpose, run } = parsed;
+    // rw-boundary-ideas (420 reviewer R-F4): an idea's research is queued by the DATABASE (slot 580: the hand-back's
+    // owner is the idea's owner, never a caller's word) and formed by the drain below - not through this door
+    if (purpose === "idea-research" || item.kind === "idea") {
+      return Response.json({ error: "an idea's research is queued by the database (capture, update, research now); this door does not take it" }, { status: 400 });
+    }
     // rw-boundary-digest: the hand-back remembers which caller opened it (server-side, never the caller's word), so
     // only that caller can record its delivery (POST /research/derived/delivered)
     const deliver = { ...parsed.deliver, caller: callerOf(req, url)?.name ?? "unknown" };
     // round 2 (TF5): whatever the item holds, the door answers a fixed code - never an unhandled 500
     let verdict: Awaited<ReturnType<typeof formDerivedRequest>>;
     try {
-    verdict = await formDerivedRequest(item, purpose, {
-      propose: async (it, ev) => parseProposals(await chat(PROPOSER_SYSTEM, proposerUser(it, ev),
-        { json: true, nothink: true, tags: ["request-boundary"], signal: AbortSignal.timeout(BOUNDARY_PROPOSE_TIMEOUT_MS) })),
-      fetchPublic: async (u) => {
-        const r = await fetchPage(u);
-        if (!r.page) return null;
-        // a redirect onto a private host or a token path is not a public page
-        if (r.finalUrl && !("url" in canonicalLink(r.finalUrl))) return null;
-        return { title: r.page.title, text: r.page.content };
-      },
-      identity: async (sub) => {
-        const c = await pool.connect();
-        try {
-          const r = await c.queryObject<{ name: string; email: string }>(`SELECT name, email FROM public.workspace_users WHERE sub = $1`, [sub]);
-          return r.rows.flatMap((x) => [x.name ?? "", x.email ?? ""]);
-        } catch { return []; } finally { c.release(); }
-      },
-      // round 2 (TF6): the same resolver the intake fetch uses (DoH through the proxy, or the system resolver on direct egress)
-      resolve: intakeResolve,
-    });
+      verdict = await formDerivedRequest(item, purpose, boundaryDeps);
     } catch (e) {
       console.error(`[boundary] forming the request failed (${(e as Error).name})`);
       return Response.json({ error: "boundary_failed" }, { status: 422 });
@@ -1380,10 +1414,11 @@ Deno.serve({ port: PORT }, async (req) => {
     try {
       await c.queryObject("BEGIN");
       const jobId = verdict.ok ? await insertDerivedJob(c, verdict.request, run) : null;
-      const state = verdict.ok ? "queued" : purpose === "idea-research" ? "awaiting_owner" : "refused";
+      // rw-boundary-ideas: an idea never comes through this door (refused above), so a refusal here is final
+      const state = verdict.ok ? "queued" as const : "refused" as const;
       const handbackId = await openHandback(c, {
         item, purpose, jobId, state, record: verdict.record, verdictId: verdict.verdict_id,
-        ownerView: !verdict.ok && state === "awaiting_owner" ? verdict.owner_view : null, deliver,
+        ownerView: null, deliver,
       });
       await c.queryObject("COMMIT");
       if (jobId) {
@@ -1421,6 +1456,34 @@ Deno.serve({ port: PORT }, async (req) => {
       return Response.json({ error: "delivery_failed", delivered }, { status: 500 });
     } finally { c.release(); }
     return Response.json({ delivered }, { status: 200 });
+  }
+
+  // rw-boundary-ideas (plan 09 D7): the OWNER approves an (edited) question for their idea that the boundary could not
+  // phrase - the workspace's own key only, for the subject it names (x-on-behalf-of = the identity seam's subject).
+  // The question still passes the identity deny list (boundary.ts formOwnerApprovedRequest); accepted: one derived job.
+  // -> 202 {job_id} | 200 {refused, failing} | 404 (not the owner's / no such review) | 409 (no longer waiting)
+  if (req.method === "POST" && url.pathname === "/research/derived/approve") {
+    const caller = callerOf(req, url);
+    if (!caller) return Response.json({ error: "unauthorized" }, { status: 401 });
+    if (caller.shared || caller.origin !== "workspace") return Response.json({ error: "an owner's approval comes through the workspace's caller key only" }, { status: 403 });
+    const viewer = viewerOf(req, url);
+    if (viewer instanceof Response) return viewer;
+    if (viewer.sub.startsWith("service:")) return Response.json({ error: "x-on-behalf-of names the owner" }, { status: 400 });
+    let raw: { handback_id?: unknown; question?: unknown };
+    try { raw = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
+    const hb = String(raw?.handback_id ?? "");
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(hb)) return Response.json({ error: "no review with this id" }, { status: 404 });
+    if (typeof raw?.question !== "string" || raw.question.length > 2000) return Response.json({ error: "question is the text to research (at most 2000 characters)" }, { status: 400 });
+    const c = await pool.connect();
+    try {
+      const o = await approveIdeaQuestion(c, viewer.sub, hb, raw.question, boundaryDeps);
+      if (o.status === 202) wake();
+      const { status, ...body } = o;
+      return Response.json(body, { status });
+    } catch (e) {
+      console.error(`[boundary] an owner's approval failed (${(e as { fields?: { code?: string } }).fields?.code ?? (e as Error).name})`);
+      return Response.json({ error: "boundary_failed" }, { status: 500 });
+    } finally { c.release(); }
   }
 
   if (req.method === "POST" && url.pathname === "/research") {
@@ -1758,4 +1821,5 @@ console.log(`openbrain-research listening on :${PORT} (curator=${CURATOR_URL}, s
 void refreshLane().finally(() => {
   setInterval(() => { void refreshLane(); }, Math.max(1000, LANE_REFRESH_MS));
   void recoverOrphanedJobs().then(() => { void dispatcher.run(); });
+  setInterval(() => { void ideaDrainTick(); }, Math.max(500, IDEA_DRAIN_MS));
 });

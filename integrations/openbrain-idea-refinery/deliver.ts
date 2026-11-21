@@ -74,3 +74,44 @@ export async function deliverForIdea(deps: DeliverDeps, idea: DeliverIdea, resul
   deps.log(`delivered idea ${idea.id} -> room ${room.room_id}`);
   return "delivered";
 }
+
+// ── rw-boundary-ideas (slot 580): the delivery THROUGH THE HAND-BACK ──────────────────────────────────────────────
+// An idea's research is a private hand-back the research service formed into a de-personalised derived job (or the
+// owner's 'personal' run). Its finished job is read through idea_handback_deliverables() - the result from the job row
+// itself: the refinery writes it into the idea OWNER's room, and a personal run's report is private to that owner, which
+// the research service's shared read would withhold from this service's key - then closed with handback_delivered().
+// A failed or cancelled job closes the hand-back as failed; the idea is marked failed only if that job is its current one.
+export type IdeaDeliverable = { id: string; idea_id: string; job_id: string; job_status: string; result: JobResult | null; error: string | null };
+
+export interface HandbackDeps extends DeliverDeps {
+  idea(id: string): Promise<DeliverIdea | null>;
+  markFailed(idea: DeliverIdea): Promise<void>;
+}
+
+export async function deliverHandbacks(deps: HandbackDeps, limit: number): Promise<{ delivered: number; failed: number; missing: boolean }> {
+  let delivered = 0, failed = 0;
+  let rows: IdeaDeliverable[];
+  try {
+    rows = await deps.sql<IdeaDeliverable>(
+      `SELECT id::text, idea_id::text, job_id::text, job_status, result, error FROM public.idea_handback_deliverables($1)`, [limit]);
+  } catch (e) {
+    if ((e as { fields?: { code?: string } }).fields?.code === "42883") return { delivered, failed, missing: true }; // slot 580 not applied
+    throw e;
+  }
+  for (const d of rows) {
+    const idea = await deps.idea(d.idea_id);
+    if (!idea) { await deps.sql(`SELECT public.handback_delivered($1::uuid, false)`, [d.id]); failed++; continue; }
+    if (d.job_status === "done") {
+      try {
+        if (await deliverForIdea(deps, { ...idea, last_job_id: d.job_id }, d.result ?? {}) === "delivered") delivered++;
+        // delivered, or an archived refinery that rests: either way the hand-back is closed
+        await deps.sql(`SELECT public.handback_delivered($1::uuid, true)`, [d.id]);
+      } catch (e) { deps.log(`deliver failed for ${idea.id}: ${(e as Error).message}`); } // retried next pass
+    } else {
+      await deps.sql(`SELECT public.handback_delivered($1::uuid, false)`, [d.id]);
+      if (idea.last_job_id === d.job_id) await deps.markFailed(idea);
+      failed++;
+    }
+  }
+  return { delivered, failed, missing: false };
+}

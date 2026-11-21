@@ -16,8 +16,11 @@
  * Each pass:
  *   1. research-now - ideas flagged metadata.research_now are queued through the same
  *      research_idea_queue() (coalescing: never a second queued run).
- *   2. deliver      - every idea whose current job (ideas.last_job_id) finished and has not been
- *      delivered: refetch the job + deliver (P25 durability: a flaky post is retried next pass).
+ *   2. deliver      - rw-boundary-ideas (slot 580): every queued idea hand-back whose job finished
+ *      (idea_handback_deliverables: the derived job of a de-personalised question, or the owner's
+ *      'personal' run) is delivered into the idea's room and closed (handback_delivered); a job from
+ *      before 580 (no hand-back) the old way - the idea's current job (ideas.last_job_id) finished and
+ *      not delivered. P25 durability: a flaky delivery is retried next pass.
  *
  * Design: documentation/implementation-guide/idea-refinery/DESIGN-idea-refinery.md
  *   §3 (research frame), §3.1 (dossier), §6/§6.2 (batch + throttle), §7 (delivery).
@@ -26,7 +29,7 @@
  *      IDEA_REFINERY_CHANNEL, PORT, IDEA_* tunables.
  */
 import { Pool } from "postgres";
-import { deliverForIdea as deliverDossier, type JobResult } from "./deliver.ts";
+import { deliverForIdea as deliverDossier, deliverHandbacks, type JobResult } from "./deliver.ts";
 import { AGE_ONE_HORIZON, AGE_PER_OWNER, ownerSetting, settingBool, settingNumber } from "./settings.ts";
 import { channelRefusal, type MmMember } from "./mm-privacy.ts";
 
@@ -112,6 +115,8 @@ async function selectPending(limit: number): Promise<OwedIdea[]> {
          JOIN research_jobs j ON j.id::text = i.last_job_id
         WHERE i.status IN ('new', 'queued', 'dirty')
           AND j.status IN ('done', 'error', 'cancelled')
+          -- rw-boundary-ideas: a job queued through a hand-back (slot 580) is delivered through it (deliverHandbacks)
+          AND j.request_kind NOT IN ('derived', 'personal')
           AND i.last_job_id IS DISTINCT FROM i.metadata->>'failed_job'
           AND COALESCE((i.metadata->>'research_attempts')::int, 0) < $2
         ORDER BY i.updated_at ASC
@@ -314,8 +319,20 @@ async function researchNow(): Promise<number> {
   }
 }
 
+// rw-boundary-ideas (slot 580): the finished jobs of queued idea hand-backs, through the hand-back (deliver.ts)
+async function deliverThroughHandbacks(): Promise<{ delivered: number; failed: number; missing: boolean }> {
+  return await deliverHandbacks({
+    sql: sqlRows,
+    resurfaceMaxDist: RESURFACE_MAX_DIST,
+    log: (m) => console.log(m),
+    idea: async (id) => (await sqlRows<OwedIdea>(`SELECT ${OWED_COLS} FROM ideas i WHERE i.id = $1::uuid`, [id]))[0] ?? null,
+    markFailed: (idea) => markFailed(idea as OwedIdea),
+  }, RUN_MAX);
+}
+
 async function deliverPending(): Promise<{ delivered: number; failed: number }> {
-  let delivered = 0, failed = 0;
+  const hb = await deliverThroughHandbacks();
+  let delivered = hb.delivered, failed = hb.failed;
   for (const idea of await selectPending(RUN_MAX)) {
     const jr = await jobResult(idea.last_job_id!);
     if (jr.status === "done") {

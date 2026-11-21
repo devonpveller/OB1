@@ -130,7 +130,10 @@ t("I1: ideas() lists by state incl. dormant and resurfaced, with last session an
   const byId = new Map(l.json.ideas.map((i: any) => [i.id, i]));
   const L: any = byId.get(live), P: any = byId.get(parked);
   assert(L && P, "both of A's ideas are listed");
-  assertNotEquals(L.last_session_at, null, "the capture queued a session: its date is listed");
+  // rw-boundary-ideas (slot 580): the capture queues a private hand-back (no job until the research service forms a
+  // de-personalised question from it) - its revision is marked, and the dossier dates the idea
+  assertEquals((await sql<{ q: boolean }>(`SELECT coalesce(metadata ? 'research_handback', false) AS q FROM public.idea_revisions WHERE idea_id = $1 AND revision = 1`, [live]))[0].q, true,
+    "the capture queued the idea's research (a pending hand-back)");
   assertNotEquals(L.dossier_at, null, "the dossier delivered into its room dates it");
   assertEquals([P.status, P.resurfaced_at !== null], ["dormant", true]);
   assertEquals(L.resurfaced_at, null);
@@ -171,9 +174,10 @@ t("I3: edit goes through idea_edit(); identical text is unchanged; an edit that 
   assertEquals([ch.status, ch.json.outcome, ch.json.revision], [200, "changed", 2]);
   const row = await ideaRow(id);
   assertEquals([row.summary, row.title, row.current_revision, row.status], ["the second text", "renamed", 2, "dirty"]);
-  const rev = (await sql<{ research_job_id: string | null; thought_id: string | null }>(
-    `SELECT research_job_id, thought_id::text AS thought_id FROM public.idea_revisions WHERE idea_id = $1 AND revision = 2`, [id]))[0];
-  assertNotEquals(rev.research_job_id, null, "the revision is queued for research by the database");
+  const rev = (await sql<{ handback: string | null; thought_id: string | null }>(
+    `SELECT metadata ->> 'research_handback' AS handback, thought_id::text AS thought_id FROM public.idea_revisions WHERE idea_id = $1 AND revision = 2`, [id]))[0];
+  // rw-boundary-ideas (slot 580): queued as a private hand-back; the job id is stamped when the boundary forms it
+  assertNotEquals(rev.handback, null, "the revision is queued for research by the database");
   // operator 2026-11-02 (ideas are completely user isolated): no corpus thought; the revision is its owner's private one
   assertEquals(rev.thought_id, null, "no thought in the shared corpus");
   assertEquals((await sql<{ p: string }>(`SELECT private_owner AS p FROM public.idea_revisions WHERE idea_id = $1 AND revision = 2`, [id]))[0].p, sub(A));
@@ -207,11 +211,14 @@ t("I4: a promotion the refinery performs on its own FAILS; an MCP idea tool's fu
   assertEquals(nd[0].o.outcome, "no_document");
 });
 
-t("I5: research now is idea_research() for the owner (202 + a job); another user's idea 404", async () => {
+t("I5: research now is idea_research() for the owner (202 + a queued request); another user's idea 404", async () => {
   const id = await captured(sub(A), `now ${rnd()}`);
   const r = await call("POST", `/workbench/ideas/${id}/research-now`, {});
   assertEquals([r.status, r.json.outcome], [202, "queued"]);
-  assert((await sql(`SELECT 1 FROM public.research_jobs WHERE id::text = $1 AND refinery_id = $2`, [r.json.job_id, id])).length === 1);
+  // rw-boundary-ideas (slot 580): a private hand-back, never a job carrying the idea (its id or its text)
+  const st = await sql<{ handback_id: string; state: string }>(`SELECT handback_id::text, state FROM public.idea_handback_review($1, $2::uuid)`, [sub(A), id]);
+  assertEquals([st[0]?.handback_id, st[0]?.state], [r.json.request_id, "pending"]);
+  assertEquals((await sql(`SELECT 1 FROM public.research_jobs WHERE refinery_id = $1`, [id])).length, 0, "no job names the idea");
   // the older idea-schedule door is the same function
   const s = await call("POST", `/workbench/idea-schedule/research-now/${id}`, {});
   assertEquals(s.status, 200, s.text);
@@ -253,7 +260,8 @@ t("I7: the refinery's members - every session, podcast and chat engaged from ins
     { team_id: team, title: "from the refinery", refinery_id: id, transcript: { title: "t", turns: [{ presenterId: `${team}-p`, text: "hi" }] } });
   assertEquals(pod.status, 202, pod.text);
   const m = (await idea(id)).json.refinery.members;
-  assert(m.sessions.includes(now.json.job_id) && m.sessions.includes(q.json.job_id), "a member missing after engagement FAILS (sessions)");
+  // rw-boundary-ideas (slot 580): research now queues a private request (its derived job is stamped when formed)
+  assert(now.json.request_id && m.sessions.includes(q.json.job_id), "a member missing after engagement FAILS (sessions)");
   assert(m.podcasts.includes(pod.json.id), "a member missing after engagement FAILS (podcast)");
   assert(m.chats.includes(room.json.room.id), "a member missing after engagement FAILS (chat)");
   assertEquals(m.document.path, path);

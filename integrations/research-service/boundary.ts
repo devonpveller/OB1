@@ -15,7 +15,7 @@
  */
 import {
   BOUNDARY_VERSION, canonicalLink, cleanText, deniedIndices, denySet, type Evidence, gate, type GateCode, lexicon, type Lexicon,
-  linkPathRefusal, type PublicPage, templateQuestion, tokens, topicOf,
+  linkPathRefusal, ownerGate, type PublicPage, templateQuestion, tokens, topicOf,
 } from "./boundary-gate.ts";
 import { judgeAddresses } from "./intake-fetch.ts";
 
@@ -50,7 +50,7 @@ export interface GateRecord {
   boundary_version: string;
   lexicon_version: string;
   purpose: Purpose;
-  accepted_by: "model" | "template" | null;
+  accepted_by: "model" | "template" | "owner" | null;
   candidate_sha256: string | null;
   evidence: Array<{ url: string; sha256: string }>;
   refusal: Refusal | null;
@@ -184,6 +184,40 @@ export async function formDerivedRequest(item: PersonalItem, purpose: Purpose, d
     };
   }
   return refuse("no_candidate_passed", purpose === "idea-research" ? best : null);
+}
+
+/** rw-boundary-ideas (plan 09 D7): the request an OWNER approved for their idea after the boundary could not phrase it.
+ *  The owner's words, so no lexicon / evidence / copy rule - but ownerGate still refuses the identity deny list (the
+ *  owner's identity, the idea's ids, a non-public link's words) and any id-shaped token. The request carries no links
+ *  (the service searches the approved question itself) and its stamp records accepted_by 'owner'. */
+export async function formOwnerApprovedRequest(item: PersonalItem, question: string, deps: Pick<BoundaryDeps, "identity" | "lexicon">): Promise<BoundaryVerdict> {
+  const lex = deps.lexicon ?? lexicon();
+  const record: GateRecord = {
+    boundary_version: BOUNDARY_VERSION, lexicon_version: lex.version, purpose: "idea-research", accepted_by: null, candidate_sha256: null,
+    evidence: [], refusal: null, tried: 1, codes: [], links_dropped: 0,
+  };
+  const owner = String(item.owner_sub ?? "").trim();
+  const refuse = async (refusal: Refusal, ov: OwnerView | null): Promise<BoundaryVerdict> => {
+    record.refusal = refusal;
+    return { ok: false, refusal, record, verdict_id: await sha256Hex(canonicalJson(record)), owner_view: ov };
+  };
+  if (!owner || BAD_SUB.test(owner)) return refuse("no_owner", null);
+  const fields = Object.fromEntries(Object.entries(item.fields ?? {}).map(([k, v]) => [k, String(v ?? "")]));
+  const identity = [...(await deps.identity(owner).catch(() => [] as string[])), ...(item.identity ?? [])].map(String);
+  const deny = denySet({ ownerSub: owner, identity, fields, links: (item.links ?? []).map(String), publicLinks: [], id: item.id });
+  const q = cleanText(String(question ?? "")).trim();
+  const g = ownerGate(q, deny);
+  record.codes.push(g.ok ? "ok" : g.code);
+  if (!g.ok) return refuse(g.code === "length" ? "empty" : "identity_token", { candidate: q.slice(0, 300), failing: g.tokens.slice(0, 20), code: g.code });
+  const topic = topicOf(q);
+  if (deniedIndices(tokens(topic), deny).size || q !== cleanText(q)) return refuse("identity_token", { candidate: q.slice(0, 300), failing: [], code: "denied_token" });
+  record.accepted_by = "owner";
+  record.candidate_sha256 = await sha256Hex(q);
+  const verdict_id = await sha256Hex(canonicalJson(record));
+  return {
+    ok: true, record, verdict_id,
+    request: { question: q, topic, links: [], purpose: "idea-research", boundary: { version: BOUNDARY_VERSION, lexicon: lex.version, verdict_id, evidence: [] } },
+  };
 }
 
 /** The proposer's prompt (the local model; D9). It sees the personal item - the model is local and its output is
