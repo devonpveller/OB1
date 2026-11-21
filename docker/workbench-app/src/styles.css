@@ -91,3 +91,33 @@ button.danger { background: var(--danger); border-color: var(--danger); color: v
   .main { padding: 16px; }
   .kbd { display: none; }
 }
+
+/* Home (rwr-home) */
+.home { max-width: 1200px; }
+.home h2, .home h3 { margin: 0; font-size: 14px; font-weight: 600; }
+.home h2 a, .home h3 a { color: var(--fg); text-decoration: none; }
+.home h2 a:hover, .home h3 a:hover { text-decoration: underline; }
+.ask-card h1 { margin: 0; font-size: 22px; font-weight: 600; }
+.ask { display: flex; flex-direction: column; gap: 10px; border: 1px solid var(--line-strong); border-radius: 10px; padding: 14px; background: var(--panel-2); }
+.ask input { border: 0; background: transparent; font: inherit; font-size: 16px; color: var(--fg); padding: 4px 0; }
+.ask-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ask-actions { margin-left: auto; display: flex; gap: 8px; }
+.ask-actions button.btn { cursor: pointer; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.ch { display: flex; align-items: baseline; gap: 8px; }
+.ch.sub { margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--line); }
+.more { margin-left: auto; font-weight: 500; font-size: 13px; }
+.row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; margin: 0 -10px; border-radius: 6px; text-decoration: none; color: var(--fg); }
+a.row:hover { background: var(--bg); }
+.row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.row-title { overflow-wrap: anywhere; }
+.meta { font-size: 12px; color: var(--muted); }
+.empty { color: var(--fg-2); }
+.pill { font-family: var(--font-mono); font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--line-strong); color: var(--fg-2); white-space: nowrap; }
+.pill.run { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
+.pill.wait { background: var(--amber-soft); border-color: var(--amber-line); color: var(--amber-text); }
+.pill.done { background: var(--sunken); color: var(--fg-2); }
+.btn.start { align-self: flex-start; }
+.hits { list-style: none; margin: 0; padding: 0; }
+@media (max-width: 1100px) { .grid3, .grid2 { grid-template-columns: 1fr; } }

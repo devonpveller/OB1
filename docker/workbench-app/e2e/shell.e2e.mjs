@@ -56,7 +56,7 @@ async function axe(label) {
 // ---- 1. every route, opened directly and by clicking its menu entry: never blank, plain phase message, no errors
 await setMode("alice");
 await scheme("light");
-for (const [path, label, phase] of ALL) {
+for (const [path, label, phase] of ALL.filter((a) => a[0] !== "/")) { // Home is a real screen: e2e/home.e2e.mjs
   await go(path);
   const s = await ev(`JSON.stringify({h1:document.querySelector('h1')?.textContent, coming:document.querySelector('[data-testid=coming]')?.textContent||null, len:document.querySelector('main').innerText.trim().length, cur:document.querySelector('[aria-current=page]')?.textContent?.replace(/\\d+ \\w+( \\w+)?$/,'').trim(), title:document.title})`);
   const o = JSON.parse(s);
@@ -78,12 +78,14 @@ await go("/documents/abc");
 ok(/phase 1/.test(await ev(`document.querySelector('[data-testid=coming]')?.textContent`)), "a deep link /documents/abc opens its placeholder");
 
 // ---- 2. counts equal the stub's fixture (alice: 2 sessions, 1 retry job of 3, 3 sources + 1 candidate with evidence)
-await go("/");
+await go("/research"); // not Home: Home makes its own reads
 let c = JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('[data-testid^=count-]')].map(e=>[e.dataset.testid,e.textContent]))`));
 ok(JSON.stringify(c) === JSON.stringify([["count-research", "2 running"], ["count-imports", "1 failed"], ["count-cleanup", "4 to review"]]), `counts as the reads: ${JSON.stringify(c)}`);
 const lg = await stub("/__log");
 const seenPaths = [...new Set(lg.map((x) => x.url.split("?")[0]))].sort();
-ok(seenPaths.length === 6 && lg.every((x) => x.method === "GET" && x.keyOk), `the stub saw 6 GET reads, all with the door key: ${seenPaths.join(", ")}`);
+const SIX = ["/workbench/auth/me", "/workbench/contract/cleanup/reopen-candidates", "/workbench/contract/cleanup/sources", "/workbench/contract/sessions", "/workbench/intake/jobs", "/workbench/workspace/whoami"];
+// the stub's log also holds the Home visits earlier in this run (Home's own reads are checked in home.e2e.mjs)
+ok(SIX.every((x) => seenPaths.includes(x)) && lg.every((x) => x.method === "GET" && x.keyOk), `the stub saw the shell's 6 GET reads, all with the door key: ${seenPaths.join(", ")}`);
 
 // ---- 3. Ctrl+K opens, Esc closes, over every screen (real key events)
 for (const [path] of ALL) {
@@ -164,7 +166,7 @@ ok(b.av === "BB" && !/Alice/.test(b.body) && JSON.stringify(b.c) === JSON.string
 const heads = await stub("/__log");
 ok(heads.every((x) => !/alice|bob|operator|subject|user/i.test(x.url)), "no request URL names a person (the server decides who is asking)");
 // the HTTP cache must not have kept a read
-await go("/");
+await go("/research");
 const fromCache = events.filter((e) => e.method === "Network.responseReceived" && /\/workbench\//.test(e.params.response.url) && (e.params.response.fromDiskCache || e.params.response.fromServiceWorker));
 ok(fromCache.length === 0, "no /workbench/ read was answered from the browser's cache");
 const wbReqs = events.filter((e) => e.method === "Network.requestWillBeSent" && /\/workbench\//.test(e.params.request.url));

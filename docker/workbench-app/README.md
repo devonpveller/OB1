@@ -44,3 +44,9 @@ image, `openbrain-workbench-app`. Later items fill it in. Not a stack service ye
 - Tests: `npm test` (vitest incl. `test/contrast.test.ts`, AA for every token pair in light and dark) and the
   headless-Chromium e2e with axe in an isolated lab: `e2e/run-e2e.ps1 -Image openbrain-workbench-app:wt-<id>
   -AxeJs <axe.min.js>` (an `--internal` network, a stub workbench, no plane lease needed).
+
+## Home (item `rwr-home`)
+
+- `src/screens/home/`: `Home.tsx` (the ask box and six cards) and `home-data.ts` (one read per card, its own loading/failed/ok state, a Try again). `App.tsx` mounts it for `/`; nothing else of the shell changed.
+- Every read goes through `lib/api.ts`: `contract/documents`, `contract/sessions?state=recent` (own cards only: `can_act` and a non-empty question), `contract/podcasts` + `contract/podcasts/requests`, `contract/ideas`, `contract/timeline` (last seven days) and `contract/claims` for the two library cards, `contract/search` for the ask box (phase 0: a search, results listed on Home; phase 4 makes it a library-wide ask).
+- Nothing is stored: no storage, cookie, cache or console call (a vitest source scan holds it). Tests: `test/home.test.tsx`; `e2e/home.e2e.mjs` with `e2e/home.stub.mjs` via `e2e/run-home-e2e.ps1` (same method as `run-e2e.ps1`).
