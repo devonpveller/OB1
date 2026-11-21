@@ -93,12 +93,16 @@ export function bodyCap(path) {
 // rwr-app-scaffold round 2: the path the forwarder may send on. The request target is judged BEFORE it is
 // joined to the upstream and again AFTER the URL parser resolved it: it must start with exactly
 // "/workbench/" (case-sensitive; no "//", no ";" tricks), hold no backslash and no control character
-// (raw or percent-encoded, to any depth), and no dot-segment in any decoding. null = fine, else a reason.
+// (raw or percent-encoded, checked through up to 6 decode passes), and no dot-segment in any of those decodings.
+// A path that is STILL changing after the 6 passes (more layers of encoding than any real caller builds) is refused
+// ("too deeply encoded") rather than forwarded unjudged. A backslash or control character in a decoded name is
+// refused on purpose. null = fine, else a reason.
 function pathRefusal(rawUrl, cfg) {
   const url = String(rawUrl || "");
   if (!(url.startsWith("/workbench/") || url === "/workbench" || url.startsWith("/workbench?"))) return "only /workbench/... is forwarded";
   const pathPart = url.split(/[?#]/)[0];
   let p = pathPart;
+  let settled = false;
   // round 3: only a FIRST decode that fails is refused. A later pass that throws (a literal "%" the first
   // pass produced: "50%25.md" -> "50%.md") is not refused: it falls back to a lenient per-escape decode and
   // stops when the string stops changing. A dot-segment / backslash / control character in any pass that did decode still refuses.
@@ -112,9 +116,10 @@ function pathRefusal(rawUrl, cfg) {
       // traversal hidden behind a literal "%" is still seen; stop once that changes nothing
       d = p.replace(/%[0-9a-f]{2}/gi, (m) => String.fromCharCode(parseInt(m.slice(1), 16)));
     }
-    if (d === p) break;
+    if (d === p) { settled = true; break; }
     p = d;
   }
+  if (!settled) return "a path that is too deeply encoded";
   if (/[\u0000-\u001f\u007f\\]/.test(url.slice(pathPart.length))) return "a control character in the query";
   let target;
   try { target = new URL(cfg.url + url); } catch { return "a path that does not resolve"; }
@@ -124,13 +129,19 @@ function pathRefusal(rawUrl, cfg) {
 }
 
 // an absolute Location / Content-Location of the upstream becomes a relative one (the browser never sees
-// the internal address); one that names any other host is dropped
+// the internal address; a base path of WORKBENCH_URL is stripped, as pathRefusal allows for it); one that
+// names any other host is dropped
 function relocate(value, cfg) {
   const v = String(Array.isArray(value) ? value[0] : value);
   if (!/^[a-z][a-z0-9+.-]*:|^\/\//i.test(v)) return v;
   try {
     const u = new URL(v, cfg.url);
-    if (u.origin === new URL(cfg.url).origin) return u.pathname + u.search + u.hash;
+    const b = new URL(cfg.url);
+    if (u.origin === b.origin) {
+      const base = b.pathname.replace(/\/+$/, "");
+      const path = base && (u.pathname === base || u.pathname.startsWith(base + "/")) ? u.pathname.slice(base.length) || "/" : u.pathname;
+      return path + u.search + u.hash;
+    }
   } catch { /* unparsable absolute: dropped */ }
   return null;
 }
@@ -208,8 +219,9 @@ export function proxyWorkbench(req, res, cfg) {
 
 // round 5 (tester attempt 2, P11): a path that only BECOMES /workbench/... once it is decoded, its
 // backslashes read as slashes, its case folded or its doubled slashes collapsed is still the
-// workbench's - it is forwarded (the workbench judges it, so an anonymous browser gets 401), never
-// answered by the wiki renderer as a page.
+// workbench's - it is ROUTED to the forwarder, never answered by the wiki renderer as a page. (Since round 2
+// the forwarder refuses the non-canonical ones - case, "//", backslash, encoded "workbench" - with 400
+// locally; they never reach the workbench. This function only decides who answers.)
 export function isWorkbenchPath(path) {
   let p = String(path || "");
   for (let i = 0; i < 4; i++) {

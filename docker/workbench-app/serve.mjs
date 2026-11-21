@@ -62,7 +62,8 @@ export function createHandler({ dist, proxy }) {
       res.end(JSON.stringify({ status: ok ? "ok" : "unavailable", service: "openbrain-workbench-app" }));
       return;
     }
-    // any spelling that decodes to /workbench is the workbench's (it judges it), never the app's index
+    // any spelling that decodes to /workbench goes to the forwarder, never the app's index (the forwarder refuses the
+    // non-canonical ones with 400 itself; they do not reach the workbench)
     if (isWorkbenchPath(path)) return proxyWorkbench(req, res, proxy);
     if (req.method !== "GET" && req.method !== "HEAD") {
       res.writeHead(405, { "content-type": "text/plain", allow: "GET, HEAD", "cache-control": "no-store" });

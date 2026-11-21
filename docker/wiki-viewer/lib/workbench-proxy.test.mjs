@@ -339,7 +339,10 @@ test("an upstream absolute Location is rewritten to a relative path (or dropped 
 // rwr-app-scaffold round 3 (tester attempt 2, Case 13): the live viewer's real /workbench request shapes
 // (NotesEditor builds "/workbench/notes/" + path.split("/").map(encodeURIComponent).join("/")). A note name
 // holding a literal % encodes to %25; the guard's later decode pass threw on it and refused the request.
-// Every shape the old (0545343) forwarder forwarded is forwarded again; "/workbench" and "/workbench?x=1" too.
+// Every shape the old (0545343) forwarder forwarded is forwarded again, EXCEPT two classes refused on purpose since
+// round 2 (see the next test): a backslash and a control character in a decoded name (the vault is edited on
+// Windows/Obsidian, which allow neither in a file name; and a backslash reads as a slash to some parsers, a
+// control character is stripped by fetch() - both are how a dot-segment is hidden). "/workbench" and "/workbench?x=1" are forwarded too.
 test("round 3: every real /workbench request shape of the live viewer is forwarded (literal %, spaces, bare /workbench)", async () => {
   const l = await pathLab();
   try {
@@ -350,7 +353,7 @@ test("round 3: every real /workbench request shape of the live viewer is forward
       "/workbench/search?q=" + enc("100% sure ../x") + "&limit=5", "/workbench/export?path=" + enc("a/../b.md") + "&format=pdf",
       notePath("Research/My Note.md"), notePath("Research/100% done.md"), notePath("50%.md"), notePath("a/100%41.md"),
       notePath("a/Q&A #1 (draft).md"), notePath("a/café ✓.md"), notePath("a/..hidden.md"), notePath("a/....md"),
-      notePath("a/.obsidian/x.md"), notePath("a/b."), notePath("a/it's [x] {y}.md"), notePath("a/back\slash.md"), "/workbench/notes/a/" + enc("x/y"),
+      notePath("a/.obsidian/x.md"), notePath("a/b."), notePath("a/it's [x] {y}.md"), "/workbench/notes/a/" + enc("x/y"),
       "/workbench/sources/3f2c0a9e-1111-4222-8333-444455556666", "/workbench/sources/" + enc("src:abc 123"), "/workbench/notebooks/" + enc("thread 1/2"),
       "/workbench/grounding/" + enc("a b"), "/workbench/documents/file?path=" + enc("My Doc.md"), "/workbench/contract/documents/" + enc("doc:1"),
       "/workbench/jobs/123", "/workbench/sources/abc/replace-from-upload", "/workbench/idea-schedule/research-now/" + enc("id 1"),
@@ -361,5 +364,57 @@ test("round 3: every real /workbench request shape of the live viewer is forward
     assert.deepEqual(l.seen, shapes, "each one reached the upstream exactly as sent");
   } finally {
     l.close();
+  }
+});
+
+// rwr-app-scaffold round 4 (reviewer 1, 2): a backslash or control character in a note name is refused ON PURPOSE
+// (the round-3 test wrote "back\slash" with a single backslash, which JavaScript reads as "backslash": no backslash was sent).
+test("round 4: a backslash or control character in a note name is refused 400 (deliberate), never forwarded", async () => {
+  const l = await pathLab();
+  try {
+    const enc = encodeURIComponent;
+    const notePath = (p) => "/workbench/notes/" + p.split("/").map(enc).join("/");
+    for (const p of [notePath("a/back\\slash.md"), "/workbench/notes/a/back%5Cslash.md", notePath("a/tab\tname.md"), "/workbench/notes/a/x%09.md",
+      "/workbench/notes/a/" + enc("x%0a.md"), "/workbench/notes/a/x%250a.md"]) {
+      assert.equal((await l.send(p)).status, 400, p);
+    }
+    assert.ok(notePath("a/back\\slash.md").includes("%5C"), "the case really carries a backslash");
+    assert.deepEqual(l.seen, []);
+  } finally {
+    l.close();
+  }
+});
+
+// rwr-app-scaffold round 4 (reviewer 1): a path still changing after the 6 decode passes is refused, not forwarded.
+test("round 4: '..' encoded 6 and 7 times is refused 400 (too deeply encoded); depths 1-5 still 400", async () => {
+  const l = await pathLab();
+  try {
+    const deep = (n) => { let s = "%2e%2e"; for (let i = 1; i < n; i++) s = s.replace(/%/g, "%25"); return s; };
+    for (const n of [1, 2, 3, 4, 5, 6, 7, 8]) assert.equal((await l.send("/workbench/" + deep(n) + "/admin")).status, 400, "depth " + n);
+    assert.deepEqual(l.seen, [], "nothing reached the upstream");
+  } finally {
+    l.close();
+  }
+});
+
+// rwr-app-scaffold round 4 (reviewer 4): a base path on WORKBENCH_URL is stripped from an absolute Location.
+test("round 4: with a base path on WORKBENCH_URL an absolute Location is made relative to the workbench, base removed", async () => {
+  const seen = [];
+  const up = await serve((req, res) => {
+    seen.push(req.url);
+    res.writeHead(302, { location: `http://${req.headers.host}/base/workbench/next?x=1#h` });
+    res.end();
+  });
+  const cfg = proxyConfig({ WORKBENCH_URL: up.url + "/base", WORKBENCH_KEY: "k" });
+  const front = await serve((req, res) => proxyWorkbench(req, res, cfg));
+  try {
+    const r = await new Promise((resolve, reject) => {
+      http.get({ host: "127.0.0.1", port: front.server.address().port, path: "/workbench/go" }, (res) => { res.resume(); res.on("end", () => resolve(res)); }).on("error", reject);
+    });
+    assert.deepEqual(seen, ["/base/workbench/go"]);
+    assert.equal(r.statusCode, 302);
+    assert.equal(r.headers.location, "/workbench/next?x=1#h");
+  } finally {
+    up.server.close(); front.server.close();
   }
 });

@@ -89,6 +89,19 @@ describe("the fetch door: same-origin /workbench/* only (asserted over the reque
     expect(requestLog()).toEqual([]);
   });
   // rwr-app-scaffold round 3 (tester attempt 2, Case 13b): real ids and note paths hold spaces and a literal %.
+  // rwr-app-scaffold round 4 (reviewer 1): a path still changing after the 6 decode passes is refused.
+  it("refuses '..' encoded 6, 7 and 8 times (too deeply encoded) as it refuses depths 1-5", async () => {
+    const sent: string[] = [];
+    setFetcher(async (u) => { sent.push(u); return new Response("{}"); });
+    let s = "%2e%2e";
+    for (let n = 1; n <= 8; n++) {
+      const u = "/workbench/" + s + "/admin";
+      expect(isWorkbenchUrl(u), "depth " + n).toBe(false);
+      await expect(api("GET", u)).rejects.toBeInstanceOf(ApiError);
+      s = s.replace(/%/g, "%25");
+    }
+    expect(sent).toEqual([]);
+  });
   it("accepts real id and note-path shapes: %20, a decoded space, a literal % as %25", async () => {
     const sent: string[] = [];
     setFetcher(async (u) => { sent.push(u); return new Response("{}"); });

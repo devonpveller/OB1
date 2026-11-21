@@ -38,6 +38,7 @@ export function resolveWorkbenchUrl(url: string): string | null {
   if (typeof url !== "string" || !url.startsWith("/workbench/") || url.startsWith("//") || RAW_BAD.test(url)) return null;
   const [pathPart] = url.split(/[?#]/);
   let p = pathPart;
+  let settled = false;
   for (let i = 0; i < 6; i++) {
     if (BAD_CHAR.test(p) || !p.startsWith("/workbench/") || dotSegment(p)) return null;
     let d: string;
@@ -48,9 +49,10 @@ export function resolveWorkbenchUrl(url: string): string | null {
       // a later pass met a literal "%": decode the well-formed %XX escapes one by one, so a traversal behind it is still seen
       d = p.replace(/%[0-9a-f]{2}/gi, (m) => String.fromCharCode(parseInt(m.slice(1), 16)));
     }
-    if (d === p) break;
+    if (d === p) { settled = true; break; }
     p = d;
   }
+  if (!settled) return null; // still changing after the passes: too deeply encoded, refused like the forwarder does
   let u: URL;
   try { u = new URL(url, location.origin); } catch { return null; }
   if (u.origin !== location.origin || !u.pathname.startsWith("/workbench/")) return null;

@@ -150,12 +150,15 @@ test("a write needs the app's own origin; a wrong Host is refused (421)", async 
   assert.equal(ok.status, 200);
 });
 
-test("odd spellings of /workbench are forwarded (the workbench judges them), never answered with the index", async () => {
+// since round 2 these spellings are routed to the forwarder and refused there with 400: they never reach the workbench
+test("odd spellings of /workbench are refused 400 by the forwarder, never the index, and never reach the upstream", async () => {
   seen.length = 0;
   for (const p of ["/Workbench/x", "//workbench/x", "/%57orkbench/x"]) {
     const r = await get(p);
+    assert.equal(r.status, 400, p);
     assert.ok(!/INDEX/.test(r.body), p);
   }
+  assert.equal(seen.length, 0, "the stub upstream received nothing");
 });
 
 test("with no key configured /workbench/* is not routed (404), never the index", async () => {
