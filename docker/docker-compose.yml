@@ -22,7 +22,9 @@ include:
 # and surfaces it actually needs, without editing this file:
 #
 #   --profile research   openbrain-curator, openbrain-research
-#   --profile wiki       openbrain-wiki, -wiki-viewer, -workbench, -workbench-app, -wiki-backup
+#   --profile wiki       openbrain-wiki, -wiki-viewer, -workbench, -wiki-backup
+#   --profile workbench-app   openbrain-workbench-app, the workbench's own front end alone (OFF until its
+#                        first deploy enables it; needs `wiki` for the workbench it fronts)
 #   --profile notebook   surrealdb, open-notebook-backup (the Open Notebook DATA side)
 #   --profile notebook-app   open_notebook, the app alone (intake-gate-relay round 2: the operator
 #                        retired it 2026-10-31 - OFF unless enabled; see open_notebook below)
@@ -1622,8 +1624,11 @@ services:
   # plane's ordinary bridge, so "no egress" is the app's own behaviour (rwr-app-scaffold asserts it
   # makes same-origin /workbench/* requests only), with every capability dropped here.
   openbrain-workbench-app:
-    # wiki group, with the workbench it fronts (same profile, so one `enable` covers both).
-    profiles: ["wiki"]
+    # OWN profile `workbench-app` (NOT `wiki`): the image is built by the gated first deploy, so no
+    # whole-plane `up` (recovery, `stack.py up`, a reboot) may build it as a side effect before that
+    # deploy enables the profile (`stack.py enable workbench-app`). It fronts openbrain-workbench (`wiki`),
+    # so the manifest `requires` wiki for it (compose refuses the project otherwise).
+    profiles: ["workbench-app"]
     build:
       context: ./workbench-app
       dockerfile: Dockerfile
