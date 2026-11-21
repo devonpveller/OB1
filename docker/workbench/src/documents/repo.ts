@@ -24,6 +24,8 @@ import {
 } from "../util/vault.ts";
 import { safeJoin } from "../util/paths.ts";
 import { parseDocument, setFrontmatterField } from "./grammar.ts";
+import { earlier, expired, TRASH_KEEP_DAYS } from "./trash_age.ts";
+import { dropTrail, NIGHTLY_ACTOR, type TrailKind, writeTrail } from "./trail.ts";
 import { deleteListing, listingRow, type ListingRow, moveListing, syncListing } from "./listing.ts";
 import {
   ARCHIVE, DOCUMENTS_ROOT, docRel, folderRel, inSubtree, isArchived, isTrashed, liveRel, rootOf, slugify, TRASH,
@@ -184,7 +186,7 @@ export async function deleteFolder(deps: DocDeps, path: string, who: Identity) {
 }
 
 // ── move, trash, restore, archive ─────────────────────────────────────────────────────────
-async function moveTo(deps: DocDeps, from: string, to: string, message: string, who: Identity) {
+export async function moveTo(deps: DocDeps, from: string, to: string, message: string, who: Identity) {
   await owned(deps.db, from, who);
   if (!(await vaultExists(from))) throw new DocError("no such document", 404);
   if (await vaultExists(to)) throw new DocError("a document with that name already exists there", 409);
@@ -226,16 +228,75 @@ export async function archiveDocument(deps: DocDeps, path: string, who: Identity
   return { archived: await moveTo(deps, from, inSubtree(from, ARCHIVE, who), `documents: archive ${from}`, who) };
 }
 
-// The trash's nightly hard removal (the legacy notes' rule), for every user: git rm (recoverable from
-// history); the listing row and the document's references go with it.
-export async function emptyTrash(deps: DocDeps, by: string) {
-  const removed: string[] = [];
-  for (const f of (await documentFiles(DOCUMENTS_ROOT)).filter(isTrashed)) {
-    await gitRm(f, `documents: empty trash - remove ${f}`, by);
-    await deleteListing(deps.db, f).catch((e) => console.error(`[documents] listing delete ${f} failed:`, (e as Error).message));
-    removed.push(f);
+// ── hard removal from the trash (rwr-docs-lifecycle-api) ──────────────────────────────────
+// When a trashed document went into the trash: the EARLIER of the listing record's date (set when the
+// move was recorded) and the trash move's commit date in the vault - an edit of a trashed document
+// moves the first, never the second. Unknown = null, and a document with no known date is never
+// removed by age (trash_age.ts).
+export async function trashedAtOf(row: ListingRow | null, rel: string): Promise<Date | null> {
+  let listed: Date | null = null;
+  if (row?.updated_at) {
+    const d = new Date(row.updated_at);
+    listed = Number.isNaN(d.getTime()) ? null : d;
   }
-  return { removed };
+  let committed: Date | null = null;
+  try {
+    const h = (await vaultFileHistory(rel, 1))[0];
+    if (h?.date) {
+      const d = new Date(h.date);
+      committed = Number.isNaN(d.getTime()) ? null : d;
+    }
+  } catch { /* no history: the listing's date stands */ }
+  return earlier(listed, committed);
+}
+
+// Remove ONE trashed document for good: its trail line first (one per removal), then git rm (recoverable
+// from the vault's history), then the listing row and the document's references. If the removal itself
+// fails the trail line is taken back, so the trail never names a document that is still there.
+export async function removeTrashed(
+  deps: DocDeps, rel: string, kind: TrailKind,
+  o: { actor: string; author: string; owner: string; trashedAt?: Date | null },
+): Promise<{ trail: string }> {
+  if (!isTrashed(rel)) throw new DocError("not in the trash", 400);
+  const row = await listingRow(deps.db, rel);
+  const trail = await writeTrail(deps.db, {
+    owner_sub: row?.owner_sub ?? o.owner, actor_sub: o.actor, kind, document_id: row?.id ?? null, path: rel,
+    trashed_at: o.trashedAt === undefined ? await trashedAtOf(row, rel) : o.trashedAt,
+  });
+  try {
+    await gitRm(rel, `documents: remove for good ${rel} (${kind})`, o.author);
+  } catch (e) {
+    await dropTrail(deps.db, trail).catch(() => {});
+    throw e;
+  }
+  await deleteListing(deps.db, rel).catch((e) => console.error(`[documents] listing delete ${rel} failed:`, (e as Error).message));
+  return { trail };
+}
+
+// The nightly hard removal, for every user: only a document trashed MORE than `days` days ago (Q9,
+// 30; before rwr-docs-lifecycle-api this removed every trashed document whatever its age). `now` is
+// injectable. One failing document is logged and the rest still run.
+export async function emptyTrash(deps: DocDeps, by: string, opts: { now?: Date; days?: number } = {}) {
+  const now = opts.now ?? new Date();
+  const removed: string[] = [];
+  const kept: string[] = [];
+  const failed: string[] = [];
+  for (const f of (await documentFiles(DOCUMENTS_ROOT)).filter(isTrashed)) {
+    try {
+      const row = await listingRow(deps.db, f);
+      const at = await trashedAtOf(row, f);
+      if (!expired(at, now, opts.days ?? TRASH_KEEP_DAYS)) {
+        kept.push(f);
+        continue;
+      }
+      await removeTrashed(deps, f, "nightly_expired", { actor: NIGHTLY_ACTOR, author: by, owner: "system:unowned", trashedAt: at });
+      removed.push(f);
+    } catch (e) {
+      console.error(`[documents] nightly empty-trash: ${f} failed:`, (e as Error).message);
+      failed.push(f);
+    }
+  }
+  return { removed, kept: kept.length, failed };
 }
 
 // ── history + recover ─────────────────────────────────────────────────────────────────────

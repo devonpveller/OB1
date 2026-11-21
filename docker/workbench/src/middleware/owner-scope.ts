@@ -175,7 +175,12 @@ export function ownerScope(db: Db) {
       throw e;
     }
     const paths = strings.flatMap(documentPathsIn);
-    if (paths.length && !(await ownsDocumentPaths(db, [...new Set(paths)], who))) {
+    // rwr-docs-lifecycle-api: an admin (a real sign-in, not an impersonation) may name another user's
+    // TRASHED document to delete it forever - that one route decides ownership and the trash itself
+    // (src/documents/lifecycle.ts), everyone else still gets the 404 here.
+    const adminDeleteForever = c.req.method === "POST" && route === "/workbench/documents/delete-forever" &&
+      !!who.admin && !who.impersonating;
+    if (paths.length && !adminDeleteForever && !(await ownsDocumentPaths(db, [...new Set(paths)], who))) {
       return c.json({ error: "no such document" }, 404);
     }
     await next();
