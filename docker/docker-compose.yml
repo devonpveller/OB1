@@ -197,6 +197,8 @@ services:
       - ./init-inlet-owner.sql:/docker-entrypoint-initdb.d/440-init-inlet-owner.sql:ro # research-workbench rw-inlet-owner (plan 08 PD1): every existing thought becomes the operator's and private (thoughts.user_id), the email-body and podcast-transcript sources + the claims drawn only from them move to owner-private stores, Gmail ids / URLs leave the shared rows and job seeds, the wiki pages presenting them are withheld and guarded (fresh-volume: nothing to do; live: psql -v owner_sub=<WORKSPACE_DEFAULT_SUB> -f after a fresh backup, the writers STOPPED; LIVE ORDER 380, 390, 400, 430, 420, 460, then 440 - never before 460; on a fresh volume 440 runs first by name and has nothing to do; revert: revert-inlet-owner.sql first, before 460 / 420 / 430 / 390 / 380)
       - ./init-boundary-digest.sql:/docker-entrypoint-initdb.d/460-init-boundary-digest.sql:ro # research-workbench rw-boundary-digest (plan 09 PD0c): a derived root's run knobs (mode article, gap_research, dry_run, deadline_at) on 420's options allow-list, podcast_episodes.transcript (the owner's private script), handback_deliver (the digest's delivery record on the private hand-back) (fresh-volume only; live: psql -f AFTER 420, BEFORE the new research image and the digest code, a fresh backup first; re-run it after any re-run of 420; revert: revert-boundary-digest.sql, before 420's)
       - ./init-inlet-stamp.sql:/docker-entrypoint-initdb.d/470-init-inlet-stamp.sql:ro # research-workbench rw-inlet-stamp (plan 08 PD2): the inlet owner record (inlet_connections), every new thought carries its owner and a shared source is never personal (triggers), owner CHECKs on the podcast episode / hand-back / 440 stores (fresh-volume: no record, the inlet writers refuse until -v owner_sub is given; live: psql -f right AFTER 440 in PD1's window, the writers stopped, and only once rw-mcp-identity is live; revert: revert-inlet-stamp.sql, before 440's)
+      - ./init-owner-private-view.sql:/docker-entrypoint-initdb.d/480-init-owner-private-view.sql:ro # research-workbench rw-owner-private-view (plan 08 PD-PV): ob_workbench (the workbench's own login role, a member of ob_app_memory) and the owner-scoped reads of PD1's private stores, executable by ob_workbench alone; PD1's two owner reads move to it (fresh-volume: the role and the functions; create ob_app_memory, then run it again for the membership; live: psql -f AFTER 440 / 470, then ALTER ROLE ob_workbench PASSWORD from OB_WORKBENCH_DB_PASSWORD, then the new workbench; RE-RUN IT AFTER ANY 440 RE-RUN; revert: revert-owner-private-view.sql after the workbench is back on ob_app_memory, before 440's)
+      - ./init-source-reader.sql:/docker-entrypoint-initdb.d/520-init-source-reader.sql:ro # research-workbench redesign rwr-source-reader-api: two owner-only read functions (inlet_private_reader_chunks / inlet_private_reader_claims) built like 480's owner_private_* reads - subject rule owner_private_subject_ok, EXECUTE for ob_workbench ALONE - so the source reader can show a moved private source's chunks and claims to its owner only; no table, column or row changes (refused unless 440 and 480 are applied; fresh-volume: after 480; LIVE ORDER: after 440, 470 and 480, BEFORE the new workbench image, a fresh backup first - a gated deploy; check: check-source-reader.sql; revert: revert-source-reader.sql, after the image is rolled back)
     networks:
       - obnet
     restart: unless-stopped
@@ -1525,14 +1527,20 @@ services:
       DB_HOST: openbrain-db
       DB_PORT: "5432"
       DB_NAME: openbrain
-      DB_USER: ob_app_memory
-      DB_PASSWORD: ${OB_APP_MEMORY_PASSWORD}
+      # rw-owner-private-view (slot 480): the workbench logs in as its OWN role, ob_workbench (a member of ob_app_memory:
+      # the same table grants), the only role that may run the owner-scoped private reads. A blank
+      # OB_WORKBENCH_DB_PASSWORD keeps the workbench from connecting (set it, then ALTER ROLE ob_workbench PASSWORD).
+      DB_USER: ob_workbench
+      DB_PASSWORD: ${OB_WORKBENCH_DB_PASSWORD}
       # PostgREST reads (via the OB1 Caddy /rest/v1 proxy).
       OPEN_BRAIN_URL: http://openbrain-rest
       # Local embeddings (bge-m3, 1024-dim) for chunk/source embedding (P5/P6).
       EMBEDDING_API_BASE: http://llama-cpp-embed:8080/v1
       # Own virtual key 'workbench-embed'; blank/unset falls back to the MCP key, then not-needed.
       EMBEDDING_API_KEY: ${OB_WORKBENCH_EMBED_LLM_KEY:-${OB_MCP_LLM_KEY:-not-needed}}
+      # rw-owner-private-view: the owner's private semantic search embeds its QUERY with the workbench's own key only - the
+      # same 'workbench-embed' virtual key, with NO fallback (no new LiteLLM consumer). Blank = semantic search off (503).
+      PRIVATE_EMBEDDING_API_KEY: ${OB_WORKBENCH_EMBED_LLM_KEY:-}
       EMBEDDING_MODEL: local-embed
       EMBEDDING_DIMENSION: "1024"
       # Extraction sidecar (P5).

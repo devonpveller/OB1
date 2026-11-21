@@ -683,6 +683,89 @@ export type Podcasts = {
   podcasts: Array<PodcastEpisode>;
 };
 
+export type PrivateClaim = {
+  id: string;
+  kind: string;
+  text: string;
+  status: string;
+  epistemic_tag: string;
+  confidence: number;
+  contradicted: boolean;
+  created_at: string;
+  private_sources: Array<PrivateSourceRef>;
+  private_parents: Array<{
+    id: string;
+    text: string;
+  }>;
+  shared_sources: Array<{
+    id: string;
+    title: string;
+    url: string;
+  }>;
+};
+
+export type PrivateClaimOne = {
+  private: boolean;
+  claim: PrivateClaim;
+};
+
+export type PrivateClaims = {
+  private: boolean;
+  claims: Array<PrivateClaim>;
+  next: string | null;
+  sign_in_required?: boolean;
+};
+
+export type PrivateHit = {
+  source_id: string;
+  title: string;
+  kind: string;
+  created_at: string;
+  idx: number;
+  snippet: string;
+  score: number;
+};
+
+export type PrivateHits = {
+  private: boolean;
+  mode: string;
+  hits: Array<PrivateHit>;
+  sign_in_required?: boolean;
+};
+
+export type PrivateJob = {
+  id: string;
+  root_job_id: string | null;
+  created_at: string;
+  state: string;
+  query: string | null;
+};
+
+export type PrivateJobText = {
+  private: boolean;
+  job: {
+    id: string;
+    query: string | null;
+    result: Record<string, unknown> | null;
+    progress: Record<string, unknown> | null;
+    error: string | null;
+  };
+};
+
+export type PrivateJobs = {
+  private: boolean;
+  jobs: Array<PrivateJob>;
+  next: string | null;
+  sign_in_required?: boolean;
+};
+
+export type PrivateSourceRef = {
+  id: string;
+  title: string;
+  kind: string;
+  created_at: string;
+};
+
 export type ProcessAllItem = {
   source_id: string;
   outcome: string;
@@ -747,6 +830,35 @@ export type QualitySource = {
   amount: number | null;
   claim: string | null;
 };
+
+export type ReaderChunk = {
+  idx: number;
+  chunk_id: string;
+  section: string | null;
+  content: string;
+  claims: Array<ReaderClaim>;
+};
+
+export type ReaderClaim = {
+  claim_id: string;
+  text: string;
+  edge_type: string; /** registry: claim_edge_types */
+  epistemic_tag: string;
+  status: string;
+  span: ReaderSpan;
+  overlap: number | null;
+};
+
+export type ReaderSection = {
+  name: string;
+  level: number;
+  first_chunk_idx: number | null;
+};
+
+export type ReaderSpan = {
+  start: number;
+  end: number;
+} | null;
 
 export type Reference = {
   id: string;
@@ -1165,6 +1277,20 @@ export type SeverResult = {
   pending_compile: Array<string>;
   lifecycle: string | null; /** registry: source_states */
   blocking: number;
+};
+
+export type SourceReader = {
+  source_id: string;
+  state: string; /** registry: record_states */
+  state_detail: Record<string, unknown>;
+  lifecycle: string | null; /** registry: source_states */
+  revision: number | null;
+  private: boolean;
+  title: string;
+  url: string | null;
+  sections: Array<ReaderSection>;
+  chunks: Array<ReaderChunk>;
+  unplaced_claims: Array<ReaderClaim>;
 };
 
 export type SourceStateRow = {

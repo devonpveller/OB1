@@ -105,7 +105,8 @@ export async function session(db: Db, id: string, who: Viewer) {
   );
   const row = rows[0];
   if (!row) return null;
-  return shapeSession(await withOwnText(db, row, who.sub));
+  // rw-owner-private-view (D2): an admin impersonating the owner reads the neutral text, as anyone else does
+  return shapeSession(await withOwnText(db, row, (who as { impersonating?: unknown }).impersonating ? "" : who.sub));
 }
 
 // rw-inlet-owner (slot 440, round 3): a research tree seeded with private mail or a podcast transcript carries neutral
