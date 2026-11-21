@@ -17,20 +17,17 @@ beforeEach(() => {
 });
 
 describe("the frame", () => {
-  it("says what it is and shows the route; on mount it makes no request at all", () => {
-    const seen: string[] = [];
-    setFetcher(async (u) => { seen.push(u); return new Response("{}"); });
+  it("renders the shell for the route it was opened at (see shell.test.tsx for the screens)", () => {
     window.history.pushState({}, "", "/documents/x");
-    render(<App />);
-    expect(screen.getByTestId("what").textContent).toMatch(/empty frame/);
-    expect(screen.getByTestId("route").textContent).toBe("/documents/x");
-    expect(seen).toEqual([]);
-    expect(requestLog()).toEqual([]);
+    render(<App load={async () => ({ loaded: true, who: null, defaultSubject: false })} />);
+    expect(screen.getByTestId("topbar")).toBeTruthy();
+    expect(screen.getByTestId("rail")).toBeTruthy();
+    expect(screen.getByTestId("coming").textContent).toMatch(/phase 1/);
   });
   it("follows navigation", () => {
-    render(<App />);
+    render(<App load={async () => ({ loaded: true, who: null, defaultSubject: false })} />);
     act(() => navigate("/research"));
-    expect(screen.getByTestId("route").textContent).toBe("/research");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Research");
   });
 });
 
@@ -163,7 +160,7 @@ describe("light and dark tokens", () => {
     expect(readTheme()).toBe("system");
   });
   it("the button cycles system -> light -> dark -> system", () => {
-    render(<App />);
+    render(<App load={async () => ({ loaded: true, who: null, defaultSubject: false })} />);
     const b = screen.getByTestId("theme");
     expect(b.textContent).toContain("system");
     fireEvent.click(b); expect(document.documentElement.getAttribute("data-theme")).toBe("light");

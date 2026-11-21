@@ -1090,6 +1090,7 @@ export type SessionCard = {
   } | null;
   tree: Array<CardBranch>;
   can_act: boolean;
+  mine: boolean;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
