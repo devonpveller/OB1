@@ -247,7 +247,8 @@ const OPEN = /^\/workbench\/(health|auth\/me)$/;
 // a user's front end: never a service's (rw-p8a4-ideas: the ideas writes too - openbrain-mcp's idea tools reach the
 // same owner-checked SQL functions directly, never through here)
 // rw-settings-store: and the Settings panel (a service reads a setting through the database's setting_get(), never here)
-const USER_ONLY = /^\/workbench\/(documents|workspace|ideas|settings|auth\/(impersonate|users|audit))(\/|$)/;
+// rwr-own-thoughts-search-api: and my own thoughts (contract/own-thoughts/*: a service is nobody's owner)
+const USER_ONLY = /^\/workbench\/(documents|workspace|ideas|settings|auth\/(impersonate|users|audit)|contract\/own-thoughts)(\/|$)/;
 // the reads that can carry a research job's original prompt (round 4, F4)
 // rw-p8a1-core round 3 (reviewer RF1): the trail's leads too - an admin may read an ownerless tree's
 // rw-p5a-intake: and the intake panel's reads (and the old /workbench/jobs), whose ownerless jobs an admin who is
