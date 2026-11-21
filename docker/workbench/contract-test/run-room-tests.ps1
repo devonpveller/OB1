@@ -221,8 +221,6 @@ try {
     Check ($script:rc -eq 0) "$viewerTag built (its build gate: the renderer's node tests)"
     if ($script:rc -ne 0) { throw 'build viewer' }
     $script:made.images += $viewerTag
-    $vt = ([regex]'Tests\s+(\d+) passed').Match($vclean)
-    if ($vt.Success) { Pass "workspace unit tests in the image build: $($vt.Groups[1].Value) passed" }
   }
   if (-not $Prebuilt) {
     $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb; Save 'build-workbench-test.log' ($o -split "`n" | Select-Object -Last 20 | Out-String)

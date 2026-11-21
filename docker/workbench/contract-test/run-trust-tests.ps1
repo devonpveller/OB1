@@ -19,8 +19,8 @@
 #   1. stages the REAL initdb chain from docker-compose.yml
 #   2. one internal network on the pinned /25
 #   3. builds openbrain-workbench:wt-<id> (its test gate runs src/contracts/ incl. trust_test.ts), its test
-#      stage, and openbrain-wiki-viewer:wt-<id> (its workspace stage runs vitest incl.
-#      test/trust-panels.test.tsx); with -Red the workbench and viewer come from -BaseSha
+#      stage, and openbrain-wiki-viewer:wt-<id> (its build gate: the renderer's node tests);
+#      with -Red the workbench and viewer come from -BaseSha
 #   4. the lab: database (chain + fixtures.sql, ob_app_memory non-superuser), stub embedder, stub research
 #      service, stub egress proxy, PostgREST + the OB1 rest Caddy, the viewer, the workbench (vault = a temp
 #      dir, WORKSPACE_IDENTITY_HEADER=X-Test-Sub for the two users)
@@ -215,8 +215,6 @@ try {
     Check ($script:rc -eq 0) "$viewerTag built (its build gate: the renderer's node tests)"
     if ($script:rc -ne 0) { throw 'build viewer' }
     $script:made.images += $viewerTag
-    $vt = ([regex]'Tests\s+(\d+) passed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
-    if ($vt.Success) { Pass "workspace unit tests in the image build: $($vt.Groups[1].Value) passed" }
   }
   $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb; Save 'build-workbench-test.log' ($o -split "`n" | Select-Object -Last 30 | Out-String)
   Check ($script:rc -eq 0) "$wbTestTag (the test stage of THIS tree) built"

@@ -405,7 +405,7 @@ try {
     console.log('guard csrf', csrf.status, 'no-origin', noOrigin.status, 'rebind', rebind, 'own-origin', /viewer's own origin|answers for/.test(ownBody) ? 'GUARDED' : 'reached-workbench');"
   Save 'edge-viewer.log' $edge
   if ($Red -and -not $baseChain) { Check ($edge -match 'workspace \d+ ' -and $edge -notmatch 'workspace 200 workspace true') 'RED: the base viewer does not serve /workspace' }
-  else { Check ($edge -match 'workspace 404 null false') 'the removed /workspace answers a plain 404 (rwr-remove-workspace)' }
+  elseif (-not $Red) { Check ($edge -match 'workspace 404 null false') 'the removed /workspace answers a plain 404 (rwr-remove-workspace)' }
   Check ($edge -match 'forwarded 200 direct-with-forged-key 401') 'the viewer forwards /workbench/* with the key injected server-side; a client key is never trusted'
   if (-not $Red) { Check ($edge -match 'guard csrf 403 no-origin 403 rebind 421 own-origin reached-workbench') 'the forwarder refuses a cross-origin or Origin-less write (403) and a rebound Host (421); a write from the viewer''s own origin reaches the workbench' }
 
