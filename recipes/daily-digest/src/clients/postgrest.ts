@@ -4,6 +4,8 @@
  * about sections, rendering, or HTTP servers.
  */
 
+
+import { restAuthHeaders } from "./rest-auth.ts";
 export interface Thought {
   id: number;
   content: string;
@@ -134,7 +136,7 @@ export class BrainClient {
   }): Promise<Array<{ id: number; content: string; metadata: Record<string, unknown> | null; similarity: number }>> {
     const res = await fetch(`${this.baseUrl}/rest/v1/rpc/match_thoughts`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...restAuthHeaders() },
       body: JSON.stringify({
         query_embedding: opts.embedding,
         match_threshold: opts.threshold ?? 0.5,
@@ -152,7 +154,7 @@ export class BrainClient {
 
   private async getJson<T>(path: string): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", ...restAuthHeaders() },
     });
     if (!res.ok) {
       const msg = await res.text().catch(() => "");

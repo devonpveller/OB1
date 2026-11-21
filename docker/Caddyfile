@@ -1,18 +1,21 @@
 # Maps the Supabase REST convention the wiki-compiler scripts expect
 # (`${OPEN_BRAIN_URL}/rest/v1/<table>` and `/rest/v1/rpc/<fn>`) onto
 # raw PostgREST (which serves `/<table>` and `/rpc/<fn>` at root).
-# Local only; obnet. Keeps the recipe scripts unmodified.
+# Local only; obnet + the loopback host port.
+#
+# rw-rest-door-auth: the door asks who is calling. A /rest/v1 request without
+# `Authorization: Bearer <token>` is answered 401 here and never reaches
+# PostgREST; with one, the header goes through and PostgREST verifies the
+# token (HS256, OB_REST_JWT_SECRET) and runs the request as the role the
+# token names - one role per caller, holding only what that caller uses
+# (slot 450, init-rest-door-auth.sql). `apikey` (a Supabase/Kong convention
+# PostgREST ignores) is still dropped. The health paths (/healthz and /)
+# answer here, without a credential, as before.
 :80 {
 	handle_path /rest/v1/* {
-		# Strip client auth headers. PostgREST runs with no JWT secret
-		# (db-anon-role = service_role, app-layer single-user trust). Any
-		# inbound `Authorization: Bearer <key>` — sent unconditionally by
-		# supabase-js and the recipe sbClient — triggers PGRST300
-		# "Server lacks JWT secret". Removing it lets every caller fall
-		# through to the anon=service_role identity. `apikey` is a
-		# Supabase/Kong convention PostgREST ignores; drop it too.
+		@nocredential not header_regexp Authorization ^Bearer\s+\S+
+		respond @nocredential "credentials required" 401
 		reverse_proxy openbrain-postgrest:3000 {
-			header_up -Authorization
 			header_up -apikey
 		}
 	}

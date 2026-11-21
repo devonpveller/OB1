@@ -40,7 +40,7 @@ export async function notify({ cls, subject, slug = null, entity = null, error =
     try {
       const r = await fetch(`${OB_URL()}/rest/v1/rpc/post_research_notification`, {
         method: "POST",
-        headers: { "content-type": "application/json", apikey: "local-trust" },
+        headers: { "content-type": "application/json", ...restAuth() },
         body: JSON.stringify({ p_class: cls, p_subject: subject, p_slug: slug, p_entity: entity == null ? null : String(entity), p_error: err }),
         signal: AbortSignal.timeout(5000),
       });
@@ -76,4 +76,12 @@ export function forgetNotification({ cls, subject, slug = null, entity = null })
 export function _resetNotifyForTests() {
   _posted.clear();
   _rpcMissing = false;
+}
+
+// rw-rest-door-auth: the REST door (openbrain-rest -> PostgREST) refuses a request that does not carry this caller's own
+// token - a JWT minted per caller whose role holds only what the caller uses. OPEN_BRAIN_REST_TOKEN, or
+// OPEN_BRAIN_SERVICE_KEY (the name the wiki compile hands its child scripts). No token = no header = 401 at the door.
+function restAuth() {
+  const t = String(process.env.OPEN_BRAIN_REST_TOKEN || process.env.OPEN_BRAIN_SERVICE_KEY || "").trim();
+  return t && t !== "local-trust" ? { authorization: `Bearer ${t}` } : {};
 }

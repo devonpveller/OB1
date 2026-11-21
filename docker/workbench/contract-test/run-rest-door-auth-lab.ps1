@@ -1,0 +1,686 @@
+# run-rest-door-auth-lab.ps1 - the lab for rw-rest-door-auth (slot 450, init-rest-door-auth.sql).
+#
+# Stands up, on ONE --internal bridge (-Subnet, a fresh /24) and nothing else: the REAL initdb chain of the tree
+# (from docker-compose.yml), a real PostgREST v12.2.3 configured as compose configures openbrain-postgrest, the
+# real Caddyfile as openbrain-rest, and a node probe (rest-door-probe.mjs). Synthetic data only. Never a live
+# container, never the live database, no published port, nothing on ai-stack_* / open-brain_*, no :local image,
+# zero leftovers (everything is labelled ai-stack.harness.owner=<Id> and removed; the run checks).
+#
+# GREEN (default): the chain WITHOUT slot 450 first (the live database's state), a snapshot of what every
+# non-door role can execute, then slot 450 by psql as the live deploy runs it (twice), the snapshot again, the door
+# switched on (the REAL mint script makes the lab's secret, password and tokens), the probe's cases, then the
+# revert round-trip. -Red: the same against -BaseSha (the base's chain, the base's compose PostgREST settings and
+# Caddyfile, no slot 450): every case must FAIL (RED-OK), proving the checks see the defect.
+#
+#   powershell -NoProfile -File run-rest-door-auth-lab.ps1 -Subnet 10.231.7.0/24 -Evidence <empty dir>
+#   powershell -NoProfile -File run-rest-door-auth-lab.ps1 -Subnet 10.231.8.0/24 -Evidence <empty dir> -Red
+#
+# Cases (the test plan's numbering): 1 unauthenticated (generated list, both doors) | 2 each caller with its own
+# token + least privilege (generated per role) | 3 forged / borrowed claims | 4 owners | 5 PUBLIC + direct-Postgres
+# continuity (catalog) | 6 health paths | 7 revert round-trip (GREEN only).
+# Exit 0 = every check passed (with -Red: every case FAILED as it should).
+param(
+  [string]$Id = 'wt-rw-rest-door-auth',
+  [string]$Subnet = '',
+  [string]$Evidence = '',
+  [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
+  [string]$PgrstImage = 'postgrest/postgrest:v12.2.3',
+  [string]$CaddyImage = 'caddy:2-alpine',
+  [string]$NodeImage = 'node:22-slim',
+  [string]$BaseSha = '5566c18',   # development's pin before this item (440 + 460 + 470 + mcp-identity, no 450)
+  [switch]$Red,
+  [switch]$Keep,
+  # the slot-450 file the lab applies by psql (default: this tree's); a RED run of cases 9 / 11 passes an older one
+  [string]$Init450 = ''
+)
+$ErrorActionPreference = 'Continue'
+if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
+. (Join-Path $PSScriptRoot 'harness-subnet.ps1')
+$w = Test-HarnessSubnet $Subnet
+if ($w) { Write-Host "REFUSED: $w"; exit 2 }
+$subnets = Split-HarnessSubnet $Subnet
+if ($Evidence -and (Test-Path $Evidence) -and @(Get-ChildItem -Force $Evidence).Count) { Write-Host "REFUSED: -Evidence $Evidence is not empty"; exit 2 }
+
+$label = "ai-stack.harness.owner=$Id"
+$ct = $PSScriptRoot
+$wb = Split-Path -Parent $ct
+$dockerDir = Split-Path -Parent $wb
+$init450 = if ($Init450) { (Resolve-Path $Init450).Path } else { Join-Path $dockerDir 'init-rest-door-auth.sql' }
+$ob1 = Split-Path -Parent $dockerDir
+$short = ($Id -replace '^wt-', '')
+$rand = -join ((48..57 + 97..102) | Get-Random -Count 6 | ForEach-Object { [char]$_ })
+$P = "rda-$rand"
+$net = "$P-net"
+$pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+$appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "$P-evidence" }
+$evStage = Join-Path $env:TEMP "$P-evstage"; New-Item -ItemType Directory -Force $evStage | Out-Null
+$stage = Join-Path $env:TEMP "$P-initdb"
+$work = Join-Path $env:TEMP "$P-work"; New-Item -ItemType Directory -Force $work | Out-Null
+$script:fail = 0
+$script:made = @{ net = $false; containers = @(); dirs = @($evStage, $stage, $work) }
+$summary = [ordered]@{}
+function Pass([string]$m) { Write-Host "  PASS  $m" }
+function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
+function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
+function RedCheck([bool]$defectShown, [string]$id, [string]$m) {
+  if ($defectShown) { Write-Host "  RED-OK [$id] $m"; $summary[$id] = 'RED' } else { Write-Host "  RED-UNEXPECTED-PASS [$id] $m"; $script:fail++; $summary[$id] = 'UNEXPECTED-PASS' }
+}
+function Save([string]$name, [string]$text) { [System.IO.File]::WriteAllText((Join-Path $evStage $name), $text, (New-Object System.Text.UTF8Encoding $false)) }
+
+# -- the lab docker shim (as run-workspace-tests.ps1) -------------------------------------------------------
+function Test-LabDockerArgs([string[]]$a) {
+  $all = ($a -join ' ')
+  if ($a.Count -and $a[0] -eq 'compose') { return 'docker compose is never used by the lab' }
+  if ($all -match '192\.168\.') { return 'a 192.168.x address' }
+  if ($all -match '(^|[\s=:/])(ai-stack_|open-brain_)') { return 'an ai-stack_* / open-brain_* name' }
+  for ($i = 0; $i -lt $a.Count; $i++) {
+    $x = $a[$i]
+    if ($x -match '^(-p|-P|--publish|--publish-all)$' -or $x -match '^--publish(-all)?=' -or $x -match '^-p\d') { return "a published port ($x)" }
+    if ($x -match '^--net(work)?$') { $v = $a[$i + 1]; if ($v -ne $net -and $v -ne 'none') { return "network '$v' is not this run's" } }
+    if ($x -match '^--net(work)?=(.+)$') { if ($Matches[2] -ne $net -and $Matches[2] -ne 'none') { return "network '$($Matches[2])' is not this run's" } }
+    if ($x -match '(^|[/=])[^ ]*:local$' -and $a[0] -notin @('images', 'image')) { return "a :local image ($x)" }
+  }
+  if ($all -match 'macvlan|ipvlan') { return 'a macvlan / ipvlan driver' }
+  if ($a.Count -ge 2 -and $a[0] -eq 'network' -and $a[1] -eq 'create') {
+    if ($a -notcontains '--internal') { return 'a network that is not --internal' }
+    if (($a -join ' ') -notmatch [regex]::Escape("--subnet $($subnets.run)")) { return 'a network not on the pinned subnet' }
+  }
+  if ($a.Count -and $a[0] -eq 'build') { return 'this lab builds no image' }
+  return ''
+}
+function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
+  $why = Test-LabDockerArgs $a
+  if ($why) { Write-Host "  SHIM REFUSED: $why :: docker $($a -join ' ')"; $script:rc = 2; $script:fail++; return "REFUSED: $why" }
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = 'docker'
+  $psi.Arguments = ($a | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join ' '
+  $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false
+  $p = [System.Diagnostics.Process]::Start($psi)
+  $out = $p.StandardOutput.ReadToEndAsync(); $err = $p.StandardError.ReadToEndAsync()
+  if (-not $p.WaitForExit($TimeoutSec * 1000)) { try { $p.Kill() } catch { }; $script:rc = 124; return "TIMEOUT after ${TimeoutSec}s" }
+  $p.WaitForExit()
+  $script:rc = $p.ExitCode
+  return (($out.Result + $err.Result) -replace "`r", '').TrimEnd()
+}
+function Dk { Lab-Docker 300 ([string[]]$args) }
+function DkLong { Lab-Docker 1800 ([string[]]$args) }
+$shimCases = @(@('run', '-p', '8080:8080', 'x'), @('run', '--network', 'ai-stack_app-net', 'x'), @('network', 'create', 'n'),
+  @('run', 'openbrain-workbench:local'), @('compose', 'up'), @('build', '-t', 'x:wt-a', '.'), @('run', '--publish=1:1', 'x'))
+$shimRefused = @($shimCases | Where-Object { Test-LabDockerArgs $_ }).Count
+Check ($shimRefused -eq $shimCases.Count) "the lab docker shim refuses every forbidden shape ($shimRefused / $($shimCases.Count))"
+function LocalSnapshot { (Dk images --filter 'reference=*:local' --format '{{.Repository}}:{{.Tag}} {{.ID}}' | Out-String).Trim() -split "`n" | Sort-Object }
+$localBefore = LocalSnapshot
+function Run-Detached([string]$name, [string[]]$extra) {
+  $o = Dk run -d --name $name --label $label --network $net @extra
+  if ($script:rc -ne 0) { Fail "$name did not start: $o"; return $false }
+  $script:made.containers += $name
+  return $true
+}
+. (Join-Path $ct 'rest-door-lab.ps1')
+function Psql([string]$sql) {
+  $f = Join-Path $work ("q-" + [guid]::NewGuid().ToString('n') + '.sql')
+  [System.IO.File]::WriteAllText($f, $sql, (New-Object System.Text.UTF8Encoding $false))
+  $null = Dk cp $f "${db}:/tmp/q.sql"
+  $o = Dk exec $db psql -U postgres -d openbrain -X -q -tA -v ON_ERROR_STOP=1 -f /tmp/q.sql
+  Remove-Item -Force $f
+  return $o
+}
+function PsqlFile([string]$path, [string]$PgOptions = '') {
+  $null = Dk cp $path "${db}:/tmp/f.sql"
+  if ($PgOptions) { return (Dk exec -e "PGOPTIONS=$PgOptions" $db psql -U postgres -d openbrain -X -v ON_ERROR_STOP=1 -f /tmp/f.sql) }
+  return (Dk exec $db psql -U postgres -d openbrain -X -v ON_ERROR_STOP=1 -f /tmp/f.sql)
+}
+# the function ACLs as a set (NULL = its default), and what every non-door role can execute
+$aclSql = @"
+SELECT md5(COALESCE(string_agg(x, E'\n' ORDER BY x), '')) FROM (
+  SELECT p.oid::regprocedure::text || ' ' || COALESCE((SELECT string_agg(a.grantee::regrole::text || '=' || a.privilege_type, ',' ORDER BY a.grantee::regrole::text, a.privilege_type)
+           FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a WHERE a.grantee <> 0), '') ||
+         CASE WHEN EXISTS (SELECT 1 FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a WHERE a.grantee = 0) THEN ' PUBLIC' ELSE '' END AS x
+    FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace) s;
+"@
+$execSql = @"
+SELECT r.rolname || ' ' || p.oid::regprocedure::text FROM pg_proc p CROSS JOIN pg_roles r
+ WHERE p.pronamespace = 'public'::regnamespace AND NOT r.rolsuper AND r.rolname !~ '^pg_' AND r.rolname !~ '^ob_rest_'
+   AND r.rolname NOT IN ('anon', 'authenticated') AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
+ ORDER BY 1;
+"@
+
+try {
+  Write-Host "== rw-rest-door-auth lab  owner=$Id  net=$net  red=$([bool]$Red)  evidence=$Evidence"
+  $sha = (& git -C $ob1 rev-parse HEAD).Trim()
+  # ------------------------------------------------------------ 1. the chain
+  Write-Host '[1] the initdb chain, from docker-compose.yml'
+  $chainDir = $dockerDir
+  if ($Red) {
+    $baseTree = Join-Path $env:TEMP "$P-base"
+    New-Item -ItemType Directory -Force $baseTree | Out-Null
+    $script:made.dirs += $baseTree
+    $tar = Join-Path $env:TEMP "$P-base.tar"
+    & git -C $ob1 archive --format=tar -o $tar $BaseSha docker integrations/intake
+    & (Join-Path $env:SystemRoot 'System32\tar.exe') -xf $tar -C $baseTree
+    Remove-Item -Force $tar
+    $chainDir = Join-Path $baseTree 'docker'
+  }
+  $compose = Get-Content -Raw (Join-Path $chainDir 'docker-compose.yml')
+  $rx = [regex]'(\.{1,2}/[A-Za-z0-9_./-]+\.sql):/docker-entrypoint-initdb\.d/([0-9]{3}-[a-z0-9.-]+\.sql)'
+  New-Item -ItemType Directory -Force $stage | Out-Null
+  $chain = @($rx.Matches($compose) | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
+  $slot450 = @($chain | Where-Object { $_[1] -eq '450-init-rest-door-auth.sql' })
+  if (-not $Red) { Check ($slot450.Count -eq 1) "the compose chain mounts 450-init-rest-door-auth.sql ($($chain.Count) migrations)" }
+  # the live database is at the chain WITHOUT slot 450; 450 is applied by psql below, as the deploy does
+  foreach ($m in $chain) { if ($m[1] -notin @('450-init-rest-door-auth.sql', '990-init-rest-door-auth-final.sql')) { Copy-Item (Join-Path $chainDir $m[0]) (Join-Path $stage $m[1]) } }
+
+  # ------------------------------------------------------------ 2. network + database
+  Write-Host '[2] the internal network and the database'
+  $null = Dk network create --driver bridge --internal --subnet $subnets.run --label $label $net
+  Check ($script:rc -eq 0) "network $net (internal, $($subnets.run))"
+  if ($script:rc -ne 0) { throw 'network' }
+  $script:made.net = $true
+  $db = "$P-db"
+  if (-not (Run-Detached $db @('--network-alias', 'openbrain-db', '-e', "POSTGRES_PASSWORD=$pw", '-e', 'POSTGRES_DB=openbrain', '-v', "${stage}:/docker-entrypoint-initdb.d:ro", $PgImage))) { throw 'db' }
+  for ($i = 0; $i -lt 150; $i++) { if ((Dk logs $db) -match 'PostgreSQL init process complete') { break }; Start-Sleep -Seconds 2 }
+  for ($i = 0; $i -lt 60; $i++) { $null = Dk exec $db pg_isready -h 127.0.0.1 -U postgres -d openbrain; if ($script:rc -eq 0) { break }; Start-Sleep -Seconds 2 }
+  $logs = Dk logs $db
+  Check ($logs -match 'PostgreSQL init process complete') 'the database ran the initdb chain'
+  $errs = @(($logs -split "`n") | Where-Object { $_ -match 'ERROR:' })
+  Check ($errs.Count -eq 0) "initdb logged no ERROR ($($errs.Count))"
+  if ($errs.Count) { Save 'initdb-errors.log' ($errs -join "`n") }
+  # the production shape of the direct-Postgres roles: ob_app_memory LOGIN in service_role; ob_plane_personal / intake /
+  # ob_pantry come from the chain where it has them
+  $null = Psql "DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') THEN CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role; END IF; END `$`$;"
+  Check ($script:rc -eq 0) 'ob_app_memory (LOGIN, member of service_role) - the production shape'
+  # int3 (stacked on rw-owner-private-view, development OB1 310b865): the slots that grant to ob_app_memory / ob_workbench BY
+  # NAME (420, 460, 580 - the boundary slots - and 480) ran in initdb before ob_app_memory existed; on live they ran with it
+  # present. So they run again here, in the restore runbook's order (boundary slots, then 480), before 450, as
+  # run-workspace-tests.ps1 does - and 480 makes ob_workbench (the workbench's login) a member of ob_app_memory.
+  $namedSlots = @('420-init-request-boundary.sql', '460-init-boundary-digest.sql', '580-init-boundary-ideas.sql', '480-init-owner-private-view.sql')
+  foreach ($n in $namedSlots) {
+    $m = @($chain | Where-Object { $_[1] -eq $n })
+    if ($m.Count -eq 1) {
+      $gx = PsqlFile (Join-Path $chainDir $m[0][0]); Save "rerun-$n.log" $gx
+      Check ($script:rc -eq 0) "$n run again after ob_app_memory exists (its named grants; exit $($script:rc))"
+    }
+  }
+  $has480 = @($chain | Where-Object { $_[1] -eq '480-init-owner-private-view.sql' }).Count -eq 1
+  if ($has480) {
+    $mem480 = (Psql "SELECT pg_has_role('ob_workbench', 'ob_app_memory', 'MEMBER')::text").Trim()
+    Check ($mem480 -eq 'true') "[480] ob_workbench (the workbench's own login, slot 480) is a member of ob_app_memory before 450 ($mem480)"
+  }
+
+  # ------------------------------------------------------------ 3. seed (synthetic)
+  Write-Host '[3] synthetic rows'
+  $seedSql = Get-Content -Raw (Join-Path $ct 'rest-door-fixtures.sql')
+  $o = Psql $seedSql
+  Check ($script:rc -eq 0 -and $o -notmatch 'ERROR') "fixtures applied$(if ($script:rc -ne 0) { ": $o" })"
+  $seed = @{}
+  foreach ($l in ((Psql "SELECT k || '=' || v FROM lab.seed ORDER BY k") -split "`n")) { if ($l -match '^([A-Za-z0-9_]+)=(.*)$') { $seed[$Matches[1]] = $Matches[2] } }
+  Save 'seed.txt' (($seed.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)=$($_.Value)" }) -join "`n")
+
+  # ------------------------------------------------------------ 4. slot 450 by psql (GREEN), the continuity snapshot
+  $aclBefore = (Psql $aclSql).Trim()
+  $execBefore = @((Psql $execSql) -split "`n" | Where-Object { $_ })
+  Save 'exec-before.txt' ($execBefore -join "`n")
+  Write-Host "[4] slot 450 $(if ($Red) { '(not in the base)' } else { 'by psql, twice' })"
+  if (-not $Red) {
+    $o1 = PsqlFile $init450; $rc1 = $script:rc; Save '450-run1.log' $o1
+    Check ($rc1 -eq 0) "init-rest-door-auth.sql ran (exit $rc1): $((($o1 -split "`n") | Where-Object { $_ -match 'NOTICE' }) -join ' | ')"
+    $aclAfter = (Psql $aclSql).Trim()
+    $o2 = PsqlFile $init450; $rc2 = $script:rc; Save '450-run2.log' $o2
+    Check ($rc2 -eq 0 -and $o2 -match '0 function grant\(s\) made in place of PUBLIC') "a second run changes nothing it has not already (exit $rc2): $((($o2 -split "`n") | Where-Object { $_ -match 'NOTICE' }) -join ' | ')"
+    Check ((Psql $aclSql).Trim() -eq $aclAfter) 'the function ACLs after run 2 equal those after run 1'
+  }
+  $execAfter = @((Psql $execSql) -split "`n" | Where-Object { $_ })
+  Save 'exec-after.txt' ($execAfter -join "`n")
+  # round 6 (case 10): every role's function EXECUTE and table privileges in public (not superusers, pg_*, or this lab's
+  # own lab_* roles), taken HERE for the live order - right after 450 by psql, before cases 7 / 9 revert and restore
+  $allSql = @"
+SELECT r.rolname || ' F ' || p.oid::regprocedure::text FROM pg_roles r CROSS JOIN pg_proc p
+ WHERE p.pronamespace = 'public'::regnamespace AND NOT r.rolsuper AND r.rolname !~ '^(pg_|lab_)' AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
+UNION ALL
+SELECT r.rolname || ' T ' || c.relname || ' ' || pr FROM pg_roles r CROSS JOIN pg_class c CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) pr
+ WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r','v','m','p') AND NOT r.rolsuper AND r.rolname !~ '^(pg_|lab_)' AND has_table_privilege(r.oid, c.oid, pr)
+ORDER BY 1;
+"@
+  $allLive = if ($Red) { @() } else { @((Psql $allSql) -split "`n" | Where-Object { $_ }) }
+
+  # ------------------------------------------------------------ 5. case 5: PUBLIC and the direct-Postgres roles (catalog)
+  Write-Host '[5] case 5 - PUBLIC runs nothing; every direct-Postgres role keeps every function it could run'
+  $pubCount = [int]((Psql "SELECT count(*) FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND has_function_privilege('public', p.oid, 'EXECUTE')").Trim())
+  $lost = @($execBefore | Where-Object { $execAfter -notcontains $_ })
+  Save 'exec-lost.txt' ($lost -join "`n")
+  $newFn = (Psql @"
+CREATE OR REPLACE FUNCTION public.lab_after_450() RETURNS int LANGUAGE sql AS 'SELECT 1';
+SELECT has_function_privilege('public', 'public.lab_after_450()', 'EXECUTE')::text || ' ' || has_function_privilege('service_role', 'public.lab_after_450()', 'EXECUTE')::text
+  || ' ' || has_function_privilege('ob_app_memory', 'public.lab_after_450()', 'EXECUTE')::text;
+DROP FUNCTION public.lab_after_450();
+"@).Trim()
+  $roles = (@($execBefore | ForEach-Object { ($_ -split ' ')[0] }) | Sort-Object -Unique) -join ','
+  if ($Red) {
+    RedCheck ($pubCount -gt 0 -and $newFn -match '^true') '5-public' "the base: PUBLIC can run $pubCount public function(s); a new function is PUBLIC-executable ($newFn)"
+  } else {
+    $ok5 = ($pubCount -eq 0) -and ($lost.Count -eq 0) -and ($newFn -eq 'false true true')
+    Check ($pubCount -eq 0) "[5-public] PUBLIC can run 0 public functions ($pubCount)"
+    Check ($lost.Count -eq 0) "[5-public] every (role, function) a non-door role could execute before 450 it still can ($($execBefore.Count) pairs over roles $roles; lost $($lost.Count))"
+    Check ($newFn -eq 'false true true') "[5-public] a function created after 450 is not PUBLIC-executable; service_role and ob_app_memory can run it ($newFn)"
+    $summary['5-public'] = if ($ok5) { 'GREEN' } else { 'FAIL' }
+  }
+
+  # ------------------------------------------------------------ 6. the door
+  Write-Host '[6] the door: PostgREST as compose configures it, the Caddyfile'
+  if ($Red) {
+    # the base's posture, read from the base compose: login postgres, anon = service_role; the base Caddyfile
+    $pgr = [regex]::Match($compose, '(?s)  openbrain-postgrest:.*?environment:\s*\n(.*?)\n    networks:').Groups[1].Value
+    Check ($pgr -match 'PGRST_DB_ANON_ROLE: service_role') 'RED: the base compose runs PostgREST with anon = service_role'
+    $door = Start-LabRestDoor -Db $db -Pw $pw -CaddyFile (Join-Path $chainDir 'Caddyfile')
+    # the base has no secret: the probe still needs one to forge tokens with
+    $door.Secret = -join ((48..57 + 97..102) | Get-Random -Count 64 | ForEach-Object { [char]$_ })
+    foreach ($k in @('WIKI', 'VIEWER', 'ENTITY', 'DIGEST', 'PODCAST', 'GMAIL_PULL', 'GMAIL_PRUNE')) { $door.Tokens[$k] = 'lab-no-token-at-the-base' }
+  } else {
+    $pgr = [regex]::Match($compose, '(?s)  openbrain-postgrest:.*?environment:\s*\n(.*?)\n    networks:').Groups[1].Value
+    Check ($pgr -notmatch 'PGRST_DB_ANON_ROLE' -and $pgr -match 'ob_rest_authenticator' -and $pgr -match 'PGRST_JWT_SECRET' -and $pgr -match 'PGRST_JWT_AUD: openbrain-rest') 'compose: openbrain-postgrest logs in as ob_rest_authenticator, has the JWT secret and audience, and no anonymous role'
+    $door = Start-LabRestDoor -Db $db -Pw $pw
+    Check ($door.Door -eq 'auth' -and $door.Tokens.Count -eq 8) "the REAL mint script made the lab secret, the authenticator password and $($door.Tokens.Count) caller tokens (values not shown)"
+  }
+  $null = Psql "NOTIFY pgrst, 'reload schema';"
+  Start-Sleep -Seconds 4
+
+  # ------------------------------------------------------------ 7. the catalog the probe works from (generated)
+  $catJson = (Psql @"
+WITH rels AS (
+  SELECT c.relname FROM pg_class c LEFT JOIN pg_depend d ON d.objid = c.oid AND d.deptype = 'e'
+   WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'v', 'm', 'p', 'f') AND d.objid IS NULL),
+fns AS (
+  SELECT DISTINCT ON (p.proname) p.proname,
+         CASE WHEN p.proargnames IS NULL THEN '[]'::json ELSE
+         COALESCE((SELECT json_agg(n ORDER BY i) FROM unnest(p.proargnames, COALESCE(p.proargmodes, array_fill('i'::"char", ARRAY[cardinality(p.proargnames)]))) WITH ORDINALITY AS u(n, m, i)
+                    WHERE m IN ('i', 'b', 'v') AND n <> ''), '[]'::json) END AS args,
+         pg_get_function_identity_arguments(p.oid) AS ident, p.pronargs AS nargs
+    FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prokind = 'f'
+     AND p.prorettype <> 'trigger'::regtype
+   ORDER BY p.proname, p.pronargs DESC),
+door AS (SELECT rolname FROM pg_roles WHERE rolname ~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune|import)$')
+SELECT json_build_object(
+  'relations', (SELECT json_agg(relname ORDER BY relname) FROM rels),
+  'functions', (SELECT json_agg(json_build_object('name', proname, 'args', args, 'nargs', nargs) ORDER BY proname) FROM fns),
+  'ownerFns', (SELECT json_agg(json_build_object('name', proname, 'args', args) ORDER BY proname) FROM fns
+                WHERE ident ~* '\m(p_owner|p_owner_sub|p_sub|p_user_id|p_requester)\M' OR proname IN ('research_job_report_owner', 'setting_get', 'setting_problem', 'user_setting_set')),
+  -- private: every relation that records whose a row is (an owner / requester / actor / user column), plus the stores of
+  -- private material that carry no such column - generated, so a slot that adds an owner-stamped table is covered
+  'privateRels', (SELECT json_agg(relname ORDER BY relname) FROM rels WHERE relname IN (
+                  SELECT c.relname FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+                   WHERE c.relnamespace = 'public'::regnamespace AND a.attnum > 0 AND NOT a.attisdropped
+                     AND a.attname IN ('owner_sub', 'requester_sub', 'actor_sub', 'user_id', 'owner')
+                  UNION SELECT unnest(ARRAY['ideas', 'idea_revisions', 'idea_schedule', 'user_settings', 'research_private_reports',
+                  'research_private_report_claims', 'user_document_listings', 'workspace_rooms', 'workspace_room_entries',
+                  'workspace_users', 'workspace_impersonation', 'refinery_user_sources', 'idea_thought_archive', 'idea_wiki_archive',
+                  'admin_audit', 'held_sources']))),
+  'hasTranscript', EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('public.podcast_episodes') AND attname = 'transcript' AND NOT attisdropped),
+  'has470', to_regclass('public.inlet_connections') IS NOT NULL,
+  'settingKeys', (SELECT COALESCE(json_agg(json_build_object('key', key, 'tier', tier) ORDER BY key), '[]') FROM public.settings_keys),
+  'allowed', (SELECT COALESCE(json_object_agg(d.rolname, json_build_object(
+                'relations', (SELECT COALESCE(json_agg(relname ORDER BY relname), '[]') FROM rels WHERE has_table_privilege(d.rolname, ('public.' || quote_ident(relname))::regclass, 'SELECT')),
+                'functions', (SELECT COALESCE(json_agg(DISTINCT p.proname), '[]') FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND has_function_privilege(d.rolname, p.oid, 'EXECUTE')))), '{}') FROM door d)
+);
+"@).Trim()
+  Save 'catalog-raw.txt' $catJson
+  $catJson = (($catJson -split "`n") | Where-Object { $_ -match '^\{' }) -join ''
+  Save 'catalog.json' $catJson
+  [System.IO.File]::WriteAllText((Join-Path $work 'catalog.json'), $catJson, (New-Object System.Text.UTF8Encoding $false))
+  $cat = $catJson | ConvertFrom-Json
+  Check ($cat.relations.Count -gt 100 -and $cat.functions.Count -gt 50) "the generated list: $($cat.relations.Count) relations, $($cat.functions.Count) functions, $($cat.ownerFns.Count) owner-argument functions, $($cat.privateRels.Count) private relations"
+
+  if (-not $Red) {
+    $tc = (Psql @"
+SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass('public.podcast_episodes') AND attname = 'transcript' AND NOT attisdropped) THEN 'no-column'
+  ELSE (SELECT string_agg(r.rolname || ':' || has_column_privilege(r.rolname, 'public.podcast_episodes', 'transcript', 'SELECT')::text || '/' ||
+                          has_column_privilege(r.rolname, 'public.podcast_episodes', 'transcript', 'UPDATE')::text, ' ' ORDER BY r.rolname)
+          FROM pg_roles r WHERE r.rolname ~ '^ob_rest_(wiki|viewer|entity|digest|podcast|gmail_pull|gmail_prune)$') END;
+"@).Trim()
+    Check ($tc -eq 'no-column' -or ($tc -match 'ob_rest_podcast:true/true' -and ($tc -replace 'ob_rest_podcast:true/true', '') -notmatch 'true')) "[2-least] podcast_episodes.transcript: only ob_rest_podcast reads / updates it ($tc)"
+  }
+  # round 6: every relation and function slot 440 / 470 created (generated: inlet_* names), and what each door role
+  # holds on it - the map lines for them (inlet_connection_owner x4, inlet_connection_mail for the prune, inlet_subject_ok
+  # through the owner CHECKs) and nothing else; written to evidence as the round's door-map table
+  if (-not $Red) {
+    $newObj = (Psql @"
+WITH door AS (SELECT rolname FROM pg_roles WHERE rolname ~ '^ob_rest_'),
+objs AS (
+  SELECT 'rel' AS k, c.relname AS name, c.oid FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r','v','m','p') AND c.relname ~ '^inlet_'
+  UNION ALL SELECT 'fn', p.oid::regprocedure::text, p.oid FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND (p.proname ~ '^(inlet_|trg_inlet_)' OR p.proname = 'match_thoughts'))
+SELECT o.k || ' ' || o.name || ' -> ' || COALESCE((SELECT string_agg(d.rolname || CASE WHEN o.k = 'rel' THEN '(' ||
+         concat_ws(',', CASE WHEN has_table_privilege(d.rolname, o.oid, 'SELECT') THEN 'S' END, CASE WHEN has_table_privilege(d.rolname, o.oid, 'INSERT') THEN 'I' END,
+                        CASE WHEN has_table_privilege(d.rolname, o.oid, 'UPDATE') THEN 'U' END, CASE WHEN has_table_privilege(d.rolname, o.oid, 'DELETE') THEN 'D' END) || ')' ELSE '' END, ' ' ORDER BY d.rolname)
+       FROM door d WHERE (o.k = 'rel' AND (has_table_privilege(d.rolname, o.oid, 'SELECT') OR has_table_privilege(d.rolname, o.oid, 'INSERT') OR has_table_privilege(d.rolname, o.oid, 'UPDATE') OR has_table_privilege(d.rolname, o.oid, 'DELETE')))
+          OR (o.k = 'fn' AND has_function_privilege(d.rolname, o.oid, 'EXECUTE'))), 'no door role (fail closed)')
+  FROM objs o ORDER BY o.k, o.name;
+"@).Trim()
+    Save 'door-map-440-470.txt' $newObj
+    $nm = @($newObj -split "`n" | Where-Object { $_ })
+    Write-Host "    the 440 / 470 objects and the door: $($nm.Count) object(s); on a door role: $((@($nm | Where-Object { $_ -notmatch 'fail closed' }) | ForEach-Object { ($_ -split ' -> ')[0] -replace '^(rel|fn) ', '' }) -join '; ')"
+    if ($cat.has470) {
+      $want = @{
+        'fn inlet_connection_owner(text)' = 'ob_rest_digest ob_rest_gmail_pull ob_rest_podcast ob_rest_wiki'
+        'rel inlet_connection_mail' = 'ob_rest_gmail_prune(S,D)'
+      }
+      $onDoor = @($nm | Where-Object { $_ -notmatch 'fail closed' })
+      $bad = @($onDoor | Where-Object { $k = ($_ -split ' -> ')[0]; -not ($want.ContainsKey($k) -and ($_ -split ' -> ')[1] -eq $want[$k]) -and $k -notmatch '^fn (inlet_subject_ok\(text\)|match_thoughts\()' })
+      $miss = @($want.Keys | Where-Object { $k = $_; -not ($onDoor | Where-Object { ($_ -split ' -> ')[0] -eq $k -and ($_ -split ' -> ')[1] -eq $want[$k] }) })
+      $subjOk = @($nm | Where-Object { $_ -match '^fn inlet_subject_ok\(text\) -> ' }) -join ''
+      Check ($bad.Count -eq 0 -and $miss.Count -eq 0) "[2-least] the 440 / 470 objects on the door are exactly the map's lines: inlet_connection_owner (wiki, digest, podcast, gmail pull), inlet_connection_mail S+D (prune), plus inlet_subject_ok through the owner CHECKs and match_thoughts (440's) where a block names it; every other one on no door role (unexpected: $($bad -join '; '); missing: $($miss -join '; '); inlet_subject_ok: $subjOk)"
+    }
+  }
+  # ------------------------------------------------------------ 8. the probe: cases 1, 2, 3, 4, 6
+  Write-Host '[8] the probe'
+  $expected = [ordered]@{
+    ob_rest_wiki = @('contract_registry_view', 'edges', 'entities', 'research_notifications', 'source_entities', 'sources', 'thought_entities', 'thoughts', 'thread_sources', 'threads', 'wiki_pages')
+    ob_rest_viewer = @('wiki_pages')
+    ob_rest_entity = @('edges', 'entities', 'entity_extraction_queue', 'source_entities', 'source_extraction_queue', 'sources', 'thought_entities', 'thoughts')
+    ob_rest_digest = @('thoughts')
+    ob_rest_podcast = @('podcast_episodes', 'podcast_presenters', 'podcast_render_requests', 'podcast_team_members', 'podcast_teams', 'podcast_voice_links', 'thoughts')
+    ob_rest_gmail_pull = @('thoughts')
+    ob_rest_gmail_prune = @('entities', 'thought_entities', 'thoughts')
+    ob_rest_import = @('thoughts')
+  }
+  # round 6: since slot 470 the prune reads and deletes only through its per-connection view, never thoughts itself
+  if ($cat.has470) { $expected['ob_rest_gmail_prune'] = @('entities', 'inlet_connection_mail', 'thought_entities') }
+  $cfg = [ordered]@{
+    rest = 'http://openbrain-rest'; pgrst = 'http://openbrain-postgrest:3000'; red = [bool]$Red; secret = $door.Secret
+    tokens = $door.Tokens; catalogFile = '/work/catalog.json'; expectedMap = $expected; out = '/work/probe-result.json'
+    roles = [ordered]@{ WIKI = 'ob_rest_wiki'; VIEWER = 'ob_rest_viewer'; ENTITY = 'ob_rest_entity'; DIGEST = 'ob_rest_digest'; PODCAST = 'ob_rest_podcast'; GMAIL_PULL = 'ob_rest_gmail_pull'; GMAIL_PRUNE = 'ob_rest_gmail_prune'; IMPORT = 'ob_rest_import' }
+    seed = [ordered]@{
+      owner = 'lab-operator'; other = 'lab-other'; operatorWindow = 48; otherWindow = 6
+      entityId = [int64]$seed.entity_id; entity2Id = [int64]$seed.entity2_id; thoughtId = [int64]$seed.thought_id; pruneThoughtId = [int64]$seed.prune_thought_id
+      sourceId = $seed.source_id; threadId = $seed.thread_id; teamId = $seed.team_id; renderId = $seed.render_id; wikiSlug = $seed.wiki_slug
+      notifyClass = $seed.notify_class; transcriptType = $seed.transcript_type; episodeId = $seed.episode_id
+    }
+  }
+  [System.IO.File]::WriteAllText((Join-Path $work 'probe.json'), ($cfg | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding $false))
+  $o = Lab-Docker 1200 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${ct}:/ct:ro", '-v', "${work}:/work", '--entrypoint', 'node', $NodeImage, '/ct/rest-door-probe.mjs', '/work/probe.json')
+  $probeRc = $script:rc
+  # never keep the lab secret or tokens in evidence: the probe prints neither; the config file stays in $work (removed)
+  Save 'probe.log' $o
+  Write-Host (($o -split "`n" | Where-Object { $_ -match '^(PASS|FAIL|RED-OK|RED-UNEXPECTED-PASS|PROBE|  \[)' }) -join "`n")
+  foreach ($l in ($o -split "`n")) {
+    if ($l -match '^(PASS|FAIL|RED-OK|RED-UNEXPECTED-PASS) \[([0-9a-zA-Z_-]+)\]') {
+      $k = $Matches[2]; $v = @{ PASS = 'GREEN'; FAIL = 'FAIL'; 'RED-OK' = 'RED'; 'RED-UNEXPECTED-PASS' = 'UNEXPECTED-PASS' }[$Matches[1]]
+      if (-not $summary.Contains($k) -or $v -ne 'GREEN') { $summary[$k] = $v }
+    }
+  }
+  Check ($probeRc -eq 0) "the probe exited 0 ($probeRc)"
+  if (Test-Path (Join-Path $work 'probe-result.json')) { Copy-Item (Join-Path $work 'probe-result.json') (Join-Path $evStage 'probe-result.json') }
+
+  # ------------------------------------------------------------ 9. case 7: the revert round-trip (GREEN)
+  if (-not $Red) {
+    Write-Host '[9] case 7 - the revert round-trip'
+    $aclMid = (Psql $aclSql).Trim()
+    $r1 = PsqlFile (Join-Path $dockerDir 'revert-rest-door-auth.sql'); $rr1 = $script:rc; Save 'revert-run1.log' $r1
+    $aclRev = (Psql $aclSql).Trim()
+    $left = (Psql "SELECT count(*) FROM pg_roles WHERE rolname ~ '^ob_rest_'").Trim() + '/' + (Psql "SELECT count(*) FROM pg_namespace WHERE nspname = 'rest_door'").Trim() + '/' +
+      (Psql "SELECT count(*) FROM pg_policy WHERE polname LIKE 'rest\_door\_%'").Trim() + '/' + (Psql "SELECT count(*) FROM pg_proc WHERE proname = 'rest_setting_get'").Trim()
+    $r2 = PsqlFile (Join-Path $dockerDir 'revert-rest-door-auth.sql'); $rr2 = $script:rc; Save 'revert-run2.log' $r2
+    $o3 = PsqlFile $init450; $rr3 = $script:rc; Save '450-run3.log' $o3
+    $aclAgain = (Psql $aclSql).Trim()
+    $ok7 = ($rr1 -eq 0) -and ($aclRev -eq $aclBefore) -and ($left -eq '0/0/0/0') -and ($rr2 -eq 0 -and $r2 -match 'no archive') -and ($rr3 -eq 0) -and ($aclAgain -eq $aclMid)
+    Check ($rr1 -eq 0 -and $aclRev -eq $aclBefore) "[7-revert] after the revert every function's ACL equals the pre-450 one (md5 $aclRev vs $aclBefore)"
+    Check ($left -eq '0/0/0/0') "[7-revert] no door role, no rest_door schema, no copied policy, no rest_setting_get left ($left)"
+    Check ($rr2 -eq 0 -and $r2 -match 'no archive') '[7-revert] a second revert says no archive and changes nothing'
+    Check ($rr3 -eq 0 -and $aclAgain -eq $aclMid) "[7-revert] slot 450 again gives the same ACLs as the first time ($aclAgain)"
+    $summary['7-revert'] = if ($ok7) { 'GREEN' } else { 'FAIL' }
+
+    # ---------------------------------------------------------- 10. case 9: a restore without ACLs, then the re-apply (R1)
+    # documentation/runbooks/restore-from-snapshot.md: pg_dump -Fc, then pg_restore --clean --if-exists --no-owner --no-acl
+    # INTO the existing database, then the grant slots again with 450 last (init-grants.sql, init-pantry.sql, then
+    # init-rest-door-auth.sql).
+    # Every (role, function) pair a non-door role could execute before 450 (case 5's list) must still be executable.
+    Write-Host '[10] case 9 - restore without ACLs (the runbook), then init-grants + init-pantry + 450 again'
+    $d1 = Dk exec $db pg_dump -U postgres -d openbrain -Fc -f /tmp/r450.dump; $rd = $script:rc
+    $d2 = Dk exec $db pg_restore -U postgres -d openbrain --clean --if-exists --no-owner --no-acl /tmp/r450.dump
+    Save 'restore.log' (($d2 -split "`n") | Select-Object -Last 40 | Out-String)
+    $execRestored = @((Psql $execSql) -split "`n" | Where-Object { $_ })
+    $lostRestored = @($execBefore | Where-Object { $execRestored -notcontains $_ })
+    $g1 = PsqlFile (Join-Path $dockerDir 'init-grants.sql'); Save 'restore-init-grants.log' $g1
+    $g2 = PsqlFile (Join-Path $dockerDir 'init-pantry.sql'); Save 'restore-init-pantry.log' $g2   # its own explicit grants (ob_pantry)
+    # round 6: the merged runbook re-applies 440 and 470 before 450 (470 owns the prune's view again - --no-owner gave it
+    # to postgres - and both are re-runnable with nothing to do here)
+    foreach ($sl in @('init-inlet-owner.sql', 'init-inlet-stamp.sql')) {
+      if (Test-Path (Join-Path $dockerDir $sl)) { $gx = PsqlFile (Join-Path $dockerDir $sl); Save "restore-$sl.log" $gx; if ($script:rc -ne 0) { Fail "[9-restore] the runbook's re-apply of $sl failed (exit $($script:rc))" } }
+    }
+    # int3: then the slots that grant by name (the merged runbook: boundary slots 420, 460, 580, then 480), 450 still last
+    foreach ($n in $namedSlots) {
+      $m = @($chain | Where-Object { $_[1] -eq $n })
+      if ($m.Count -eq 1) { $gx = PsqlFile (Join-Path $chainDir $m[0][0]); Save "restore-$n.log" $gx; if ($script:rc -ne 0) { Fail "[9-restore] the runbook's re-apply of $n failed (exit $($script:rc))" } }
+    }
+    $vOwner = (Psql "SELECT COALESCE((SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = to_regclass('public.inlet_connection_mail')), 'none')").Trim()
+    Check ($vOwner -eq 'ob_inlet_stamp_view' -or $vOwner -eq 'none') "[9-restore] the prune's view is its slot's view role's again after the re-apply ($vOwner)"
+    $o9 = PsqlFile $init450; $rr9 = $script:rc; Save 'restore-450.log' $o9
+    $execReapplied = @((Psql $execSql) -split "`n" | Where-Object { $_ })
+    $lost9 = @($execBefore | Where-Object { $execReapplied -notcontains $_ })
+    Save 'restore-exec-lost.txt' ($lost9 -join "`n")
+    $pub9 = (Psql "SELECT count(*) FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND has_function_privilege('public', p.oid, 'EXECUTE')").Trim()
+    Write-Host "    dump exit $rd; after the restore (before the re-apply) $($lostRestored.Count) of $($execBefore.Count) pair(s) missing; 450 again: exit $rr9, $((($o9 -split "`n") | Where-Object { $_ -match 'NOTICE:  rest door: .*(archived|in place of)' } | ForEach-Object { ($_ -split 'NOTICE:  ')[1] }) -join ' | ')"
+    $ok9 = ($rd -eq 0) -and ($rr9 -eq 0) -and ($lost9.Count -eq 0) -and ($pub9 -eq '0')
+    Check ($rr9 -eq 0 -and $lost9.Count -eq 0) "[9-restore] after the runbook's restore and the re-apply every (role, function) pair of case 5 is executable again ($($execBefore.Count) pairs; lost $($lost9.Count): $((($lost9 | Select-Object -First 4) -join '; ')))"
+    Check ($pub9 -eq '0') "[9-restore] PUBLIC runs nothing after the re-apply ($pub9)"
+    # int3: the re-apply must not WIDEN either. --no-acl recreates every function under the default ACLs (service_role holds
+    # EXECUTE), so a function its slot narrowed to ob_app_memory or ob_workbench alone (420, 460, 480, 580) is service_role's
+    # again until that slot runs once more.
+    $gained9 = @($execReapplied | Where-Object { $execBefore -notcontains $_ })
+    Save 'restore-exec-gained.txt' ($gained9 -join "`n")
+    Check ($gained9.Count -eq 0) "[9-restore] after the re-apply no (role, function) pair is executable that was not before 450 (gained $($gained9.Count): $((($gained9 | Select-Object -First 4) -join '; ')))"
+    $ok9 = $ok9 -and ($gained9.Count -eq 0)
+    $summary['9-restore'] = if ($ok9) { 'GREEN' } else { 'FAIL' }
+
+    # ---------------------------------------------------------- 11. case 10: the fresh volume = the live order (R2)
+    # The compose chain as initdb runs it on a FRESH volume (450 in its slot, every later slot, then 990 = 450 again)
+    # must complete with no ERROR, and give the door roles exactly the grants the live order gives (every slot by psql,
+    # 450 last - the main database above, after one more 450 run). A map line of a later slot that exists in this
+    # tree is granted in both.
+    Write-Host '[11] case 10 - a fresh volume (the whole chain, 990 last) gives the door the grants the live order gives'
+    $stageFull = Join-Path $env:TEMP "$P-initdb-full"
+    New-Item -ItemType Directory -Force $stageFull | Out-Null; $script:made.dirs += $stageFull
+    foreach ($m in $chain) { Copy-Item (Join-Path $chainDir $m[0]) (Join-Path $stageFull $m[1]) }
+    $fullHas990 = @($chain | Where-Object { $_[1] -eq '990-init-rest-door-auth-final.sql' }).Count -eq 1
+    $o10 = PsqlFile $init450; $rr10 = $script:rc
+    $db2 = "$P-db2"
+    $null = Run-Detached $db2 @('-e', "POSTGRES_PASSWORD=$pw", '-e', 'POSTGRES_DB=openbrain', '-v', "${stageFull}:/docker-entrypoint-initdb.d:ro", $PgImage)
+    for ($i = 0; $i -lt 150; $i++) { $l2 = Dk logs $db2; if ($l2 -match 'PostgreSQL init process complete' -or $l2 -match 'exited with exit code|FATAL') { break }; Start-Sleep -Seconds 2 }
+    for ($i = 0; $i -lt 60; $i++) { $null = Dk exec $db2 pg_isready -h 127.0.0.1 -U postgres -d openbrain; if ($script:rc -eq 0) { break }; Start-Sleep -Seconds 2 }
+    $l2 = Dk logs $db2
+    $err2 = @(($l2 -split "`n") | Where-Object { $_ -match 'ERROR:' })
+    Save 'fresh-initdb.log' ((($l2 -split "`n") | Where-Object { $_ -match 'ERROR|NOTICE:  rest door|init process|running /docker-entrypoint' }) -join "`n")
+    $fpSql = @"
+WITH door AS (SELECT rolname FROM pg_roles WHERE rolname ~ '^ob_rest_')
+SELECT md5(COALESCE(string_agg(x, E'\n' ORDER BY x), '')) || ' ' || count(*) FROM (
+  SELECT d.rolname || ' T ' || c.relname || ' ' || pr AS x FROM door d CROSS JOIN pg_class c
+    CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) pr
+   WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r','v','m','p') AND has_table_privilege(d.rolname, c.oid, pr)
+  UNION ALL
+  SELECT grantee || ' C ' || table_name || '.' || column_name || ' ' || privilege_type FROM information_schema.column_privileges
+   WHERE table_schema = 'public' AND grantee ~ '^ob_rest_'
+  UNION ALL
+  SELECT d.rolname || ' F ' || p.oid::regprocedure::text FROM door d CROSS JOIN pg_proc p
+   WHERE p.pronamespace = 'public'::regnamespace AND has_function_privilege(d.rolname, p.oid, 'EXECUTE')) s;
+"@
+    $fpLive = (Psql $fpSql).Trim()
+    $f2 = Join-Path $work 'fp.sql'; [System.IO.File]::WriteAllText($f2, $fpSql, (New-Object System.Text.UTF8Encoding $false))
+    $null = Dk cp $f2 "${db2}:/tmp/fp.sql"
+    $fpFresh = ((Dk exec $db2 psql -U postgres -d openbrain -X -q -tA -f /tmp/fp.sql) -split "`n" | Where-Object { $_ -match '^[0-9a-f]{32} ' } | Select-Object -First 1)
+    # the fingerprint's lines too, so a difference names its (role, object)
+    $fpLines = (($fpSql -split "`n") | ForEach-Object { if ($_ -like 'SELECT md5(*') { 'SELECT x FROM (' } elseif ($_ -match 'has_function_privilege\(d\.rolname, p\.oid, ''EXECUTE''\)\) s;') { $_ -replace '\) s;', ') s ORDER BY 1;' } else { $_ } }) -join "`n"
+    $dLive = @((Psql $fpLines) -split "`n" | Where-Object { $_ })
+    $f4l = Join-Path $work 'fplines.sql'; [System.IO.File]::WriteAllText($f4l, $fpLines, (New-Object System.Text.UTF8Encoding $false))
+    $null = Dk cp $f4l "${db2}:/tmp/fplines.sql"
+    $dFresh = @((Dk exec $db2 psql -U postgres -d openbrain -X -q -tA -f /tmp/fplines.sql) -split "`n" | Where-Object { $_ })
+    Save 'case10-door-diff.txt' ("door lines: live $($dLive.Count), fresh $($dFresh.Count)`n-- only live:`n$((@($dLive | Where-Object { $dFresh -notcontains $_ })) -join "`n")`n-- only fresh:`n$((@($dFresh | Where-Object { $dLive -notcontains $_ })) -join "`n")")
+    # round 6: the same comparison over EVERY role: the live-order snapshot (taken after 450's first runs, above) against
+    # the fresh volume, which gets ob_app_memory the way the main database did (the production shape, out of band).
+    # The lines themselves go to evidence, so a difference names its (role, object).
+    $null = Dk exec $db2 psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') THEN CREATE ROLE ob_app_memory LOGIN NOSUPERUSER NOBYPASSRLS IN ROLE service_role; END IF; END `$`$;"
+    # int3: then, as on the main database, the slots that grant by name run again now that ob_app_memory exists, and 450 once
+    # more after them (a re-run of 460 / 580 takes the door's grants on their functions away until 450 runs again)
+    foreach ($n in $namedSlots) {
+      $m = @($chain | Where-Object { $_[1] -eq $n })
+      if ($m.Count -eq 1) {
+        $null = Dk cp (Join-Path $chainDir $m[0][0]) "${db2}:/tmp/named.sql"
+        $gx = Dk exec $db2 psql -U postgres -d openbrain -X -v ON_ERROR_STOP=1 -f /tmp/named.sql; Save "fresh-rerun-$n.log" $gx
+        Check ($script:rc -eq 0) "[10-fresh] $n run again on the fresh volume after ob_app_memory exists (exit $($script:rc))"
+      }
+    }
+    $null = Dk cp $init450 "${db2}:/tmp/i450.sql"
+    $gx = Dk exec $db2 psql -U postgres -d openbrain -X -v ON_ERROR_STOP=1 -f /tmp/i450.sql; Save 'fresh-450-again.log' $gx
+    Check ($script:rc -eq 0) "[10-fresh] 450 once more on the fresh volume after the out-of-band role and the named-grant slots (exit $($script:rc))"
+    $f3 = Join-Path $work 'all.sql'; [System.IO.File]::WriteAllText($f3, $allSql, (New-Object System.Text.UTF8Encoding $false))
+    $null = Dk cp $f3 "${db2}:/tmp/all.sql"
+    $allFresh = @((Dk exec $db2 psql -U postgres -d openbrain -X -q -tA -f /tmp/all.sql) -split "`n" | Where-Object { $_ })
+    $onlyLive = @($allLive | Where-Object { $allFresh -notcontains $_ }); $onlyFresh = @($allFresh | Where-Object { $allLive -notcontains $_ })
+    Save 'case10-all-roles-diff.txt' ("live order: $($allLive.Count) lines, fresh volume: $($allFresh.Count) lines`n-- only in the live order:`n$($onlyLive -join "`n")`n-- only on the fresh volume:`n$($onlyFresh -join "`n")")
+    Write-Host "    every role: live order $($allLive.Count) / fresh volume $($allFresh.Count) (role, privilege, object) lines; only live $($onlyLive.Count), only fresh $($onlyFresh.Count)"
+    $has470 = (Psql "SELECT count(*) FROM pg_proc WHERE proname = 'inlet_connection_owner' AND pronamespace = 'public'::regnamespace").Trim()
+    $g470 = ''
+    if ($has470 -ne '0') {
+      $g470 = (Psql @"
+SELECT string_agg(r || ':' || has_function_privilege(r, 'public.inlet_connection_owner(text)', 'EXECUTE')::text, ' ' ORDER BY r)
+  FROM unnest(ARRAY['ob_rest_gmail_pull','ob_rest_digest','ob_rest_podcast','ob_rest_wiki']) r;
+SELECT 'prune-mail:' || has_table_privilege('ob_rest_gmail_prune', 'public.inlet_connection_mail', 'SELECT')::text || '/' || has_table_privilege('ob_rest_gmail_prune', 'public.inlet_connection_mail', 'DELETE')::text;
+"@).Trim() -replace "`n", ' '
+    }
+    Write-Host "    fresh chain: $($chain.Count) migrations (990 last: $fullHas990), initdb ERROR lines $($err2.Count); door fingerprint fresh $fpFresh / live order $fpLive; slot 470 in the tree: $has470 $g470"
+    $ok10 = $fullHas990 -and ($rr10 -eq 0) -and ($l2 -match 'PostgreSQL init process complete') -and ($err2.Count -eq 0) -and $fpFresh -and ($fpFresh -eq $fpLive) -and ($has470 -eq '0' -or $g470 -notmatch 'false')
+    Check ($l2 -match 'PostgreSQL init process complete' -and $err2.Count -eq 0) "[10-fresh] a fresh volume runs the whole chain (450 ... 990) with no ERROR ($($err2.Count))"
+    Check ($fpFresh -and $fpFresh -eq $fpLive) "[10-fresh] the fresh volume gives the door roles exactly the live order's grants ($fpFresh vs $fpLive)"
+    if ($has470 -ne '0') { Check ($g470 -notmatch 'false') "[10-fresh] slot 470's door lines are granted after the live-order 450 re-run ($g470)" }
+    Check ($allLive.Count -gt 100 -and $onlyLive.Count -eq 0 -and $onlyFresh.Count -eq 0) "[10-fresh] EVERY role ends with the same function and table privileges in both orders (live 440 -> 470 -> 450 by psql vs fresh 440, 450, 460, 470, 990): $($allLive.Count) lines, $($onlyLive.Count) only live ($((($onlyLive | Select-Object -First 3) -join '; '))), $($onlyFresh.Count) only fresh ($((($onlyFresh | Select-Object -First 3) -join '; ')))"
+    $ok10 = $ok10 -and ($onlyLive.Count -eq 0) -and ($onlyFresh.Count -eq 0)
+    $summary['10-fresh'] = if ($ok10) { 'GREEN' } else { 'FAIL' }
+
+    # ---------------------------------------------------------- 12. case 11: stale and hostile archive rows (F-1..F-3)
+    # rest_door.regrants rows for a dropped role, a dropped function, PUBLIC, a door role, postgres, anon / authenticated,
+    # the authenticator, a function PUBLIC never held, and a role nobody granted (lab_outsider): 450 must exit 0 on
+    # EVERY run (10 per stale case, plus runs with the planner forced both ways), grant nothing a stand-in may not be,
+    # and leave a deliberately revoked stand-in revoked.
+    Write-Host '[12] case 11 - stale and hostile archive rows; a deliberate REVOKE'
+    $hasOidCol = (Psql "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'rest_door' AND table_name = 'regrants' AND column_name = 'fn_oid'").Trim() -eq '1'
+    $f0 = (Psql @"
+SELECT x.signature FROM rest_door.regrants x WHERE x.role_name = 'ob_pantry'
+   AND NOT EXISTS (SELECT 1 FROM pg_roles r WHERE r.rolname ~ '^ob_rest_' AND has_function_privilege(r.oid, to_regprocedure(x.signature), 'EXECUTE'))
+ ORDER BY 1 LIMIT 1;
+"@).Trim()
+    $f1 = (Psql "SELECT x.signature FROM rest_door.regrants x WHERE x.role_name = 'ob_pantry' AND x.signature <> '$f0' ORDER BY 1 LIMIT 1").Trim()
+    # F-3: a stand-in revoked on purpose stays revoked through a 450 re-run
+    $null = Psql "REVOKE EXECUTE ON FUNCTION $f1 FROM ob_pantry;"
+    $o = PsqlFile $init450; $rrRev = $script:rc
+    $rev = (Psql "SELECT has_function_privilege('ob_pantry', to_regprocedure('$f1'), 'EXECUTE')::text").Trim()
+    $null = Psql "GRANT EXECUTE ON FUNCTION $f1 TO ob_pantry;"
+    $oidSet = { param($sig) if ($hasOidCol) { "UPDATE rest_door.regrants SET fn_oid = to_regprocedure('$sig') WHERE signature = '$sig';" } else { '' } }
+    $plant = @"
+DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lab_outsider') THEN CREATE ROLE lab_outsider NOLOGIN; END IF; END `$`$;
+INSERT INTO rest_door.regrants (signature, role_name) VALUES
+  ('$f0', 'public'), ('$f0', 'ob_rest_wiki'), ('$f0', 'postgres'), ('$f0', 'anon'), ('$f0', 'authenticated'),
+  ('$f0', 'ob_rest_authenticator'), ('$f0', 'lab_outsider'), ('setting_get(text,text)', 'ob_pantry')
+ON CONFLICT DO NOTHING;
+$(& $oidSet $f0)
+"@
+    $null = Psql $plant
+    $staleSql = @"
+DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lab_gone') THEN CREATE ROLE lab_gone NOLOGIN; END IF; END `$`$;
+INSERT INTO rest_door.regrants (signature, role_name) VALUES ('$f0', 'lab_gone') ON CONFLICT DO NOTHING;
+CREATE OR REPLACE FUNCTION public.lab_dropped_fn() RETURNS int LANGUAGE sql AS 'SELECT 1';
+INSERT INTO rest_door.fn_acl_before (signature, public_had) VALUES ('lab_dropped_fn()', true) ON CONFLICT DO NOTHING;
+INSERT INTO rest_door.regrants (signature, role_name) VALUES ('lab_dropped_fn()', 'ob_pantry') ON CONFLICT DO NOTHING;
+$(& $oidSet $f0)
+$(& $oidSet 'lab_dropped_fn()')
+DROP FUNCTION public.lab_dropped_fn();
+DROP OWNED BY lab_gone; DROP ROLE lab_gone;
+"@
+    $runs11 = @()
+    $exits = @()
+    for ($i = 1; $i -le 10; $i++) {
+      $null = Psql $staleSql
+      $o = PsqlFile $init450; $exits += $script:rc
+      if ($i -eq 1) { Save 'case11-run1.log' $o }
+      if ($script:rc -ne 0) { $runs11 += "run $i exit $($script:rc): $((($o -split "`n") | Where-Object { $_ -match 'ERROR' } | Select-Object -First 1))" }
+    }
+    foreach ($opt in @('-c enable_hashjoin=off', '-c enable_nestloop=off', '-c enable_hashjoin=off -c enable_mergejoin=off', '-c enable_nestloop=off -c enable_mergejoin=off')) {
+      $null = Psql $staleSql
+      $o = PsqlFile $init450 $opt; $exits += $script:rc
+      if ($script:rc -ne 0) { $runs11 += "PGOPTIONS '$opt' exit $($script:rc): $((($o -split "`n") | Where-Object { $_ -match 'ERROR' } | Select-Object -First 1))" }
+    }
+    $bad11 = @($exits | Where-Object { $_ -ne 0 }).Count
+    $g11 = (Psql @"
+SELECT 'public:' || has_function_privilege('public', to_regprocedure('$f0'), 'EXECUTE')::text
+    || ' wiki:' || has_function_privilege('ob_rest_wiki', to_regprocedure('$f0'), 'EXECUTE')::text
+    || ' anon:' || has_function_privilege('anon', to_regprocedure('$f0'), 'EXECUTE')::text
+    || ' authenticated:' || has_function_privilege('authenticated', to_regprocedure('$f0'), 'EXECUTE')::text
+    || ' authenticator:' || has_function_privilege('ob_rest_authenticator', to_regprocedure('$f0'), 'EXECUTE')::text
+    || ' outsider:' || has_function_privilege('lab_outsider', to_regprocedure('$f0'), 'EXECUTE')::text
+    || ' pantry-setting_get:' || has_function_privilege('ob_pantry', 'public.setting_get(text,text)', 'EXECUTE')::text;
+"@).Trim()
+    $null = Psql "DO `$`$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'lab_outsider') THEN DROP OWNED BY lab_outsider; DROP ROLE lab_outsider; END IF; END `$`$;"
+    Save 'case11.txt' ("f0=$f0 f1=$f1 fn_oid column=$hasOidCol`nexits: $($exits -join ' ')`n$($runs11 -join "`n")`ngrants: $g11`nrevoked stays revoked: ob_pantry on $f1 after a 450 re-run = $rev (exit $rrRev)")
+    Write-Host "    exits (10 + 4 planner-forced runs): $($exits -join ' '); $($runs11 | Select-Object -First 2)"
+    Write-Host "    grants after: $g11; deliberately revoked $f1 for ob_pantry after a re-run: $rev"
+    Check ($bad11 -eq 0) "[11-archive] 450 exits 0 on every run with a dropped role and a dropped function in the archive (14 runs, planner forced both ways; $bad11 failed)"
+    # round 6 (D1): the dropped function's row is pruned; the dropped ROLE's row is kept, granted to nobody meanwhile, and
+    # given back once the role exists again (a new role object: the out-of-chain role made again after a rebuilt volume)
+    $d1 = (Psql "SELECT (SELECT count(*) FROM rest_door.regrants WHERE role_name = 'lab_gone') || '/' || (SELECT count(*) FROM rest_door.regrants WHERE signature = 'lab_dropped_fn()')").Trim()
+    $null = Psql "CREATE ROLE lab_gone NOLOGIN;"
+    $oD1 = PsqlFile $init450; $rrD1 = $script:rc
+    $d1back = (Psql "SELECT has_function_privilege('lab_gone', to_regprocedure('$f0'), 'EXECUTE')::text").Trim()
+    $null = Psql "DROP OWNED BY lab_gone; DROP ROLE lab_gone; DELETE FROM rest_door.regrants WHERE role_name = 'lab_gone';"
+    Save 'case11-d1.txt' ("rows (lab_gone / lab_dropped_fn) before the role is made again: $d1`n450 with the role back: exit $rrD1, granted: $d1back`n$((($oD1 -split "`n") | Where-Object { $_ -match 'NOTICE:  rest door: .*(archived|kept)' }) -join "`n")")
+    Write-Host "    D1: rows for the dropped role / the dropped function after the runs: $d1; the role made again -> 450 exit $rrD1, stand-in back: $d1back"
+    $okD1 = ($d1 -eq '1/0') -and ($rrD1 -eq 0) -and ($d1back -eq 'true')
+    Check $okD1 "[11-archive] D1: an archived stand-in whose ROLE is missing is kept (not pruned) and given back when the role exists again; one whose FUNCTION is gone is pruned ($d1; back: $d1back, exit $rrD1)"
+    Check ($g11 -eq 'public:false wiki:false anon:false authenticated:false authenticator:false outsider:false pantry-setting_get:false') "[11-archive] hostile rows grant nothing a stand-in may not be: PUBLIC, a door role, anon, authenticated, the authenticator, a function PUBLIC never held, and a row 450 never wrote for an ordinary role (same function object: nothing to give back) grant nothing ($g11)"
+    Check ($rrRev -eq 0 -and $rev -eq 'false') "[11-archive] a stand-in revoked on purpose stays revoked through a 450 re-run ($rev)"
+    # F-4: the owner-argument family through a map line (what a later slot's author would write): a SECURITY DEFINER
+    # function with p_owner_id is refused; a pure predicate taking p_subject is exempt
+    $probeFns = @"
+CREATE OR REPLACE FUNCTION public.lab_owner_probe(p_owner_id text) RETURNS int LANGUAGE sql STABLE SECURITY DEFINER AS 'SELECT 1';
+CREATE OR REPLACE FUNCTION public.lab_pure_probe(p_subject text) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT p_subject IS NOT NULL';
+CREATE OR REPLACE FUNCTION public.lab_near_probe(p_ownerid text) RETURNS int LANGUAGE sql STABLE SECURITY DEFINER AS 'SELECT 1';
+CREATE OR REPLACE FUNCTION public.lab_near_invoker_probe(p_ownerid text) RETURNS int LANGUAGE sql STABLE AS 'SELECT 1';
+"@
+    $null = Psql $probeFns
+    $mapAnchor = "  ('ob_rest_wiki', 'function', 'contract_registry_has', NULL),"
+    $src450 = [System.IO.File]::ReadAllText($init450)
+    $f4 = @{}
+    foreach ($fnName in @('lab_owner_probe', 'lab_pure_probe', 'lab_near_probe', 'lab_near_invoker_probe')) {
+      $copy = Join-Path $work "450-$fnName.sql"
+      [System.IO.File]::WriteAllText($copy, $src450.Replace($mapAnchor, "$mapAnchor`n  ('ob_rest_wiki', 'function', '$fnName', NULL),"), (New-Object System.Text.UTF8Encoding $false))
+      $o = PsqlFile $copy; $f4[$fnName] = "exit $($script:rc)$(if ($o -match 'owner-argument function') { ' (owner-argument refusal)' } elseif ($o -match 'owner-like argument') { ' (SECURITY DEFINER near-miss refusal)' })"
+    }
+    $null = Psql "DROP FUNCTION public.lab_owner_probe(text); DROP FUNCTION public.lab_pure_probe(text); DROP FUNCTION public.lab_near_probe(text); DROP FUNCTION public.lab_near_invoker_probe(text);"
+    $o = PsqlFile $init450; $rrF4 = $script:rc
+    Write-Host "    owner family: SECURITY DEFINER p_owner_id -> $($f4['lab_owner_probe']); IMMUTABLE boolean p_subject -> $($f4['lab_pure_probe']); D3: SECURITY DEFINER p_ownerid -> $($f4['lab_near_probe']); INVOKER p_ownerid -> $($f4['lab_near_invoker_probe']); 450 again exit $rrF4"
+    $okF4 = ($f4['lab_owner_probe'] -match '^exit 3 \(owner-argument refusal\)') -and ($f4['lab_pure_probe'] -eq 'exit 0') -and ($rrF4 -eq 0)
+    Check $okF4 "[11-archive] the owner family: a SECURITY DEFINER map function taking p_owner_id is refused, a pure predicate taking p_subject is exempt ($($f4['lab_owner_probe']) / $($f4['lab_pure_probe']))"
+    # D3: the near miss p_ownerid is refused on a SECURITY DEFINER function (substring test); on an INVOKER one it is the
+    # known, accepted gap of the whole-name test (the review: map-line review is the control there) - reported, not failed
+    $okD3 = ($f4['lab_near_probe'] -match '^exit 3 \(SECURITY DEFINER near-miss refusal\)')
+    Check $okD3 "[11-archive] D3: a SECURITY DEFINER map function taking p_ownerid (a near-miss owner name) is refused by the substring test ($($f4['lab_near_probe']); the same on an INVOKER function: $($f4['lab_near_invoker_probe']))"
+    $summary['11-archive'] = if (-not $okF4 -or -not $okD3 -or -not $okD1) { 'FAIL' } elseif ($bad11 -eq 0 -and $g11 -eq 'public:false wiki:false anon:false authenticated:false authenticator:false outsider:false pantry-setting_get:false' -and $rev -eq 'false') { 'GREEN' } else { 'FAIL' }
+  }
+}
+catch { Fail "lab aborted: $($_.Exception.Message)" }
+finally {
+  Write-Host '[10] teardown'
+  if (-not $Keep) {
+    foreach ($c in $script:made.containers) { $null = Dk rm -f -v $c }
+    if ($script:made.net) { $null = Dk network rm $net }
+  }
+  $leftC = (Dk ps -a --filter "label=$label" --format '{{.Names}}' | Out-String).Trim()
+  $leftN = (Dk network ls --filter "label=$label" --format '{{.Name}}' | Out-String).Trim()
+  $leftV = (Dk volume ls --filter "label=$label" --format '{{.Name}}' | Out-String).Trim()
+  if (-not $Keep) { Check (-not $leftC -and -not $leftN -and -not $leftV) "nothing labelled $Id is left (containers '$leftC', networks '$leftN', volumes '$leftV')" }
+  $localAfter = LocalSnapshot
+  if ((($localBefore -join "`n") -ne ($localAfter -join "`n"))) { Write-Host '  WARN  the :local image listing changed during the run (another session''s build?) - this lab never touches one' ; Save 'local-images-before.txt' ($localBefore -join "`n"); Save 'local-images-after.txt' ($localAfter -join "`n") }
+  $sumLine = (($summary.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' ')
+  Save 'summary.txt' "mode=$(if ($Red) { 'RED' } else { 'GREEN' }) ob1=$sha fail=$($script:fail)`n$sumLine"
+  New-Item -ItemType Directory -Force $Evidence | Out-Null
+  Copy-Item -Recurse -Force (Join-Path $evStage '*') $Evidence
+  if (-not $Keep) { foreach ($d in $script:made.dirs) { if (Test-Path $d) { Remove-Item -Recurse -Force $d } } }
+  Write-Host "SUMMARY $sumLine"
+  if ($script:fail) { Write-Host "LAB FAILED ($($script:fail) failed)"; exit 1 } else { Write-Host 'LAB OK'; exit 0 }
+}

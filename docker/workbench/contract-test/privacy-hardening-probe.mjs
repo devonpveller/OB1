@@ -7,6 +7,8 @@
 //   TAG           a run tag for the slugs
 const SHARED = process.env.SHARED || "/shared";
 const OB = (process.env.OPEN_BRAIN_URL || "").replace(/\/+$/, "");
+// rw-rest-door-auth: the door refuses a request without a caller token (the lab hands this probe the wiki compile's)
+const AUTH = (process.env.OPEN_BRAIN_REST_TOKEN || "").trim() ? { authorization: `Bearer ${process.env.OPEN_BRAIN_REST_TOKEN.trim()}` } : {};
 const tag = process.env.TAG || "t";
 const th = process.env.IDEA_THOUGHT || "";
 const rs = process.env.REPORT_SOURCE || "";
@@ -22,7 +24,7 @@ const file = (n) => path.join(dir, `ph-${n}-${tag}.md`);
 const slug = (n) => `content/topic/ph-${n}-${tag}`;
 async function rowsNow(names) {
   const list = names.map((n) => `"${slug(n)}"`).join(",");
-  const r = await fetch(`${OB}/rest/v1/wiki_pages?select=slug&slug=in.(${encodeURIComponent(list)})`, { headers: { apikey: "local-trust" } });
+  const r = await fetch(`${OB}/rest/v1/wiki_pages?select=slug&slug=in.(${encodeURIComponent(list)})`, { headers: { apikey: "local-trust", ...AUTH } });
   return new Set((await r.json()).map((x) => x.slug));
 }
 const out = { tag };
@@ -49,7 +51,7 @@ out.unsynced1 = wp.unsyncedWikiPages().length;
 {
   const row = { slug: slug("raw-guarded"), page_class: "entity", title: "raw", body: `see [[Thought/${th}]]`, tags: [], links: [], frontmatter: {} };
   const r = await fetch(`${OB}/rest/v1/wiki_pages?on_conflict=slug&select=slug`, { method: "POST",
-    headers: { "content-type": "application/json", apikey: "local-trust", prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify([row, { ...row, slug: slug("raw-clean"), body: "shared" }]) });
+    headers: { "content-type": "application/json", apikey: "local-trust", ...AUTH, prefer: "resolution=merge-duplicates,return=representation" }, body: JSON.stringify([row, { ...row, slug: slug("raw-clean"), body: "shared" }]) });
   out.marker = { status: r.status, header: r.headers.get("x-wiki-withheld"), back: (await r.json()).map((x) => x.slug).sort() };
 }
 
@@ -76,7 +78,7 @@ out.mixed = { heldFile: fs.existsSync(file("held-mixed")), hiddenFile: fs.exists
 // names neither
 async function note(n, body) {
   const r = await fetch(`${OB}/rest/v1/wiki_pages?on_conflict=slug`, { method: "POST",
-    headers: { "content-type": "application/json", apikey: "local-trust", prefer: "resolution=merge-duplicates,return=minimal" },
+    headers: { "content-type": "application/json", apikey: "local-trust", ...AUTH, prefer: "resolution=merge-duplicates,return=minimal" },
     body: JSON.stringify([{ slug: `notes/ph-${n}-${tag}`, page_class: "note", title: "A note", body, tags: [], links: [], frontmatter: {} }]) });
   const t = await r.text();
   let m = ""; try { m = JSON.parse(t).message ?? ""; } catch { m = t.slice(0, 200); }

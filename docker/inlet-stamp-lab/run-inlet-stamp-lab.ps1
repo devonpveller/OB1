@@ -191,19 +191,39 @@ try {
     Check ($r.rc -eq 0 -and $conns -eq 'gmail=A,vault=A') "470 right after 440: the owner record seeded from 440's record (gmail, vault -> A) ($conns)"
     $null = Q "INSERT INTO public.inlet_connections (id, kind, owner_sub) VALUES ('gmail-b', 'gmail', '$B')"
     Check ((Q "SELECT owner_sub = '$B' FROM public.inlet_connections WHERE id = 'gmail-b'") -eq 't') 'a second inlet connection, gmail-b, owned by B (the PD4 stand-in: two seeded inlet owners)'
+    # rw-rest-door-auth (slot 450) in the chain: on live 450 is applied AFTER 440 and 470 (2026-11-20), so the lab does
+    # the same - 450 by psql right after 470. The door roles the probe's tokens name (ob_rest_import, ob_rest_wiki) are
+    # then 450's real ones, with exactly their door-map grants (not the stand-ins below, which are made only when 450
+    # is absent from the chain)
+    $f450 = Join-Path $dockerDir 'init-rest-door-auth.sql'
+    if (Test-Path $f450) {
+      $r = PsqlFile $f450 @()
+      Save '450-after-470.log' $r.out
+      $g = Q "SELECT has_table_privilege('ob_rest_import', 'public.thoughts', 'INSERT')::text || '/' || pg_has_role('ob_rest_import', 'service_role', 'MEMBER')::text || '/' || has_function_privilege('ob_rest_gmail_pull', 'public.inlet_connection_owner(text)', 'EXECUTE')::text"
+      Check ($r.rc -eq 0 -and $g -eq 'true/false/true') "slot 450 by psql after 470 (the live order): the door roles are 450's own - ob_rest_import may insert thoughts, is no member of service_role, gmail pull may ask the record ($g)"
+    }
   }
-  # a lab stand-in for slot 450's import door role (450 is not in this chain): a NOLOGIN role PostgREST switches to
+  # a lab stand-in for slot 450's import door role (only when 450 is not in this chain): a NOLOGIN role PostgREST switches to
   # from a verified token; it writes thoughts as the ops plane allows (service_role)
   $null = Q "DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_rest_import') THEN CREATE ROLE ob_rest_import NOLOGIN NOBYPASSRLS IN ROLE service_role; END IF; END `$`$"
   # and for 450's wiki role (it may INSERT, UPDATE, DELETE thoughts: the note mirror) - the UPDATE probes' door caller
   $null = Q "DO `$`$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_rest_wiki') THEN CREATE ROLE ob_rest_wiki NOLOGIN NOBYPASSRLS IN ROLE service_role; END IF; END `$`$"
-  Check ((Q "SELECT count(*) FROM pg_roles WHERE rolname = 'ob_rest_import'") -eq '1') 'a lab stand-in for 450''s import door role (ob_rest_import, a member of service_role)'
+  Check ((Q "SELECT count(*) FROM pg_roles WHERE rolname = 'ob_rest_import'") -eq '1') 'the import door role exists (slot 450''s own when 450 is in the chain, else a lab stand-in in service_role)'
   $t0 = Q "SELECT max(id) FROM public.thoughts"
 
   Write-Host '[4] PostgREST behind the real Caddyfile, and the stubs (Gmail API, the gateway aliases)'
   $o = Dk run -d --name $pgrst --label $label --network $net --network-alias openbrain-postgrest -e "PGRST_DB_URI=postgres://postgres:$pw@${db}:5432/openbrain" -e PGRST_DB_SCHEMAS=public -e PGRST_DB_ANON_ROLE=service_role -e PGRST_SERVER_PORT=3000 -e "PGRST_JWT_SECRET=$jwtSecret" $PgrstImage
   if ($script:rc -eq 0) { $made.containers += $pgrst } else { Fail "PostgREST did not start" }
-  $o = Dk run -d --name $caddy --label $label --network $net --network-alias openbrain-rest -v "$(Join-Path $dockerDir 'Caddyfile'):/etc/caddy/Caddyfile:ro" $CaddyImage
+  # rw-rest-door-auth: this lab is about the database's refusals with PostgREST as it was BEFORE slot 450's door switch
+  # (anon = service_role; the probe's door tokens go straight to PostgREST). The tree's Caddyfile is 450's (a request
+  # without a Bearer gets 401 from Caddy), so the lab serves the pre-450 Caddyfile it replaced; the door itself is
+  # rw-rest-door-auth's lab (run-rest-door-auth-lab.ps1, which replays these writers' requests with their own tokens)
+  $caddyFile = Join-Path $dockerDir 'Caddyfile'
+  if ((Get-Content -Raw $caddyFile) -match 'credentials required') {
+    $caddyFile = Join-Path $work 'Caddyfile.pre450'
+    [System.IO.File]::WriteAllText($caddyFile, ":80 {`n`thandle_path /rest/v1/* {`n`t`treverse_proxy openbrain-postgrest:3000 {`n`t`t`theader_up -Authorization`n`t`t`theader_up -apikey`n`t`t}`n`t}`n`trespond /healthz 200`n`trespond ""open-brain REST proxy"" 200`n}`n", (New-Object System.Text.UTF8Encoding $false))
+  }
+  $o = Dk run -d --name $caddy --label $label --network $net --network-alias openbrain-rest -v "${caddyFile}:/etc/caddy/Caddyfile:ro" $CaddyImage
   if ($script:rc -eq 0) { $made.containers += $caddy } else { Fail "Caddy did not start: $o" }
   $o = Dk run -d --name $stub --label $label --network $net --network-alias gmail-stub --network-alias llama-cpp --network-alias llama-cpp-embed `
     -e "STAMP_MARK_A=$MA" -e "STAMP_MARK_B=$MB" -v "${labDir}:/lab:ro" $DenoImage run --allow-net --allow-env /lab/stub.ts

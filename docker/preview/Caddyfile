@@ -20,6 +20,9 @@
 	# PostgREST serves `/<table>` at root. Strip the client auth headers for the
 	# same reason prod does — PostgREST runs with no JWT secret (anon role =
 	# service_role), so any inbound Authorization triggers PGRST300.
+	# rw-rest-door-auth: prod's door now requires a per-caller token (slot 450, which this preview's initdb
+	# chain does not run); the preview deliberately keeps the old single-user posture - the viewer's token
+	# header is stripped here and PostgREST serves it as service_role. Loopback-only throwaway stack.
 	handle_path /rest/v1/* {
 		reverse_proxy preview-postgrest:3000 {
 			header_up -Authorization

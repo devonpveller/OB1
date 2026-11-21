@@ -6,6 +6,7 @@
  */
 import type { Format, Presenter, Team, VoiceLink } from "./presenters.ts";
 
+import { restAuthHeaders } from "../clients/rest-auth.ts";
 type Row = Record<string, unknown>;
 
 export class PresenterStore {
@@ -19,7 +20,7 @@ export class PresenterStore {
   async #req<T>(method: string, path: string, body?: unknown, prefer = "return=representation"): Promise<T> {
     const res = await this.#f(`${this.#base}/${path}`, {
       method,
-      headers: { "Content-Type": "application/json", Accept: "application/json", Prefer: prefer },
+      headers: { "Content-Type": "application/json", Accept: "application/json", Prefer: prefer, ...restAuthHeaders() },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(30_000),
     });

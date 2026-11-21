@@ -153,7 +153,7 @@ export async function fetchAllRows(signal, fetchImpl = fetch) {
   const out = [];
   let cursor = null;
   for (;;) {
-    const r = await fetchImpl(pageUrl(cursor), { headers: { apikey: "local-trust" }, signal });
+    const r = await fetchImpl(pageUrl(cursor), { headers: { ...restAuth() }, signal });
     if (!r.ok && r.status === 400 && _projection === SELECT_SITE) {
       _projection = SELECT_NAV; // pre-migration database: no frontmatter column
       continue;
@@ -174,7 +174,7 @@ export async function fetchAllRows(signal, fetchImpl = fetch) {
 // does not carry it (then the rows are walked, as before P1b).
 export async function tableSignature(signal, fetchImpl = fetch) {
   const r = await fetchImpl(`${OB_URL}/rest/v1/wiki_pages?select=updated_at&order=updated_at.desc.nullslast&limit=1`, {
-    headers: { apikey: "local-trust", prefer: "count=exact" }, signal,
+    headers: { ...restAuth(), prefer: "count=exact" }, signal,
   });
   if (!r.ok) throw new Error(`wiki_pages signature ${r.status}`);
   const range = r.headers?.get?.("content-range") || "";
@@ -232,7 +232,7 @@ async function tryDelta(cache, sig, fetchImpl) {
   const from = new Date(since - DELTA_OVERLAP_MS).toISOString();
   const select = _navOnly ? "select=slug,title,updated_at" : _projection;
   const r = await fetchImpl(`${OB_URL}/rest/v1/wiki_pages?${select}&updated_at=gte.${encodeURIComponent(from)}` +
-    `&order=updated_at.asc&limit=${DELTA_MAX + 1}`, { headers: { apikey: "local-trust" }, signal: AbortSignal.timeout(10_000) });
+    `&order=updated_at.asc&limit=${DELTA_MAX + 1}`, { headers: { ...restAuth() }, signal: AbortSignal.timeout(10_000) });
   if (!r.ok) return { ok: false };
   const rows = await r.json();
   if (!Array.isArray(rows) || rows.length > DELTA_MAX) return { ok: false };
@@ -386,4 +386,12 @@ export async function _pendingRefresh() {
 // what the background timer runs, for tests (injected fetch/clock)
 export function _tickForTests({ fetchImpl, now }) {
   return startTick(fetchImpl, now);
+}
+
+// rw-rest-door-auth: the REST door (openbrain-rest -> PostgREST) refuses a request that does not carry this caller's own
+// token - a JWT minted per caller whose role holds only what the caller uses. OPEN_BRAIN_REST_TOKEN, or
+// OPEN_BRAIN_SERVICE_KEY (the name the wiki compile hands its child scripts). No token = no header = 401 at the door.
+function restAuth() {
+  const t = String(process.env.OPEN_BRAIN_REST_TOKEN || process.env.OPEN_BRAIN_SERVICE_KEY || "").trim();
+  return t && t !== "local-trust" ? { authorization: `Bearer ${t}` } : {};
 }

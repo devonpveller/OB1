@@ -195,11 +195,17 @@ services:
       - ./init-request-boundary.sql:/docker-entrypoint-initdb.d/420-init-request-boundary.sql:ro # research-workbench rw-boundary-core (plan 09 PD0a): research_jobs.request_kind + boundary, the derived-job guard, the private research_handbacks (forced RLS, purpose-scoped functions), a derived root's report is shared (fresh-volume only; live: psql -f BEFORE the new research + workbench images, a fresh backup first; revert: revert-request-boundary.sql, before 390's)
       - ./init-privacy-hardening.sql:/docker-entrypoint-initdb.d/430-init-privacy-hardening.sql:ro # research-workbench rw-privacy-hardening: the follow-ups of slots 380/390 (390 notebook-label repair F1/F2, the wiki guard's case-insensitive thought/ link and %2F, the withheld marker header, one refusal message for a note, an idea's purge erases its archive rows) as a FORWARD migration (fresh-volume: nothing to repair; live: psql -f AFTER 380 + 390, a fresh backup first, the wiki compile stopped, then the new openbrain-wiki-viewer and openbrain-workbench images, openbrain-wiki and the curator restarted (bind-mounted recipes); revert: revert-privacy-hardening.sql BEFORE the 390 and 380 reverts)
       - ./init-inlet-owner.sql:/docker-entrypoint-initdb.d/440-init-inlet-owner.sql:ro # research-workbench rw-inlet-owner (plan 08 PD1): every existing thought becomes the operator's and private (thoughts.user_id), the email-body and podcast-transcript sources + the claims drawn only from them move to owner-private stores, Gmail ids / URLs leave the shared rows and job seeds, the wiki pages presenting them are withheld and guarded (fresh-volume: nothing to do; live: psql -v owner_sub=<WORKSPACE_DEFAULT_SUB> -f after a fresh backup, the writers STOPPED; LIVE ORDER 380, 390, 400, 430, 420, 460, then 440 - never before 460; on a fresh volume 440 runs first by name and has nothing to do; revert: revert-inlet-owner.sql first, before 460 / 420 / 430 / 390 / 380)
+      - ./init-rest-door-auth.sql:/docker-entrypoint-initdb.d/450-init-rest-door-auth.sql:ro # research-workbench rw-rest-door-auth: the REST door's per-caller roles, PostgREST's authenticator, rest_setting_get, EXECUTE revoked from PUBLIC (catalog-generated stand-in grants for every non-door role) (fresh-volume only; live: psql -f, then the authenticator password, then the callers' code, then the door switch; revert: revert-rest-door-auth.sql)
       - ./init-boundary-digest.sql:/docker-entrypoint-initdb.d/460-init-boundary-digest.sql:ro # research-workbench rw-boundary-digest (plan 09 PD0c): a derived root's run knobs (mode article, gap_research, dry_run, deadline_at) on 420's options allow-list, podcast_episodes.transcript (the owner's private script), handback_deliver (the digest's delivery record on the private hand-back) (fresh-volume only; live: psql -f AFTER 420, BEFORE the new research image and the digest code, a fresh backup first; re-run it after any re-run of 420; revert: revert-boundary-digest.sql, before 420's)
       - ./init-inlet-stamp.sql:/docker-entrypoint-initdb.d/470-init-inlet-stamp.sql:ro # research-workbench rw-inlet-stamp (plan 08 PD2): the inlet owner record (inlet_connections), every new thought carries its owner and a shared source is never personal (triggers), owner CHECKs on the podcast episode / hand-back / 440 stores (fresh-volume: no record, the inlet writers refuse until -v owner_sub is given; live: psql -f right AFTER 440 in PD1's window, the writers stopped, and only once rw-mcp-identity is live; revert: revert-inlet-stamp.sql, before 440's)
       - ./init-owner-private-view.sql:/docker-entrypoint-initdb.d/480-init-owner-private-view.sql:ro # research-workbench rw-owner-private-view (plan 08 PD-PV): ob_workbench (the workbench's own login role, a member of ob_app_memory) and the owner-scoped reads of PD1's private stores, executable by ob_workbench alone; PD1's two owner reads move to it (fresh-volume: the role and the functions; create ob_app_memory, then run it again for the membership; live: psql -f AFTER 440 / 470, then ALTER ROLE ob_workbench PASSWORD from OB_WORKBENCH_DB_PASSWORD, then the new workbench; RE-RUN IT AFTER ANY 440 RE-RUN; revert: revert-owner-private-view.sql after the workbench is back on ob_app_memory, before 440's)
       - ./init-flags.sql:/docker-entrypoint-initdb.d/500-init-flags.sql:ro # research-workbench rwr-flags-api: user_flags (a person's flag on a source, claim or reference: reason, note, where it was made from, state) + the flag_* registries; a flag changes nothing about the flagged item (fresh-volume only; live: psql -f BEFORE the new workbench image, a fresh backup first; revert: revert-flags.sql)
       - ./init-boundary-ideas.sql:/docker-entrypoint-initdb.d/580-init-boundary-ideas.sql:ro # research-workbench rw-boundary-ideas (plan 09 PD0b): an idea's research is a pending private hand-back (research_idea_queue and its callers, same lock and coalescing, no prior-synthesis paste), drained by the research service through the boundary; idea hand-backs bound and keyed to the idea's owner (420 R-F4); the owner's review (awaiting_owner: approve, run privately); the refinery's deliverables (fresh-volume; live: psql -f AFTER 420, BEFORE the new research / refinery / workbench images, a fresh backup first; re-run it after creating ob_app_memory on a fresh volume; revert: revert-boundary-ideas.sql, before 420's)
+      # rw-rest-door-auth: slot 450 AGAIN, last (fresh volume only; idempotent). The door map applies to whatever the chain
+      # created after 450 (slot 460's podcast_episodes.transcript column, slot 470's inlet_connections and its functions: each
+      # map line is guarded on its object existing). Live never runs this (initdb only): there 450 is applied by psql after
+      # the later slots (the test plan's apply order: 440 and 470 were applied first on live, 450 after them).
+      - ./init-rest-door-auth.sql:/docker-entrypoint-initdb.d/990-init-rest-door-auth-final.sql:ro
     networks:
       - obnet
     restart: unless-stopped
@@ -903,8 +909,12 @@ services:
 
   # PostgREST over openbrain-db — the API surface the wiki-compiler
   # scripts expect (they were written for Supabase /rest/v1). Local
-  # only: loopback host port + obnet. anon-role = service_role (single
-  # user, same app-layer-trust posture as the MCP server as superuser).
+  # only: loopback host port (via openbrain-rest) + obnet.
+  # rw-rest-door-auth (slot 450): no anonymous role - a request without a valid token is refused (401)
+  # before it reaches the database. Each caller presents its own HS256 JWT (OB_REST_JWT_SECRET, aud
+  # openbrain-rest) naming its own role (ob_rest_<caller>); PostgREST logs in as ob_rest_authenticator,
+  # a member of those roles only, so a token naming service_role / postgres / any other role is refused.
+  # OB_REST_AUTHENTICATOR_PASSWORD is set on the role out of band (rest-door/mint-rest-tokens.ps1).
   openbrain-postgrest:
     image: postgrest/postgrest:v12.2.3
     container_name: openbrain-postgrest
@@ -912,9 +922,10 @@ services:
       openbrain-db:
         condition: service_healthy
     environment:
-      PGRST_DB_URI: postgres://postgres:${POSTGRES_PASSWORD}@openbrain-db:5432/openbrain
+      PGRST_DB_URI: postgres://ob_rest_authenticator:${OB_REST_AUTHENTICATOR_PASSWORD:-}@openbrain-db:5432/openbrain
       PGRST_DB_SCHEMAS: public
-      PGRST_DB_ANON_ROLE: service_role
+      PGRST_JWT_SECRET: ${OB_REST_JWT_SECRET:-}
+      PGRST_JWT_AUD: openbrain-rest
       PGRST_DB_POOL: "10"
       PGRST_SERVER_PORT: "3000"
     networks:
@@ -956,11 +967,11 @@ services:
     depends_on:
       - openbrain-rest
     environment:
-      # supabase-js → Caddy /rest/v1 proxy → PostgREST (anon=service_role).
-      # PostgREST has no JWT secret, so the key value is not verified;
-      # supabase-js only requires it be non-empty.
+      # supabase-js → Caddy /rest/v1 proxy → PostgREST. rw-rest-door-auth: supabase-js sends this key as
+      # `Authorization: Bearer`; it is this caller's own REST-door token (a JWT for role ob_rest_entity;
+      # OB1/docker/.env, minted by rest-door/mint-rest-tokens.ps1), no longer MCP_ACCESS_KEY. Blank = 401.
       SUPABASE_URL: http://openbrain-rest
-      SUPABASE_SERVICE_ROLE_KEY: ${MCP_ACCESS_KEY}
+      SUPABASE_SERVICE_ROLE_KEY: ${OB_REST_TOKEN_ENTITY:-}
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       # Local OpenAI-compatible chat (entity/relation extraction).
       CHAT_API_BASE: http://llama-cpp:8080/v1
@@ -1277,10 +1288,14 @@ services:
       - openbrain-entity-worker
     environment:
       OPEN_BRAIN_URL: http://openbrain-rest
+      # rw-rest-door-auth: this caller's own REST-door token (a JWT for role ob_rest_wiki; OB1/docker/.env, minted by
+      # rest-door/mint-rest-tokens.ps1); the service hands it to the compile's child scripts as OPEN_BRAIN_SERVICE_KEY.
+      # Blank = the door refuses the compile's requests (401).
+      OPEN_BRAIN_REST_TOKEN: ${OB_REST_TOKEN_WIKI:-}
+      OPEN_BRAIN_SERVICE_KEY: ${OB_REST_TOKEN_WIKI:-}
       # rw-inlet-stamp (plan 08 PD2, slot 470): the vault's inlet connection - every note thought is written with its
       # recorded owner (public.inlet_connections), never a constant
       INLET_CONNECTION: vault
-      OPEN_BRAIN_SERVICE_KEY: local-trust
       MCP_ACCESS_KEY: ${MCP_ACCESS_KEY}
       # P4.7 — commit working source-content edits as revisions, one per compile
       # (service-to-service call to the workbench; needs the X-Brain-Key).
@@ -1388,6 +1403,9 @@ services:
     depends_on:
       - openbrain-wiki
     environment:
+      # rw-rest-door-auth: this caller's own REST-door token (a JWT for role ob_rest_viewer; OB1/docker/.env, minted by
+      # rest-door/mint-rest-tokens.ps1). Blank = the door refuses this service's requests (401).
+      OPEN_BRAIN_REST_TOKEN: ${OB_REST_TOKEN_VIEWER:-}
       # Heap cap of the renderer (its site index holds one entry per page;
       # rw-p1b-ready ran 401k synthetic rows under 6 GB). The value is the one
       # the retired Quartz builder needed, kept as a cap (a cap, not a reservation).
