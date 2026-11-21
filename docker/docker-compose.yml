@@ -1630,8 +1630,9 @@ services:
       # The forwarder + security headers are the wiki viewer's own files (one module, not a fork):
       # the Dockerfile copies them from the named context `viewerlib` (rwr-app-scaffold). A deploy
       # that builds by hand must pass it: --build-context viewerlib=OB1/docker/wiki-viewer/lib.
+      # (compose resolves additional_contexts against THIS file's directory, OB1/docker - not the build context.)
       additional_contexts:
-        viewerlib: ../wiki-viewer/lib
+        viewerlib: ./wiki-viewer/lib
     image: openbrain-workbench-app:local
     container_name: openbrain-workbench-app
     logging: # sysadmin log cap (disk-prune-watcher); applies on recreate
