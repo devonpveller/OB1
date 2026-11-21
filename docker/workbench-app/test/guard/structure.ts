@@ -15,10 +15,23 @@
 //   R4  the contract search path is built in exactly ONE place (components/picker/search.ts): no other file contains it
 //       as a string, as constant-folded concatenation / template / join of literals, or as split literal pieces
 //       ("contract" and "search" pieces in one file outside the picker).
+//   R6  a src file may not import, re-export, dynamically import or require anything whose path resolves outside src/
+//       (a relative path that climbs out of it). Whatever lives outside src/ is therefore not part of the app's bundle
+//       by import, and a list UI cannot be parked there. Package imports (bare names) are unaffected.
 //   R5  every .ts .tsx .js .jsx .mjs .mts .cjs file under src/ is read (a .jsx cannot hide a picker).
 //
-// What it cannot see (stated, not hidden): a search path assembled from data at runtime (a variable holding the
-// pieces), and a list UI that uses no role/aria and no native list element. The runtime backstop for the first is that
+// Role strings are constant-folded before matching (concatenation, template literals, .concat, join, and `const`
+// identifiers holding foldable strings), and the list-widget roles include grid / treegrid / row / tree / treeitem.
+// R2 also applies inside components/picker/ (a new file there, e.g. in harness/, must be added to SEARCH_ALLOW).
+//
+// RESIDUAL, precisely (what it cannot see; stated, not hidden):
+//   - a search path or role assembled from runtime DATA (a function result, a prop, a fetched value, a `let` that is
+//     reassigned, an object property); only `const` and literal-only expressions are folded;
+//   - a list UI that uses no role/aria and no native list element (plain <ul>/<div> rows with only click handlers);
+//   - a role outside the folded list-widget set (e.g. role="menu", "listitem", "table") - not blocked;
+//   - a second list UI INSIDE ItemPicker.tsx itself (the allowed file);
+//   - non-JS list renderers reached some other way than a src import (e.g. a second Vite HTML entry): R6 stops src
+//     importing them, but a new entry is a build-config change, reviewed with vite.config.ts. The runtime backstop for the first is that
 // every request goes through lib/api.ts's door and its log (test/picker.test.tsx asserts what the picker sends).
 import ts from "typescript";
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -36,7 +49,7 @@ export const SEARCH_ALLOW = [
 ];
 const ROUTE_FILE = "src/components/picker/search.ts";
 const EXT = /\.(ts|tsx|js|jsx|mjs|mts|cjs)$/;
-const LIST_ROLES = new Set(["listbox", "option", "combobox"]);
+const LIST_ROLES = new Set(["listbox", "option", "combobox", "grid", "treegrid", "row", "tree", "treeitem"]);
 const LIST_TAGS = new Set(["select", "datalist"]);
 
 export type Files = Map<string, string>; // path relative to the app root, "/" separators
@@ -77,28 +90,37 @@ function resolveSpec(from: string, spec: string, files: Files, paths: Paths, bas
   return null;
 }
 
+// a relative specifier whose normalised path climbs out of src/ (from a file under src/)
+function leavesSrc(from: string, spec: string): boolean {
+  if (!spec.startsWith(".") || !from.startsWith("src/")) return false;
+  return !join(dirname(from), spec).split(sep).join("/").startsWith("src/");
+}
+
 // constant-fold a string expression made of literals (+, template without holes, .concat, [..].join(sep)); else null
-function fold(n: ts.Node): string | null {
+type Env = Map<string, string>;
+function fold(n: ts.Node, env: Env = new Map()): string | null {
   if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) return n.text;
-  if (ts.isParenthesizedExpression(n)) return fold(n.expression);
+  if (ts.isParenthesizedExpression(n)) return fold(n.expression, env);
+  if (ts.isIdentifier(n)) return env.get(n.text) ?? null;
+  if (ts.isAsExpression(n) || ts.isNonNullExpression(n)) return fold(n.expression, env);
   if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-    const a = fold(n.left), b = fold(n.right);
+    const a = fold(n.left, env), b = fold(n.right, env);
     return a !== null && b !== null ? a + b : null;
   }
   if (ts.isTemplateExpression(n)) {
     let s = n.head.text;
-    for (const sp of n.templateSpans) { const v = fold(sp.expression); if (v === null) return null; s += v + sp.literal.text; }
+    for (const sp of n.templateSpans) { const v = fold(sp.expression, env); if (v === null) return null; s += v + sp.literal.text; }
     return s;
   }
   if (ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
     const m = n.expression.name.text;
     if (m === "concat") {
-      const parts = [fold(n.expression.expression), ...n.arguments.map(fold)];
+      const parts = [fold(n.expression.expression, env), ...n.arguments.map((a) => fold(a, env))];
       return parts.every((p) => p !== null) ? parts.join("") : null;
     }
     if (m === "join" && ts.isArrayLiteralExpression(n.expression.expression)) {
-      const els = n.expression.expression.elements.map(fold);
-      const sep = n.arguments.length ? fold(n.arguments[0]) : ",";
+      const els = n.expression.expression.elements.map((e) => fold(e, env));
+      const sep = n.arguments.length ? fold(n.arguments[0], env) : ",";
       return els.every((e) => e !== null) && sep !== null ? (els as string[]).join(sep) : null;
     }
   }
@@ -114,15 +136,30 @@ export function check(files: Files, opts: { paths?: Paths; baseUrl?: string } = 
     const kind = file.endsWith("x") ? ts.ScriptKind.TSX : /\.(js|mjs|cjs)$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
     const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, file.endsWith(".jsx") ? ts.ScriptKind.JSX : kind);
     const pieces: string[] = [];
+    // `const NAME = <foldable>` anywhere in the file (two passes so a const may build on an earlier one)
+    const env: Env = new Map();
+    for (let pass = 0; pass < 2; pass++) {
+      const collect = (n: ts.Node) => {
+        if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer && ts.isVariableDeclarationList(n.parent) && n.parent.flags & ts.NodeFlags.Const) {
+          const f = fold(n.initializer, env);
+          if (f !== null) env.set(n.name.text, f);
+        }
+        ts.forEachChild(n, collect);
+      };
+      collect(sf);
+    }
     const folded = new Set<ts.Node>();
     const importsOf = (spec: string, names: string[] | "*", reexportsAs: string[]) => {
+      // R6: nothing under src/ reaches outside src/
+      if (leavesSrc(file, spec)) v.push(`R6 ${file}: imports "${spec}", which resolves outside src/`);
       const target = resolveSpec(file, spec, files, paths, baseUrl);
-      if (!target || !target.startsWith(PICKER_DIR) || inPicker) return;
-      // R3: outside the picker folder only the index
-      if (target !== "src/components/picker/index.ts") v.push(`R3 ${file}: imports ${target} (not the picker index)`);
-      // R2: the search exports
+      if (!target || !target.startsWith(PICKER_DIR)) return;
+      // R2: the search exports (inside the picker too: a new file there must be on the allow-list)
       const bad = names === "*" ? SEARCH_NAMES : names.filter((n) => SEARCH_NAMES.includes(n));
       if (bad.length && !SEARCH_ALLOW.includes(file)) v.push(`R2 ${file}: imports ${bad.join(", ")} from the picker (not on the search allow-list)`);
+      if (inPicker) return;
+      // R3: outside the picker folder only the index
+      if (target !== "src/components/picker/index.ts") v.push(`R3 ${file}: imports ${target} (not the picker index)`);
       if (reexportsAs.length) v.push(`R3 ${file}: re-exports from the picker (${reexportsAs.join(", ")})`);
     };
     const visit = (n: ts.Node) => {
@@ -142,7 +179,7 @@ export function check(files: Files, opts: { paths?: Paths; baseUrl?: string } = 
         importsOf(n.moduleSpecifier.text, names, names === "*" ? ["*"] : names);
       }
       if (ts.isCallExpression(n) && (n.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(n.expression) && n.expression.text === "require")) && n.arguments[0]) {
-        const s = fold(n.arguments[0]);
+        const s = fold(n.arguments[0], env);
         if (s !== null) importsOf(s, "*", []);
         else if (!inPicker) v.push(`R3 ${file}: dynamic import/require of a non-literal path (cannot be resolved)`);
       }
@@ -152,9 +189,15 @@ export function check(files: Files, opts: { paths?: Paths; baseUrl?: string } = 
           const name = n.name.getText(sf);
           const init = n.initializer;
           if (name === "aria-activedescendant") v.push(`R1 ${file}: aria-activedescendant outside ItemPicker.tsx`);
-          if (name === "role" && init && ts.isStringLiteral(init) && LIST_ROLES.has(init.text)) v.push(`R1 ${file}: role="${init.text}" outside ItemPicker.tsx`);
+          const rv = init && ts.isStringLiteral(init) ? init.text : init && ts.isJsxExpression(init) && init.expression ? fold(init.expression, env) : null;
+          if (name === "role" && rv !== null && LIST_ROLES.has(rv)) v.push(`R1 ${file}: role="${rv}" outside ItemPicker.tsx`);
         }
         if ((ts.isJsxOpeningElement(n) || ts.isJsxSelfClosingElement(n)) && LIST_TAGS.has(n.tagName.getText(sf))) v.push(`R1 ${file}: <${n.tagName.getText(sf)}> outside ItemPicker.tsx`);
+        // a role / marker word produced by folding (concatenation, template, const) rather than written whole
+        if ((ts.isBinaryExpression(n) || ts.isTemplateExpression(n) || ts.isCallExpression(n)) && !ts.isJsxAttribute(n.parent)) {
+          const f = fold(n, env);
+          if (f !== null && (LIST_ROLES.has(f) || f === "aria-activedescendant")) v.push(`R1 ${file}: the folded string "${f}" outside ItemPicker.tsx`);
+        }
         if ((ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && !ts.isImportDeclaration(n.parent)) {
           const asRoleValue = ts.isPropertyAssignment(n.parent) && ["role"].includes(n.parent.name.getText(sf).replace(/["']/g, "")) && LIST_ROLES.has(n.text);
           if (n.text === "listbox" || n.text === "combobox" || n.text === "aria-activedescendant" || asRoleValue) v.push(`R1 ${file}: the string "${n.text}" outside ItemPicker.tsx`);
@@ -162,7 +205,7 @@ export function check(files: Files, opts: { paths?: Paths; baseUrl?: string } = 
       }
       // R4: the route
       if (file !== ROUTE_FILE) {
-        const f = (ts.isBinaryExpression(n) || ts.isTemplateExpression(n) || ts.isCallExpression(n)) && !folded.has(n) ? fold(n) : null;
+        const f = (ts.isBinaryExpression(n) || ts.isTemplateExpression(n) || ts.isCallExpression(n)) && !folded.has(n) ? fold(n, env) : null;
         if (f !== null) {
           n.forEachChild((c) => folded.add(c));
           if (/contract\/search/.test(f)) v.push(`R4 ${file}: builds the contract search path ("${f}")`);

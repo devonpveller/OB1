@@ -40,6 +40,31 @@ describe("one picker, one list search (structural)", () => {
       red({ "src/screens/Cast.tsx": `import { SEARCH_URL } from "../components/picker";\nimport { api } from "../lib/api";\nexport const go = (q: string) => api("GET", \`\${SEARCH_URL}?q=\${q}\`);\nexport const L = () => <div role="listbox"><div role="option" /></div>;` }, /R2.*SEARCH_URL/));
   });
 
+  describe("the tester's attempt-2 bypasses (round 3)", () => {
+    it("F1 a list UI outside src/ imported from src through ../../extra/Pick", () =>
+      red({ "extra/Pick.tsx": `export const Pick = () => <ul role="listbox"><li role="option">x</li></ul>;`, "src/components/Use.tsx": `import { Pick } from "../../extra/Pick"; export const U = Pick;` }, /R6/));
+    it("F1 an import that leaves src/ is refused even when the target is not on disk map, dynamic import and require too", () => {
+      red({ "src/components/Out.ts": `export * from "../../../elsewhere/thing";` }, /R6/);
+      red({ "src/components/Out2.ts": `export const f = () => import("../../extra/x");` }, /R6/);
+      red({ "src/components/Out3.js": `const x = require("../../extra/x");` }, /R6/);
+    });
+    it("F1 files outside src/ that are handed to the guard are checked as well", () =>
+      red({ "extra/Pick.tsx": `export const Pick = () => <ul role="listbox" />;` }, /R1/));
+    it("F2 role built by concatenation, through a const, or from a template", () => {
+      red({ "src/components/N1.tsx": `const r = "list" + "box"; export const N1 = () => <ul role={r}><li role={"op" + "tion"}>x</li></ul>;` }, /R1/);
+      red({ "src/components/N1b.tsx": `export const N = () => <ul role={"list" + "box"} />;` }, /R1/);
+      red({ "src/components/N1c.tsx": `export const N = () => <li role={\`op\${"tion"}\`} />;` }, /R1/);
+      red({ "src/components/N1d.tsx": `const a = "list"; const b = a + "box"; export const N = () => <ul role={b} />;` }, /R1/);
+      red({ "src/components/N1e.tsx": `import { createElement } from "react"; export const N = () => createElement("ul", { role: "list".concat("box") });` }, /R1/);
+    });
+    it("F2 residual closed cheaply: grid / row / tree roles are list UI too", () => {
+      red({ "src/components/N5.tsx": `export const N5 = () => <div role="grid"><div role="row" /></div>;` }, /R1/);
+      red({ "src/components/N5b.tsx": `export const N5 = () => <div role={"tr" + "ee"} />;` }, /R1/);
+    });
+    it("F2 a new file inside picker/harness may not import the search exports (R2 applies inside the picker too)", () =>
+      red({ "src/components/picker/harness/Other.tsx": `import { useLibrarySearch } from "../search"; export const O = () => { useLibrarySearch("a", {} as never); return null; };` }, /R2.*Other\.tsx/));
+  });
+
   describe("further shapes", () => {
     it("an import through a tsconfig-style alias resolves to the picker's files", () =>
       red({ "src/screens/A.tsx": `import { searchLibrary } from "@picker/search";` }, /R2.*searchLibrary|R3/, { paths: { "@picker/*": ["src/components/picker/*"] }, baseUrl: "." }));
