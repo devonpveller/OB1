@@ -27,9 +27,16 @@ const CLEANUP_WRITE = /\/cleanup\/(sources\/\{id\}\/(sever|erase)|process-all|to
 //    identity header (the lab workbench runs with WORKSPACE_IDENTITY_HEADER=X-Test-Sub).
 const PODCAST_MODEL = /\/(podcasts|presenters|teams)(\/|$| )/;
 
+// 7. rwr-podcast-audio-api: the episode audio's 206 example is the first 4 bytes of the fixture file; its request
+//    asks for exactly those (the 200 transaction asks for none and gets the whole file).
+const AUDIO = /\/podcasts\/\{id\}\/audio/;
+
 hooks.beforeEach((transaction, done) => {
   if (PODCAST_MODEL.test(String(transaction.name || '')) && transaction.request && transaction.request.headers) {
     transaction.request.headers['X-Test-Sub'] = 'lab-podcaster-0001';
+  }
+  if (AUDIO.test(String(transaction.name || '')) && String(transaction.expected && transaction.expected.statusCode) === '206') {
+    transaction.request.headers['Range'] = 'bytes=0-3';
   }
   const code = String(transaction.expected && transaction.expected.statusCode);
   transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || ''));

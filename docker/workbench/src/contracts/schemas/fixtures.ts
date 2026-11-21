@@ -36,4 +36,8 @@ export const FX = {
   referenceSpan: "f2000000-0000-4000-8000-000000000001", // span on refSource, pinned at 1 (out of date)
   referenceCurrent: "f2000000-0000-4000-8000-000000000002", // span on refSource, pinned at 2 (current)
   refNotePath: "notes/p2a/fixture-note.md", // a legacy note holding referenceSpan (the user document holds referenceCurrent)
+  // rwr-podcast-audio-api: lab-podcaster-0001's unshared episode (its archive is contract-test/podcast-archive/renders/fixture)
+  // and failed render request
+  podcastEpisode: "e7000000-0000-4000-8000-000000000001",
+  podcastFailedRequest: "e8000000-0000-4000-8000-000000000002",
 } as const;

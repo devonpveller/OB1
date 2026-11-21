@@ -60,6 +60,8 @@ const writes: Req[] = [
     team_id: "pod-fx-team", title: "A recorded request",
     transcript: { title: "A recorded request", turns: [{ presenterId: "pod-fx-presenter-a", text: "Good morning." }, { presenterId: "pod-fx-presenter-b", text: "Morning!" }] },
   }],
+  // rwr-podcast-audio-api: the fixture's failed request, moved back to queued (once)
+  ["podcastRequestRetried", "POST", `/podcasts/requests/e8000000-0000-4000-8000-000000000002/retry`],
   // P2a: place a reference held by the fixture user document
   ["referenceCreated", "POST", `/references`, {
     source_id: F.refSrc, provenance: "user", scope: "span",
@@ -79,7 +81,8 @@ const ex: Record<string, any> = {};
 const reqs: Record<string, unknown> = {};
 for (const [name, method, path, body] of [...reads, ...writes]) {
   const r = await fetch(B + path, {
-    method, headers: { "content-type": "application/json", "x-brain-key": key },
+    // the podcast model's fixtures belong to lab-podcaster-0001 (rw-inlet-stamp): called as that subject, as dredd-hooks.js does
+    method, headers: { "content-type": "application/json", "x-brain-key": key, ...(/^\/(podcasts|presenters|teams)(\/|$)/.test(path) ? { "X-Test-Sub": "lab-podcaster-0001" } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (r.status >= 400 && r.status !== 501) throw new Error(`${name}: HTTP ${r.status} ${await r.text()}`);
@@ -88,6 +91,8 @@ for (const [name, method, path, body] of [...reads, ...writes]) {
 }
 const stream = (await (await fetch(`${B}/sessions/${F.job}/stream`, { headers: { "x-brain-key": key } })).text())
   .replace(/\d{4}-\d{2}-\d{2}T[0-9:.]+Z/g, "2026-10-17T12:00:00.000Z");
+// rwr-podcast-audio-api: the fixture episode's archived bytes (contract-test/podcast-archive/renders/fixture/audio.mp3)
+ex.podcastAudio = await (await fetch(`${B}/podcasts/e7000000-0000-4000-8000-000000000001/audio`, { headers: { "x-brain-key": key, "X-Test-Sub": "lab-podcaster-0001" } })).text();
 ex.erase.tombstone.id = "66666666-6666-4666-8666-666666666668";
 ex.userSourceAdded.source.source_id = "cccccccc-cccc-4ccc-8ccc-ccccccccccc3";
 ex.referenceCreated.record.id = "f2000000-0000-4000-8000-0000000000c1";
