@@ -176,6 +176,30 @@ const t = [];
 for (let i = 0; i < 3; i++) { await ev(`document.querySelector('[data-testid=theme]').click()`); await sleep(100); t.push(await ev(`String(document.documentElement.getAttribute('data-theme'))`)); }
 ok(JSON.stringify(t) === JSON.stringify(["light", "dark", "null"]), `theme cycle: ${t.join(",")}`);
 
+// ---- 9. round 2 (tester findings): own sessions only, header-mode banner, click-inside overlay, inert, narrow widths
+const vp = (width, height, dsf = 1) => send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: dsf, mobile: false });
+await scheme("light"); await vp(1440, 900);
+await setMode("bob"); await go("/");
+ok((await ev(`document.querySelector('[data-testid=count-research]')?.textContent`)) === "0 running", "F1: bob owns no session; three others run: Research shows 0 running, not 3");
+await setMode("header"); await go("/");
+ok(await ev(`!!document.querySelector('[data-testid=default-banner]')`), "F2: header mode with no identity header (kind default): banner shown");
+await setMode("alice"); await go("/");
+await key("k", "KeyK", 75, 2); await sleep(120);
+await ev(`document.querySelector('.overlay-empty').dispatchEvent(new MouseEvent('mousedown',{bubbles:true}))`);
+await ev(`document.activeElement.blur()`);
+await key("Tab", "Tab", 9, 8); await sleep(80);
+ok(await ev(`!!document.querySelector('[role=dialog]').contains(document.activeElement)`), "F3: after a click inside the overlay, Shift+Tab stays inside it");
+ok(await ev(`document.querySelector('[data-testid=page]').hasAttribute('inert')`), "F3: the page behind the overlay is inert");
+await ev(`document.activeElement.blur()`);
+await key("Escape", "Escape", 27); await sleep(120);
+ok(await ev(`!document.querySelector('[role=dialog]') && !document.querySelector('[data-testid=page]').hasAttribute('inert')`), "F3: Esc closes it from anywhere in it; the page is live again");
+for (const [w, h, dsf, label] of [[400, 800, 1, "400px"], [640, 450, 2, "zoom 200%"], [320, 640, 1, "320px"]]) {
+  await vp(w, h, dsf); await setMode("alice"); await go("/");
+  const m = JSON.parse(await ev(`JSON.stringify((()=>{const d=document.documentElement; const clip=[...document.querySelectorAll('.nav .count')].filter(e=>{const b=e.getBoundingClientRect(),r=e.closest('.rail').getBoundingClientRect();return b.right>r.right+0.5||b.left<r.left-0.5}).map(e=>e.textContent); const sb=document.querySelector('[data-testid=search-box]').getBoundingClientRect(); const rail=document.querySelector('.rail'); return {sw:d.scrollWidth,cw:d.clientWidth,clip,searchW:Math.round(sb.width),railX:rail.scrollWidth>rail.clientWidth+1,counts:document.querySelectorAll('.nav .count').length}})())`));
+  ok(m.sw <= m.cw && m.clip.length === 0 && !m.railX && m.searchW >= 150 && m.counts === 3, `F5 ${label}: no sideways page scroll (${m.sw}/${m.cw}), counts not clipped (${m.clip.join(",") || "none"}), rail does not scroll sideways, search box ${m.searchW}px, ${m.counts} counts`);
+}
+await vp(1440, 900);
+
 ws.close();
 await fetch(`http://${CH}:9222/json/close/${tgt.id}`).catch(() => {});
 void KEY;

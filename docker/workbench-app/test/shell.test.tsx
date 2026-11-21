@@ -99,7 +99,7 @@ describe("every menu entry opens its route (acceptance 1)", () => {
 describe("the counts match the reads (acceptance 2)", () => {
   it("shows what the fixture holds: 2 running, 1 failed of 4 jobs, 3 sources + 1 candidate with evidence", async () => {
     const seen = fixture({
-      sessions: [{ id: "a" }, { id: "b" }],
+      sessions: [{ id: "a", mine: true }, { id: "b", mine: true }],
       jobs: [{ detail: { actions: ["retry"] } }, { detail: { actions: ["cancel"] } }, { detail: { actions: ["cancel"] } }, { detail: { actions: [] } }],
       sources: { total: 3 },
       candidates: [{ evidence: [{}] }, { evidence: [] }],
@@ -225,7 +225,7 @@ describe("own data only, nothing kept on a shared surface (acceptance 7)", () =>
   });
   it("what was read and the documents shown are not written to storage, console or the page title", async () => {
     const spies = (["log", "info", "warn", "error", "debug"] as const).map((k) => vi.spyOn(console, k).mockImplementation(() => {}));
-    fixture({ whoami: { subject_sub: "u-alice", name: "Alice Secretname" }, sessions: [{ id: "s1", title: "Private research Z" }] });
+    fixture({ whoami: { subject_sub: "u-alice", name: "Alice Secretname" }, sessions: [{ id: "s1", mine: true, title: "Private research Z" }] });
     setLockedDocument({ id: "d1", title: "Private Locked Title" });
     setLastDocument({ id: "d2", title: "Private Last Title" });
     render(<App />);

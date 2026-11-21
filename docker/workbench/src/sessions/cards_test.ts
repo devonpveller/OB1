@@ -3,7 +3,7 @@
 // interjection lands, the branch tree, and who may steer or cancel from it.
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import {
-  adminOf, badgeOf, cardOf, CARD_KEYS, type CardInput, linkOf, mayActOn, nextSteeringPoint, owuiBase, redactEvents, treeOf, waitingOn,
+  adminOf, badgeOf, cardOf, CARD_KEYS, type CardInput, linkOf, mayActOn, ownsSession, nextSteeringPoint, owuiBase, redactEvents, treeOf, waitingOn,
 } from "./cards.ts";
 
 const J = "99999999-9999-4999-8999-999999999999";
@@ -11,7 +11,7 @@ const IDEA = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1";
 const base = (o: Partial<CardInput> = {}): CardInput => ({
   id: J, status: "running", origin: "workspace", caller: "workspace", inlet_ref: null, refinery_id: null, query: "q",
   progress: { phase: "gather" }, created_at: "2026-10-30T00:00:00Z", started_at: null, finished_at: null, queue_position: null,
-  foreign: false, can_act: true,
+  foreign: false, can_act: true, mine: true,
   branches: [{ id: J, parent_job_id: null, branch_kind: "root", rooted_step_id: null, status: "running", query: "q", created_at: "2026-10-30T00:00:00Z" }],
   events: [], ...o,
 });
@@ -183,4 +183,15 @@ Deno.test("P4b round 2: a cancelled or failed session's card offers no steer", (
     assertEquals(cardOf(base({ status, events: ev }), "").next_steering_point, null, status);
   }
   assertEquals(cardOf(base({ status: "done", events: ev }), "").next_steering_point?.step_id, "s2", "a done session is still steered (P4a STEERABLE)");
+});
+
+Deno.test("rwr-shell-nav mine: the viewer OWNS the session; an admin never owns a service's, though they may act on it", () => {
+  const alice = { sub: "alice" }, admin = { sub: "boss" };
+  assertEquals(ownsSession("alice", alice, "prof"), true);
+  assertEquals(ownsSession("alice", { sub: "bob" }, "prof"), false);
+  assertEquals(ownsSession("service:agent-org", admin, "prof"), false);
+  assertEquals(mayActOn("service:agent-org", admin, "prof", true), true);
+  assertEquals(ownsSession(null, { sub: "prof" }, "prof"), true);
+  assertEquals(ownsSession(null, alice, "prof"), false);
+  assertEquals(ownsSession(null, alice, null), false);
 });

@@ -38,7 +38,11 @@ image, `openbrain-workbench-app`. Later items fill it in. Not a stack service ye
   `Toast` (with Undo).
 - `lib/shell-data.ts` reads who you are (`/workspace/whoami`, `/auth/me`) and the three menu counts (running
   sessions, intake jobs that offer a retry, cleanup sources + reopen candidates). Reads go through `lib/api.ts`
-  with `cache: "no-store"`; nothing read is stored, cached or logged.
+  with `cache: "no-store"`; nothing read is stored, cached or logged. The six reads are independent (each lands
+  alone); the Research count is only the cards with `mine: true` (the sessions contract's server-computed owner
+  flag: a global list holds other people's cards); a read that came back full shows `N+`; a different subject
+  calls `resetState()`. The default-subject banner keys on the identity KIND (`/auth/me` `kind`, else
+  `/workspace/whoami` `kind`), not the sign-in mode.
 - `lib/state.ts` holds the locked and last document in memory (typed getters + subscribe). `rwr-ui-state-keys`
   replaces its body with the account's settings keys; the shell does not change.
 - Tests: `npm test` (vitest incl. `test/contrast.test.ts`, AA for every token pair in light and dark) and the

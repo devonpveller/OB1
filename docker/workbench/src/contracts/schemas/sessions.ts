@@ -63,6 +63,7 @@ export const SessionCard = z.object({
     .openapi({ description: "where a steer sent now lands: the latest steering stage (step id for a viewer who may act)" }),
   tree: z.array(CardBranch),
   can_act: z.boolean().openapi({ description: "the viewer may steer and cancel from the card" }),
+  mine: z.boolean().openapi({ description: "the viewer owns the session (an admin does not own a service's); the shell counts only these" }),
   created_at: Iso,
   started_at: Iso.nullable(),
   finished_at: Iso.nullable(),
