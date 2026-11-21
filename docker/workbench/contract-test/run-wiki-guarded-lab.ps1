@@ -149,12 +149,20 @@ function Probe-Json([string]$o) {
 }
 function Health {
   $o = Lab-Docker 60 @('run', '--rm', '--label', $label, '--network', $net, '--entrypoint', 'node', $NodeImage, '-e',
-    "fetch('http://$P-viewer:8080/__health').then(r=>r.json()).then(j=>console.log('H '+JSON.stringify({s:j.status,d:j.reconcile&&j.reconcile.drift,m:j.reconcile&&j.reconcile.missing?j.reconcile.missing.length:null,reasons:(j.reasons||[]).map(x=>String(x).slice(0,80))}))).catch(e=>console.log('H '+JSON.stringify({error:String(e.message||e)})))")
+    "fetch('http://$P-viewer:8080/__health').then(r=>r.json()).then(j=>console.log('H '+JSON.stringify({s:j.status,d:j.reconcile&&j.reconcile.drift,m:j.reconcile&&j.reconcile.missing?j.reconcile.missing.length:null,c:j.reconcile&&j.reconcile.checkedAt,reasons:(j.reasons||[]).map(x=>String(x).slice(0,80))}))).catch(e=>console.log('H '+JSON.stringify({error:String(e.message||e)})))")
   $l = (($o -split "`n") | Where-Object { $_ -match '^H ' } | Select-Object -Last 1)
   if (-not $l) { return $null }
   try { return $l.Substring(2) | ConvertFrom-Json } catch { return $null }
 }
 
+# the viewer's health from a reconcile pass that ran AFTER $since (the lab database's clock = the docker VM's, as the viewer's);
+# a report from before the step it judges never counts (RED run 2 read the pass from before the writer ran)
+function Now-Iso { $t = "(clock_timestamp() AT TIME ZONE 'UTC')"; return (Q1 "SELECT to_char($t, 'YYYY-MM-DD') || 'T' || to_char($t, 'HH24:MI:SS.MS') || 'Z'").Trim() }
+function Fresh-Health([string]$since, [int]$tries = 40) {
+  $h = $null
+  for ($i = 0; $i -lt $tries; $i++) { Start-Sleep -Seconds 3; $h = Health; if ($h -and $h.c -and ([string]$h.c).CompareTo($since) -gt 0) { return $h } }
+  return $null
+}
 try {
   Write-Host "== rw-wiki-guarded-pages lab  owner=$Id  net=$net  red=$([bool]$Red)  evidence=$Evidence"
   if ($Red) { $tree = Tree-At $BaseSha; $sharedDir = Join-Path $tree 'recipes\_shared'; $viewerDir = Join-Path $tree 'docker\wiki-viewer'; $recCtx = Join-Path $tree 'recipes' }
@@ -249,9 +257,9 @@ COMMIT;
   Check ($wr -and $wr.recordClean -and $wr.logsClean) 'the withheld record and the writer''s log carry no marker and no slug (hashes and counts only)'
   Fix 'log-no-slug' ($wr -and -not $wr.logsNameRefused) 'the writer''s log names no refused page'
 
+  $afterWriter = Now-Iso
   Write-Host '[6] [viewer] health with the withheld page present; two identities on every route'
-  $h = $null
-  for ($i = 0; $i -lt 30; $i++) { Start-Sleep -Seconds 3; $h = Health; if ($h -and $h.d -ne $null) { if ($h.d -eq 0 -or $i -gt 6) { break } } }
+  $h = Fresh-Health $afterWriter
   Write-Host "    health: $($h | ConvertTo-Json -Compress)"
   Fix 'viewer-green' ($h -and $h.s -eq 'ok' -and $h.d -eq 0) 'the viewer is GREEN (status ok, drift 0) with a refused page''s file in the vault and its slug in the withheld record'
   $slugs = "content/notebooks/lab-$rand/w-refused,content/notebooks/lab-$rand/r-refused,content/notebooks/lab-$rand/v-refused,content/notebooks/lab-$rand/x-refused"
@@ -264,12 +272,10 @@ COMMIT;
   New-Item -ItemType Directory -Force (Split-Path $gm) | Out-Null
   [System.IO.File]::WriteAllText($gm, "---`ntitle: Genuinely missing`n---`nA clean page whose row never landed.`n", (New-Object System.Text.UTF8Encoding $false))
   (Get-Item $gm).LastWriteTime = (Get-Date).AddMinutes(-5)
-  $h2 = $null
-  for ($i = 0; $i -lt 20; $i++) { Start-Sleep -Seconds 3; $h2 = Health; if ($h2 -and $h2.d -gt 0) { break } }
+  $h2 = Fresh-Health (Now-Iso)
   Check ($h2 -and $h2.s -ne 'ok' -and $h2.d -ge 1 -and $h2.m -ge 1) "a missing page that no guard withheld turns the viewer RED (status $($h2.s), drift $($h2.d), missing $($h2.m))"
   Remove-Item -Force $gm
-  $h3 = $null
-  for ($i = 0; $i -lt 20; $i++) { Start-Sleep -Seconds 3; $h3 = Health; if ($h3 -and $h3.d -eq 0) { break } }
+  $h3 = Fresh-Health (Now-Iso)
   Fix 'viewer-green-again' ($h3 -and $h3.s -eq 'ok' -and $h3.d -eq 0) 'the missing page gone, the viewer is green again (the withheld page still present)'
 
   Write-Host '[8] [cleanup] an old refused file left by the old writer: moved to a backup folder, the revert puts it back'
@@ -280,8 +286,7 @@ COMMIT;
   Write-Host "    $clLines"
   $movedOk = -not (Test-Path $old) -and (Test-Path (Join-Path $vault ".withheld-backup-lab\files\content\notebooks\lab-$rand\c-refused.md"))
   Fix 'cleanup-apply' ($movedOk -and $clLines -match 'apply: (\d+) refused page file' -and [int]$Matches[1] -ge 1 -and $clLines -notmatch [regex]::Escape($MARK) -and $clLines -notmatch 'refused\.md|c-refused') 'the cleanup moved the old refused file(s) out of the served vault into the backup folder; its output is counts only'
-  $h4 = $null
-  for ($i = 0; $i -lt 20; $i++) { Start-Sleep -Seconds 3; $h4 = Health; if ($h4 -and $h4.d -eq 0) { break } }
+  $h4 = Fresh-Health (Now-Iso)
   Fix 'viewer-green-after-cleanup' ($h4 -and $h4.s -eq 'ok' -and $h4.d -eq 0) "after the cleanup the viewer is green (drift $($h4.d))"
   $rv = Node-Run 'cleanup-revert' @() $sharedDir '/shared/withheld-pages-cleanup.mjs --revert --vault /vault --backup /vault/.withheld-backup-lab' 600
   $rvLines = (($rv -split "`n") | Where-Object { $_ -match '^\[withheld-cleanup\]' }) -join ' | '
