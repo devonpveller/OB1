@@ -1419,7 +1419,8 @@ services:
     ports:
       - "127.0.0.1:8812:8080"
       # OPT-IN LAN BINDING (rw-p2b-workspace, the edge-b2-pub pattern), SHIPPED INERT. The viewer is
-      # the ob1 plane's front end - the wiki and /workspace - and forwards /workbench/* to the
+      # the ob1 plane's wiki front end (the old /workspace app is gone; the research workbench is its own
+      # service, openbrain-workbench-app, with its own door) - and forwards /workbench/* to the
       # workbench with the key server-side, so nothing else of this plane is ever on the LAN.
       # WIKI_VIEWER_LAN_IP in OB1/docker/.env, set to the ONE host LAN address the Proxmox Traefik
       # targets (never 0.0.0.0), adds <ip>:8812 BESIDE the loopback line; UNSET (or empty) it renders

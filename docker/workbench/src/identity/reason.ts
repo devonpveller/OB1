@@ -4,7 +4,8 @@
 // characters), marks (Mn, Me, Mc - variation selectors, combining marks), private use and unassigned
 // code points (Co, Cn), symbols (U+2800 braille blank, U+FFFC), punctuation, separators (NBSP, em
 // space), and the Hangul fillers, which Unicode files as letters (U+115F, U+1160, U+3164, U+FFA0). The old workspace applied the same
-// rule before it sent (deleted by rwr-remove-workspace; the new app re-applies it); init-identity.sql keeps a coarser CHECK.
+// rule client-side before it sent (deleted by rwr-remove-workspace); no client applies it today, so this server
+// check is the only gate; init-identity.sql keeps a coarser CHECK.
 export const REASON_MIN = 8;
 export const REASON_MAX = 1000;
 
