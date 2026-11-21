@@ -1,10 +1,10 @@
 // Screen 1, Home (rwr-home): the ask box, then what you were doing and what is new. Every card is drawn only
 // from the signed-in subject's own documents, sessions, episodes and ideas and the shared library, read through
 // lib/api.ts; the title of each card opens its screen. Nothing here is stored in the browser.
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Link } from "../../shell/Link";
 import {
-  ago, readClaimsWaiting, readDocuments, readIdeas, readNewInLibrary, readPodcasts, readSessions, runSearch, SHOW, useCard,
+  ago, readClaimsWaiting, readDocuments, readIdeas, readNewInLibrary, readPodcasts, readSessions, runSearch, SESSIONS_LIMIT, SHOW, useCard,
   type CardState, type SearchHit,
 } from "./home-data";
 
@@ -90,12 +90,25 @@ function AskBox() {
   );
 }
 
-// Home is drawn for ONE known subject. The cards live under a key made of that subject, so when the shell
-// shows another person (its periodic whoami read) every card, every read in flight and the ask box are dropped
-// and read again for the new person; before the subject is known nothing is drawn or read.
-export function Home({ subject }: { subject: string | null }) {
-  if (!subject) return <div className="screen home" data-testid="home"><h1 className="sr-only">Home</h1><p className="meta" role="status" data-testid="home-waiting">Checking who you are...</p></div>;
-  return <HomeCards key={subject} />;
+// Home is drawn for ONE known subject. The cards live under a key made of the LAST KNOWN subject, so when the shell
+// shows a DIFFERENT person (its periodic whoami read) every card, every read in flight and the ask box are dropped
+// and read again for the new person; a failed poll (no subject this time) keeps the current Home, and nothing is
+// drawn or read until a subject has been known at least once.
+export function Home({ subject, loaded, onRetry = () => window.location.reload() }: { subject: string | null; loaded: boolean; onRetry?: () => void }) {
+  const last = useRef<string | null>(null);
+  if (subject) last.current = subject;
+  const known = subject ?? last.current;
+  if (!known) {
+    return (
+      <div className="screen home" data-testid="home">
+        <h1 className="sr-only">Home</h1>
+        {loaded
+          ? <p className="meta" data-testid="home-failed">Could not tell who you are, so nothing is shown. <button type="button" onClick={onRetry}>Try again</button></p>
+          : <p className="meta" role="status" data-testid="home-waiting">Checking who you are...</p>}
+      </div>
+    );
+  }
+  return <HomeCards key={known} />;
 }
 
 function HomeCards() {
@@ -115,14 +128,15 @@ function HomeCards() {
         <Card id="docs" title="Continue writing" to="/documents" more={<Link to="/documents">All documents</Link>} state={docs} retry={rDocs}
           empty={d && d.length === 0 ? { text: "You have no documents yet.", to: "/documents", action: "New document" } : null}>
           {d?.slice(0, SHOW).map((x) => (
-            <Row key={x.path} id="doc" to={"/documents/" + encodeURIComponent(x.path)} title={x.title}
+            <Row key={x.path} id="doc" to={x.href} title={x.title}
               meta={["edited " + ago(x.updated), x.refs ? x.refs + (x.refs === 1 ? " reference" : " references") : ""].filter(Boolean).join(" · ")} />
           ))}
           <Link to="/documents" className="btn start">+ New document</Link>
         </Card>
         <Card id="research" title="Research" to="/research" more={<Link to="/research">See the tree</Link>} state={ses} retry={rSes}
-          empty={s && s.length === 0 ? { text: "No research running or finished lately.", to: "/research/start", action: "Start research" } : null}>
-          {s?.slice(0, SHOW).map((x) => {
+          empty={s && s.rows.length === 0 && !s.capped ? { text: "No research running or finished lately.", to: "/research/start", action: "Start research" } : null}>
+          {s && s.capped && s.rows.length === 0 && <p className="empty" data-testid="capped-research">None of the newest {SESSIONS_LIMIT} sessions is yours. <Link to="/research">Open Research</Link></p>}
+          {s?.rows.slice(0, SHOW).map((x) => {
             const [label, kind] = pillOf(x.status, x.waiting);
             const meta = x.status === "done" ? "report ready · " + ago(x.at)
               : (x.waitKind === "branches" ? [x.waiting] : [x.branches ? x.branches + (x.branches === 1 ? " branch" : " branches") : "", x.waiting]).filter(Boolean).join(" · ");
@@ -147,11 +161,12 @@ function HomeCards() {
           <div className="ch"><h2 id="h-library"><Link to="/library" data-testid="title-library">New in the library this week</Link></h2></div>
           {neu.state === "loading" && <p className="meta" role="status">Loading...</p>}
           {neu.state === "failed" && <p className="meta" data-testid="failed-library">Could not load this card. <button type="button" onClick={rNeu}>Try again</button></p>}
-          {n && n.sources === 0 && n.claims === 0 && <p className="empty" data-testid="empty-library">Nothing new in the library this week. <Link to="/library">Open the library</Link></p>}
-          {n && (n.sources > 0 || n.claims > 0) && (
+          {n && n.sourcesTotal === 0 && n.claimsTotal === 0 && <p className="empty" data-testid="empty-library">Nothing new in the library this week. <Link to="/library">Open the library</Link></p>}
+          {n && (n.sourcesTotal > 0 || n.claimsTotal > 0) && (
             <div className="row static" data-testid="new-counts">
               <span className="row-main">
-                <span className="row-title">{n.sources}{n.capped ? "+" : ""} new {n.sources === 1 ? "source" : "sources"}, {n.claims}{n.capped ? "+" : ""} new {n.claims === 1 ? "claim" : "claims"}</span>
+                <span className="row-title">{n.sourcesTotal} new {n.sourcesTotal === 1 ? "source" : "sources"}, {n.claimsTotal} new {n.claimsTotal === 1 ? "claim" : "claims"}</span>
+                {n.sources.slice(0, 3).map((x) => <span key={x.id} className="meta">{x.title || "(untitled)"}</span>)}
                 <span className="meta">open them in the Library to check quality</span>
               </span>
               <Link to="/library" className="more">Review</Link>
@@ -160,11 +175,11 @@ function HomeCards() {
           <div className="ch sub"><h3><Link to="/library" data-testid="title-claims">Claims waiting for a second source</Link></h3></div>
           {cla.state === "loading" && <p className="meta" role="status">Loading...</p>}
           {cla.state === "failed" && <p className="meta" data-testid="failed-claims">Could not load this. <button type="button" onClick={rCla}>Try again</button></p>}
-          {c && c.count === 0 && <p className="empty" data-testid="empty-claims">No claim waits for a second source. <Link to="/library">Open the library</Link></p>}
-          {c && c.count > 0 && (
+          {c && c.total === 0 && <p className="empty" data-testid="empty-claims">No claim waits for a second source. <Link to="/library">Open the library</Link></p>}
+          {c && c.total > 0 && (
             <div className="row static" data-testid="claims-waiting">
               <span className="row-main">
-                <span className="row-title">{c.count}{c.capped ? "+" : ""} {c.count === 1 ? "claim" : "claims"} backed by one source only</span>
+                <span className="row-title">{c.total} {c.total === 1 ? "claim" : "claims"} backed by one source only</span>
                 {c.samples.map((x) => <span key={x.id} className="meta">{x.text}</span>)}
               </span>
               <Link to="/library" className="more">Review</Link>

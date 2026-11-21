@@ -56,7 +56,7 @@ function Shell({ load }: { load: Load }) {
         <Rail path={route.path} d={d} locked={locked} last={last} theme={theme}
           onTheme={() => { const n = NEXT[theme]; applyTheme(n); setTheme(n); }} />
         <main className="main" id="main" tabIndex={-1} data-testid="main">
-          {def === "overview" ? <Overview /> : def?.path === "/" ? <Home subject={d.who?.subject ?? null} /> : def ? <Placeholder def={def} /> : <NotFound path={route.path} />}
+          {def === "overview" ? <Overview /> : def?.path === "/" ? <Home subject={d.who?.subject ?? null} loaded={d.loaded} /> : def ? <Placeholder def={def} /> : <NotFound path={route.path} />}
         </main>
       </div>
       </div>

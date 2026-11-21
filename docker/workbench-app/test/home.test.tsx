@@ -1,7 +1,7 @@
 // The Home screen (rwr-home): each card against its source read, empty states, every card title, the two-identity
 // planted-data test, a failing read, nothing kept in the browser, and the ask box.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { render, screen, fireEvent, cleanup, waitFor, within } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, waitFor, within, act } from "@testing-library/react";
 import { App } from "../src/App";
 import { setFetcher, requestLog, clearRequestLog } from "../src/lib/api";
 import { resetState } from "../src/lib/state";
@@ -42,23 +42,16 @@ const DB = {
   admin: { documents: [], ideas: [], episodes: [], requests: [], sessions: [] },
 } as const;
 
-// The shared library: the same for every identity.
-const LIB = {
-  timeline: [
-    { at: iso(D), kind: "source_revision", ref: "a@1", summary: "revision 1 by original", source_id: "a", lifecycle: "active" },
-    { at: iso(D), kind: "source_revision", ref: "a@2", summary: "revision 2 by operator", source_id: "a", lifecycle: "active" },
-    { at: iso(D), kind: "source_revision", ref: "b@1", summary: "revision 1 by original", source_id: "b", lifecycle: "active" },
-    { at: iso(D), kind: "source_revision", ref: "c@1", summary: "revision 1 by original", source_id: "c", lifecycle: "suppressed" },
-    { at: iso(D), kind: "claim_created", ref: "k1", summary: "a claim", source_id: null, lifecycle: null },
-    { at: iso(D), kind: "session_started", ref: "s", summary: "", source_id: null, lifecycle: null },
-  ],
-  claims: [
-    { id: "k1", text: "Shared claim one source", status: "active", corroborations: 0, contradicted: false, contradicted_by_newer: false, sources: [{ source_id: "a", lifecycle: "active", edge_type: "states" }] },
-    { id: "k2", text: "Shared claim corroborated", status: "active", corroborations: 1, contradicted: false, contradicted_by_newer: false, sources: [{ source_id: "a", lifecycle: "active", edge_type: "states" }, { source_id: "b", lifecycle: "active", edge_type: "corroborates" }] },
-    { id: "k3", text: "Shared claim one suppressed source", status: "active", corroborations: 0, contradicted: false, contradicted_by_newer: false, sources: [{ source_id: "a", lifecycle: "suppressed", edge_type: "states" }] },
-    { id: "k4", text: "Shared claim contradicted", status: "active", corroborations: 0, contradicted: true, contradicted_by_newer: false, sources: [{ source_id: "a", lifecycle: "active", edge_type: "states" }] },
-  ],
+// The shared library: the same for every identity. The two library reads are the server's own (totals are exact
+// over the whole library; the page is the limit). The default holds live-like volume: thousands of waiting claims.
+const claimRow = (i: number) => ({ id: "k" + i, text: "Shared claim one source " + i, created_at: iso(i * H) });
+const LIB0 = {
+  recent: { days: 7, sources_total: 2, claims_total: 682, sources: [
+    { id: "a", title: "Shared source first", url: "https://example.org/a", content_type: "web_article", created_at: iso(H) },
+    { id: "b", title: "Shared source second", url: null, content_type: "pdf", created_at: iso(D) } ] },
+  waiting: { total: 14292, claims: [1, 2, 3, 4, 5].map(claimRow) },
 };
+let LIB: typeof LIB0 = LIB0;
 // Alice's running session as Bob's read returns it: another user's card has an empty question and can_act false.
 // a service job an admin may act on: can_act true, question visible, but not the admin's own
 const SERVICE = { id: "s7", status: "running", query: "SERVICE job text", can_act: true, mine: false, waiting_on: { kind: "stage", detail: "plan" }, tree: [{}], created_at: iso(H), started_at: iso(H), finished_at: null };
@@ -89,8 +82,8 @@ function stub() {
       const own = me.sessions as readonly unknown[];
       return j({ sessions: who === "bob" ? [...own, FOREIGN] : who === "nobody" ? [FOREIGN] : who === "admin" ? [{ ...FOREIGN, query: "ALPHA admin can read this", can_act: true }, SERVICE] : own });
     }
-    if (path === "/workbench/contract/timeline") return j({ events: LIB.timeline });
-    if (path === "/workbench/contract/claims") return j({ count: LIB.claims.length, claims: LIB.claims });
+    if (path === "/workbench/contract/library/recent") return j(LIB.recent);
+    if (path === "/workbench/contract/library/waiting-claims") return j(LIB.waiting);
     if (path === "/workbench/contract/search") {
       const q = new URL(u, "http://x").searchParams.get("q");
       if (q === "zzzz") return j({ results: [] });
@@ -109,7 +102,7 @@ const card = (id: string) => screen.getByTestId("card-" + id);
 const rowTitles = (id: string) => within(card(id)).queryAllByTestId(/^row-/).map((r) => r.querySelector(".row-title")!.textContent);
 
 beforeEach(() => {
-  cleanup(); clearRequestLog(); resetState(); who = "alice"; failing = []; malformed = []; hanging = [];
+  cleanup(); clearRequestLog(); resetState(); LIB = LIB0; who = "alice"; failing = []; malformed = []; hanging = [];
   document.documentElement.removeAttribute("data-theme");
   window.localStorage.clear(); window.sessionStorage.clear();
   window.history.pushState({}, "", "/");
@@ -145,20 +138,23 @@ describe("each card lists the same items as its source read (acceptance 1)", () 
     expect(rowTitles("ideas")).toEqual(["ALPHA pantry idea"]);
     expect(card("ideas").textContent).toMatch(/researched/);
   });
-  it("the two library cards: this week's new sources and claims, and claims backed by one active source only", async () => {
+  it("the two library cards come from the server's totals: real titles, the exact number over the whole library", async () => {
     await renderHome();
-    // sources a and b have a revision 1 in the window; c is suppressed; a's revision 2 is not new
-    expect(screen.getByTestId("new-counts").textContent).toMatch(/2 new sources, 1 new claim/);
+    const n = screen.getByTestId("new-counts").textContent!;
+    expect(n).toMatch(/2 new sources, 682 new claims/);
+    expect(n).toMatch(/Shared source first/); expect(n).toMatch(/Shared source second/);
     const w = screen.getByTestId("claims-waiting").textContent!;
-    expect(w).toMatch(/1 claim backed by one source only/);
-    expect(w).toMatch(/Shared claim one source/);
-    expect(w).not.toMatch(/corroborated|suppressed source|contradicted/);
+    expect(w).toMatch(/14292 claims backed by one source only/);
+    expect(w).toMatch(/Shared claim one source 1/);
+    expect(within(screen.getByTestId("claims-waiting")).queryAllByText(/Shared claim one source \d/)).toHaveLength(3);
+    expect(w).not.toMatch(/14292\+/);
   });
-  it("the library card asks the timeline for the last seven days", async () => {
+  it("the library cards ask the server for the last seven days and a page of five (no client page of everything)", async () => {
     await renderHome();
-    const u = requestLog().find((r) => r.url.startsWith("/workbench/contract/timeline"))!.url;
-    const from = Date.parse(decodeURIComponent(new URL(u, "http://x").searchParams.get("from")!));
-    expect(Math.abs(NOW - 7 * D - from)).toBeLessThan(60_000);
+    const urls = requestLog().map((r) => r.url);
+    expect(urls).toContain("/workbench/contract/library/recent?days=7&limit=5");
+    expect(urls).toContain("/workbench/contract/library/waiting-claims?limit=5");
+    expect(urls.some((u) => u.startsWith("/workbench/contract/timeline") || u.startsWith("/workbench/contract/claims"))).toBe(false);
   });
   it("a card lists at most five rows; its title opens the rest", async () => {
     const many = Array.from({ length: 9 }, (_, i) => ({ id: "i" + i, title: "ALPHA idea " + i, status: "new", updated_at: iso(i * H) }));
@@ -171,7 +167,7 @@ describe("each card lists the same items as its source read (acceptance 1)", () 
 describe("a card with nothing in it shows a one-line empty state with its action (acceptance 2)", () => {
   it("every card, for a subject with nothing", async () => {
     who = "nobody";
-    (LIB as any).savedT = LIB.timeline.slice(); (LIB as any).savedC = LIB.claims.slice(); LIB.timeline.length = 0; LIB.claims.length = 0;
+    LIB = { recent: { days: 7, sources_total: 0, claims_total: 0, sources: [] }, waiting: { total: 0, claims: [] } };
     try {
       await renderHome();
       const want: [string, RegExp, string][] = [
@@ -186,7 +182,7 @@ describe("a card with nothing in it shows a one-line empty state with its action
         expect(el.textContent!.split("\n")).toHaveLength(1);
       }
     } finally {
-      LIB.timeline.push(...(LIB as any).savedT); LIB.claims.push(...(LIB as any).savedC);
+      LIB = LIB0;
     }
   });
 });
@@ -272,7 +268,7 @@ describe("a failing read blanks one card, never the screen", () => {
     await waitFor(() => expect(rowTitles("podcasts")).toHaveLength(2));
   });
   it("the claims read fails: no invented number", async () => {
-    failing = ["/contract/claims"];
+    failing = ["/library/waiting-claims"];
     await renderHome();
     expect(screen.getByTestId("failed-claims")).toBeTruthy();
     expect(screen.queryByTestId("claims-waiting")).toBeNull();
@@ -393,7 +389,7 @@ describe("round 3 (tester attempt 1)", () => {
     expect(bad.bad).toBe(true);
   });
   it("F4: a 200 that is not the expected JSON shows Could not load on every card, never an empty state", async () => {
-    malformed = ["/contract/documents", "/contract/sessions", "/contract/podcasts", "/contract/ideas", "/contract/timeline", "/contract/claims"];
+    malformed = ["/contract/documents", "/contract/sessions", "/contract/podcasts", "/contract/ideas", "/library/recent", "/library/waiting-claims"];
     await renderHome();
     for (const id of ["docs", "research", "podcasts", "ideas", "library", "claims"]) {
       expect(screen.getByTestId("failed-" + id), id).toBeTruthy();
@@ -444,5 +440,81 @@ describe("round 3 (tester attempt 1)", () => {
   it("F5: .meta wraps long unbroken text", async () => {
     const { readFileSync } = await import("node:fs");
     expect(readFileSync("src/styles.css", "utf8")).toMatch(/\.meta\s*\{[^}]*overflow-wrap:\s*anywhere/);
+  });
+});
+
+describe("round 4 (review)", () => {
+  it("1: a new-sources count with no source rows is still not the empty line; claims_total alone is news", async () => {
+    LIB = { ...LIB0, recent: { days: 7, sources_total: 0, claims_total: 3, sources: [] } };
+    await renderHome();
+    expect(screen.queryByTestId("empty-library")).toBeNull();
+    expect(screen.getByTestId("new-counts").textContent).toMatch(/0 new sources, 3 new claims/);
+  });
+  it("1: a server answer without the totals is a failed card, never the empty line", async () => {
+    setFetcher(async (u) => {
+      const p = u.split("?")[0];
+      const j = (o: unknown) => new Response(JSON.stringify(o), { status: 200 });
+      if (p === "/workbench/workspace/whoami") return j({ subject_sub: "u-alice", name: "alice" });
+      if (p === "/workbench/contract/library/recent") return j({ sources: [] });
+      if (p === "/workbench/contract/library/waiting-claims") return j({ claims: [] });
+      return new Response("{}", { status: 404 });
+    });
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("failed-library")).toBeTruthy());
+    expect(screen.getByTestId("failed-claims")).toBeTruthy();
+    expect(screen.queryByTestId("empty-library")).toBeNull();
+    expect(screen.queryByTestId("empty-claims")).toBeNull();
+  });
+  it("2: the rail marks a slot whose id holds a slash as current on its own page", async () => {
+    const { setLastDocument } = await import("../src/lib/state");
+    setLastDocument({ id: "documents/alpha-new.md", title: "Slot doc" });
+    window.history.pushState({}, "", "/documents/documents%2Falpha-new.md");
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("doc-slot").className).toMatch(/\bon\b/));
+  });
+  it("3: one failed whoami poll keeps Home (cards, ask text); only a different subject resets it", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    await renderHome();
+    fireEvent.change(screen.getByTestId("ask-input"), { target: { value: "typed words" } });
+    const keep = rowTitles("docs");
+    failing = ["/workspace/whoami"];
+    const before = requestLog().filter((r) => r.url.includes("whoami")).length;
+    await vi.advanceTimersByTimeAsync(31000);
+    await waitFor(() => expect(requestLog().filter((r) => r.url.includes("whoami")).length).toBeGreaterThan(before));
+    await act(async () => { await Promise.resolve(); });
+    expect(rowTitles("docs")).toEqual(keep);
+    expect((screen.getByTestId("ask-input") as HTMLInputElement).value).toBe("typed words");
+    expect(screen.queryByTestId("home-waiting")).toBeNull();
+    failing = []; who = "bob";
+    await vi.advanceTimersByTimeAsync(31000);
+    await waitFor(() => expect(rowTitles("docs")).toEqual(["BRAVO plan"]));
+    expect((screen.getByTestId("ask-input") as HTMLInputElement).value).toBe("");
+  });
+  it("3: a subject never known: a plain failure with Try again, no card", async () => {
+    failing = ["/workspace/whoami"];
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("home-failed")).toBeTruthy());
+    expect(screen.getByTestId("home-failed").textContent).toMatch(/Try again/);
+    expect(screen.queryByTestId("card-docs")).toBeNull();
+  });
+  it("4: the Research card asks for 200 sessions like the shell; capped with none of mine is not the empty line", async () => {
+    const others = Array.from({ length: 200 }, (_, i) => ({ ...FOREIGN, id: "f" + i }));
+    const mine = DB.alice.sessions as unknown as any[];
+    const saved = mine.slice();
+    mine.length = 0; mine.push(...others);
+    try {
+      await renderHome();
+      expect(requestLog().some((r) => r.url === "/workbench/contract/sessions?state=recent&limit=200")).toBe(true);
+      expect(screen.queryByTestId("empty-research")).toBeNull();
+      expect(screen.getByTestId("capped-research").textContent).toMatch(/200/);
+    } finally { mine.length = 0; mine.push(...saved); }
+  });
+  it("5: a document path that cannot be encoded makes that card Could not load, not a blank app", async () => {
+    (DB.alice.documents as unknown as any[]).push({ title: "bad", path: "documents/\ud800.md", updated: iso(H), outbound_links: [] });
+    try {
+      await renderHome();
+      expect(screen.getByTestId("failed-docs")).toBeTruthy();
+      expect(screen.getByTestId("card-research")).toBeTruthy();
+    } finally { (DB.alice.documents as unknown as any[]).pop(); }
   });
 });

@@ -10,12 +10,14 @@ export type CardState<T> = { state: "loading" } | { state: "failed" } | { state:
 export const SHOW = 5; // rows a card lists; the card title opens the screen with the rest
 export const WEEK_MS = 7 * 24 * 3600 * 1000;
 
-export type DocRow = { title: string; path: string; updated: string; refs: number };
+export type DocRow = { title: string; path: string; href: string; updated: string; refs: number };
 export type SessionRow = { id: string; query: string; status: string; waiting: string; waitKind: string; branches: number; at: string };
 export type PodcastRow = { id: string; title: string; kind: "episode" | "request"; label: string; detail: string; at: string };
 export type IdeaRow = { id: string; title: string; status: string; at: string };
-export type NewInLibrary = { sources: number; claims: number; capped: boolean };
-export type ClaimsWaiting = { count: number; capped: boolean; samples: { id: string; text: string }[] };
+export type NewInLibrary = { sources: { id: string; title: string }[]; sourcesTotal: number; claimsTotal: number };
+export type SessionsRead = { rows: SessionRow[]; capped: boolean };
+export const SESSIONS_LIMIT = 200; // the shell asks the same: the read is every user's sessions, newest first
+export type ClaimsWaiting = { total: number; samples: { id: string; text: string }[] };
 export type SearchHit = { kind: string; id: string; title: string; snippet: string };
 
 const arr = (x: unknown): any[] => (Array.isArray(x) ? x : []);
@@ -31,22 +33,26 @@ const time = (s: unknown) => { const t = Date.parse(String(s ?? "")); return Num
 export async function readDocuments(): Promise<DocRow[]> {
   const { data } = await api("GET", "/workbench/contract/documents?limit=100");
   return listOf(data, "documents")
-    .map((d) => ({ title: String(d.title ?? ""), path: String(d.path ?? ""), updated: String(d.updated ?? ""), refs: arr(d.outbound_links).length }))
+    // the row link is built HERE: a path that cannot be encoded fails this read (the card says so), never the render
+    .map((d) => ({ title: String(d.title ?? ""), path: String(d.path ?? ""), href: "/documents/" + encodeURIComponent(String(d.path ?? "")), updated: String(d.updated ?? ""), refs: arr(d.outbound_links).length }))
     .sort((a, b) => time(b.updated) - time(a.updated));
 }
 
 // contract/sessions (state=recent: open sessions + those finished in the last day). The read returns every
 // user's sessions (research is shared). Each card carries `mine` (the viewer owns it); Home shows only those,
 // so nothing of anyone else's appears, not even a count, and an admin sees only their own.
-export async function readSessions(): Promise<SessionRow[]> {
-  const { data } = await api("GET", "/workbench/contract/sessions?state=recent&limit=50");
-  return listOf(data, "sessions")
+export async function readSessions(): Promise<SessionsRead> {
+  const { data } = await api("GET", "/workbench/contract/sessions?state=recent&limit=" + SESSIONS_LIMIT);
+  const all = listOf(data, "sessions");
+  const rows: SessionRow[] = all
     .filter((s) => s?.mine === true) // the server's owner flag: an admin acting on someone else's or a service job is not "mine"
     .map((s) => ({
       id: String(s.id), query: typeof s.query === "string" ? s.query : "", status: String(s.status ?? ""),
       waiting: String(s.waiting_on?.kind === "nothing" ? "" : s.waiting_on?.detail ?? ""), waitKind: String(s.waiting_on?.kind ?? ""),
       branches: Math.max(0, arr(s.tree).length - 1), at: String(s.finished_at ?? s.started_at ?? s.created_at ?? ""),
     }));
+  // a full page means older sessions were not read: the card must not claim there is none of mine
+  return { rows, capped: all.length >= SESSIONS_LIMIT };
 }
 
 // contract/podcasts (the caller's own episodes and the shared renders) + contract/podcasts/requests (the
@@ -79,32 +85,25 @@ export async function readIdeas(): Promise<IdeaRow[]> {
   return listOf(data, "ideas").map((i) => ({ id: String(i.id), title: String(i.title ?? ""), status: String(i.status ?? ""), at: String(i.updated_at ?? "") }));
 }
 
-// "New in the library this week": the timeline from seven days ago. A source is new when its first revision
-// (revision 1) is in the window; a claim is new on its claim_created event. Only counts: the timeline names
-// no source title, and a source that is not active now is not counted.
-export async function readNewInLibrary(now = Date.now()): Promise<NewInLibrary> {
-  const from = new Date(now - WEEK_MS).toISOString();
-  const { data } = await api("GET", "/workbench/contract/timeline?from=" + encodeURIComponent(from) + "&limit=200");
-  const ev = listOf(data, "events");
-  const sources = new Set<string>();
-  let claims = 0;
-  for (const e of ev) {
-    if (e.kind === "source_revision" && e.lifecycle === "active" && /^revision 1 /.test(String(e.summary)) && e.source_id) sources.add(String(e.source_id));
-    if (e.kind === "claim_created") claims++;
-  }
-  return { sources: sources.size, claims, capped: ev.length >= 200 };
+// "New in the library this week": the server's own read (contract/library/recent) - the active sources first added in
+// the last seven days with their titles, and the exact totals of new sources and claims over the whole library.
+// "Claims waiting for a second source": contract/library/waiting-claims - active, uncontradicted claims backed by
+// exactly one active source, counted by the server over EVERY claim. Both are shared-library material only. A
+// total that is not a number is a failed read (the cards then say so), never an empty line.
+const intOf = (x: unknown, what: string): number => {
+  if (typeof x !== "number" || !Number.isInteger(x) || x < 0) throw new Error("unexpected answer: " + what);
+  return x;
+};
+export async function readNewInLibrary(): Promise<NewInLibrary> {
+  const { data } = await api("GET", "/workbench/contract/library/recent?days=7&limit=" + SHOW);
+  const sources = listOf(data, "sources").map((s) => ({ id: String(s.id), title: String(s.title ?? "") }));
+  return { sources, sourcesTotal: intOf(data.sources_total, "sources_total"), claimsTotal: intOf(data.claims_total, "claims_total") };
 }
 
-// "Claims waiting for a second source": active claims, not contradicted, backed by exactly one active
-// source and no corroborator (the claims read's own corroborations count).
 export async function readClaimsWaiting(): Promise<ClaimsWaiting> {
-  const { data } = await api("GET", "/workbench/contract/claims?status=active&limit=200");
-  const all = listOf(data, "claims");
-  const waiting = all.filter((c) => {
-    const act = new Set(arr(c.sources).filter((s) => s.lifecycle === "active" && s.edge_type !== "contradicts").map((s) => String(s.source_id)));
-    return c.corroborations === 0 && !c.contradicted && !c.contradicted_by_newer && act.size === 1;
-  });
-  return { count: waiting.length, capped: all.length >= 200, samples: waiting.slice(0, 3).map((c) => ({ id: String(c.id), text: String(c.text ?? "") })) };
+  const { data } = await api("GET", "/workbench/contract/library/waiting-claims?limit=" + SHOW);
+  const claims = listOf(data, "claims");
+  return { total: intOf(data.total, "total"), samples: claims.slice(0, 3).map((c) => ({ id: String(c.id), text: String(c.text ?? "") })) };
 }
 
 // The ask box, in phase 0: a library search (pages, claims and sources; never a user document).

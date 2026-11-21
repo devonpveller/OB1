@@ -43,17 +43,13 @@ PEOPLE.admin = { documents: [], ideas: [], episodes: [], requests: [], sessions:
 PEOPLE.broken = PEOPLE.alice;
 const NAME = { admin: "Ada Admin", alice: "Alice Lab", bob: "Bob Builder", nobody: "Nina Nobody", broken: "Alice Lab" };
 const SUB = { admin: "u-admin", alice: "u-alice", bob: "u-bob", nobody: "u-nobody", broken: "u-alice" };
+// the server's own library reads: exact totals over the whole library, a page of five (live-like volume)
+const LONG = "Claim with a long unbroken address https://example.org/" + "a".repeat(300);
 const LIB = {
-  timeline: [
-    { at: ago(D), kind: "source_revision", ref: "a@1", summary: "revision 1 by original", source_id: "a", lifecycle: "active" },
-    { at: ago(D), kind: "source_revision", ref: "b@1", summary: "revision 1 by original", source_id: "b", lifecycle: "active" },
-    { at: ago(D), kind: "claim_created", ref: "k1", summary: "a claim", source_id: null, lifecycle: null },
-  ],
-  claims: [
-    { id: "k1", text: "Shared claim backed by one source", status: "active", corroborations: 0, contradicted: false, contradicted_by_newer: false, sources: [{ source_id: "a", lifecycle: "active", edge_type: "states" }] },
-    { id: "k3", text: "Claim with a long unbroken address https://example.org/" + "a".repeat(300), status: "active", corroborations: 0, contradicted: false, contradicted_by_newer: false, sources: [{ source_id: "b", lifecycle: "active", edge_type: "states" }] },
-    { id: "k2", text: "Shared claim corroborated", status: "active", corroborations: 1, contradicted: false, contradicted_by_newer: false, sources: [{ source_id: "a", lifecycle: "active", edge_type: "states" }, { source_id: "b", lifecycle: "active", edge_type: "corroborates" }] },
-  ],
+  recent: { days: 7, sources_total: 2, claims_total: 682, sources: [
+    { id: "a", title: "Shared source first", url: "https://example.org/a", content_type: "web_article", created_at: ago(H) },
+    { id: "b", title: "Shared source second", url: null, content_type: "pdf", created_at: ago(D) } ] },
+  waiting: { total: 14292, claims: [LONG, "Shared claim two", "Shared claim three", "four", "five"].map((text, i) => ({ id: "k" + i, text, created_at: ago(i * H) })) },
 };
 let mode = "alice";
 let emptyLibrary = false;
@@ -79,8 +75,8 @@ http.createServer((req, res) => {
   if (p === "/workbench/contract/podcasts") return mode === "broken" ? json({ error: "boom" }, 500) : json({ podcasts: f.episodes });
   if (p === "/workbench/contract/podcasts/requests") return json({ requests: f.requests });
   if (p === "/workbench/contract/sessions") return json({ sessions: f.sessions });
-  if (p === "/workbench/contract/timeline") return json({ events: emptyLibrary ? [] : LIB.timeline });
-  if (p === "/workbench/contract/claims") return json({ count: 0, claims: emptyLibrary ? [] : LIB.claims });
+  if (p === "/workbench/contract/library/recent") return json(emptyLibrary ? { days: 7, sources_total: 0, claims_total: 0, sources: [] } : LIB.recent);
+  if (p === "/workbench/contract/library/waiting-claims") return json(emptyLibrary ? { total: 0, claims: [] } : LIB.waiting);
   if (p === "/workbench/contract/search") {
     const q = u.searchParams.get("q");
     if (q === "zzzz") return json({ results: [] });

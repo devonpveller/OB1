@@ -58,8 +58,8 @@ ok(JSON.stringify(await titles("docs")) === JSON.stringify(["ALPHA newest draft"
 ok(JSON.stringify(await titles("research")) === JSON.stringify(["ALPHA which CPUs fit", "ALPHA finished question"]), "Research lists alice's two sessions");
 ok(JSON.stringify(await titles("podcasts")) === JSON.stringify(["ALPHA digest episode", "ALPHA rendering now"]), "Podcasts lists the episode first, then the pending request (the done request once)");
 ok(JSON.stringify(await titles("ideas")) === JSON.stringify(["ALPHA pantry idea"]), "Ideas lists alice's idea");
-ok(/2 new sources, 1 new claim/.test(await ev(`document.querySelector('[data-testid=new-counts]')?.textContent||''`)), "New in the library: 2 new sources, 1 new claim");
-ok(/2 claims backed by one source only/.test(await ev(`document.querySelector('[data-testid=claims-waiting]')?.textContent||''`)), "Claims waiting for a second source: 2");
+ok(/2 new sources, 682 new claims.*Shared source first/.test(await ev(`document.querySelector('[data-testid=new-counts]')?.textContent||''`)), "New in the library: 2 new sources, 1 new claim");
+ok(/14292 claims backed by one source only/.test(await ev(`document.querySelector('[data-testid=claims-waiting]')?.textContent||''`)), "Claims waiting for a second source: 2");
 ok(problems().length === 0, `no console errors/warnings/exceptions (${problems().length})` + JSON.stringify(problems().map((e) => e.params?.entry?.text || e.params?.exceptionDetails?.text)));
 const rq = reqs();
 ok(rq.every((r) => r.url.startsWith(origin + "/")) && rq.filter((r) => /\/workbench\//.test(r.url)).every((r) => r.method === "GET"), `every request same-origin, every read a GET (${rq.length})`);
