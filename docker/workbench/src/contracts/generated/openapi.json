@@ -6285,6 +6285,86 @@
         "required": [
           "actions"
         ]
+      },
+      "IdeaCaptured": {
+        "type": "object",
+        "properties": {
+          "idea_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+            "description": "the new idea, private to the caller"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "example": "new"
+          },
+          "research": {
+            "$ref": "#/components/schemas/IdeaCaptureResearch"
+          }
+        },
+        "required": [
+          "idea_id",
+          "title",
+          "status",
+          "research"
+        ]
+      },
+      "IdeaCaptureResearch": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "example": "immediate",
+            "description": "the owner's research schedule: immediate (the default), daily or weekly"
+          },
+          "queued": {
+            "type": "boolean",
+            "description": "true when research was queued at capture; false when it waits for the owner's scheduled start"
+          },
+          "job_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "d0d0d0d0-0000-4000-8000-000000000002",
+            "description": "the queued research job (the caller's own), or null"
+          },
+          "next_start": {
+            "type": "string",
+            "nullable": true,
+            "example": null,
+            "description": "when the waiting research starts (ISO-8601), or null when queued"
+          }
+        },
+        "required": [
+          "mode",
+          "queued",
+          "job_id",
+          "next_start"
+        ]
+      },
+      "IdeaCaptureRequest": {
+        "type": "object",
+        "properties": {
+          "summary": {
+            "type": "string",
+            "example": "A pantry tracker that suggests meals from what is about to expire.",
+            "description": "the idea's text (private to its owner); at most 20000 characters"
+          },
+          "title": {
+            "type": "string",
+            "nullable": true,
+            "example": "Pantry meal suggestions",
+            "description": "optional; at most 120 characters kept; omitted = the text's first line"
+          }
+        },
+        "required": [
+          "summary"
+        ],
+        "additionalProperties": false
       }
     },
     "parameters": {}
@@ -13650,6 +13730,103 @@
                 },
                 "schema": {
                   "$ref": "#/components/schemas/CleanupAction"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/ideas": {
+      "post": {
+        "operationId": "captureIdea",
+        "tags": [
+          "ideas and the idea refinery (D17)"
+        ],
+        "summary": "capture a new idea, private to the caller; research starts per the caller's research schedule",
+        "description": "Creates the idea for the signed-in user only (there is no owner field; any unknown field is 400) through the same owner-checked function capture_idea uses. Research is queued at once (schedule immediate, the default) or waits for the caller's scheduled start (daily / weekly); research.queued and research.next_start say which.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "summary": "A pantry tracker that suggests meals from what is about to expire.",
+                "title": "Pantry meal suggestions"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/IdeaCaptureRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "captured",
+            "content": {
+              "application/json": {
+                "example": {
+                  "idea_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+                  "title": "Pantry meal suggestions",
+                  "status": "new",
+                  "research": {
+                    "mode": "immediate",
+                    "queued": true,
+                    "job_id": "d0d0d0d0-0000-4000-8000-000000000002",
+                    "next_start": null
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/IdeaCaptured"
                 }
               }
             }

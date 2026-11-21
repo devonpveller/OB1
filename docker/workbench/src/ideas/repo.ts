@@ -9,6 +9,9 @@
 //   promote       idea_promote(idea, subject, actor, path) - documents/seed.ts calls it after the seed
 //   draft         the accreting draft, a field on the idea's ONE room (workspace_rooms.draft, slot 340)
 //   engage        refinery_engage(refinery, subject, kind, ref) - a member engaged from inside the refinery
+//   capture       idea_capture(subject, actor, title, summary, NULL, embedding) - the SAME write capture_idea makes (rwr-idea-
+//                 capture-api): the idea and its PRIVATE revision 1, no corpus thought; the revision trigger (slot 300)
+//                 queues research at once, or marks it deferred for an owner on a daily / weekly schedule
 import type { Db } from "../contracts/db.ts";
 import type { Identity } from "../middleware/identity.ts";
 
@@ -41,6 +44,13 @@ export function parseEdit(b: Record<string, unknown>): { summary: string; title:
   if (b.title !== undefined && b.title !== null && typeof b.title !== "string") throw new IdeaError(400, "title is text");
   const title = typeof b.title === "string" && b.title.trim() ? b.title.trim().slice(0, MAX_TITLE) : null;
   return { summary, title };
+}
+
+// rwr-idea-capture-api: the capture's body - the idea's text and an optional title, the same limits as an edit. The
+// contract route refuses any other field (an owner, a user, a domain) before this runs.
+export function parseCapture(b: Record<string, unknown>): { summary: string; title: string | null } {
+  if (b.summary !== undefined && typeof b.summary !== "string") throw new IdeaError(400, "summary is the idea's text");
+  return parseEdit(b);
 }
 
 export function parseDraft(b: Record<string, unknown>): string {
@@ -77,6 +87,48 @@ export async function editIdea(
   // (idea_revisions.private_owner), read through its own owner-established policy (slot 370), not through a thought.
   return refuse(await fn(db, `SELECT public.idea_edit($1::uuid, $2, $3, $4, $5, $6, NULL) AS o`,
     [id, who.sub, who.actor, input.summary, input.title, vec]));
+}
+
+export interface Captured {
+  idea_id: string;
+  title: string;
+  status: string;
+  research: { mode: string; queued: boolean; job_id: string | null; next_start: string | null };
+}
+
+// rwr-idea-capture-api: capture a new idea for the identity seam's subject (owner) and actor. Whether research starts now
+// is the database's (the revision trigger reads the owner's idea_schedule row: none = immediate); this only reports what
+// it did, read back for the same owner.
+export async function captureIdea(
+  db: Db, input: { summary: string; title: string | null }, who: Identity, embed: (t: string) => Promise<number[]>,
+): Promise<Captured> {
+  let vec: string | null = null;
+  try {
+    vec = `[${(await embed(`${input.title ?? ""}\n\n${input.summary}`.trim())).join(",")}]`;
+  } catch (e) {
+    console.error("[ideas] embedding unavailable; the idea is captured without one:", String((e as Error)?.message ?? e).slice(0, 200));
+  }
+  const id = (await db.query<{ id: string }>(
+    `SELECT public.idea_capture($1, $2, $3, $4, $5, $6)::text AS id`, [who.sub, who.actor, input.title, input.summary, null, vec],
+  ))[0].id;
+  const row = (await db.query<{ title: string; status: string; job_id: string | null; deferred: boolean }>(
+    `SELECT i.title, i.status, r.research_job_id AS job_id, coalesce(r.metadata->>'deferred' = 'true', false) AS deferred
+       FROM public.ideas i
+       JOIN public.idea_revisions r ON r.idea_id = i.id AND r.revision = i.current_revision
+      WHERE i.id = $1::uuid AND i.owner_sub = $2`, [id, who.sub],
+  ))[0];
+  if (!row) throw new Error("the captured idea did not read back for its owner");
+  const sched = (await db.query<{ mode: string; next_start: string | null }>(
+    `SELECT mode, to_json(public.idea_schedule_next(owner_sub, now())) #>> '{}' AS next_start
+       FROM public.idea_schedule WHERE owner_sub = $1`,
+    [who.sub],
+  ))[0];
+  const mode = sched?.mode ?? "immediate";
+  const queued = row.job_id !== null && !row.deferred;
+  return {
+    idea_id: id, title: row.title, status: row.status,
+    research: { mode, queued, job_id: queued ? row.job_id : null, next_start: queued ? null : (sched?.next_start ?? null) },
+  };
 }
 
 export async function researchIdea(db: Db, id: string, who: Identity): Promise<Outcome> {

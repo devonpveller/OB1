@@ -659,3 +659,136 @@ t("I17 (rw-report-isolation): a non-idea research report is still a shared sourc
   }
   assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.sources WHERE id = $1 AND content_type = 'research_synthesis'`, [src]))[0].n, 1);
 });
+
+// ── rwr-idea-capture-api: POST /workbench/ideas - an idea written down in the workbench ───────────────────────────────
+// Each case maps to an acceptance line of the anchor (C1 privacy, C2/C3 the schedule, C4 the owner, C5 the research
+// path, C6 the two-identity sweep incl. counts and error bodies). Red before this item: the route does not exist (404).
+const capture = (b: unknown, who: Record<string, string> = A) => call("POST", "/workbench/ideas", b, who);
+const markerCount = async (m: string) => (await sql<{ n: number }>(
+  `SELECT ((SELECT count(*) FROM public.thoughts WHERE content LIKE '%' || $1 || '%' OR metadata::text LIKE '%' || $1 || '%')
+         + (SELECT count(*) FROM public.thought_entities WHERE evidence::text LIKE '%' || $1 || '%')
+         + (SELECT count(*) FROM public.sources WHERE content LIKE '%' || $1 || '%' OR title LIKE '%' || $1 || '%')
+         + (SELECT count(*) FROM public.source_chunks WHERE content LIKE '%' || $1 || '%'))::int AS n`, [m]))[0].n;
+
+t("C1 (acceptance 1): a captured idea is invisible to B, to shared search and to the ops corpus - planted marker", async () => {
+  const mk = { title: `CapTitle${rnd()}`, body: `CapBody${rnd()}` };
+  const r = await capture({ title: mk.title, summary: `my idea ${mk.body}` });
+  assertEquals(r.status, 201, r.text);
+  const id = r.json.idea_id as string;
+  assertEquals((await sql<{ owner_sub: string }>(`SELECT owner_sub FROM public.ideas WHERE id = $1`, [id]))[0].owner_sub, sub(A));
+  // the ops corpus (the shared thought corpus, its entity evidence) and the shared knowledge tables: no marker at all
+  for (const m of Object.values(mk)) assertEquals(await markerCount(m), 0, `a shared table carries ${m}`);
+  // the app role (the generic MCP lane) finds no thought of it either
+  for (const m of Object.values(mk)) {
+    assertEquals((await asApp<{ n: number }>(`SELECT count(*)::int AS n FROM public.thoughts WHERE content LIKE '%' || $1 || '%'`, [m]))[0].n, 0);
+  }
+  // shared search, as B and as A (the search reads shared knowledge only)
+  for (const who of [A, B]) {
+    for (const m of Object.values(mk)) {
+      const s = await call("GET", `/workbench/contract/search?q=${encodeURIComponent(m)}&kinds=page,claim,source`, undefined, who);
+      assertEquals(s.status, 200, s.text);
+      assert(!JSON.stringify(s.json.results ?? []).includes(m), `search results carry ${m}`);
+    }
+  }
+  // B: not in the ideas list, the idea by id, the bell, the sessions or jobs reads, the rooms
+  const reads = ["/workbench/contract/ideas?limit=200", `/workbench/contract/ideas/${id}`, "/workbench/contract/notifications",
+    "/workbench/contract/sessions", "/workbench/contract/jobs", "/workbench/jobs", "/workbench/rooms"];
+  for (const p of reads) {
+    const b = await call("GET", p, undefined, B);
+    for (const m of [id, ...Object.values(mk)]) assert(!b.text.includes(m), `B's ${p} carries ${m === id ? "the idea id" : m}`);
+  }
+  // A reads it back
+  const own = await idea(id);
+  assertEquals(own.status, 200, own.text);
+  assert(own.text.includes(mk.body) && own.text.includes(mk.title));
+});
+
+t("C2 (acceptance 2): with no schedule (immediate, the default) research is queued at capture, on revision 1", async () => {
+  const r = await capture({ summary: `immediate ${rnd()}` });
+  assertEquals(r.status, 201, r.text);
+  assertEquals([r.json.research.mode, r.json.research.queued, r.json.research.next_start], ["immediate", true, null]);
+  const job = await sql<{ id: string }>(`SELECT id::text AS id FROM public.research_jobs WHERE refinery_id = $1 AND branch_kind = 'idea' AND status = 'queued'`, [r.json.idea_id]);
+  assertEquals(job.map((j) => j.id), [r.json.research.job_id]);
+  assertEquals((await sql<{ j: string }>(`SELECT research_job_id AS j FROM public.idea_revisions WHERE idea_id = $1 AND revision = 1`, [r.json.idea_id]))[0].j, r.json.research.job_id);
+});
+
+t("C3 (acceptance 2): a daily schedule holds research until the scheduled time, then the drain queues it once", async () => {
+  const C = { "X-Test-Sub": `ideas-c-${rnd()}` };
+  const at = new Date(Date.now() + 3 * 3600_000); // three hours from now, UTC
+  const hhmm = `${String(at.getUTCHours()).padStart(2, "0")}:${String(at.getUTCMinutes()).padStart(2, "0")}`;
+  const s = await call("PUT", "/workbench/idea-schedule", { mode: "daily", at_time: hhmm, tz: "UTC" }, C);
+  assertEquals(s.status, 200, s.text);
+  const r = await capture({ summary: `scheduled ${rnd()}` }, C);
+  assertEquals(r.status, 201, r.text);
+  assertEquals([r.json.research.mode, r.json.research.queued, r.json.research.job_id], ["daily", false, null]);
+  assertNotEquals(r.json.research.next_start, null);
+  const id = r.json.idea_id as string;
+  const jobs = async () => (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.research_jobs WHERE refinery_id = $1`, [id]))[0].n;
+  assertEquals(await jobs(), 0, "nothing queued before the scheduled time");
+  await sql(`SELECT public.idea_schedule_drain(now())`);
+  assertEquals(await jobs(), 0, "a drain before the time queues nothing");
+  await sql(`SELECT public.idea_schedule_drain($1::timestamptz + interval '1 minute')`, [r.json.research.next_start]);
+  assertEquals(await jobs(), 1, "the drain after the time queues it");
+  await sql(`SELECT public.idea_schedule_drain($1::timestamptz + interval '2 minutes')`, [r.json.research.next_start]);
+  assertEquals(await jobs(), 1, "once");
+});
+
+t("C4 (acceptance 3): the idea is created only for the calling identity; a body naming another owner is refused and writes nothing", async () => {
+  const mk = `OwnerProbe${rnd()}`;
+  const before = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.ideas`))[0].n;
+  for (const f of ["owner_sub", "owner", "sub", "user", "actor_sub", "subject_sub"]) {
+    const r = await capture({ summary: `${mk} ${f}`, [f]: sub(B) });
+    assertEquals(r.status, 400, `${f}: ${r.text}`);
+  }
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.ideas`))[0].n, before, "no idea was written");
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.ideas WHERE summary LIKE '%' || $1 || '%'`, [mk]))[0].n, 0);
+  // the identity comes from the seam (the lab's header), never the body: A's call is A's idea, B's call is B's
+  const ra = await capture({ summary: `${mk} A` }), rb = await capture({ summary: `${mk} B` }, B);
+  const owners = await sql<{ id: string; owner_sub: string; actor_sub: string }>(
+    `SELECT id::text AS id, owner_sub, actor_sub FROM public.ideas WHERE id = ANY($1::uuid[])`, [[ra.json.idea_id, rb.json.idea_id]]);
+  assertEquals(new Map(owners.map((o) => [o.id, [o.owner_sub, o.actor_sub]])), new Map([[ra.json.idea_id, [sub(A), sub(A)]], [rb.json.idea_id, [sub(B), sub(B)]]]));
+});
+
+t("C5 (acceptance 4): its research goes through the one idea queue, exactly as capture_idea's - no other job, no corpus thought", async () => {
+  const text = `queue path ${rnd()}`;
+  const viaRoute = await capture({ title: "Same", summary: text });
+  assertEquals(viaRoute.status, 201, viaRoute.text);
+  const viaMcp = await captured(sub(A), "Same", text);
+  const shape = async (id: string) => (await sql<{ caller: string; origin: string; branch_kind: string; query: string; n: number }>(
+    `SELECT caller, origin, branch_kind, query, (SELECT count(*)::int FROM public.research_jobs j2 WHERE j2.refinery_id = $1) AS n
+       FROM public.research_jobs WHERE refinery_id = $1`, [id]))[0];
+  const a = await shape(viaRoute.json.idea_id), b = await shape(viaMcp);
+  assertEquals([a.caller, a.origin, a.branch_kind, a.n], [b.caller, b.origin, b.branch_kind, b.n], "the same queue, the same one job");
+  assertEquals(a.query, b.query, "the same request text research_idea_queue() forms");
+  assertEquals(await markerCount(text), 0);
+});
+
+t("C6 (acceptance 5, two identities): B never learns of A's captured idea - lists, counts, nested fields, and a refusal identical to a missing row", async () => {
+  const listB = async () => await call("GET", "/workbench/contract/ideas?limit=200", undefined, B);
+  const before = await listB();
+  assertEquals(before.status, 200, before.text);
+  const mk = `TwoId${rnd()}`;
+  const r = await capture({ title: `T ${mk}`, summary: `S ${mk}` });
+  assertEquals(r.status, 201, r.text);
+  const id = r.json.idea_id as string;
+  const after = await listB();
+  assertEquals(after.json.ideas.length, before.json.ideas.length, "B's count does not move");
+  assertEquals(after.text, before.text, "B's list is byte-identical");
+  const missing = crypto.randomUUID();
+  for (const [m, p, b] of [
+    ["GET", "/workbench/contract/ideas/{}", undefined],
+    ["POST", "/workbench/ideas/{}/edit", { summary: "B was here" }],
+    ["POST", "/workbench/ideas/{}/research-now", {}],
+    ["PUT", "/workbench/ideas/{}/draft", { text: "B was here" }],
+    ["POST", "/workbench/idea-schedule/research-now/{}", {}],
+  ] as const) {
+    const real = await call(m, p.replace("{}", id), b, B), none = await call(m, p.replace("{}", missing), b, B);
+    assertEquals([real.status, real.text], [none.status, none.text.replaceAll(missing, id)], `${m} ${p}: A's idea reads like a missing one`);
+    assert(!real.text.includes(mk));
+  }
+  // B's own capture answer carries nothing of A's
+  const rb = await capture({ summary: `B's own ${rnd()}` }, B);
+  assertEquals(rb.status, 201, rb.text);
+  assert(!rb.text.includes(id) && !rb.text.includes(mk));
+  assertEquals((await ideaRow(id)).current_revision, 1, "B's attempts changed nothing");
+});
