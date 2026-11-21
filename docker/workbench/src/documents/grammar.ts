@@ -1,7 +1,8 @@
 // The user document grammar (research-workbench P2b, D12). PURE: no DB, no vault, no env, no
-// imports - the build test gate runs it, and the workspace (wiki-viewer/workspace/src/lib/
-// grammar.ts) carries a BYTE-IDENTICAL copy, checked by the workspace runner, so the editor and
-// the documents API read a document the same way.
+// imports - the build test gate runs it. The old workspace's BYTE-IDENTICAL copy was deleted with the
+// workspace (rwr-remove-workspace); the byte-identity check (run-workspace-tests.ps1 [5c]) is suspended
+// until rwr-doc-editor lands the new app's copy, so the editor and the documents API read a document
+// the same way.
 //
 // A user document is markdown with optional frontmatter and four link forms:
 //   [[slug]] / [[slug|alias]]           a wiki page, live (kind page)

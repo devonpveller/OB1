@@ -49,12 +49,10 @@ viewer (openbrain-wiki-viewer, node:22; NO Quartz in the image since P1c -
   from /wiki itself (assets/<id>/<name>, slug-indexed; never a .md, never
   private/, templates/ or a dot path). Never a bare 404 for a page URL. Pages carry ETag W/"p-..."
   (304 on If-None-Match) and server-timing. No page carries a
-  notifications strip any more: the workspace's title bar bell replaced it
+  notifications strip any more: the old workspace's title bar bell replaced it
   (research-workbench P2b, D13).
-  workspace: /workspace - the Vite + React 19 panel workspace (source in
-  workspace/, built in the Dockerfile's `workspace` stage from its
-  package-lock.json, served from /viewer/workspace - only that build, never
-  the vault; see workspace/README.md).
+  /workspace: 404 (the old workspace app was removed by rwr-remove-workspace; the research
+  workbench is its own service, openbrain-workbench-app, with its own door).
   /workbench/*: forwarded to the workbench with WORKBENCH_KEY injected
   server-side (lib/workbench-proxy.mjs); only for an allow-listed Host
   (WIKI_VIEWER_ALLOWED_HOSTS; 421 otherwise), and a write only from the

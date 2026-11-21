@@ -24,7 +24,7 @@
 #   1. stages the REAL initdb chain from docker-compose.yml (the 340 room store slot included)
 #   2. one internal network on the pinned /25
 #   3. builds openbrain-workbench:wt-<id> (its build test gate runs src/rooms/ with the rest) and its test
-#      stage, and openbrain-wiki-viewer:wt-<id> (its workspace stage runs vitest: the room and chat panels)
+#      stage, and openbrain-wiki-viewer:wt-<id> (its build gate: the renderer's node tests)
 #   4. the lab: database (chain + fixtures.sql; the workbench as ob_app_memory, non-superuser), stub embedder,
 #      stub research service, PostgREST + the OB1 rest Caddy, the viewer (the front door), the STUB GATEWAY
 #      (stub-chat.ts) holding the aliases `llama-cpp` and `llama-cpp-upstream`, a Mattermost stand-in (the
@@ -218,11 +218,9 @@ try {
     $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --build-context "recipes=$(Join-Path $ob1 'recipes')" -t $viewerTag $viewerDir
     $vclean = ($o -replace '\x1b\[[0-9;]*m', '')
     Save 'build-viewer.log' ((($vclean -split "`n") | Where-Object { $_ -match 'room|Test Files|Tests |FAIL|notices' } | Select-Object -Last 80) -join "`n")
-    Check ($script:rc -eq 0) "$viewerTag built (its workspace stage: vitest incl. test/room.test.tsx, the D9 notices check, tsc + vite build)"
+    Check ($script:rc -eq 0) "$viewerTag built (its build gate: the renderer's node tests)"
     if ($script:rc -ne 0) { throw 'build viewer' }
     $script:made.images += $viewerTag
-    $vt = ([regex]'Tests\s+(\d+) passed').Match($vclean)
-    if ($vt.Success) { Pass "workspace unit tests in the image build: $($vt.Groups[1].Value) passed" }
   }
   if (-not $Prebuilt) {
     $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb; Save 'build-workbench-test.log' ($o -split "`n" | Select-Object -Last 20 | Out-String)

@@ -23,7 +23,7 @@
 #   1. stages the REAL initdb chain from docker-compose.yml (this item's 320 slot included)
 #   2. one internal network on the pinned /25
 #   3. builds openbrain-workbench:wt-<id> (+ its test stage: src/sessions/ unit tests in its gate),
-#      openbrain-wiki-viewer:wt-<id> (the workspace's vitest, sessions.test.tsx included),
+#      openbrain-wiki-viewer:wt-<id> (its build gate and node tests),
 #      openbrain-research:wt-<id> (its offline suite, sessions-authority.test.ts included); -Red: the
 #      three from -BaseSha and the base's test stage
 #   4. the lab: database (chain + fixtures.sql, ob_app_memory non-superuser), stub embedder, stub gateway
@@ -243,7 +243,7 @@ try {
     $script:made.images += $wbTag
     $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --build-context "recipes=$(Join-Path $ob1 'recipes')" -t $viewerTag $viewerDir
     Save 'build-viewer.log' (($o -split "`n" | Select-Object -Last 120) -join "`n")
-    Check ($script:rc -eq 0) "$viewerTag built (the workspace's vitest, sessions.test.tsx included)"
+    Check ($script:rc -eq 0) "$viewerTag built (its build gate and node tests)"
     if ($script:rc -ne 0) { throw 'build viewer' }
     $script:made.images += $viewerTag
     $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" -t $rsTag $rsDir; Save 'build-research.log' (($o -split "`n" | Select-Object -Last 40) -join "`n")
