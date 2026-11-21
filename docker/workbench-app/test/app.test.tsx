@@ -5,6 +5,7 @@ import { render, screen, fireEvent, cleanup, act } from "@testing-library/react"
 import { App } from "../src/App";
 import { parseRoute, navigate } from "../src/lib/router";
 import { api, raw, setFetcher, requestLog, clearRequestLog, isWorkbenchUrl, ApiError } from "../src/lib/api";
+import config from "../vite.config";
 import { applyTheme, readTheme } from "../src/lib/theme";
 
 beforeEach(() => {
@@ -66,6 +67,38 @@ describe("the fetch door: same-origin /workbench/* only (asserted over the reque
     expect(sent).toEqual([]);
     expect(requestLog()).toEqual([]);
   });
+  // rwr-app-scaffold round 2 (tester Case 3): fetch() strips ASCII tab / CR / LF from a URL BEFORE it
+  // resolves dot-segments, so a guard that reads the raw string can pass "/workbench/.\t./admin" while the
+  // browser requests /admin. The guard refuses control characters, space and backslash outright and judges
+  // the RESOLVED URL; the log holds the resolved path, i.e. what leaves.
+  it("refuses tab / CR / LF-split dot-segments and their encodings (the browser strips the raw ones)", async () => {
+    const sent: string[] = [];
+    setFetcher(async (u) => { sent.push(u); return new Response("{}"); });
+    const bad = ["/workbench/.\t./admin", "/workbench/.\n./admin", "/workbench/\t../admin", "/workbench/..\n/admin",
+      "/workbench/x/.\r./.\r./admin", "/workbench/%2e\t%2e/admin",
+      "/workbench/.%09./admin", "/workbench/.%0a./admin", "/workbench/.%0d./admin", "/workbench/%2e%09%2e/admin",
+      "/workbench/%09../admin", "/workbench/..%0a/admin", "/workbench/a b", "/workbench/a%20b/../../admin", "/workbench/a/./b",
+      "/workbench/\u0000x", "/workbench/%00", "/workbench/x\u007f", "/workbench/%7f"];
+    for (const u of bad) {
+      expect(isWorkbenchUrl(u), JSON.stringify(u)).toBe(false);
+      await expect(api("GET", u)).rejects.toBeInstanceOf(ApiError);
+      await expect(raw(u)).rejects.toBeInstanceOf(ApiError);
+    }
+    expect(sent).toEqual([]);
+    expect(requestLog()).toEqual([]);
+  });
+  it("what is sent and logged is the RESOLVED path, always under /workbench/", async () => {
+    const sent: string[] = [];
+    setFetcher(async (u) => { sent.push(u); return new Response("{}"); });
+    await api("GET", "/workbench/a/b?x=1#frag");
+    await api("GET", "/workbench/documents/x%2Fy?q=%2e%2e");
+    for (const u of sent) expect(new URL(u, location.origin).pathname.startsWith("/workbench/"), u).toBe(true);
+    expect(requestLog().map((x) => x.url)).toEqual(sent);
+    expect(sent[0]).toBe("/workbench/a/b?x=1");
+    expect(requestLog()[0].url).toBe("/workbench/a/b?x=1");
+    expect(isWorkbenchUrl("/workbench/")).toBe(true);
+    expect(isWorkbenchUrl("/workbench/..foo/x")).toBe(true);
+  });
   it("turns a non-2xx into an ApiError carrying the body", async () => {
     setFetcher(async () => new Response(JSON.stringify({ error: "nope" }), { status: 403 }));
     await expect(api("GET", "/workbench/x")).rejects.toMatchObject({ status: 403, message: "nope" });
@@ -105,5 +138,13 @@ describe("light and dark tokens", () => {
     fireEvent.click(b); expect(document.documentElement.getAttribute("data-theme")).toBe("light");
     fireEvent.click(b); expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
     fireEvent.click(b); expect(document.documentElement.hasAttribute("data-theme")).toBe(false);
+  });
+});
+
+describe("the build", () => {
+  // round 2 (tester attempt 1, finding 5): Vite's modulepreload polyfill is code the notices do not name,
+  // and the frame needs none (one entry chunk); it is off.
+  it("ships no modulepreload polyfill", () => {
+    expect((config as any).build?.modulePreload).toEqual({ polyfill: false });
   });
 });

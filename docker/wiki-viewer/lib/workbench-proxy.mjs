@@ -90,6 +90,43 @@ export function bodyCap(path) {
   return UPLOAD.test(path) ? 100 * MB : 1 * MB;
 }
 
+// rwr-app-scaffold round 2: the path the forwarder may send on. The request target is judged BEFORE it is
+// joined to the upstream and again AFTER the URL parser resolved it: it must start with exactly
+// "/workbench/" (case-sensitive; no "//", no ";" tricks), hold no backslash and no control character
+// (raw or percent-encoded, to any depth), and no dot-segment in any decoding. null = fine, else a reason.
+function pathRefusal(rawUrl, cfg) {
+  const url = String(rawUrl || "");
+  if (!url.startsWith("/workbench/")) return "only /workbench/... is forwarded";
+  const pathPart = url.split(/[?#]/)[0];
+  let p = pathPart;
+  for (let i = 0; i < 5; i++) {
+    if (/[\u0000-\u001f\u007f\\]/.test(p)) return "a backslash or control character in the path";
+    if (p.split("/").some((s) => s === ".." || s === ".")) return "a dot-segment in the path";
+    let d;
+    try { d = decodeURIComponent(p); } catch { return "a path that does not decode"; }
+    if (d === p) break;
+    p = d;
+  }
+  if (/[\u0000-\u001f\u007f\\]/.test(url.slice(pathPart.length))) return "a control character in the query";
+  let target;
+  try { target = new URL(cfg.url + url); } catch { return "a path that does not resolve"; }
+  const base = new URL(cfg.url).pathname.replace(/\/+$/, "");
+  if (!target.pathname.startsWith(base + "/workbench/")) return "the path resolves outside /workbench/";
+  return null;
+}
+
+// an absolute Location / Content-Location of the upstream becomes a relative one (the browser never sees
+// the internal address); one that names any other host is dropped
+function relocate(value, cfg) {
+  const v = String(Array.isArray(value) ? value[0] : value);
+  if (!/^[a-z][a-z0-9+.-]*:|^\/\//i.test(v)) return v;
+  try {
+    const u = new URL(v, cfg.url);
+    if (u.origin === new URL(cfg.url).origin) return u.pathname + u.search + u.hash;
+  } catch { /* unparsable absolute: dropped */ }
+  return null;
+}
+
 export function proxyWorkbench(req, res, cfg) {
   if (!cfg) {
     res.writeHead(404, { "content-type": "application/json", "cache-control": "no-store" });
@@ -101,6 +138,13 @@ export function proxyWorkbench(req, res, cfg) {
     req.resume();
     res.writeHead(no[0], { "content-type": "application/json", "cache-control": "no-store" });
     res.end(JSON.stringify({ error: no[1] }));
+    return;
+  }
+  const bad = pathRefusal(req.url, cfg);
+  if (bad) {
+    req.resume();
+    res.writeHead(400, { "content-type": "application/json", "cache-control": "no-store" });
+    res.end(JSON.stringify({ error: `refused: ${bad}` }));
     return;
   }
   const cap = bodyCap(req.url || "");
@@ -120,6 +164,11 @@ export function proxyWorkbench(req, res, cfg) {
   const up = lib.request(target, { method: req.method, headers, timeout: 600_000 }, (r) => {
     const out = {};
     for (const [k, v] of Object.entries(r.headers)) if (!HOP.has(k) || k === "content-length") out[k] = v;
+    for (const h of ["location", "content-location"]) {
+      if (out[h] === undefined) continue;
+      const rel = relocate(out[h], cfg);
+      if (rel === null) delete out[h]; else out[h] = rel;
+    }
     res.writeHead(r.statusCode || 502, out);
     r.pipe(res);
   });

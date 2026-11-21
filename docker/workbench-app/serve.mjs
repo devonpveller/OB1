@@ -4,6 +4,7 @@
 //                    forwarder (workbench-proxy.mjs) - the SAME module file, not a fork (see the Dockerfile:
 //                    the image copies it from the wiki viewer's lib/ through the build context `viewerlib`)
 //   /assets/<hashed> the Vite build's hashed files: cache-control public, max-age=31536000, immutable
+//                    (an unhashed file under /assets, the notices, is no-cache)
 //   anything else    index.html, cache-control no-cache (the app's own routes are deep links: /documents/x)
 // Every response carries the viewer's security headers (security-headers.mjs, same shared module).
 // Env: PORT (8080), WORKBENCH_URL + WORKBENCH_KEY / WORKSPACE_DOOR_KEY (the forwarder is off, 404, unless
@@ -32,11 +33,22 @@ const MIME = {
   ".woff2": "font/woff2", ".woff": "font/woff", ".txt": "text/plain; charset=utf-8", ".map": "application/json",
 };
 
+// Content-Security-Policy on the app's HTML (round 2): the app is same-origin only (scripts, styles, fonts,
+// fetches), images may be data: URIs, nothing may frame it, <base> and cross-origin forms are out.
+export const CSP = [
+  "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data:", "font-src 'self'",
+  "connect-src 'self'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'self'",
+].join("; ");
+// Vite content-hashes its build files (name-<hash>.ext); only those may be cached for good. Anything else
+// under /assets (the notices file) is revalidated.
+const HASHED = /-[A-Za-z0-9_-]{6,}\.(js|mjs|css|woff2?|svg|png|jpe?g|webp|gif|ico|map)$/;
+
 export function createHandler({ dist, proxy }) {
   const root = normalize(dist);
   async function sendFile(req, res, file, cache) {
     const st = await stat(file);
-    res.writeHead(200, { "content-type": MIME[extname(file)] || "application/octet-stream", "content-length": st.size, "cache-control": cache });
+    const type = MIME[extname(file)] || "application/octet-stream";
+    res.writeHead(200, { "content-type": type, "content-length": st.size, "cache-control": cache, ...(type.startsWith("text/html") ? { "content-security-policy": CSP } : {}) });
     if (req.method === "HEAD") { res.end(); return; }
     createReadStream(file).pipe(res);
   }
@@ -61,7 +73,7 @@ export function createHandler({ dist, proxy }) {
     if (path.startsWith("/assets/")) {
       const rel = path.slice("/assets/".length);
       if (/^[A-Za-z0-9._-]+$/.test(rel) && !rel.startsWith(".")) {
-        try { return await sendFile(req, res, join(root, "assets", rel), "public, max-age=31536000, immutable"); } catch { /* fall through */ }
+        try { return await sendFile(req, res, join(root, "assets", rel), HASHED.test(rel) ? "public, max-age=31536000, immutable" : "no-cache"); } catch { /* fall through */ }
       }
       res.writeHead(404, { "content-type": "text/plain", "cache-control": "no-store" });
       res.end("not found");

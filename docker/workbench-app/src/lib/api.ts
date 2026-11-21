@@ -23,25 +23,37 @@ export class ApiError extends Error {
   }
 }
 
-// true only for a path-absolute /workbench/... URL: no scheme, no host, no "//", no backslash, no
-// dot-segment that could climb out of /workbench
-export function isWorkbenchUrl(url: string): boolean {
-  if (typeof url !== "string" || !url.startsWith("/workbench/")) return false;
-  if (url.startsWith("//") || url.includes("\\")) return false;
+// The URL that will actually leave, or null. fetch() strips ASCII tab / CR / LF from a URL BEFORE it
+// resolves dot-segments, so a guard that reads the raw string can be walked past ("/workbench/.<TAB>./admin"
+// is /admin on the wire). So: any control character (C0, DEL), space or backslash is refused outright,
+// raw or percent-encoded; a dot-segment is refused outright; and what is judged and logged is the RESOLVED
+// URL: same origin, pathname under /workbench/. Returns pathname + search of that resolved URL.
+const BAD_CHAR = /[\u0000-\u0020\u007f\\]/;
+export function resolveWorkbenchUrl(url: string): string | null {
+  if (typeof url !== "string" || !url.startsWith("/workbench/") || url.startsWith("//") || BAD_CHAR.test(url)) return null;
+  const [pathPart] = url.split(/[?#]/);
   let decoded: string;
-  try { decoded = decodeURIComponent(url.split(/[?#]/)[0]); } catch { return false; }
-  if (decoded.includes("\\")) return false;
-  return decoded.startsWith("/workbench/") && !decoded.split("/").some((s) => s === ".." || s === ".");
+  try { decoded = decodeURIComponent(pathPart); } catch { return null; }
+  if (BAD_CHAR.test(decoded) || !decoded.startsWith("/workbench/") || decoded.split("/").some((s) => s === ".." || s === ".")) return null;
+  let u: URL;
+  try { u = new URL(url, location.origin); } catch { return null; }
+  if (u.origin !== location.origin || !u.pathname.startsWith("/workbench/")) return null;
+  return u.pathname + u.search;
+}
+export function isWorkbenchUrl(url: string): boolean {
+  return resolveWorkbenchUrl(url) !== null;
 }
 
-function guard(url: string) {
-  if (!isWorkbenchUrl(url)) throw new ApiError(0, { error: `refused: ${url} is not a same-origin /workbench/* path` });
+function guard(url: string): string {
+  const r = resolveWorkbenchUrl(url);
+  if (r === null) throw new ApiError(0, { error: `refused: ${JSON.stringify(url)} is not a same-origin /workbench/* path` });
+  return r;
 }
 
 export async function api<T = any>(method: string, url: string, body?: unknown): Promise<{ status: number; data: T }> {
-  guard(url);
-  log.push({ method, url });
-  const r = await fetcher(url, {
+  const target = guard(url);
+  log.push({ method, url: target });
+  const r = await fetcher(target, {
     method,
     headers: body === undefined ? {} : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -60,7 +72,7 @@ export async function api<T = any>(method: string, url: string, body?: unknown):
 
 // A GET whose answer may be a FILE: the raw response, through the same door and the same log.
 export async function raw(url: string): Promise<Response> {
-  guard(url);
-  log.push({ method: "GET", url });
-  return await fetcher(url, { method: "GET", credentials: "same-origin" });
+  const target = guard(url);
+  log.push({ method: "GET", url: target });
+  return await fetcher(target, { method: "GET", credentials: "same-origin" });
 }

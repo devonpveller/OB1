@@ -7,7 +7,13 @@ image, `openbrain-workbench-app`. Later items fill it in. Not a stack service ye
   `/workbench/*` only, with a request log), `lib/router.ts` (path router), `lib/theme.ts` + `theme/tokens.css`
   (light/dark tokens: `prefers-color-scheme` plus an explicit `data-theme` choice).
 - `serve.mjs` serves the index (`no-cache`) for every app route, hashed `/assets/*` as immutable, `/__health`,
-  and forwards `/workbench/*` with the door key injected server-side.
+  and forwards `/workbench/*` with the door key injected server-side. Only content-hashed files are immutable
+  (the notices file under `/assets` is `no-cache`). HTML carries a Content-Security-Policy (same-origin only,
+  no inline script or style, no framing). The forwarder refuses (400) any path that does not stay under
+  `/workbench/` (dot-segments in any encoding, backslash, control characters, case or `%77` spellings) and
+  rewrites an absolute upstream `Location` to a relative one.
+- The fetch door judges the RESOLVED URL (fetch strips tab/CR/LF before resolving dot-segments): control
+  characters, space, backslash and dot-segments are refused, and `requestLog()` holds the resolved path.
 - **Shared module:** the forwarder and the security headers are the wiki viewer's own
   `../wiki-viewer/lib/workbench-proxy.mjs` and `security-headers.mjs`, not copies. The image takes them through
   the named build context `viewerlib`:
