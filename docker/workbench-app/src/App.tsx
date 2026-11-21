@@ -1,25 +1,67 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { applyTheme, readTheme, type ThemeChoice } from "./lib/theme";
 import { useRoute } from "./lib/router";
+import { getLastDocument, getLockedDocument, setLockedDocument, subscribeState } from "./lib/state";
+import { loadShellData, useShellData, type ShellData } from "./lib/shell-data";
+import { matchRoute } from "./routes";
+import { TopBar } from "./shell/TopBar";
+import { Rail } from "./shell/Rail";
+import { DefaultSubjectBanner } from "./shell/Banner";
+import { SearchOverlay } from "./shell/SearchOverlay";
+import { Placeholder, NotFound } from "./shell/Placeholder";
+import { Overview } from "./shell/Overview";
+import { ToastProvider, useToast } from "./shell/Toast";
 
 const NEXT: Record<ThemeChoice, ThemeChoice> = { system: "light", light: "dark", dark: "system" };
 
-// The empty frame: it says what it is and shows the route it was opened at. No screen yet.
-export function App() {
+function Shell({ load }: { load: () => Promise<ShellData> }) {
   const route = useRoute();
+  const d = useShellData(load);
+  const locked = useSyncExternalStore(subscribeState, getLockedDocument);
+  const last = useSyncExternalStore(subscribeState, getLastDocument);
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
+  const [searching, setSearching] = useState(false);
+  const toast = useToast();
+  const def = matchRoute(route.path);
+
+  // Ctrl+K (or Cmd+K) opens the overlay on every screen; Esc is handled inside the overlay.
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k") { e.preventDefault(); setSearching(true); }
+    };
+    window.addEventListener("keydown", on);
+    return () => window.removeEventListener("keydown", on);
+  }, []);
+
+  useEffect(() => {
+    document.title = (def === "overview" ? "What moved where" : def ? def.label : "Not found") + " - Research workbench";
+  }, [def]);
+
+  const unlock = useCallback(() => {
+    const was = getLockedDocument();
+    if (!was) return;
+    setLockedDocument(null);
+    toast({ message: "Unlocked a document.", onUndo: () => setLockedDocument(was) });
+  }, [toast]);
+
   return (
     <div className="frame">
-      <header className="frame-bar">
-        <h1>Research workbench</h1>
-        <button type="button" data-testid="theme" onClick={() => { const n = NEXT[theme]; applyTheme(n); setTheme(n); }}>
-          Colours: {theme}
-        </button>
-      </header>
-      <main className="frame-main">
-        <p data-testid="what">This is the new workbench app: an empty frame. Its screens arrive in later steps.</p>
-        <p>You opened <code data-testid="route">{route.path}</code></p>
-      </main>
+      <a className="skip" href="#main" onClick={(e) => { e.preventDefault(); document.getElementById("main")?.focus(); }}>Skip to the screen</a>
+      <TopBar who={d.who} locked={locked} onSearch={() => setSearching(true)} onUnlock={unlock} />
+      {d.defaultSubject && <DefaultSubjectBanner />}
+      <div className="body">
+        <Rail path={route.path} d={d} locked={locked} last={last} theme={theme}
+          onTheme={() => { const n = NEXT[theme]; applyTheme(n); setTheme(n); }} />
+        <main className="main" id="main" tabIndex={-1} data-testid="main">
+          {def === "overview" ? <Overview /> : def ? <Placeholder def={def} /> : <NotFound path={route.path} />}
+        </main>
+      </div>
+      {searching && <SearchOverlay onClose={() => setSearching(false)} />}
     </div>
   );
+}
+
+// `load` is the shell's one read of "who am I and the menu counts"; a test passes its own.
+export function App({ load = loadShellData }: { load?: () => Promise<ShellData> }) {
+  return <ToastProvider><Shell load={load} /></ToastProvider>;
 }
