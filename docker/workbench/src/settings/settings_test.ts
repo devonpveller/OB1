@@ -169,3 +169,31 @@ Deno.test("settingsAdmin (400-A4): in header mode a header equal to WORKSPACE_DE
   assertEquals([none.kind, none.sub], ["default", "owner-sub"]);
   assertEquals(settingsAdmin(none, cfg), true);
 });
+
+// rwr-ui-state-keys: the four UI state keys ride the same routes. A stale version (the database's 40001) is a 409
+// that changes nothing; a user's PUT is always the seam's subject's, whatever the body names.
+Deno.test("UI-1: a PUT of a ui key passes the seam's subject and the caller's version; a stale one (40001) is a 409; the body cannot name an owner", async () => {
+  const calls: unknown[][] = [];
+  const key = { key: "ui.locked_document", tier: "user", type: "string", editable: true, store: "settings", default_value: null, validation: { max_len: 400 } };
+  const db = {
+    query: (sql: string, args: unknown[] = []) => {
+      if (/FROM public\.settings_keys WHERE key = \$1/.test(sql)) return Promise.resolve([key]);
+      if (/setting_problem/.test(sql)) return Promise.resolve([{ p: null }]);
+      if (/user_setting_set/.test(sql)) {
+        calls.push(args);
+        if (args[4] === 1) return Promise.reject({ fields: { code: "40001", message: "the setting changed since it was read (version 2, not 1)" } });
+        return Promise.resolve([{}]);
+      }
+      return Promise.resolve([]);
+    },
+    tx: (fn: (d: Db) => Promise<unknown>) => fn(db),
+  } as never as Db;
+  const a = app(db);
+  const ok = await put(a, "/s/ui.locked_document", { value: "documents/x/a.md", version: 0, owner_sub: "bob" }, { "x-who": "alice" });
+  assertEquals(ok.status, 200);
+  assertEquals(calls[0][0], "alice", "the owner is the seam's subject, not the body's");
+  assertEquals(calls[0][4], 0, "the caller's version reaches the versioned write");
+  const stale = await put(a, "/s/ui.locked_document", { value: "documents/x/b.md", version: 1 }, { "x-who": "alice" });
+  assertEquals(stale.status, 409);
+  assert(String((await stale.json()).error).includes("changed since it was read"));
+});
