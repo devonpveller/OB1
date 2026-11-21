@@ -155,10 +155,20 @@ t("a claim linked to a PRIVATE idea report is in neither read, for anyone; a sha
     const r0 = await get("/recent?days=7&limit=50");
     const src = await source("private-src");
     // user B's private idea report and a claim drawn from it, backed by ONE active source (slot 390: the claim stays in public.claims)
-    const priv = await claim("PRIVATE-B idea claim", [[src, "states"]]);
     const rep = crypto.randomUUID();
-    await sql(`INSERT INTO public.research_private_reports (id, research_key, owner_sub, title, content) VALUES ($1, $2, 'user-b', $3, 'private report body')`, [rep, `${MARK}-key`, `${MARK} private report`]);
-    await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2)`, [rep, priv]);
+    // rw-private-report-claims (slot 570): a private report's claim is filed private (its link guard refuses linking a
+    // shared claim); before 570, the 390 shape - a shared claim linked back
+    const has570 = (await sql<{ ok: boolean }>(`SELECT to_regprocedure('public.private_report_claim_file(text,uuid,text,uuid,text,text,integer,vector,jsonb)') IS NOT NULL AS ok`))[0].ok;
+    if (has570) {
+      const job = (await sql<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, query) VALUES ('done', 'manual', $1) RETURNING id::text AS id`, [`${MARK} private job`]))[0].id;
+      await sql(`INSERT INTO public.research_private_reports (id, research_key, owner_sub, job_id, title, content) VALUES ($1, $2, 'user-b', $3, $4, 'private report body')`, [rep, `${MARK}-key`, job, `${MARK} private report`]);
+      const f = (await sql<{ id: string }>(`SELECT f.id::text AS id FROM public.private_report_claim_file($1, $2::uuid, $3, NULL) f`, [`${MARK}-key`, job, `${MARK} PRIVATE-B idea claim`]))[0].id;
+      await sql(`SELECT public.private_report_claim_edge($1::uuid, $2::uuid, 'states', 1.0)`, [f, src]);
+    } else {
+      const priv = await claim("PRIVATE-B idea claim", [[src, "states"]]);
+      await sql(`INSERT INTO public.research_private_reports (id, research_key, owner_sub, title, content) VALUES ($1, $2, 'user-b', $3, 'private report body')`, [rep, `${MARK}-key`, `${MARK} private report`]);
+      await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2)`, [rep, priv]);
+    }
     for (const who of ["user-a", "user-b", "user-c"]) {
       const w = await get("/waiting-claims?limit=50", who);
       assertEquals(w.json.total, w0.json.total, `${who}: the waiting total must not move for a private claim`);

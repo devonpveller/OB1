@@ -14,6 +14,10 @@
 //   migrated  after 570: every case passes
 // Identities: B is the victim (PRC_B); A (PRC_A) a second user; C (PRC_C) an admin signed in (forward-auth, the admin
 // group) who owns nothing; the lane (no identity header: the default subject the MCP lanes act as); a service key.
+// Round 2 (tester attempt 1): the plant uses a registered content type and every red / migrated case first asserts the
+// plant LANDED (landed()) - a missing plant fails loudly ("plant did not land"), never a vacuous red; the gap work of a
+// shared tree (P1), the wiki variants (P3), the services' REAL login (the owner read, the link guard, the gap guard),
+// PostgREST's rpc refused, and a P2 shared synthesis restating one of B's claims (counted by the lab, not judged).
 // Only counts, route names and pass/fail are printed, never a claim's text. Never point it at a live stack.
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { Pool } from "postgres";
@@ -35,6 +39,12 @@ const pool = !off
     user: Deno.env.get("CONTRACT_TEST_DB_USER") ?? "postgres", password: Deno.env.get("CONTRACT_TEST_DB_PASSWORD") ?? "",
   }, 2, true)
   : null;
+// the services' REAL login (ob_app_memory, non-superuser: session_user is it), as the workbench and the curator connect
+const APP_PW = Deno.env.get("PRC_APP_PASSWORD") ?? "";
+const appPool = !off && APP_PW
+  ? new Pool({ hostname: HOST!, port: 5432, database: "openbrain", user: "ob_app_memory", password: APP_PW }, 2, true)
+  : null;
+const PGRST = (Deno.env.get("PRC_PGRST") ?? "").replace(/\/+$/, "");   // PostgREST itself (its anon role is service_role)
 const t = (phases: string[], name: string, fn: () => Promise<void>) =>
   Deno.test({ name: `[${phases.join("|")}] ${name}`, ignore: off || !phases.includes(PHASE), fn, sanitizeOps: false, sanitizeResources: false });
 const BOTH = ["red", "migrated"];
@@ -65,6 +75,33 @@ async function probe<T = Record<string, any>>(role: string | null, text: string,
   try {
     await c.queryObject("BEGIN");
     if (role) await c.queryObject(`SET LOCAL ROLE ${role}`);
+    return (await c.queryObject<T>(text, args)).rows;
+  } finally {
+    try { await c.queryObject("ROLLBACK"); } catch { /* broken */ }
+    c.release();
+  }
+}
+// as the services' real login, one transaction, always rolled back
+// deno-lint-ignore no-explicit-any
+async function asApp<T = Record<string, any>>(text: string, args: unknown[] = []): Promise<T[]> {
+  if (!appPool) throw new Error("PRC_APP_PASSWORD is not set: the services' real login is required");
+  const c = await appPool.connect();
+  try {
+    await c.queryObject("BEGIN");
+    return (await c.queryObject<T>(text, args)).rows;
+  } finally {
+    try { await c.queryObject("ROLLBACK"); } catch { /* broken */ }
+    c.release();
+  }
+}
+// as PostgREST runs a request: its anon role, request.method set (what slot 570's caller gate keys on)
+// deno-lint-ignore no-explicit-any
+async function asPostgrest<T = Record<string, any>>(role: string, text: string, args: unknown[] = []): Promise<T[]> {
+  const c = await pool!.connect();
+  try {
+    await c.queryObject("BEGIN");
+    await c.queryObject(`SELECT set_config('request.method', 'POST', true) AS m, set_config('request.path', '/rpc/x', true) AS p`);
+    await c.queryObject(`SET LOCAL ROLE ${role}`);
     return (await c.queryObject<T>(text, args)).rows;
   } finally {
     try { await c.queryObject("ROLLBACK"); } catch { /* broken */ }
@@ -111,17 +148,47 @@ async function get(v: Viewer, path: string) {
 
 // deno-lint-ignore no-explicit-any
 async function plant(): Promise<Record<string, any>> {
-  const r = await sql<{ v: Record<string, unknown> }>(`SELECT v FROM public.lab_prc_plant WHERE k = 'plant'`);
-  return r[0]?.v ?? {};
+  const r = await sql<{ v: Record<string, unknown> }>(
+    `SELECT v FROM public.lab_prc_plant WHERE k = 'plant'`).catch(() => [] as { v: Record<string, unknown> }[]);
+  const p = r[0]?.v;
+  if (!p || !p.R) throw new Error("plant did not land: no plant record");
+  await landed(p);
+  return p;
+}
+// the plant is where the phase expects it - before any absence check (round 2, tester F1: a missing plant made every red
+// case fail vacuously). Each planted claim is in the shared table, an owner store or 570's archive; each planted page /
+// gap row is in its table or the archive; the shared job and the gap branch exist.
+// deno-lint-ignore no-explicit-any
+async function landed(p: Record<string, any>): Promise<void> {
+  const ids = [p.b1, p.b2, p.b3, p.a1, p.multi, p.orph, p.ctl, p.mix];
+  const n = (await sql<{ c: number; j: number; g: number; s: number; e: number; w: number; syn: number }>(
+    `SELECT (SELECT count(DISTINCT x)::int FROM unnest($1::uuid[]) x
+              WHERE EXISTS (SELECT 1 FROM public.claims c WHERE c.id = x)
+                 OR EXISTS (SELECT 1 FROM public.inlet_private_claims c WHERE c.id = x)
+                 OR (to_regclass('public.private_report_claims_archive') IS NOT NULL
+                     AND EXISTS (SELECT 1 FROM public.private_report_claims_archive a WHERE a.action IN ('k', 'x') AND a.ref = x::text))) AS c,
+            (SELECT count(*)::int FROM public.research_jobs WHERE id = $2::uuid) AS j,
+            (SELECT count(*)::int FROM public.research_jobs WHERE id = $3::uuid AND gap_ref = 'claim:' || $4) AS g,
+            (SELECT count(*)::int FROM public.research_steers WHERE child_job_id = $3::uuid) AS s,
+            (SELECT count(*)::int FROM public.research_job_events WHERE job_id = $2::uuid AND type = 'gap' AND payload ->> 'claim_id' = $4) AS e,
+            (SELECT count(*)::int FROM unnest($5::text[]) x
+              WHERE EXISTS (SELECT 1 FROM public.wiki_pages w WHERE w.slug = x)
+                 OR (to_regclass('public.private_report_claims_archive') IS NOT NULL
+                     AND EXISTS (SELECT 1 FROM public.private_report_claims_archive a WHERE a.action = 'w' AND a.ref = x))) AS w,
+            (SELECT count(*)::int FROM public.sources WHERE id = $6::uuid) AS syn`,
+    [ids, p.job, p.child, p.b1, [p.page, p.pageCite, p.pageBold, p.clean], p.p2syn]))[0];
+  const want = { c: ids.length, j: 1, g: 1, s: 1, e: 1, w: 4, syn: 1 };
+  const got = { c: n.c, j: n.j, g: n.g, s: n.s, e: n.e, w: n.w, syn: n.syn };
+  if (JSON.stringify(got) !== JSON.stringify(want)) throw new Error(`plant did not land: ${JSON.stringify(got)} (want ${JSON.stringify(want)})`);
 }
 
 // ── plant: the 390 shape ───────────────────────────────────────────────────────────────────────────────────────────
 t(["plant"], "plant two users' private reports and their claims in the shape slot 390 left them", async () => {
   const R = rnd();
-  const w = { b: `prcb${R}`, a: `prca${R}`, multi: `prcmulti${R}`, orph: `prcorph${R}`, ctl: `prcctl${R}`, mix: `prcmix${R}`, bnew: `prcbnew${R}` };
+  const w = { b: `prcb${R}`, a: `prca${R}`, multi: `prcmulti${R}`, orph: `prcorph${R}`, ctl: `prcctl${R}`, mix: `prcmix${R}`, bnew: `prcbnew${R}`, b3: `prcbthree${R}` };
   const one = async (q: string, args: unknown[] = []) => (await sql<{ id: string }>(q, args))[0].id;
   const thread = await one(`INSERT INTO public.threads (name, description, status) VALUES ($1, 'a shared thread', 'active') RETURNING id::text AS id`, [`Shared thread ${R}`]);
-  const src = (title: string, ct = "web") => one(
+  const src = (title: string, ct = "web_article") => one(
     `INSERT INTO public.sources (title, content, content_type, url) VALUES ($1, $2, $3, $4) RETURNING id::text AS id`,
     [title, `shared page text ${title} `.repeat(4), ct, `https://example.org/prc-${R}/${title.replace(/\W+/g, "-")}`]);
   const s1 = await src(`Shared source one ${R}`);
@@ -154,6 +221,14 @@ t(["plant"], "plant two users' private reports and their claims in the shape slo
   const b1 = await claim(`The ${w.b} alpha result reproduced in 12 trials across two labs.`, thread, null);
   const b2 = await claim(`The ${w.b} beta result held for 40 participants over six months.`, thread, null);
   await link(bReport, b1); await link(bReport, b2);
+  // P2 (operator decision, counted not judged): B's third claim, restated by a SHARED synthesis and a shared job's report
+  const b3text = `The ${w.b3} theta result was restated in a shared report later on.`;
+  const b3 = await claim(b3text, null, null);
+  await link(bReport, b3);
+  const p2syn = await one(`INSERT INTO public.sources (title, content, content_type, research_key) VALUES ($1, $2, 'research_synthesis', $3) RETURNING id::text AS id`,
+    [`Shared report two ${R}`, `A shared run. ${b3text} Nothing else.`, `rk-prc-shared2-${R}`]);
+  const p2job = await one(`INSERT INTO public.research_jobs (status, origin, query, finished_at, result) VALUES ('done', 'manual', 'another shared question', now(), $1::jsonb) RETURNING id::text AS id`,
+    [JSON.stringify({ outcome: "answered", synthesis: `Findings. ${b3text}`, claims: [] })]);
   const a1 = await claim(`The ${w.a} gamma result was confirmed by a second team in 2025.`, null, null);
   await link(aReport, a1);
   const multi = await claim(`The ${w.multi} delta result appeared in both private reports alike.`, thread, null);
@@ -171,17 +246,35 @@ t(["plant"], "plant two users' private reports and their claims in the shape slo
   const job = await one(`INSERT INTO public.research_jobs (status, origin, query, finished_at, result, metrics)
       VALUES ('done', 'manual', 'a shared question', now(), $1::jsonb, '{"claims_reused": 2, "gap_ratio": 0.5}'::jsonb) RETURNING id::text AS id`,
     [JSON.stringify({ outcome: "answered", reuse_claims: [{ id: b1, text: `The ${w.b} alpha result reproduced in 12 trials across two labs.` }, { id: ctl, text: `The ${w.ctl} control result is shared knowledge from a shared report.` }], claims: [] })]);
-  // a wiki page carrying B's claim's text, and a clean page
+  // P1 (round 2): the shared job's gap work - B's claim recalled below its threshold: a gap event on the root, a gap
+  // branch asking to verify it, its steer, and the root's tree report naming the branch by it (tree.ts / index.ts shapes)
+  const b1text = `The ${w.b} alpha result reproduced in 12 trials across two labs.`;
+  const gap = { claim_id: b1, text: b1text, score: 0.1, threshold: 0.5, claim_kind: "descriptive" };
+  await sql(`INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload) VALUES ($1, $1, 'gap', 'steering', $2::jsonb)`, [job, JSON.stringify(gap)]);
+  const child = await one(`INSERT INTO public.research_jobs (status, origin, query, parent_job_id, root_job_id, rooted_step_id, branch_kind, anchor, gap_ref)
+      VALUES ('queued', 'manual', $1, $2, $2, 'reuse', 'gap', 'a shared question', $3) RETURNING id::text AS id`, [`Verify: ${b1text}`, job, `claim:${b1}`]);
+  await sql(`INSERT INTO public.research_steers (root_job_id, parent_job_id, child_job_id, steer_kind, step_id, text, topic_estimate, anchor, gap, actor_sub)
+             VALUES ($1, $1, $2, 'gap', 'reuse', $3, 'a shared topic', 'a shared question', $4::jsonb, 'system:research')`, [job, child, b1text, JSON.stringify(gap)]);
+  await sql(`UPDATE public.research_jobs SET topic_estimate = 'a shared topic', tree_report = $2::jsonb WHERE id = $1`,
+    [job, JSON.stringify({ heading: "a shared topic", origin: "a shared question", topic_estimate: "a shared topic",
+      branches: [{ job_id: child, branch_kind: "gap", opened_by: b1text, steer_kind: "gap" }],
+      markdown: `# a shared topic\n\n## Branch (gap gap): ${b1text}\n` })]);
+  // a wiki page carrying B's claim's text, the P3 variants (a citation marker, emphasis inside the sentence), a clean page
   const page = `content/topic/prc-${R}`, clean = `content/topic/prc-clean-${R}`;
-  await sql(`INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'entity', $2, $3), ($4, 'entity', $5, 'nothing private here at all')`,
-    [page, `Topic ${R}`, `Some notes. The ${w.b} alpha result reproduced in 12 trials across two labs. More notes.`, clean, `Clean topic ${R}`]);
+  const pageCite = `content/topic/prc-cite-${R}`, pageBold = `content/topic/prc-bold-${R}`;
+  await sql(`INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'entity', $2, $3), ($4, 'entity', $5, 'nothing private here at all'),
+             ($6, 'entity', $7, $8), ($9, 'entity', $10, $11)`,
+    [page, `Topic ${R}`, `Some notes. The ${w.b} alpha result reproduced in 12 trials across two labs. More notes.`, clean, `Clean topic ${R}`,
+     pageCite, `Cite ${R}`, `Notes. The ${w.b} alpha result reproduced in 12 trials across two labs [Source 2]. More.`,
+     pageBold, `Bold ${R}`, `Notes. The ${w.b} **alpha** result   reproduced in 12 trials across two labs. More.`]);
   // a corroboration line of B's run (the research service writes them during the run)
   await sql(`INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version, job_id)
              VALUES ($1, $2, 'strong', 0.5, $3, 'descriptive', 'supports', 'lab', $4)`,
     [s2, s1, `The ${w.b} alpha result reproduced in 12 trials across two labs.`, bIdea.job]);
   await sql(`CREATE TABLE IF NOT EXISTS public.lab_prc_plant (k TEXT PRIMARY KEY, v JSONB NOT NULL)`);
   await sql(`INSERT INTO public.lab_prc_plant (k, v) VALUES ('plant', $1::jsonb) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v`,
-    [JSON.stringify({ R, w, thread, s1, s2, syn, bIdea, aIdea, bReport, aReport, orphReport, b1, b2, a1, multi, orph, ctl, mix, job, page, clean })]);
+    [JSON.stringify({ R, w, thread, s1, s2, syn, bIdea, aIdea, bReport, aReport, orphReport, b1, b2, b3, a1, multi, orph, ctl, mix, job, child, page, pageCite, pageBold, clean, p2syn, p2job })]);
+  await landed(await plant());
 });
 
 // ── migrated only: a new filing the way the curator files it (before the reads, so they see it too) ──────────────────
@@ -210,10 +303,14 @@ t(["migrated"], "the curator's write: a new claim of B's report lands in B's sto
     "an ownerless report files nothing");
   await sql(`UPDATE public.research_private_reports SET job_id = NULL WHERE id = $1`, [p.orphReport]);
   assertEquals(await errCode(() => asRole("ob_app_memory", `SELECT * FROM public.private_report_claim_file('rk-none', gen_random_uuid(), 'a claim text', NULL)`)), "23503");
-  // PostgREST's anon role (service_role) and authenticated may not file
+  // PostgREST's anon role (service_role, as PostgREST runs a request) and authenticated may not file
   for (const role of ["service_role", "authenticated"]) {
-    assertEquals(await errCode(() => asRole(role, `SELECT * FROM public.private_report_claim_file($1, $2::uuid, 'a claim text', NULL)`, [`rk-prc-b-${p.R}`, p.bIdea.job])), "42501", role);
+    assertEquals(await errCode(() => asPostgrest(role, `SELECT * FROM public.private_report_claim_file($1, $2::uuid, 'a claim text', NULL)`, [`rk-prc-b-${p.R}`, p.bIdea.job])), "42501", role);
   }
+  // the services' REAL login files (the curator's connection)
+  const real = await asApp<{ id: string }>(`SELECT f.id::text AS id FROM public.private_report_claim_file($1, $2::uuid, $3, NULL) f`,
+    [`rk-prc-b-${p.R}`, p.bIdea.job, `The ${p.w.bnew} eta result, filed by the services' own login.`]);
+  assertEquals(real.length, 1, "the ob_app_memory login files");
   await sql(`UPDATE public.lab_prc_plant SET v = v || jsonb_build_object('bnewId', $1::text) WHERE k = 'plant'`, [r[0].id]);
 });
 
@@ -236,6 +333,11 @@ const READS: Array<[string, (p: Record<string, any>) => string]> = [
   ["contract/trail?source_id", (p) => `/workbench/contract/trail?source_id=${p.s1}`],
   ["contract/jobs", () => `/workbench/contract/jobs?limit=200`],
   ["contract/sessions/{shared job}", (p) => `/workbench/contract/sessions/${p.job}`],
+  // round 2 (tester P1): the shared job's gap work
+  ["contract/jobs?kind=research", () => `/workbench/contract/jobs?kind=research&limit=200`],
+  ["contract/sessions/{the gap branch}", (p) => `/workbench/contract/sessions/${p.child}`],
+  ["contract/sessions/{shared job}/coverage", (p) => `/workbench/contract/sessions/${p.job}/coverage`],
+  ["contract/search kinds=page (the claim's word)", (p) => `/workbench/contract/search?q=${p.w.b}&kinds=page`],
   // already owner-only before slot 570 (rw-report-isolation / rw-p8a4-ideas): controls, green in both phases
   ["contract/ideas/{B's idea}", (p) => `/workbench/contract/ideas/${p.bIdea.id}`],
   ["contract/ideas", () => `/workbench/contract/ideas?limit=200`],
@@ -300,7 +402,7 @@ t(BOTH, "[owner] B reads the claims drawn from B's report in B's idea dossier (h
 // ── the database surfaces ──────────────────────────────────────────────────────────────────────────────────────
 t(BOTH, "[db] no shared table row carries B's claims: claims, claim_sources, the semantic recall (the research service's shape)", async () => {
   const p = await plant();
-  const ids = [p.b1, p.b2, p.multi, p.orph];
+  const ids = [p.b1, p.b2, p.b3, p.multi, p.orph];
   const n = (await sql<{ c: number; e: number; t: number }>(
     `SELECT (SELECT count(*)::int FROM public.claims WHERE id = ANY($1::uuid[])) AS c,
             (SELECT count(*)::int FROM public.claim_sources WHERE claim_id = ANY($1::uuid[]) OR parent_claim_id = ANY($1::uuid[])) AS e,
@@ -326,6 +428,18 @@ t(BOTH, "[db] the shared claim that B's claim contradicted is no longer capped o
 t(BOTH, "[db] the wiki page carrying B's claim's text is withheld, and stays out (a rewrite is withheld, a note refused); a clean page goes in", async () => {
   const p = await plant();
   assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE slug = $1`, [p.page]))[0].n, 0, "the page is gone");
+  // round 2 (tester P3): the variants - a citation marker before the full stop, emphasis and a whitespace run inside
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE slug = ANY($1::text[])`, [[p.pageCite, p.pageBold]]))[0].n, 0,
+    "the citation-marker and emphasis variants are gone");
+  for (const [slug, variant] of [
+    [`content/topic/prc-cite3-${p.R}`, `Later. The ${p.w.b} alpha result reproduced in 12 trials across two labs [3].`],
+    [`content/topic/prc-em-${p.R}`, `Later. THE ${p.w.b} alpha result reproduced in 12 trials across _two labs_ [^1], it says.`],
+    [`content/topic/prc-link-${p.R}`, `Later. The ${p.w.b} alpha result [reproduced](https://example.org/x) in 12 trials across two labs.`],
+  ]) {
+    const n = await probe<{ n: number }>(null,
+      `WITH w AS (INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'entity', 'variant', $2) RETURNING 1) SELECT count(*)::int AS n FROM w`, [slug, variant]);
+    assertEquals(n[0].n, 0, `a new write of a variant is withheld (${slug.split("/").pop()!.replace(/-.*/, "")})`);
+  }
   const body = `Rewritten. The ${p.w.b} alpha result reproduced in 12 trials across two labs.`;
   // each probe in a rolled-back transaction (the viewer's reconcile / a compile writing the page back)
   const back = await probe<{ n: number }>(null,
@@ -343,7 +457,7 @@ t(BOTH, "[db] B's run's corroboration line no longer carries the claim's text; i
   const r = await sql<{ t: string; amount: number }>(`SELECT claim_text AS t, amount FROM public.source_corroborations WHERE from_source_id = $1 AND to_source_id = $2`, [p.s2, p.s1]);
   assertEquals(r.length, 1);
   assert(r[0].t.startsWith("private-text:") && !r[0].t.includes(p.w.b), "the line is neutral");
-  assertEquals(r[0].amount, 0.5);
+  assertEquals(Number(r[0].amount), 0.5, "the amount (numeric arrives as a string)");
 });
 t(BOTH, "[db] the owner stores and the owner read: closed to every app role, owner-checked for the services' role", async () => {
   const p = await plant();
@@ -351,16 +465,66 @@ t(BOTH, "[db] the owner stores and the owner read: closed to every app role, own
     assertEquals(await errCode(() => asRole(role, `SELECT count(*) FROM public.inlet_private_claims`)), "42501", `${role} reads the store`);
     assertEquals(await errCode(() => asRole(role, `SELECT count(*) FROM public.private_report_claims_archive`)), "42501", `${role} reads the archive`);
   }
-  const of = async (sub: string) => (await asRole<{ id: string }>("ob_app_memory", `SELECT id::text AS id FROM public.private_report_claims_of_idea($1::uuid, $2)`, [p.bIdea.id, sub])).map((r) => r.id).sort();
-  assertEquals(await of(B), [p.b1, p.b2, p.bnewId].filter(Boolean).sort(), "B's own");
+  // round 2 (tester F2): the services' REAL login (created after the chain ran), as the workbench connects
+  const of = async (sub: string) => (await asApp<{ id: string }>(`SELECT id::text AS id FROM public.private_report_claims_of_idea($1::uuid, $2)`, [p.bIdea.id, sub])).map((r) => r.id).sort();
+  const mine = await of(B);
+  for (const id of [p.b1, p.b2, p.b3]) assert(mine.includes(id), "B's own, read by the ob_app_memory login");
   for (const s of [A, C, "", "service:openbrain-mcp", "anonymous:", "operator"]) assertEquals(await of(s), [], `subject ${s || "(blank)"}`);
-  assertEquals(await errCode(() => asRole("service_role", `SELECT * FROM public.private_report_claims_of_idea($1::uuid, $2)`, [p.bIdea.id, B])), "42501", "PostgREST's anon role");
+  assertEquals(await errCode(() => asPostgrest("service_role", `SELECT * FROM public.private_report_claims_of_idea($1::uuid, $2)`, [p.bIdea.id, B])), "42501", "PostgREST's anon role");
   // the withheld ones are in no store
   assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.inlet_private_claims WHERE id = ANY($1::uuid[])`, [[p.multi, p.orph]]))[0].n, 0);
 });
-t(BOTH, "[db] no service can link a shared claim to a private report (the services' role and PostgREST's)", async () => {
+t(BOTH, "[db] no service can link a shared claim to a private report (the services' REAL login, and PostgREST's anon role)", async () => {
   const p = await plant();
-  for (const role of ["ob_app_memory", "service_role"]) {
-    assertEquals(await errCode(() => probe(role, `INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2)`, [p.bReport, p.ctl])), "23514", role);
+  // round 2 (tester F5): the services' own login (session_user ob_app_memory, not a superuser session under SET ROLE);
+  // it holds INSERT on the link (slot 390 grants service_role ALL), so only the guard stands in the way
+  assertEquals(await errCode(() => asApp(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2)`, [p.bReport, p.ctl])), "23514", "ob_app_memory login");
+  assertEquals(await errCode(() => asPostgrest("service_role", `INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2)`, [p.bReport, p.ctl])), "23514", "service_role (PostgREST)");
+});
+
+// ── round 2 (tester P1): the gap work of a shared tree ───────────────────────────────────────────────────────────
+t(BOTH, "[db] the shared tree's gap work no longer carries B's claim's text (the branch's question, its steer, the gap event, the tree report)", async () => {
+  const p = await plant();
+  const r = (await sql<{ q: string; s: string; e: string; tr: string; ref: string }>(
+    `SELECT (SELECT query FROM public.research_jobs WHERE id = $2) AS q,
+            (SELECT text || ' ' || coalesce(gap::text, '') FROM public.research_steers WHERE child_job_id = $2) AS s,
+            (SELECT string_agg(payload::text, ' ') FROM public.research_job_events WHERE job_id = $1 AND type = 'gap') AS e,
+            (SELECT coalesce(tree_report::text, '') FROM public.research_jobs WHERE id = $1) AS tr,
+            (SELECT gap_ref FROM public.research_jobs WHERE id = $2) AS ref`, [p.job, p.child]))[0];
+  const carries = Object.entries({ branch: r.q, steer: r.s, event: r.e, tree_report: r.tr }).filter(([, v]) => (v ?? "").includes(p.w.b)).map(([k]) => k);
+  assertEquals(carries, [], "rows still carrying the claim's word");
+  assertEquals(r.ref, `claim:${p.b1}`, "the branch keeps its gap_ref (ids only), so the tree's per-gap dedup still holds");
+});
+t(BOTH, "[db] a NEW gap branch / steer / gap event for B's claim on a shared tree carries no text (the services' REAL login)", async () => {
+  const p = await plant();
+  const text = `The ${p.w.b} alpha result reproduced in 12 trials across two labs.`;
+  const gap = JSON.stringify({ claim_id: p.b2, text, score: 0.1, threshold: 0.5, claim_kind: "descriptive" });
+  const c = await appPool!.connect();
+  try {
+    await c.queryObject("BEGIN");
+    const j = (await c.queryObject<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, query, parent_job_id, root_job_id, rooted_step_id, branch_kind, anchor, gap_ref)
+        VALUES ('queued', 'manual', $1, $2, $2, 'reuse', 'gap', 'a shared question', $3) RETURNING id::text AS id`, [`Verify: ${text}`, p.job, `claim:${p.b2}`])).rows;
+    assertEquals(j.length, 0, "no gap branch is opened for a private claim on a shared tree");
+    await c.queryObject(`INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload) VALUES ($1, $1, 'gap', 'steering', $2::jsonb)`, [p.job, gap]);
+    const ev = (await c.queryObject<{ t: string }>(`SELECT payload::text AS t FROM public.research_job_events WHERE job_id = $1 AND type = 'gap' AND payload ->> 'claim_id' = $2`, [p.job, p.b2])).rows;
+    assertEquals(ev.length, 1);
+    assert(!ev[0].t.includes(p.w.b), "the gap event's text is neutral");
+  } finally {
+    try { await c.queryObject("ROLLBACK"); } catch { /* broken */ }
+    c.release();
   }
+});
+// PostgREST itself (the anon role service_role, over HTTP): the slot's functions answer no row to an rpc call
+t(BOTH, "[guard] PostgREST's rpc never reads or files a private-report claim", async () => {
+  if (!PGRST) throw new Error("PRC_PGRST is not set");
+  const p = await plant();
+  const call = async (fn: string, body: unknown) => {
+    const r = await fetch(`${PGRST}/rpc/${fn}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    return { status: r.status, text: await r.text() };
+  };
+  const read = await call("private_report_claims_of_idea", { p_idea_id: p.bIdea.id, p_sub: B });
+  assert(read.status >= 400, `the owner read is refused over rpc (${read.status})`);
+  for (const s of secretsOf(p)) assert(!read.text.includes(s), "no claim text or id in the refusal");
+  const file = await call("private_report_claim_file", { p_research_key: `rk-prc-b-${p.R}`, p_job_id: p.bIdea.job, p_text: "a claim text over rpc" });
+  assert(file.status >= 400, `filing is refused over rpc (${file.status})`);
 });

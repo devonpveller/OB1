@@ -629,8 +629,14 @@ filed stays shared ("mixed"); one with no single owner (an ownerless report, two
 named a moved claim are archived and fixed: its edges, the contradicts edges onto shared claims, job results' claim lists
 (and `claims_reused`), wiki pages carrying its text (withheld and guarded), and a private run's corroboration lines
 (neutral keyed text; a guard on `source_corroborations`). `idea(id)` lists the owner's private claims through
-`private_report_claims_of_idea(idea, sub)` (owner-checked). A guard refuses linking a shared claim to a private report.
-Check: `check-private-report-claims.sql`; lab: `contract-test/run-private-report-claims-lab.ps1`; revert:
+`private_report_claims_of_idea(idea, sub)` (owner-checked; read on its own and fail-closed, so the dossier still answers
+when slot 570 is absent or reverted). A guard refuses linking a shared claim to a private report. Round 2: the gap work
+of a shared tree (gap / inter-hub branch questions, steers, gap events, the tree report) loses the claim's text and a
+guard keeps new gap work from carrying it; the wiki match is normalised (case, whitespace, citation markers, emphasis);
+the slot's functions are granted to `service_role` (so `ob_app_memory` reaches them whenever it is created) and refuse
+any caller but the `ob_app_memory` login or a superuser session outside a PostgREST request; a live apply refuses
+without `ob_app_memory`. A shared synthesis that restated a private-report claim stays shared (operator decision;
+`count-private-report-claim-reuse.sql` counts them, read-only). Check: `check-private-report-claims.sql`; lab: `contract-test/run-private-report-claims-lab.ps1`; revert:
 `revert-private-report-claims.sql` (first, before 480 / 470 / 440 / 390).
 
 **Existing personal data is its owner's, and private (rw-inlet-owner, plan 08 PD1, slot 440, after 430).** `init-inlet-owner.sql`

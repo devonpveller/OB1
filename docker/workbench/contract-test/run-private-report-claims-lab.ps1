@@ -15,6 +15,10 @@
 #       to [4]'s hashes; 570 again; the check script says OK
 #   [7] GREEN: every case passes (a new filing the curator's way included)
 #   [8] the last revert puts the post-570 filing back in the shared table (the 390 model) and the key back on
+# Round 2 (tester attempt 1): no 570 re-run after ob_app_memory is created - the chain's own 570 must already reach the
+# role (a real login executes the owner read); a live apply without the role is refused; the plant must LAND before
+# any red gate counts (a missing plant is a FAIL, never a vacuous red); the gap work (P1), the wiki variants (P3) and the
+# P2 count (count-private-report-claim-reuse.sql, before and after 570 - an operator decision, not a pass/fail gate).
 # Exit 0 = every check passed. Counts, route names and pass/fail only - never a claim's text. Never the live stack.
 param(
   [string]$Id = 'wt-rw-private-report-claims',
@@ -134,6 +138,8 @@ SELECT string_agg(t || '=' || h, ' ' ORDER BY t) FROM (
   UNION ALL SELECT 'wiki_pages', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.slug), '')) FROM public.wiki_pages x
   UNION ALL SELECT 'corroborations', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.source_corroborations x
   UNION ALL SELECT 'private_claims', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.inlet_private_claims x
+  UNION ALL SELECT 'steers', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.research_steers x
+  UNION ALL SELECT 'events', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.research_job_events x
   UNION ALL SELECT 'private_edges', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.claim_id, x.edge_ref, x.batch), '')) FROM public.inlet_private_claim_sources x
   UNION ALL SELECT 'link_fk', md5(coalesce((SELECT string_agg(conname || ' ' || pg_get_constraintdef(oid), '|' ORDER BY conname) FROM pg_constraint
                                            WHERE conrelid = 'public.research_private_report_claims'::regclass AND contype = 'f'), ''))
@@ -147,6 +153,7 @@ function Invoke-Test([string]$phase) {
     '-e', "PRC_FA_ISSUER=$faIssuer", '-e', "PRC_FA_CLIENT=$faClient", '-e', "PRC_FA_SECRET=$faSecret",
     '-e', "PRC_A=$subA", '-e', "PRC_B=$subB", '-e', "PRC_C=$subC",
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+    '-e', "PRC_APP_PASSWORD=$appPw", '-e', "PRC_PGRST=http://$P-postgrest:3000",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/inlet/private_report_claims_integration_test.ts')
   $o = Lab-Docker 900 $a
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
@@ -197,11 +204,17 @@ try {
   Check ($errs.Count -eq 0) "initdb logged no ERROR ($($errs.Count))"
   if ($errs.Count) { Save 'initdb-errors.log' ($errs -join "`n") }
   Check ($logs -match 'private report claims: nothing to move') 'on a fresh volume slot 570 has nothing to move'
+  # round 2 (tester F2): a LIVE apply (the server listens) without the services' role is refused loudly, nothing changed
+  $r0 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570 live, before ob_app_memory exists'
+  Check ($r0.rc -ne 0 -and $r0.msg -match 'ob_app_memory does not exist') "a live 570 without ob_app_memory is refused (exit $($r0.rc))"
   $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) 'ob_app_memory (non-superuser, service_role) - the production shape'
-  # the role exists only now (production creates it before 570): 570 again grants it its functions
-  $r0 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570 again, once ob_app_memory exists'
-  Check ($r0.rc -eq 0 -and $r0.msg -match 'nothing to move') '570 re-run on the fresh lab: nothing to move, the grants made'
+  # round 2 (tester F2): the role is created AFTER the chain's 570 (the house labs and a fresh volume), and 570 is NOT
+  # re-run: its grant must reach the role anyway (the workbench's owner read, as the real login)
+  $o = Dk exec -e "PGPASSWORD=$appPw" $db psql -h 127.0.0.1 -U ob_app_memory -d openbrain -X -A -t -q -c "SELECT count(*) FROM public.private_report_claims_of_idea(gen_random_uuid(), 'prc-nobody')"
+  Check ($script:rc -eq 0 -and "$o".Trim() -eq '0') "the ob_app_memory login executes the chain's private_report_claims_of_idea with no 570 re-run ($("$o".Trim()))"
+  $c00 = Check-Script; Save 'check-fresh.log' $c00
+  Check ($c00 -match "ob_app_memory may execute the slot's functions=3 of 3" -and $c00 -match 'check: OK') 'the check script on the fresh chain: the grant reaches ob_app_memory, OK'
   $ctMount = "${ct}:/ct:ro"
   $null = Run-Detached "$P-embed" @('--network-alias', 'stub-embed', '-v', $ctMount, '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '/ct/stub-embed.ts')
   $null = Run-Detached "$P-postgrest" @('--network-alias', 'openbrain-postgrest', '-e', "PGRST_DB_URI=postgres://postgres:$pw@openbrain-db:5432/openbrain",
@@ -230,13 +243,24 @@ try {
   $rv0 = Psql-File (Join-Path $dockerDir 'revert-private-report-claims.sql') 'revert the chain''s 570'
   Check ($rv0.rc -eq 0 -and $rv0.msg -match 'foreign key restored') 'the revert puts the link''s foreign key back (the 390 model)'
   $c0 = Check-Script; Save 'check-before-plant.log' $c0
+  Check ($c0 -match 'check: FAIL' -and $c0 -match "may execute the slot's functions=0 of 3") 'after the revert the check script reports the missing grant (0 of 3) and FAILS'
   $pt = Invoke-Test 'plant'
   Check ($pt.m.Success -and $pt.m.Groups[1].Value -eq 'ok' -and [int]$pt.m.Groups[2].Value -eq 1) "planted the 390-shaped private-report claims and everything naming them ($($pt.m.Value))"
+  # round 2 (tester F1): the plant LANDED - the phase above asserts it (landed()); the lab counts it once more itself
+  $pl = Q "SELECT (SELECT count(*) FROM public.lab_prc_plant) || '/' || (SELECT count(*) FROM public.research_private_report_claims) || '/' || (SELECT count(*) FROM public.research_steers) || '/' || (SELECT count(*) FROM public.wiki_pages WHERE slug LIKE 'content/topic/prc-%')"
+  Check ($pl -eq '1/8/1/4') "the plant is in the database (plant record / links / steers / pages = $pl, want 1/8/1/4)"
+  if ($pl -ne '1/8/1/4') { throw 'the plant did not land' }
   $h0 = Q $hashQ; Save 'hash-planted.txt' $h0
+  # P2 (operator decision): how many shared outputs restate a private-report claim - before 570
+  $null = Dk cp (Join-Path $dockerDir 'count-private-report-claim-reuse.sql') "${db}:/tmp/prcreuse.sql"
+  $p2a = ((Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/prcreuse.sql) | Out-String).Trim(); Save 'p2-count-before-570.log' $p2a
+  Write-Host ($p2a -replace "`n", ' | ')
+  Check ($p2a -match 'mixed claims \(a shared synthesis also filed them; shared\)=1' -and $p2a -match "shared syntheses carrying a private-report claim's sentence=1" -and $p2a -match 'shared job reports carrying one=1') 'P2 count before 570: 1 mixed claim, 1 shared synthesis, 1 shared job report (the plant)'
   # ---------------------------------------------------------------- [5] RED
   Write-Host '[5] RED: before 570'
   $red = Invoke-Test 'red'
   $redCases = Case-Results $red.out
+  Check ($red.out -notmatch 'plant did not land') 'RED: every case ran against the landed plant (no "plant did not land")'
   $leakRed = @($redCases.Keys | Where-Object { $_ -match '\[leak\]' -and $redCases[$_] -eq 'FAILED' })
   $dbRed = @($redCases.Keys | Where-Object { $_ -match '\[db\]' -and $redCases[$_] -eq 'FAILED' })
   $ctlRed = @($redCases.Keys | Where-Object { $_ -match '\[(control|owner)\]' -and $redCases[$_] -eq 'FAILED' })
@@ -246,23 +270,27 @@ try {
   Check ($ctlRed.Count -eq 0) "RED: the controls and the owner's read pass before 570 ($($ctlRed.Count) failed)"
   $cr = Check-Script; Save 'check-red.log' $cr
   Check ($cr -match 'check: FAIL' -and $cr -match 'in the shared table=[1-9]') 'RED: the check script reports private-report claims on a shared surface and FAILS'
+  Check ($cr -match "wiki pages carrying one's text=3" -and $cr -match 'job results naming one for someone else=1' -and $cr -match "gap-work rows of a shared tree carrying one's text=[1-9]") 'RED (tester F4): before 570 the check script sees the 3 pages (variants included), the job result and the gap work'
   # ---------------------------------------------------------------- [6] init x2, revert x2, init
   Write-Host '[6] 570 x2, revert x2 (byte-identical), 570'
   $i1 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570'
-  Check ($i1.rc -eq 0 -and $i1.msg -match '3 claim\(s\) moved to their owner''s store' -and $i1.msg -match '2 withheld' -and $i1.msg -match '1 claim\(s\) a shared synthesis also filed stay shared' -and $i1.msg -match '1 job result\(s\) stripped' -and $i1.msg -match '1 wiki page\(s\) withheld' -and $i1.msg -match '1 corroboration line') "570 moves B's 2 + A's 1 claims, withholds the two-owner and the ownerless claim, keeps the mixed one, strips the job, withholds the page, neutralises the line (counts only)"
+  Check ($i1.rc -eq 0 -and $i1.msg -match '4 claim\(s\) moved to their owner''s store' -and $i1.msg -match '2 withheld' -and $i1.msg -match '1 claim\(s\) a shared synthesis also filed stay shared' -and $i1.msg -match '1 job result\(s\) stripped' -and $i1.msg -match '3 wiki page\(s\) withheld' -and $i1.msg -match '4 gap-work row\(s\) of a shared tree made neutral' -and $i1.msg -match '1 corroboration line') "570 moves B's 3 + A's 1 claims, withholds the two-owner and the ownerless claim, keeps the mixed one, strips the job, withholds the 3 pages (variants), neutralises the 4 gap-work rows and the line (counts only)"
   $i2 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570 again'
   Check ($i2.rc -eq 0 -and $i2.msg -match 'nothing to move' -and $i2.msg -notmatch 'corroboration line') '570 a second time: nothing to move'
   $c1 = Check-Script; Save 'check-after-570.log' $c1
   Check ($c1 -match 'check: OK') 'after 570 the check script says OK'
   $v1 = Psql-File (Join-Path $dockerDir 'revert-private-report-claims.sql') 'revert'
-  Check ($v1.rc -eq 0 -and $v1.msg -match '5 claim\(s\) restored' -and $v1.msg -match 'foreign key restored') 'the revert restores the 5 claims, the edges, the job, the page, the line and the key'
+  Check ($v1.rc -eq 0 -and $v1.msg -match '6 claim\(s\) restored' -and $v1.msg -match '4 gap-work row\(s\)' -and $v1.msg -match 'foreign key restored') 'the revert restores the 6 claims, the edges, the job, the pages, the gap work, the line and the key'
   $v2 = Psql-File (Join-Path $dockerDir 'revert-private-report-claims.sql') 'revert again'
   Check ($v2.rc -eq 0 -and $v2.msg -match 'nothing to restore') 'a second revert has nothing to restore'
   $h1 = Q $hashQ; Save 'hash-reverted.txt' $h1
   Check ($h1 -eq $h0) "after the revert every touched table is byte-identical to the planted state"
   if ($h1 -ne $h0) { Save 'hash-diff.txt' ("planted:  $h0`nreverted: $h1") }
   $i3 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570 once more'
-  Check ($i3.rc -eq 0 -and $i3.msg -match '3 claim\(s\) moved') '570 after the revert moves the same claims again'
+  Check ($i3.rc -eq 0 -and $i3.msg -match '4 claim\(s\) moved') '570 after the revert moves the same claims again'
+  $p2b = ((Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/prcreuse.sql) | Out-String).Trim(); Save 'p2-count-after-570.log' $p2b
+  Write-Host ($p2b -replace "`n", ' | ')
+  Check ($p2b -match "shared syntheses carrying a private-report claim's sentence=1" -and $p2b -match 'shared job reports carrying one=1') 'P2 count after 570: unchanged (570 leaves shared syntheses / reports as they are - the operator decides)'
   $c2 = Check-Script; Save 'check-green.log' $c2
   Check ($c2 -match 'check: OK') 'the check script says OK'
   # ---------------------------------------------------------------- [7] GREEN

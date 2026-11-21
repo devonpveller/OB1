@@ -12,6 +12,8 @@
 --   * the link's foreign key onto public.claims is put back from its archived definition (refused, nothing changed,
 --     while a link names a claim that is in no table);
 --   * the corroboration lines slot 570 made neutral get their text back (its guard on source_corroborations goes);
+--   * the gap work of shared trees it made neutral (action g: research_jobs, research_steers, research_job_events) gets
+--     its text back; the gap guards on those three tables go;
 --   * the functions go; the archive and salt tables stay (restored rows carry restored_at).
 -- Counts only (NOTICE). A second run has nothing to restore. Run it BEFORE the 480 / 470 / 440 / 390 reverts.
 -- ============================================================
@@ -37,14 +39,19 @@ DECLARE
     n_w     BIGINT := 0;
     n_fk    BIGINT := 0;
     n_c     BIGINT := 0;
+    n_g     BIGINT := 0;
 BEGIN
     IF to_regclass('public.private_report_claims_archive') IS NULL THEN
         RAISE NOTICE 'private report claims revert: slot 570 was never applied - nothing to restore';
         RETURN;
     END IF;
     LOCK TABLE public.claims, public.claim_sources, public.research_private_report_claims, public.research_jobs, public.wiki_pages,
-               public.inlet_private_claims, public.inlet_private_claim_sources IN SHARE ROW EXCLUSIVE MODE;
+               public.inlet_private_claims, public.inlet_private_claim_sources, public.research_steers, public.research_job_events
+        IN SHARE ROW EXCLUSIVE MODE;
     DROP TRIGGER IF EXISTS trg_private_report_claims_wiki_guard ON public.wiki_pages;
+    DROP TRIGGER IF EXISTS trg_private_report_claims_gap_guard ON public.research_jobs;
+    DROP TRIGGER IF EXISTS trg_private_report_claims_gap_guard ON public.research_steers;
+    DROP TRIGGER IF EXISTS trg_private_report_claims_gap_guard ON public.research_job_events;
     DROP TRIGGER IF EXISTS trg_private_report_claims_link_guard ON public.research_private_report_claims;
     IF to_regclass('public.source_corroborations') IS NOT NULL THEN
         LOCK TABLE public.source_corroborations IN SHARE ROW EXCLUSIVE MODE;
@@ -123,6 +130,23 @@ BEGIN
              WHERE a.batch = v_batch AND a.action = 'j' AND a.restored_at IS NULL AND j.id::text = a.ref;
         END IF;
         GET DIAGNOSTICS v_n = ROW_COUNT; n_j := n_j + v_n;
+        -- the gap work of shared trees (round 2): the columns slot 570 made neutral, as they were
+        UPDATE public.research_jobs j
+           SET query = a.row_data ->> 'query', anchor = a.row_data ->> 'anchor', topic_estimate = a.row_data ->> 'topic_estimate',
+               tree_report = CASE WHEN jsonb_typeof(a.row_data -> 'tree_report') = 'null' THEN NULL ELSE a.row_data -> 'tree_report' END
+          FROM public.private_report_claims_archive a
+         WHERE a.batch = v_batch AND a.action = 'g' AND a.tbl = 'public.research_jobs' AND a.restored_at IS NULL AND j.id::text = a.ref;
+        GET DIAGNOSTICS v_n = ROW_COUNT; n_g := n_g + v_n;
+        UPDATE public.research_steers st
+           SET text = a.row_data ->> 'text', anchor = a.row_data ->> 'anchor', topic_estimate = a.row_data ->> 'topic_estimate',
+               gap = CASE WHEN jsonb_typeof(a.row_data -> 'gap') = 'null' THEN NULL ELSE a.row_data -> 'gap' END
+          FROM public.private_report_claims_archive a
+         WHERE a.batch = v_batch AND a.action = 'g' AND a.tbl = 'public.research_steers' AND a.restored_at IS NULL AND st.id::text = a.ref;
+        GET DIAGNOSTICS v_n = ROW_COUNT; n_g := n_g + v_n;
+        UPDATE public.research_job_events e SET payload = a.row_data -> 'payload'
+          FROM public.private_report_claims_archive a
+         WHERE a.batch = v_batch AND a.action = 'g' AND a.tbl = 'public.research_job_events' AND a.restored_at IS NULL AND e.id::text = a.ref;
+        GET DIAGNOSTICS v_n = ROW_COUNT; n_g := n_g + v_n;
         EXECUTE format('INSERT INTO public.wiki_pages (%s) SELECT %s FROM public.private_report_claims_archive a, jsonb_populate_record(NULL::public.wiki_pages, a.row_data) r
                          WHERE a.batch = $1 AND a.action = ''w'' AND a.restored_at IS NULL
                            AND NOT EXISTS (SELECT 1 FROM public.wiki_pages w WHERE w.slug = a.ref)', v_wcols,
@@ -157,11 +181,11 @@ BEGIN
         UPDATE public.private_report_claims_archive SET restored_at = now() WHERE action = 'f' AND restored_at IS NULL;
     END LOOP;
 
-    IF n_filed + n_point + n_k + n_e + n_m + n_j + n_w + n_fk + n_c = 0 THEN
+    IF n_filed + n_point + n_k + n_e + n_m + n_j + n_w + n_fk + n_c + n_g = 0 THEN
         RAISE NOTICE 'private report claims revert: nothing to restore';
     ELSE
-        RAISE NOTICE 'private report claims revert: % claim(s) restored (% edge(s), % shared claim image(s)), % job result(s), % wiki page(s), % corroboration line(s), foreign key %; % curator filing(s) made shared again, % re-pointed at a shared claim',
-            n_k, n_e, n_m, n_j, n_w, n_c, CASE WHEN n_fk = 1 THEN 'restored' ELSE 'already there' END, n_filed, n_point;
+        RAISE NOTICE 'private report claims revert: % claim(s) restored (% edge(s), % shared claim image(s)), % job result(s), % wiki page(s), % corroboration line(s), % gap-work row(s), foreign key %; % curator filing(s) made shared again, % re-pointed at a shared claim',
+            n_k, n_e, n_m, n_j, n_w, n_c, n_g, CASE WHEN n_fk = 1 THEN 'restored' ELSE 'already there' END, n_filed, n_point;
     END IF;
 END $$;
 
@@ -177,6 +201,10 @@ DROP FUNCTION IF EXISTS public.private_report_claim_subject_ok(TEXT);
 DROP FUNCTION IF EXISTS public.trg_private_report_claims_corroboration_guard();
 DROP FUNCTION IF EXISTS public.private_report_claims_neutral_line(UUID, UUID, TEXT);
 DROP FUNCTION IF EXISTS public.private_report_claims_job_private(UUID);
+DROP FUNCTION IF EXISTS public.trg_private_report_claims_gap_guard();
+DROP FUNCTION IF EXISTS public.private_report_claims_private_owner(UUID);
+DROP FUNCTION IF EXISTS public.private_report_claims_tree_owner(UUID);
+DROP FUNCTION IF EXISTS public.private_report_claims_caller_ok();
 
 NOTIFY pgrst, 'reload schema';
 COMMIT;

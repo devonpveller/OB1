@@ -34,6 +34,14 @@
 --   * research_private_report_claims loses its foreign key onto public.claims (a link now names a private claim), and
 --     a guard refuses linking a SHARED claim: a private report's claim is filed private, through
 --     private_report_claim_file (the research curator's write).
+--   * round 2 (tester attempt 1): the gap work of a shared tree that recalled a moved claim (a gap / inter-hub
+--     branch's question, its steer, the gap event, the root's tree report and topic estimate) loses the claim's text
+--     (archived first), and a guard keeps a new gap branch / steer / gap event from carrying it into a shared tree;
+--     the wiki match is normalised on both sides (case, whitespace, citation markers, emphasis, link syntax); the
+--     slot's functions are granted to service_role (ob_app_memory inherits it, whenever it is created) and gated in
+--     the function to the services' login or a superuser session outside a PostgREST request; a live apply refuses
+--     without ob_app_memory. NOT changed (operator decision P2): a SHARED synthesis or report that restated a
+--     private-report claim stays shared (count-private-report-claim-reuse.sql counts them, read-only).
 -- The archive (public.private_report_claims_archive) is readable by no app role. Counts only are printed (NOTICE),
 -- never content. Re-runnable: a second run has nothing to move. Revert: revert-private-report-claims.sql (byte-
 -- identical from the archive; it puts the claims the curator filed private after this slot back into the shared
@@ -54,10 +62,29 @@ BEGIN
     IF to_regclass('public.inlet_private_claims') IS NULL OR to_regclass('public.inlet_private_claim_sources') IS NULL THEN
         RAISE EXCEPTION 'private report claims: refused, nothing changed - slot 440 (init-inlet-owner.sql, round 5 or later) must be applied first' USING ERRCODE = '55000';
     END IF;
+    -- round 2 (tester F2): the services' role. The slot's three functions are granted to service_role, which the
+    -- services' login role ob_app_memory inherits (H1's scheme, scripts/checks/sql/init-app-role-memory.sql), so the
+    -- grant reaches it whatever order the role and this slot are created in (a fresh volume runs this slot in initdb,
+    -- before the operator creates the role); each function refuses any other caller itself
+    -- (private_report_claims_caller_ok). A LIVE apply (the server listens: not initdb) refuses without the role; a role
+    -- that does not inherit service_role is refused everywhere (the grant would not reach it).
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+        RAISE EXCEPTION 'private report claims: refused, nothing changed - role service_role is missing' USING ERRCODE = '55000';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') THEN
+        IF NOT pg_has_role('ob_app_memory', 'service_role', 'USAGE') THEN
+            RAISE EXCEPTION 'private report claims: refused, nothing changed - ob_app_memory does not inherit service_role, so the workbench and the curator could not execute this slot''s functions' USING ERRCODE = '55000';
+        END IF;
+    ELSIF current_setting('listen_addresses') <> '' THEN
+        RAISE EXCEPTION 'private report claims: refused, nothing changed - the services'' role ob_app_memory does not exist (create it first: scripts/checks/sql/init-app-role-memory.sql)' USING ERRCODE = '55000';
+    ELSE
+        RAISE NOTICE 'private report claims: fresh volume - ob_app_memory is created after initdb; it executes this slot''s functions through service_role once it exists';
+    END IF;
 END $$;
 -- every table the run writes, at once, under the 10 s lock_timeout: SHARE ROW EXCLUSIVE blocks writers, lets readers through
 LOCK TABLE public.claims, public.claim_sources, public.research_private_report_claims, public.research_private_reports,
-           public.research_jobs, public.wiki_pages, public.inlet_private_claims, public.inlet_private_claim_sources
+           public.research_jobs, public.wiki_pages, public.inlet_private_claims, public.inlet_private_claim_sources,
+           public.research_steers, public.research_job_events
     IN SHARE ROW EXCLUSIVE MODE;
 
 -- ── the archive ────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -67,7 +94,9 @@ CREATE TABLE IF NOT EXISTS public.private_report_claims_archive (
     tbl         TEXT NOT NULL,           -- schema-qualified table the row is from
     action      TEXT NOT NULL,           -- k moved claim | x withheld claim | e claim_sources edge | m whole image of a
                                          -- shared claim that lost an edge | j a job's (result, metrics) | w wiki page |
-                                         -- f the dropped foreign key's definition
+                                         -- f the dropped foreign key's definition | g a shared tree row's gap-work
+                                         -- text (research_jobs query/anchor/topic_estimate/tree_report, research_steers
+                                         -- text/anchor/topic_estimate/gap, research_job_events payload)
     ref         TEXT,                    -- the claim id (k x e m), the job id (j), the slug (w), the constraint name (f)
     row_data    JSONB NOT NULL,
     archived_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -109,12 +138,38 @@ REVOKE ALL ON FUNCTION public.private_report_claim_subject_ok(TEXT) FROM PUBLIC;
 CREATE OR REPLACE FUNCTION public.private_report_claims_filed_batch() RETURNS UUID
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT '00000000-0000-4570-8000-000000000570'::uuid $$;
 REVOKE ALL ON FUNCTION public.private_report_claims_filed_batch() FROM PUBLIC;
--- the text a page match compares: lower case, whitespace collapsed
+-- the text a page match compares, on BOTH sides (the claim and the page): case-folded; a markdown link reduced to its
+-- text; citation markers ([3], [Source 2], [^1], [1, 2]) and html tags dropped; markdown emphasis (* _ ~ `) dropped;
+-- whitespace runs collapsed, a space before punctuation and trailing punctuation removed. Round 2 (tester P3): an exact substring let a page
+-- with a citation marker or emphasis inside the sentence through. check-private-report-claims.sql repeats it.
 CREATE OR REPLACE FUNCTION public.private_report_claim_norm(p_text TEXT) RETURNS TEXT
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
 SET search_path = pg_catalog
-AS $$ SELECT lower(regexp_replace(btrim(coalesce(p_text, '')), '\s+', ' ', 'g')) $$;
+AS $$
+    SELECT rtrim(btrim(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(
+             lower(coalesce(p_text, '')),
+             '\[([^]\[]*)\]\([^)]*\)', '\1', 'g'),
+             '\[\s*(\^|(source|src|ref|cite|citation|note)\s*)?[0-9]+([\s,;-]+[0-9]+)*\s*\]', ' ', 'g'),
+             '</?[a-z][a-z0-9]*[^>]*>', ' ', 'g'),
+             '[*_~`]+', '', 'g'),
+             '\s+', ' ', 'g'),
+             ' ([.,;:!?)])', '\1', 'g')), ' .,;:!?')
+$$;
 REVOKE ALL ON FUNCTION public.private_report_claim_norm(TEXT) FROM PUBLIC;
+
+-- who may call the slot's three functions (round 2, tester F2): they are granted to service_role so the services' role
+-- reaches them in any creation order; this keeps everyone else out. A PostgREST request (it sets request.method /
+-- request.path; service_role is its anon role) never; otherwise the services' own login (session_user ob_app_memory)
+-- or a superuser session (the operator's psql, the migrations, the curator's e2e). session_user is the LOGIN role: a
+-- SET ROLE cannot change it.
+CREATE OR REPLACE FUNCTION public.private_report_claims_caller_ok() RETURNS BOOLEAN
+LANGUAGE sql STABLE
+SET search_path = pg_catalog
+AS $$
+    SELECT coalesce(nullif(current_setting('request.method', true), ''), nullif(current_setting('request.path', true), '')) IS NULL
+       AND (session_user = 'ob_app_memory' OR coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = session_user), false))
+$$;
+REVOKE ALL ON FUNCTION public.private_report_claims_caller_ok() FROM PUBLIC;
 
 -- does this page text carry a private-report claim's text? (a claim in an owner store that a private report links, or
 -- a withheld one this slot archived; texts under 24 characters are too short to name a claim and are not matched)
@@ -167,8 +222,11 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 BEGIN
+    -- round 2: "a superuser session" excludes a PostgREST request - PostgREST connects as a superuser in this stack
+    -- (PGRST_DB_URI) and its anon role service_role holds ALL on the link table
     IF EXISTS (SELECT 1 FROM public.claims c WHERE c.id = NEW.claim_id)
-       AND NOT coalesce((SELECT r.rolsuper FROM pg_roles r WHERE r.rolname = session_user), false) THEN
+       AND NOT (coalesce((SELECT r.rolsuper FROM pg_roles r WHERE r.rolname = session_user), false)
+                AND coalesce(nullif(current_setting('request.method', true), ''), nullif(current_setting('request.path', true), '')) IS NULL) THEN
         RAISE EXCEPTION 'private report claims: a private report''s claim is filed private (private_report_claim_file); a shared claim cannot be linked'
             USING ERRCODE = '23514';
     END IF;
@@ -176,6 +234,76 @@ BEGIN
 END;
 $$;
 REVOKE ALL ON FUNCTION public.trg_private_report_claims_link_guard() FROM PUBLIC;
+
+-- ── the gap work (round 2, tester P1) ──────────────────────────────────────────────────────────────────────────────
+-- A recalled claim held below its kind's threshold is gap work (research-service harness.ts splitAtThreshold ->
+-- tree.ts GapClaim, index.ts openTreeGaps): a 'gap' event naming it (payload.text), a gap branch asking
+-- "Verify: <text>" (gap_ref claim:<id>), its steer (text, gap.text), and the root's tree report naming the branch by
+-- it. After this slot the research service recalls no private claim (it reads public.claims), so it opens no such
+-- branch; the guard below enforces it for every writer. On a tree that is not the claim owner's: no gap branch is
+-- opened (the insert is skipped), a steer's or a gap event's text is replaced by a neutral stand-in.
+-- the owner of a private-report claim: the store's owner; '' for a withheld one (nobody's); NULL = not a private claim
+CREATE OR REPLACE FUNCTION public.private_report_claims_private_owner(p_claim UUID) RETURNS TEXT
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+    SELECT coalesce(
+        (SELECT c.inlet_owner_sub FROM public.inlet_private_claims c
+          WHERE c.id = p_claim AND EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id) LIMIT 1),
+        (SELECT '' FROM public.private_report_claims_archive a
+          WHERE a.action = 'x' AND a.restored_at IS NULL AND a.ref = p_claim::text LIMIT 1))
+$$;
+REVOKE ALL ON FUNCTION public.private_report_claims_private_owner(UUID) FROM PUBLIC;
+-- the owner of a research tree's report (slot 390's rule on the tree's root); NULL = a shared tree
+CREATE OR REPLACE FUNCTION public.private_report_claims_tree_owner(p_job UUID) RETURNS TEXT
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+    SELECT (SELECT o.owner_sub FROM public.research_job_report_owner(
+               coalesce((SELECT j.root_job_id FROM public.research_jobs j WHERE j.id = p_job), p_job)) o LIMIT 1)
+$$;
+REVOKE ALL ON FUNCTION public.private_report_claims_tree_owner(UUID) FROM PUBLIC;
+CREATE OR REPLACE FUNCTION public.trg_private_report_claims_gap_guard()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_claim TEXT;
+    v_root  UUID;
+    v_owner TEXT;
+BEGIN
+    IF TG_TABLE_NAME = 'research_jobs' THEN
+        IF NEW.gap_ref IS NULL OR NEW.gap_ref NOT LIKE 'claim:%' THEN RETURN NEW; END IF;
+        v_claim := substr(NEW.gap_ref, 7);
+        v_root := coalesce(NEW.root_job_id, NEW.parent_job_id);
+    ELSIF TG_TABLE_NAME = 'research_steers' THEN
+        v_claim := NEW.gap ->> 'claim_id';
+        v_root := NEW.root_job_id;
+    ELSE
+        IF NEW.type IS DISTINCT FROM 'gap' THEN RETURN NEW; END IF;
+        v_claim := NEW.payload ->> 'claim_id';
+        v_root := NEW.root_job_id;
+    END IF;
+    IF v_claim IS NULL OR v_claim !~* '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$' THEN RETURN NEW; END IF;
+    v_owner := public.private_report_claims_private_owner(v_claim::uuid);
+    IF v_owner IS NULL THEN RETURN NEW; END IF;
+    IF v_owner <> '' AND v_owner IS NOT DISTINCT FROM public.private_report_claims_tree_owner(v_root) THEN RETURN NEW; END IF;
+    IF TG_TABLE_NAME = 'research_jobs' THEN
+        RETURN NULL;
+    ELSIF TG_TABLE_NAME = 'research_steers' THEN
+        NEW.text := '(a private claim)';
+        NEW.gap := NEW.gap || jsonb_build_object('text', '(a private claim)');
+    ELSE
+        NEW.payload := NEW.payload || jsonb_build_object('text', '(a private claim)');
+    END IF;
+    RETURN NEW;
+END;
+$$;
+REVOKE ALL ON FUNCTION public.trg_private_report_claims_gap_guard() FROM PUBLIC;
 
 -- ── the move ───────────────────────────────────────────────────────────────────────────────────────────────────────
 DO $$
@@ -194,6 +322,7 @@ DECLARE
     n_touched BIGINT := 0;
     n_jobs    BIGINT := 0;
     n_pages   BIGINT := 0;
+    n_gap     BIGINT := 0;
 BEGIN
     -- the foreign key onto public.claims goes first (a link names a private claim from now on): its definition archived
     FOR r IN SELECT con.conname, pg_get_constraintdef(con.oid) AS def
@@ -303,6 +432,53 @@ BEGIN
           FROM _prc_jobs t;
         GET DIAGNOSTICS n_jobs = ROW_COUNT;
 
+        -- the gap work of shared trees (round 2, tester P1): every tree that recalled a moved claim as gap work - a
+        -- per-claim gap (a branch's gap_ref, a steer's or a gap event's claim_id) or an inter-hub gap (tree.ts
+        -- interHubGaps: a hub's members are claim ids, its sample a claim's TEXT, in the event, the steer and the
+        -- branch's question) - or whose branch / steer / event / tree report carries the claim's text, and that is not
+        -- the claim owner's tree; in it every row that carries the claim's text (jobs: query, anchor, topic estimate,
+        -- tree report; steers: text, anchor, topic estimate, gap; events: payload) is archived (action g), then the
+        -- text is replaced by a neutral stand-in
+        CREATE TEMP TABLE _prc_text ON COMMIT DROP AS
+        SELECT x.id, x.owner, c.text, substr(to_jsonb(c.text)::text, 2, length(to_jsonb(c.text)::text) - 2) AS jtext
+          FROM _prc x JOIN public.claims c ON c.id = x.id
+         WHERE length(btrim(c.text)) >= 24;
+        CREATE TEMP TABLE _prc_trees ON COMMIT DROP AS
+        SELECT DISTINCT q.root, t.id AS claim_id, t.text, t.jtext
+          FROM _prc_text t
+          JOIN LATERAL (
+                SELECT coalesce(j.root_job_id, j.id) AS root FROM public.research_jobs j
+                 WHERE j.gap_ref = 'claim:' || t.id::text
+                    OR (j.branch_kind NOT IN ('root', 'idea') AND position(t.text IN j.query) > 0)
+                    OR position(t.jtext IN coalesce(j.tree_report::text, '')) > 0
+                UNION SELECT s.root_job_id FROM public.research_steers s
+                 WHERE position(t.id::text IN coalesce(s.gap::text, '')) > 0 OR position(t.text IN s.text) > 0
+                UNION SELECT e.root_job_id FROM public.research_job_events e
+                 WHERE e.type IN ('gap', 'interhub_gap', 'branch_open', 'human_steer', 'topic')
+                   AND (position(t.id::text IN e.payload::text) > 0 OR position(t.jtext IN e.payload::text) > 0)) q ON true
+         WHERE t.owner IS NULL OR t.owner IS DISTINCT FROM (SELECT o.owner_sub FROM public.research_job_report_owner(q.root) o LIMIT 1);
+        INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
+        SELECT v_batch, 'public.research_jobs', 'g', j.id::text,
+               jsonb_build_object('id', j.id, 'query', j.query, 'anchor', j.anchor, 'topic_estimate', j.topic_estimate, 'tree_report', j.tree_report)
+          FROM public.research_jobs j
+         WHERE EXISTS (SELECT 1 FROM _prc_trees t WHERE t.root = coalesce(j.root_job_id, j.id)
+                        AND (position(t.text IN coalesce(j.query, '')) > 0 OR position(t.text IN coalesce(j.anchor, '')) > 0
+                             OR position(t.text IN coalesce(j.topic_estimate, '')) > 0 OR position(t.jtext IN coalesce(j.tree_report::text, '')) > 0));
+        GET DIAGNOSTICS v_n = ROW_COUNT; n_gap := n_gap + v_n;
+        INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
+        SELECT v_batch, 'public.research_steers', 'g', s.id::text,
+               jsonb_build_object('id', s.id, 'text', s.text, 'anchor', s.anchor, 'topic_estimate', s.topic_estimate, 'gap', s.gap)
+          FROM public.research_steers s
+         WHERE EXISTS (SELECT 1 FROM _prc_trees t WHERE t.root = s.root_job_id
+                        AND (position(t.text IN s.text) > 0 OR position(t.text IN s.anchor) > 0 OR position(t.text IN s.topic_estimate) > 0
+                             OR position(t.jtext IN coalesce(s.gap::text, '')) > 0));
+        GET DIAGNOSTICS v_n = ROW_COUNT; n_gap := n_gap + v_n;
+        INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
+        SELECT v_batch, 'public.research_job_events', 'g', e.id::text, jsonb_build_object('id', e.id, 'payload', e.payload)
+          FROM public.research_job_events e
+         WHERE EXISTS (SELECT 1 FROM _prc_trees t WHERE t.root = e.root_job_id AND position(t.jtext IN e.payload::text) > 0);
+        GET DIAGNOSTICS v_n = ROW_COUNT; n_gap := n_gap + v_n;
+
         -- the shared rows go, with ordinary triggers off for the job rows (their touch timestamps do not move: the revert is
         -- byte-identical); the edge deletes recompute the shared claims archived whole above
         DELETE FROM public.claim_sources cs WHERE cs.claim_id IN (SELECT id FROM _prc) OR cs.parent_claim_id IN (SELECT id FROM _prc);
@@ -313,7 +489,34 @@ BEGIN
         ELSE
             UPDATE public.research_jobs j SET result = t.new_result FROM _prc_jobs t WHERE t.id = j.id;
         END IF;
+        FOR r IN SELECT * FROM _prc_trees LOOP
+            UPDATE public.research_jobs j
+               SET query = replace(j.query, r.text, '(a private claim)'), anchor = replace(j.anchor, r.text, '(a private claim)'),
+                   topic_estimate = replace(j.topic_estimate, r.text, '(a private claim)'),
+                   tree_report = CASE WHEN j.tree_report IS NULL THEN NULL ELSE replace(j.tree_report::text, r.jtext, '(a private claim)')::jsonb END
+             WHERE coalesce(j.root_job_id, j.id) = r.root
+               AND j.id::text IN (SELECT a.ref FROM public.private_report_claims_archive a WHERE a.batch = v_batch AND a.action = 'g' AND a.tbl = 'public.research_jobs');
+            UPDATE public.research_steers s
+               SET text = replace(s.text, r.text, '(a private claim)'), anchor = replace(s.anchor, r.text, '(a private claim)'),
+                   topic_estimate = replace(s.topic_estimate, r.text, '(a private claim)'),
+                   gap = CASE WHEN s.gap IS NULL THEN NULL ELSE replace(s.gap::text, r.jtext, '(a private claim)')::jsonb END
+             WHERE s.root_job_id = r.root
+               AND s.id::text IN (SELECT a.ref FROM public.private_report_claims_archive a WHERE a.batch = v_batch AND a.action = 'g' AND a.tbl = 'public.research_steers');
+            UPDATE public.research_job_events e
+               SET payload = replace(e.payload::text, r.jtext, '(a private claim)')::jsonb
+             WHERE e.root_job_id = r.root
+               AND e.id::text IN (SELECT a.ref FROM public.private_report_claims_archive a WHERE a.batch = v_batch AND a.action = 'g' AND a.tbl = 'public.research_job_events');
+        END LOOP;
         PERFORM set_config('session_replication_role', 'origin', true);
+        IF EXISTS (SELECT 1 FROM _prc_trees t JOIN public.research_jobs j ON coalesce(j.root_job_id, j.id) = t.root
+                    WHERE position(t.text IN coalesce(j.query, '') || ' ' || coalesce(j.anchor, '') || ' ' || coalesce(j.topic_estimate, '')) > 0
+                       OR position(t.jtext IN coalesce(j.tree_report::text, '')) > 0)
+           OR EXISTS (SELECT 1 FROM _prc_trees t JOIN public.research_steers s ON s.root_job_id = t.root
+                       WHERE position(t.text IN s.text || ' ' || s.anchor || ' ' || s.topic_estimate) > 0 OR position(t.jtext IN coalesce(s.gap::text, '')) > 0)
+           OR EXISTS (SELECT 1 FROM _prc_trees t JOIN public.research_job_events e ON e.root_job_id = t.root
+                       WHERE position(t.jtext IN e.payload::text) > 0) THEN
+            RAISE EXCEPTION 'private report claims: refused, nothing changed - a moved claim''s text is still in a shared tree''s gap work' USING ERRCODE = '55000';
+        END IF;
     END IF;
 
     -- the wiki: every page carrying a private-report claim's text (the predicate reads the store and this batch's archive),
@@ -337,8 +540,8 @@ BEGIN
     ELSE
         RAISE NOTICE 'private report claims: % claim(s) moved to their owner''s store (% edge(s) kept for the owner), % withheld (no single owner), % claim(s) a shared synthesis also filed stay shared',
             n_own, n_kept_e, n_held, n_mixed;
-        RAISE NOTICE 'private report claims: % edge(s) archived and deleted, % shared claim(s) that lost an edge archived whole, % job result(s) stripped, % wiki page(s) withheld',
-            n_edges, n_touched, n_jobs, n_pages;
+        RAISE NOTICE 'private report claims: % edge(s) archived and deleted, % shared claim(s) that lost an edge archived whole, % job result(s) stripped, % wiki page(s) withheld, % gap-work row(s) of a shared tree made neutral',
+            n_edges, n_touched, n_jobs, n_pages, n_gap;
     END IF;
 END $$;
 
@@ -433,6 +636,15 @@ END $$;
 DROP TRIGGER IF EXISTS trg_private_report_claims_wiki_guard ON public.wiki_pages;
 CREATE TRIGGER trg_private_report_claims_wiki_guard BEFORE INSERT OR UPDATE ON public.wiki_pages
     FOR EACH ROW EXECUTE FUNCTION public.trg_private_report_claims_wiki_guard();
+DROP TRIGGER IF EXISTS trg_private_report_claims_gap_guard ON public.research_jobs;
+CREATE TRIGGER trg_private_report_claims_gap_guard BEFORE INSERT ON public.research_jobs
+    FOR EACH ROW EXECUTE FUNCTION public.trg_private_report_claims_gap_guard();
+DROP TRIGGER IF EXISTS trg_private_report_claims_gap_guard ON public.research_steers;
+CREATE TRIGGER trg_private_report_claims_gap_guard BEFORE INSERT ON public.research_steers
+    FOR EACH ROW EXECUTE FUNCTION public.trg_private_report_claims_gap_guard();
+DROP TRIGGER IF EXISTS trg_private_report_claims_gap_guard ON public.research_job_events;
+CREATE TRIGGER trg_private_report_claims_gap_guard BEFORE INSERT ON public.research_job_events
+    FOR EACH ROW EXECUTE FUNCTION public.trg_private_report_claims_gap_guard();
 DROP TRIGGER IF EXISTS trg_private_report_claims_link_guard ON public.research_private_report_claims;
 CREATE TRIGGER trg_private_report_claims_link_guard BEFORE INSERT OR UPDATE OF claim_id ON public.research_private_report_claims
     FOR EACH ROW EXECUTE FUNCTION public.trg_private_report_claims_link_guard();
@@ -465,6 +677,9 @@ DECLARE
     v_tag    TEXT := CASE WHEN p_epistemic_tag IN ('sourced', 'inferred', 'uncertain') THEN p_epistemic_tag ELSE 'sourced' END;
     v_id     UUID;
 BEGIN
+    IF NOT public.private_report_claims_caller_ok() THEN
+        RAISE EXCEPTION 'private report claims: not for this caller' USING ERRCODE = '42501';
+    END IF;
     IF coalesce(btrim(p_text), '') = '' THEN
         RAISE EXCEPTION 'claim text required';
     END IF;
@@ -518,6 +733,9 @@ DECLARE
     v_owner TEXT;
     v_ref   TEXT;
 BEGIN
+    IF NOT public.private_report_claims_caller_ok() THEN
+        RAISE EXCEPTION 'private report claims: not for this caller' USING ERRCODE = '42501';
+    END IF;
     IF p_edge_type NOT IN ('states', 'inferred_from', 'corroborates', 'contradicts') THEN
         RAISE EXCEPTION 'private report claims: edge type % refused', p_edge_type USING ERRCODE = '23514';
     END IF;
@@ -545,20 +763,30 @@ $$;
 -- the subject owns both the report and the claim; nothing for a blank, service, system or anonymous subject.
 CREATE OR REPLACE FUNCTION public.private_report_claims_of_idea(p_idea_id UUID, p_sub TEXT)
 RETURNS TABLE (id UUID, text TEXT, confidence REAL)
-LANGUAGE sql STABLE
+LANGUAGE plpgsql STABLE
 SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
+#variable_conflict use_column
+BEGIN
+    IF NOT public.private_report_claims_caller_ok() THEN
+        RAISE EXCEPTION 'private report claims: not for this caller' USING ERRCODE = '42501';
+    END IF;
+    RETURN QUERY
     SELECT DISTINCT c.id, c.text, c.confidence
       FROM public.inlet_private_claims c
       JOIN public.research_private_report_claims pc ON pc.claim_id = c.id
       JOIN public.research_private_reports p ON p.id = pc.report_id
      WHERE public.private_report_claim_subject_ok(p_sub)
-       AND p.idea_id = p_idea_id AND p.owner_sub = p_sub AND c.inlet_owner_sub = p_sub
+       AND p.idea_id = p_idea_id AND p.owner_sub = p_sub AND c.inlet_owner_sub = p_sub;
+END;
 $$;
 
--- EXECUTE: the services' own login role only (the curator files, the workbench reads), and ob_workbench (slot 480's
--- workbench role) for the read where it exists. Never PUBLIC, never service_role (PostgREST's anon role), never authenticated.
+-- EXECUTE (round 2, tester F2): service_role, which the services' login role ob_app_memory inherits - so the grant reaches
+-- it however late the role is created - and ob_app_memory itself where it exists; ob_workbench (slot 480's workbench
+-- role) for the read where it exists. Each function refuses every caller but the services' login and a superuser
+-- session outside a PostgREST request (private_report_claims_caller_ok): service_role is PostgREST's anon role, and an
+-- rpc call is refused 42501. Never PUBLIC, never authenticated.
 REVOKE ALL ON FUNCTION public.private_report_claim_file(TEXT, UUID, TEXT, UUID, TEXT, TEXT, INT, VECTOR, JSONB) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.private_report_claim_edge(UUID, UUID, TEXT, REAL) FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.private_report_claims_of_idea(UUID, TEXT) FROM PUBLIC;
@@ -570,13 +798,18 @@ BEGIN
                              'public.private_report_claim_edge(uuid,uuid,text,real)', 'public.private_report_claims_of_idea(uuid,text)',
                              'public.private_report_claims_page_shows(text,text)', 'public.private_report_claim_subject_ok(text)',
                              'public.private_report_claims_filed_batch()', 'public.private_report_claim_norm(text)',
-                             'public.private_report_claims_job_private(uuid)', 'public.private_report_claims_neutral_line(uuid,uuid,text)'] LOOP
+                             'public.private_report_claims_job_private(uuid)', 'public.private_report_claims_neutral_line(uuid,uuid,text)',
+                             'public.private_report_claims_caller_ok()', 'public.private_report_claims_private_owner(uuid)',
+                             'public.private_report_claims_tree_owner(uuid)', 'public.trg_private_report_claims_gap_guard()'] LOOP
         FOR r IN SELECT DISTINCT ro.rolname AS grantee
                    FROM pg_proc p, aclexplode(p.proacl) a JOIN pg_roles ro ON ro.oid = a.grantee
                   WHERE p.oid = f::regprocedure AND NOT ro.rolsuper AND ro.oid <> p.proowner LOOP
             EXECUTE format('REVOKE ALL ON FUNCTION %s FROM %I', f::regprocedure, r.grantee);
         END LOOP;
     END LOOP;
+    GRANT EXECUTE ON FUNCTION public.private_report_claim_file(TEXT, UUID, TEXT, UUID, TEXT, TEXT, INT, VECTOR, JSONB) TO service_role;
+    GRANT EXECUTE ON FUNCTION public.private_report_claim_edge(UUID, UUID, TEXT, REAL) TO service_role;
+    GRANT EXECUTE ON FUNCTION public.private_report_claims_of_idea(UUID, TEXT) TO service_role;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') THEN
         GRANT EXECUTE ON FUNCTION public.private_report_claim_file(TEXT, UUID, TEXT, UUID, TEXT, TEXT, INT, VECTOR, JSONB) TO ob_app_memory;
         GRANT EXECUTE ON FUNCTION public.private_report_claim_edge(UUID, UUID, TEXT, REAL) TO ob_app_memory;
@@ -587,9 +820,9 @@ BEGIN
     END IF;
 END $$;
 COMMENT ON FUNCTION public.private_report_claim_file(TEXT, UUID, TEXT, UUID, TEXT, TEXT, INT, VECTOR, JSONB) IS
-  'rw-private-report-claims (slot 570): the research curator files one claim of a private report into the report owner''s store (inlet_private_claims) and links it. ob_app_memory only.';
+  'rw-private-report-claims (slot 570): the research curator files one claim of a private report into the report owner''s store (inlet_private_claims) and links it. Granted to service_role; callable by the ob_app_memory login or a superuser session only, never through PostgREST.';
 COMMENT ON FUNCTION public.private_report_claims_of_idea(UUID, TEXT) IS
-  'rw-private-report-claims (slot 570): the subject''s claims drawn from their idea''s private reports; nothing for any other subject. ob_app_memory / ob_workbench only.';
+  'rw-private-report-claims (slot 570): the subject''s claims drawn from their idea''s private reports; nothing for any other subject. Granted to service_role; callable by the ob_app_memory login or a superuser session only, never through PostgREST.';
 
 NOTIFY pgrst, 'reload schema';
 COMMIT;
