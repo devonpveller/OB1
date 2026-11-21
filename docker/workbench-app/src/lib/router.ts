@@ -2,13 +2,20 @@
 // No library; later items add the real route table. parseRoute is pure so it is unit-tested.
 import { useEffect, useState } from "react";
 
-export type Route = { path: string; segments: string[] };
+// `segments` are decoded one by one AFTER the split, so an encoded slash (%2F, in a document path) stays inside its
+// segment; `path` re-encodes only that slash, so route matching (which splits `path`) sees the same segments.
+// A segment that does not decode (a malformed %-escape) makes the route `bad`: the screen says "no such screen".
+export type Route = { path: string; segments: string[]; bad?: boolean };
 
 export function parseRoute(pathname: string): Route {
-  let p = pathname.split(/[?#]/)[0] || "/";
-  try { p = decodeURIComponent(p); } catch { /* keep the raw path */ }
-  const segments = p.split("/").filter(Boolean);
-  return { path: "/" + segments.join("/"), segments };
+  const raw = (pathname.split(/[?#]/)[0] || "/").split("/").filter(Boolean);
+  const segments: string[] = [];
+  let bad = false;
+  for (const r of raw) {
+    try { segments.push(decodeURIComponent(r)); } catch { segments.push(r); bad = true; }
+  }
+  const path = "/" + segments.map((x) => x.replace(/\//g, "%2F")).join("/");
+  return bad ? { path, segments, bad } : { path, segments };
 }
 
 export function navigate(to: string) {

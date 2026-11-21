@@ -15,6 +15,7 @@ export type Count = { n: number; more: boolean };
 export type ShellData = {
   loaded: boolean;
   who: { subject: string; name: string } | null;
+  whoDone?: boolean;    // the whoami read has ANSWERED (with a person or without): until then who is unknown, not failed
   defaultSubject: boolean;
   running?: Count;      // MY research sessions queued or running (cards I own, not everyone's)
   failedJobs?: Count;   // intake jobs that offer a retry
@@ -66,7 +67,7 @@ export async function loadShellData(emit: (p: Patch) => void = () => {}): Promis
   const cleanup = () => { if (srcDone && candDone) put({ cleanup: parseCleanup(srcRes, candRes) }); };
   await Promise.allSettled([
     ok(api("GET", "/workbench/workspace/whoami")).then((w) => {
-      const p = parseWhoami(w); whoamiDefault = p.defaultKind; put({ who: p.who }); banner();
+      const p = parseWhoami(w); whoamiDefault = p.defaultKind; put({ who: p.who, whoDone: true }); banner();
     }),
     // /auth/me: the identity KIND of this request ("default" = no identity at all, whatever the server's mode)
     ok(api("GET", "/workbench/auth/me")).then((m: any) => {
