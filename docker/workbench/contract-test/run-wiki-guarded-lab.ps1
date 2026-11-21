@@ -216,9 +216,10 @@ COMMIT;
   $ownerBefore = Q1 $ownerSql
   $fnSql = "SELECT md5(string_agg(pg_get_functiondef(p.oid), '|' ORDER BY p.proname)) FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('trg_idea_privacy_wiki_guard', 'trg_report_isolation_wiki_guard', 'trg_inlet_owner_wiki_guard', 'idea_privacy_page_links_idea', 'report_isolation_page_shows_report', 'inlet_owner_page_private', 'inlet_owner_text_withheld', 'wiki_guard_mark_withheld')"
   $fnBefore = Q1 $fnSql
-  $trgSql = "SELECT string_agg(tgname || ':' || tgenabled, ',' ORDER BY tgname) FROM pg_trigger WHERE tgrelid = 'public.wiki_pages'::regclass AND NOT tgisinternal"
+  $trgSql = "SELECT string_agg(tgname || ':' || tgenabled::text, ',' ORDER BY tgname) FROM pg_trigger WHERE tgrelid = 'public.wiki_pages'::regclass AND NOT tgisinternal"
   $trgBefore = Q1 $trgSql
   Write-Host "    guard functions md5 $fnBefore; triggers $trgBefore"
+  Check ($fnBefore -match '^[0-9a-f]{32}$' -and $trgBefore -match '^trg_idea_privacy_wiki_guard:O,trg_inlet_owner_wiki_guard:O,trg_report_isolation_wiki_guard:O') "the guard functions and the three guard triggers are read (all ON: $trgBefore)"
   $penv = @("IDEA_THOUGHT=990002", "PRIV_THOUGHT=990001", "REPORT_SOURCE=$rep", "WITHHELD_TEXT=$text")
 
   Write-Host '[4] [guards] the same planted text against every guard; each guard loosened in turn must be caught'
