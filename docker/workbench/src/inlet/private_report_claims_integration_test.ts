@@ -44,6 +44,11 @@ const APP_PW = Deno.env.get("PRC_APP_PASSWORD") ?? "";
 const appPool = !off && APP_PW
   ? new Pool({ hostname: HOST!, port: 5432, database: "openbrain", user: "ob_app_memory", password: APP_PW }, 2, true)
   : null;
+// slot 480's workbench login (ob_workbench: LOGIN INHERIT, a member of ob_app_memory), as 480 creates it
+const WB_PW = Deno.env.get("PRC_WB_PASSWORD") ?? "";
+const wbPool = !off && WB_PW
+  ? new Pool({ hostname: HOST!, port: 5432, database: "openbrain", user: "ob_workbench", password: WB_PW }, 1, true)
+  : null;
 const PGRST = (Deno.env.get("PRC_PGRST") ?? "").replace(/\/+$/, "");   // PostgREST itself (its anon role is service_role)
 const t = (phases: string[], name: string, fn: () => Promise<void>) =>
   Deno.test({ name: `[${phases.join("|")}] ${name}`, ignore: off || !phases.includes(PHASE), fn, sanitizeOps: false, sanitizeResources: false });
@@ -176,8 +181,8 @@ async function landed(p: Record<string, any>): Promise<void> {
                  OR (to_regclass('public.private_report_claims_archive') IS NOT NULL
                      AND EXISTS (SELECT 1 FROM public.private_report_claims_archive a WHERE a.action = 'w' AND a.ref = x))) AS w,
             (SELECT count(*)::int FROM public.sources WHERE id = $6::uuid) AS syn`,
-    [ids, p.job, p.child, p.b1, [p.page, p.pageCite, p.pageBold, p.clean], p.p2syn]))[0];
-  const want = { c: ids.length, j: 1, g: 1, s: 1, e: 1, w: 4, syn: 1 };
+    [ids, p.job, p.child, p.b1, [p.page, p.pageCite, p.pageBold, p.pageWiki, p.pageMid, p.pageSup, p.clean, p.near], p.p2syn]))[0];
+  const want = { c: ids.length, j: 1, g: 1, s: 1, e: 1, w: 8, syn: 1 };
   const got = { c: n.c, j: n.j, g: n.g, s: n.s, e: n.e, w: n.w, syn: n.syn };
   if (JSON.stringify(got) !== JSON.stringify(want)) throw new Error(`plant did not land: ${JSON.stringify(got)} (want ${JSON.stringify(want)})`);
 }
@@ -267,13 +272,22 @@ t(["plant"], "plant two users' private reports and their claims in the shape slo
     [page, `Topic ${R}`, `Some notes. The ${w.b} alpha result reproduced in 12 trials across two labs. More notes.`, clean, `Clean topic ${R}`,
      pageCite, `Cite ${R}`, `Notes. The ${w.b} alpha result reproduced in 12 trials across two labs [Source 2]. More.`,
      pageBold, `Bold ${R}`, `Notes. The ${w.b} **alpha** result   reproduced in 12 trials across two labs. More.`]);
+  // final round (tester attempt 2, Q4): the forms the round-2 normaliser did not fold, planted before 570 - a wikilink on a
+  // word (the vault's own link syntax), a mid-word footnote, a <sup> marker; and a NEAR MISS that must stay (false positive)
+  const pageWiki = `content/topic/prc-wiki-${R}`, pageMid = `content/topic/prc-mid-${R}`, pageSup = `content/topic/prc-sup-${R}`;
+  const near = `content/topic/prc-near-${R}`;
+  await sql(`INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'entity', $2, $3), ($4, 'entity', $5, $6), ($7, 'entity', $8, $9), ($10, 'entity', $11, $12)`,
+    [pageWiki, `Wiki ${R}`, `Notes. The ${w.b} [[alpha]] result reproduced in 12 trials across two labs.`,
+     pageMid, `Mid ${R}`, `Notes. The ${w.b} alpha result repro[^1]duced in 12 trials across two labs.`,
+     pageSup, `Sup ${R}`, `Notes. The ${w.b} alpha<sup>1</sup> result reproduced in 12 trials across two labs.`,
+     near, `Near ${R}`, `Notes. The ${w.b.slice(0, 4)} alpha result reproduced in 13 trials across one lab.`]);
   // a corroboration line of B's run (the research service writes them during the run)
   await sql(`INSERT INTO public.source_corroborations (from_source_id, to_source_id, strength, amount, claim_text, claim_kind, verdict, model_version, job_id)
              VALUES ($1, $2, 'strong', 0.5, $3, 'descriptive', 'supports', 'lab', $4)`,
     [s2, s1, `The ${w.b} alpha result reproduced in 12 trials across two labs.`, bIdea.job]);
   await sql(`CREATE TABLE IF NOT EXISTS public.lab_prc_plant (k TEXT PRIMARY KEY, v JSONB NOT NULL)`);
   await sql(`INSERT INTO public.lab_prc_plant (k, v) VALUES ('plant', $1::jsonb) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v`,
-    [JSON.stringify({ R, w, thread, s1, s2, syn, bIdea, aIdea, bReport, aReport, orphReport, b1, b2, b3, a1, multi, orph, ctl, mix, job, child, page, pageCite, pageBold, clean, p2syn, p2job })]);
+    [JSON.stringify({ R, w, thread, s1, s2, syn, bIdea, aIdea, bReport, aReport, orphReport, b1, b2, b3, a1, multi, orph, ctl, mix, job, child, page, pageCite, pageBold, pageWiki, pageMid, pageSup, near, clean, p2syn, p2job })]);
   await landed(await plant());
 });
 
@@ -431,6 +445,38 @@ t(BOTH, "[db] the wiki page carrying B's claim's text is withheld, and stays out
   // round 2 (tester P3): the variants - a citation marker before the full stop, emphasis and a whitespace run inside
   assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE slug = ANY($1::text[])`, [[p.pageCite, p.pageBold]]))[0].n, 0,
     "the citation-marker and emphasis variants are gone");
+  // final round (tester attempt 2): the skeleton match - the pre-570 wikilink / mid-word footnote / <sup> pages are gone,
+  // the near miss (13 trials, one lab) stays
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE slug = ANY($1::text[])`, [[p.pageWiki, p.pageMid, p.pageSup]]))[0].n, 0,
+    "the wikilink, mid-word footnote and <sup> pages are gone");
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE slug = $1`, [p.near]))[0].n, 1, "the near-miss page stays (no false positive)");
+  const W = p.w.b;
+  const forms: Array<[string, string]> = [
+    ["midword-footnote", `The ${W} alpha result repro[^1]duced in 12 trials across two labs.`],
+    ["wikilink", `The ${W} [[alpha]] result reproduced in 12 trials across two labs.`],
+    ["sup", `The ${W} alpha<sup>1</sup> result reproduced in 12 trials across two labs.`],
+    ["nbsp", `The ${W} alpha\u00a0result reproduced in 12 trials across two labs.`],
+    ["nbsp-entity", `The ${W} alpha&nbsp;result reproduced in 12 trials across two labs.`],
+    ["named-footnote", `The ${W} alpha result reproduced in 12[^note-a] trials across two labs.`],
+    ["hyphen-wrap", `The ${W} alpha result repro-\nduced in 12 trials across two labs.`],
+    ["wikilink-label", `The ${W} [[Alpha (topic)|alpha]] result reproduced in 12 trials across two labs.`],
+    ["numeric-entity", `The ${W} alph&#97; result reproduced in 12 trials across two labs.`],
+    ["ref-tag", `The ${W} <em>alpha</em> result<ref>Smith 2020</ref> reproduced in 12 trials across two labs.`],
+    ["zero-width-curly", `The ${W} \u201calpha\u201d\u200b result reproduced in 12 trials across two labs.`],
+    ["caps-accents", `THE ${W.toUpperCase()} \u00c1LPHA RESULT REPRODUCED IN 12 TRIALS ACROSS TWO LABS`],
+  ];
+  const leaked: string[] = [];
+  for (const [name, body] of forms) {
+    const n = await probe<{ n: number }>(null,
+      `WITH w AS (INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'entity', 'form', $2) RETURNING 1) SELECT count(*)::int AS n FROM w`,
+      [`content/topic/prc-form-${name}-${p.R}`, `Later. ${body} Then more.`]);
+    if (n[0].n !== 0) leaked.push(name);
+  }
+  assertEquals(leaked, [], "every formatting form of B's sentence is withheld on a new write");
+  const nearW = await probe<{ n: number }>(null,
+    `WITH w AS (INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'entity', 'near', $2) RETURNING 1) SELECT count(*)::int AS n FROM w`,
+    [`content/topic/prc-near2-${p.R}`, `The ${W} alpha result reproduced in 12 trials across one lab.`]);
+  assertEquals(nearW[0].n, 1, "a near miss is written (no false positive)");
   for (const [slug, variant] of [
     [`content/topic/prc-cite3-${p.R}`, `Later. The ${p.w.b} alpha result reproduced in 12 trials across two labs [3].`],
     [`content/topic/prc-em-${p.R}`, `Later. THE ${p.w.b} alpha result reproduced in 12 trials across _two labs_ [^1], it says.`],
@@ -509,10 +555,42 @@ t(BOTH, "[db] a NEW gap branch / steer / gap event for B's claim on a shared tre
     const ev = (await c.queryObject<{ t: string }>(`SELECT payload::text AS t FROM public.research_job_events WHERE job_id = $1 AND type = 'gap' AND payload ->> 'claim_id' = $2`, [p.job, p.b2])).rows;
     assertEquals(ev.length, 1);
     assert(!ev[0].t.includes(p.w.b), "the gap event's text is neutral");
+    // final round (tester attempt 2 F2): every steering kind, UPDATEs, a braced id, an inter-hub branch
+    const hub = JSON.stringify({ a: { label: p.b2, members: [p.b2], sample: text }, b: { label: p.ctl, members: [p.ctl], sample: "a shared sample" }, density: 0.1, links: 1 });
+    await c.queryObject(`INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload) VALUES ($1, $1, 'interhub_gap', 'steering', $2::jsonb)`, [p.job, hub]);
+    await c.queryObject(`INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload) VALUES ($1, $1, 'topic', 'steering', $2::jsonb)`,
+      [p.job, JSON.stringify({ from: "a shared topic", to: text, at_branch: p.child })]);
+    const kinds = (await c.queryObject<{ t: string }>(`SELECT string_agg(payload::text, ' ') AS t FROM public.research_job_events WHERE job_id = $1 AND type IN ('interhub_gap', 'topic')`, [p.job])).rows;
+    assert(!(kinds[0].t ?? "").includes(p.w.b), "inter-hub and topic events carry no text");
+    const ih = (await c.queryObject<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, query, parent_job_id, root_job_id, rooted_step_id, branch_kind, anchor, gap_ref)
+        VALUES ('queued', 'manual', $1, $2, $2, 'reuse', 'interhub', 'a shared question', $3) RETURNING id::text AS id`,
+      [`How does "${text}" relate to "a shared sample"?`, p.job, `interhub:{${p.b2}}|x`])).rows;
+    assertEquals(ih.length, 0, "no inter-hub branch is opened for a private claim on a shared tree (braced id)");
+    await c.queryObject(`UPDATE public.research_jobs SET query = $2 WHERE id = $1`, [p.child, `Verify again: ${text}`]);
+    await c.queryObject(`UPDATE public.research_steers SET text = $2 WHERE child_job_id = $1`, [p.child, `Steer: ${text}`]);
+    await c.queryObject(`UPDATE public.research_jobs SET tree_report = $2::jsonb WHERE id = $1`, [p.job, JSON.stringify({ markdown: `# t\n${text}` })]);
+    const up = (await c.queryObject<{ t: string }>(
+      `SELECT (SELECT query FROM public.research_jobs WHERE id = $1) || ' ' || (SELECT text FROM public.research_steers WHERE child_job_id = $1)
+              || ' ' || (SELECT tree_report::text FROM public.research_jobs WHERE id = $2) AS t`, [p.child, p.job])).rows;
+    assert(!up[0].t.includes(p.w.b), "an UPDATE of a branch question, a steer or the tree report carries no text");
   } finally {
     try { await c.queryObject("ROLLBACK"); } catch { /* broken */ }
     c.release();
   }
+});
+// final round (tester attempt 2 F3): slot 480's workbench login reads the owner's claims, owner-scoped; it files nothing
+t([...BOTH, "p480"], "[db] slot 480's ob_workbench login reads only the verified subject's private-report claims, and files none", async () => {
+  if (!wbPool) throw new Error("PRC_WB_PASSWORD is not set: slot 480's ob_workbench login is required");
+  const p = await plant();
+  const c = await wbPool.connect();
+  try {
+    const of = async (sub: string) => (await c.queryObject<{ id: string }>(`SELECT id::text AS id FROM public.private_report_claims_of_idea($1::uuid, $2)`, [p.bIdea.id, sub])).rows.map((r) => r.id);
+    const mine = await of(B);
+    for (const id of [p.b1, p.b2, p.b3]) assert(mine.includes(id), "B's own, read by the ob_workbench login");
+    for (const s of [A, C, "", "service:openbrain-mcp", "operator"]) assertEquals(await of(s), [], `subject ${s || "(blank)"}`);
+    const code = await errCode(() => c.queryObject(`SELECT * FROM public.private_report_claim_file($1, $2::uuid, 'a claim text', NULL)`, [`rk-prc-b-${p.R}`, p.bIdea.job]));
+    assertEquals(code, "42501", "ob_workbench files nothing");
+  } finally { c.release(); }
 });
 // PostgREST itself (the anon role service_role, over HTTP): the slot's functions answer no row to an rpc call
 t(BOTH, "[guard] PostgREST's rpc never reads or files a private-report claim", async () => {

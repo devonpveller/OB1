@@ -138,22 +138,51 @@ REVOKE ALL ON FUNCTION public.private_report_claim_subject_ok(TEXT) FROM PUBLIC;
 CREATE OR REPLACE FUNCTION public.private_report_claims_filed_batch() RETURNS UUID
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT '00000000-0000-4570-8000-000000000570'::uuid $$;
 REVOKE ALL ON FUNCTION public.private_report_claims_filed_batch() FROM PUBLIC;
--- the text a page match compares, on BOTH sides (the claim and the page): case-folded; a markdown link reduced to its
--- text; citation markers ([3], [Source 2], [^1], [1, 2]) and html tags dropped; markdown emphasis (* _ ~ `) dropped;
--- whitespace runs collapsed, a space before punctuation and trailing punctuation removed. Round 2 (tester P3): an exact substring let a page
--- with a citation marker or emphasis inside the sentence through. check-private-report-claims.sql repeats it.
+-- the SKELETON a page match compares, on BOTH sides (the claim and the page). Final round (tester attempt 2, the
+-- coordinator's stopping rule): no format list to keep up - HTML entities decoded; the text inside [[...]] and [..](..)
+-- link labels kept; footnote / citation markers, <sup>/<ref> and every tag dropped; then letters and digits only, lower
+-- case, accents removed, so all spacing, punctuation and hyphenation is gone. A claim matches when its skeleton (24+
+-- characters) is a substring of the page's. check-private-report-claims.sql and count-private-report-claim-reuse.sql
+-- repeat it verbatim. Residual (accepted): a claim-id-only link (ids, no text); a paraphrase or synonyms.
 CREATE OR REPLACE FUNCTION public.private_report_claim_norm(p_text TEXT) RETURNS TEXT
-LANGUAGE sql IMMUTABLE PARALLEL SAFE
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
 SET search_path = pg_catalog
 AS $$
-    SELECT rtrim(btrim(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(
-             lower(coalesce(p_text, '')),
-             '\[([^]\[]*)\]\([^)]*\)', '\1', 'g'),
-             '\[\s*(\^|(source|src|ref|cite|citation|note)\s*)?[0-9]+([\s,;-]+[0-9]+)*\s*\]', ' ', 'g'),
-             '</?[a-z][a-z0-9]*[^>]*>', ' ', 'g'),
-             '[*_~`]+', '', 'g'),
-             '\s+', ' ', 'g'),
-             ' ([.,;:!?)])', '\1', 'g')), ' .,;:!?')
+DECLARE
+    t TEXT := coalesce(p_text, '');
+    m TEXT[];
+    v INT;
+    n INT := 0;
+BEGIN
+    -- 1. HTML entities: numeric (&#233; &#xE9;) decoded; a named letter entity (&eacute; &Ouml;) to its letter;
+    --    &szlig; to ss; every other named one (&nbsp; &amp; ...) to a space
+    LOOP
+        m := regexp_match(t, '&#([xX][0-9a-fA-F]{1,6}|[0-9]{1,7});');
+        EXIT WHEN m IS NULL OR n > 500;
+        n := n + 1;
+        v := CASE WHEN lower(left(m[1], 1)) = 'x' THEN ('x' || lpad(substr(m[1], 2), 8, '0'))::bit(32)::int ELSE m[1]::int END;
+        t := replace(t, '&#' || m[1] || ';', CASE WHEN v BETWEEN 1 AND 1114111 AND v NOT BETWEEN 55296 AND 57343 THEN chr(v) ELSE ' ' END);
+    END LOOP;
+    t := regexp_replace(t, '&([A-Za-z])(acute|grave|circ|uml|tilde|cedil|ring|slash|caron);', '\1', 'g');
+    t := regexp_replace(t, '&szlig;', 'ss', 'g');
+    t := regexp_replace(t, '&[A-Za-z][A-Za-z0-9]{1,31};', ' ', 'g');
+    -- 2. links: the text a reader sees - [[target|label]] -> label, [[target]] -> target, [label](url) -> label
+    t := regexp_replace(t, '\[\[(?:[^]|]*\|)?([^]]*)\]\]', '\1', 'g');
+    t := regexp_replace(t, '\[([^]\[]*)\]\([^)]*\)', '\1', 'g');
+    -- 3. markers and tags: footnotes ([^1] [^note-a], mid-word too), numeric / named citations ([3] [Source 2] [1, 2]),
+    --    <sup>..</sup> and <ref>..</ref> with their content, every other tag (its content kept)
+    t := regexp_replace(t, '\[\^[^]]*\]', '', 'g');
+    t := regexp_replace(t, '\[\s*((source|src|ref|cite|citation|note)\s*)?[0-9]+([\s,;-]+[0-9]+)*\s*\]', '', 'gi');
+    t := regexp_replace(t, '<sup([\s/][^>]*)?>.*?</sup\s*>', '', 'gi');
+    t := regexp_replace(t, '<ref([\s/][^>]*)?>.*?</ref\s*>', '', 'gi');
+    t := regexp_replace(t, '<[^>]*>', '', 'g');
+    -- 4. the skeleton: lower case, accents removed, letters and digits only (all spacing, punctuation, hyphenation gone)
+    t := lower(t);
+    t := replace(replace(replace(replace(t, 'ß', 'ss'), 'æ', 'ae'), 'œ', 'oe'), 'ø', 'o');
+    t := translate(t, 'àáâãäåçèéêëìíîïñòóôõöùúûüýÿāăąćĉčďđēĕėęěĝğġģĥĩīĭįıĵķĺļľłńņňōŏőŕŗřśŝşšţťũūŭůűųŵŷźżž',
+                      'aaaaaaceeeeiiiinooooouuuuyyaaacccddeeeeegggghiiiiijkllllnnnooorrrssssttuuuuuuwyzzz');
+    RETURN regexp_replace(t, '[^[:alnum:]]+', '', 'g');
+END;
 $$;
 REVOKE ALL ON FUNCTION public.private_report_claim_norm(TEXT) FROM PUBLIC;
 
@@ -170,6 +199,18 @@ AS $$
        AND (session_user = 'ob_app_memory' OR coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = session_user), false))
 $$;
 REVOKE ALL ON FUNCTION public.private_report_claims_caller_ok() FROM PUBLIC;
+-- the owner READ also admits slot 480's workbench login ob_workbench (a member of ob_app_memory; final round, tester
+-- attempt 2 F3): owner-scoped exactly as 480's own functions - the function answers only the subject the workbench
+-- verified (p_sub), and only that subject's own claims. Never through PostgREST. The writes stay ob_app_memory's.
+CREATE OR REPLACE FUNCTION public.private_report_claims_reader_ok() RETURNS BOOLEAN
+LANGUAGE sql STABLE
+SET search_path = pg_catalog
+AS $$
+    SELECT public.private_report_claims_caller_ok()
+        OR (session_user = 'ob_workbench'
+            AND coalesce(nullif(current_setting('request.method', true), ''), nullif(current_setting('request.path', true), '')) IS NULL)
+$$;
+REVOKE ALL ON FUNCTION public.private_report_claims_reader_ok() FROM PUBLIC;
 
 -- does this page text carry a private-report claim's text? (a claim in an owner store that a private report links, or
 -- a withheld one this slot archived; texts under 24 characters are too short to name a claim and are not matched)
@@ -265,6 +306,12 @@ AS $$
                coalesce((SELECT j.root_job_id FROM public.research_jobs j WHERE j.id = p_job), p_job)) o LIMIT 1)
 $$;
 REVOKE ALL ON FUNCTION public.private_report_claims_tree_owner(UUID) FROM PUBLIC;
+-- Final round (tester attempt 2 F2): the guard does not depend on "nothing writes those". It runs on INSERT AND UPDATE of
+-- research_jobs (a branch's question / anchor / topic estimate / tree report; a root's own question is the asker's and is
+-- left alone, its tree report and topic estimate are not), research_steers (every kind) and research_job_events (the
+-- steering kinds: gap, interhub_gap, branch_open, human_steer, topic). A row of a tree that is not the claim's owner's,
+-- naming a private-report claim (its id anywhere in the row, braced or not) or carrying its text, has the text replaced
+-- by the neutral stand-in; a NEW gap or inter-hub branch naming one is not inserted at all.
 CREATE OR REPLACE FUNCTION public.trg_private_report_claims_gap_guard()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -272,33 +319,76 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-    v_claim TEXT;
     v_root  UUID;
-    v_owner TEXT;
+    v_tree  TEXT;
+    v_body  TEXT;
+    v_hit   BOOLEAN := false;
+    r       RECORD;
+    c_n     CONSTANT TEXT := '(a private claim)';
 BEGIN
     IF TG_TABLE_NAME = 'research_jobs' THEN
-        IF NEW.gap_ref IS NULL OR NEW.gap_ref NOT LIKE 'claim:%' THEN RETURN NEW; END IF;
-        v_claim := substr(NEW.gap_ref, 7);
-        v_root := coalesce(NEW.root_job_id, NEW.parent_job_id);
+        IF NEW.branch_kind IN ('root', 'idea') THEN
+            IF TG_OP = 'INSERT' THEN RETURN NEW; END IF;
+            IF NEW.tree_report IS NOT DISTINCT FROM OLD.tree_report AND NEW.topic_estimate IS NOT DISTINCT FROM OLD.topic_estimate THEN RETURN NEW; END IF;
+            v_body := coalesce(NEW.topic_estimate, '') || ' ' || coalesce(NEW.tree_report::text, '');
+        ELSE
+            IF TG_OP = 'UPDATE' AND NEW.query IS NOT DISTINCT FROM OLD.query AND NEW.anchor IS NOT DISTINCT FROM OLD.anchor
+               AND NEW.topic_estimate IS NOT DISTINCT FROM OLD.topic_estimate AND NEW.tree_report IS NOT DISTINCT FROM OLD.tree_report
+               AND NEW.gap_ref IS NOT DISTINCT FROM OLD.gap_ref THEN RETURN NEW; END IF;
+            v_body := coalesce(NEW.query, '') || ' ' || coalesce(NEW.anchor, '') || ' ' || coalesce(NEW.topic_estimate, '') || ' '
+                      || coalesce(NEW.tree_report::text, '') || ' ' || coalesce(NEW.gap_ref, '');
+        END IF;
+        v_root := coalesce(NEW.root_job_id, NEW.parent_job_id, NEW.id);
     ELSIF TG_TABLE_NAME = 'research_steers' THEN
-        v_claim := NEW.gap ->> 'claim_id';
+        v_body := coalesce(NEW.text, '') || ' ' || coalesce(NEW.anchor, '') || ' ' || coalesce(NEW.topic_estimate, '') || ' ' || coalesce(NEW.gap::text, '');
         v_root := NEW.root_job_id;
     ELSE
-        IF NEW.type IS DISTINCT FROM 'gap' THEN RETURN NEW; END IF;
-        v_claim := NEW.payload ->> 'claim_id';
+        IF NEW.type NOT IN ('gap', 'interhub_gap', 'branch_open', 'human_steer', 'topic') THEN RETURN NEW; END IF;
+        v_body := coalesce(NEW.payload::text, '');
         v_root := NEW.root_job_id;
     END IF;
-    IF v_claim IS NULL OR v_claim !~* '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$' THEN RETURN NEW; END IF;
-    v_owner := public.private_report_claims_private_owner(v_claim::uuid);
-    IF v_owner IS NULL THEN RETURN NEW; END IF;
-    IF v_owner <> '' AND v_owner IS NOT DISTINCT FROM public.private_report_claims_tree_owner(v_root) THEN RETURN NEW; END IF;
+    v_tree := public.private_report_claims_tree_owner(v_root);
+    FOR r IN
+        SELECT x.id, x.text, substr(to_jsonb(x.text)::text, 2, length(to_jsonb(x.text)::text) - 2) AS jtext
+          FROM (SELECT c.id, c.text, c.inlet_owner_sub AS owner FROM public.inlet_private_claims c
+                 WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+                UNION ALL
+                SELECT a.ref::uuid, a.row_data ->> 'text', NULL FROM public.private_report_claims_archive a
+                 WHERE a.action = 'x' AND a.restored_at IS NULL) x
+         WHERE (x.owner IS NULL OR x.owner IS DISTINCT FROM v_tree)
+           AND (position(x.id::text IN lower(v_body)) > 0
+                OR (length(btrim(coalesce(x.text, ''))) >= 24 AND position(x.text IN v_body) > 0))
+    LOOP
+        v_hit := true;
+        IF coalesce(btrim(r.text), '') = '' THEN CONTINUE; END IF;
+        IF TG_TABLE_NAME = 'research_jobs' THEN
+            NEW.query := replace(NEW.query, r.text, c_n);
+            NEW.anchor := replace(NEW.anchor, r.text, c_n);
+            NEW.topic_estimate := replace(NEW.topic_estimate, r.text, c_n);
+            IF NEW.tree_report IS NOT NULL THEN NEW.tree_report := replace(NEW.tree_report::text, r.jtext, c_n)::jsonb; END IF;
+        ELSIF TG_TABLE_NAME = 'research_steers' THEN
+            NEW.text := replace(NEW.text, r.text, c_n);
+            NEW.anchor := replace(NEW.anchor, r.text, c_n);
+            NEW.topic_estimate := replace(NEW.topic_estimate, r.text, c_n);
+            IF NEW.gap IS NOT NULL THEN NEW.gap := replace(NEW.gap::text, r.jtext, c_n)::jsonb; END IF;
+        ELSE
+            NEW.payload := replace(NEW.payload::text, r.jtext, c_n)::jsonb;
+        END IF;
+    END LOOP;
+    IF NOT v_hit THEN RETURN NEW; END IF;
+    -- (nested: a plpgsql expression resolves every NEW field it names, so each table's fields only in its own branch)
     IF TG_TABLE_NAME = 'research_jobs' THEN
-        RETURN NULL;
-    ELSIF TG_TABLE_NAME = 'research_steers' THEN
-        NEW.text := '(a private claim)';
-        NEW.gap := NEW.gap || jsonb_build_object('text', '(a private claim)');
+        IF TG_OP = 'INSERT' THEN
+            IF NEW.branch_kind IN ('gap', 'interhub') THEN RETURN NULL; END IF;
+        END IF;
+    ELSIF TG_TABLE_NAME = 'research_job_events' THEN
+        -- a gap event naming the claim keeps the id (the per-tree dedup) but never its text
+        IF NEW.payload ? 'text' THEN NEW.payload := NEW.payload || jsonb_build_object('text', c_n); END IF;
     ELSE
-        NEW.payload := NEW.payload || jsonb_build_object('text', '(a private claim)');
+        IF NEW.steer_kind <> 'human' THEN
+            NEW.text := c_n;
+            IF NEW.gap ? 'text' THEN NEW.gap := NEW.gap || jsonb_build_object('text', c_n); END IF;
+        END IF;
     END IF;
     RETURN NEW;
 END;
@@ -637,13 +727,13 @@ DROP TRIGGER IF EXISTS trg_private_report_claims_wiki_guard ON public.wiki_pages
 CREATE TRIGGER trg_private_report_claims_wiki_guard BEFORE INSERT OR UPDATE ON public.wiki_pages
     FOR EACH ROW EXECUTE FUNCTION public.trg_private_report_claims_wiki_guard();
 DROP TRIGGER IF EXISTS trg_private_report_claims_gap_guard ON public.research_jobs;
-CREATE TRIGGER trg_private_report_claims_gap_guard BEFORE INSERT ON public.research_jobs
+CREATE TRIGGER trg_private_report_claims_gap_guard BEFORE INSERT OR UPDATE ON public.research_jobs
     FOR EACH ROW EXECUTE FUNCTION public.trg_private_report_claims_gap_guard();
 DROP TRIGGER IF EXISTS trg_private_report_claims_gap_guard ON public.research_steers;
-CREATE TRIGGER trg_private_report_claims_gap_guard BEFORE INSERT ON public.research_steers
+CREATE TRIGGER trg_private_report_claims_gap_guard BEFORE INSERT OR UPDATE ON public.research_steers
     FOR EACH ROW EXECUTE FUNCTION public.trg_private_report_claims_gap_guard();
 DROP TRIGGER IF EXISTS trg_private_report_claims_gap_guard ON public.research_job_events;
-CREATE TRIGGER trg_private_report_claims_gap_guard BEFORE INSERT ON public.research_job_events
+CREATE TRIGGER trg_private_report_claims_gap_guard BEFORE INSERT OR UPDATE ON public.research_job_events
     FOR EACH ROW EXECUTE FUNCTION public.trg_private_report_claims_gap_guard();
 DROP TRIGGER IF EXISTS trg_private_report_claims_link_guard ON public.research_private_report_claims;
 CREATE TRIGGER trg_private_report_claims_link_guard BEFORE INSERT OR UPDATE OF claim_id ON public.research_private_report_claims
@@ -769,7 +859,7 @@ SET search_path = public, pg_temp
 AS $$
 #variable_conflict use_column
 BEGIN
-    IF NOT public.private_report_claims_caller_ok() THEN
+    IF NOT public.private_report_claims_reader_ok() THEN
         RAISE EXCEPTION 'private report claims: not for this caller' USING ERRCODE = '42501';
     END IF;
     RETURN QUERY
@@ -799,7 +889,7 @@ BEGIN
                              'public.private_report_claims_page_shows(text,text)', 'public.private_report_claim_subject_ok(text)',
                              'public.private_report_claims_filed_batch()', 'public.private_report_claim_norm(text)',
                              'public.private_report_claims_job_private(uuid)', 'public.private_report_claims_neutral_line(uuid,uuid,text)',
-                             'public.private_report_claims_caller_ok()', 'public.private_report_claims_private_owner(uuid)',
+                             'public.private_report_claims_caller_ok()', 'public.private_report_claims_reader_ok()', 'public.private_report_claims_private_owner(uuid)',
                              'public.private_report_claims_tree_owner(uuid)', 'public.trg_private_report_claims_gap_guard()'] LOOP
         FOR r IN SELECT DISTINCT ro.rolname AS grantee
                    FROM pg_proc p, aclexplode(p.proacl) a JOIN pg_roles ro ON ro.oid = a.grantee

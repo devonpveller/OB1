@@ -204,6 +204,7 @@ DROP FUNCTION IF EXISTS public.private_report_claims_job_private(UUID);
 DROP FUNCTION IF EXISTS public.trg_private_report_claims_gap_guard();
 DROP FUNCTION IF EXISTS public.private_report_claims_private_owner(UUID);
 DROP FUNCTION IF EXISTS public.private_report_claims_tree_owner(UUID);
+DROP FUNCTION IF EXISTS public.private_report_claims_reader_ok();
 DROP FUNCTION IF EXISTS public.private_report_claims_caller_ok();
 
 NOTIFY pgrst, 'reload schema';

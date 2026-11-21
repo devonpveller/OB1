@@ -13,16 +13,44 @@
 -- branch / steer / gap event / tree report of a shared tree carrying one's text; a private run's corroboration line in
 -- the clear; the guards and the dropped foreign key; who may execute the slot's functions.
 CREATE OR REPLACE FUNCTION pg_temp.prc_norm(p_text TEXT) RETURNS TEXT
-LANGUAGE sql IMMUTABLE
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+SET search_path = pg_catalog
 AS $$
-    SELECT rtrim(btrim(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(regexp_replace(
-             lower(coalesce(p_text, '')),
-             '\[([^]\[]*)\]\([^)]*\)', '\1', 'g'),
-             '\[\s*(\^|(source|src|ref|cite|citation|note)\s*)?[0-9]+([\s,;-]+[0-9]+)*\s*\]', ' ', 'g'),
-             '</?[a-z][a-z0-9]*[^>]*>', ' ', 'g'),
-             '[*_~`]+', '', 'g'),
-             '\s+', ' ', 'g'),
-             ' ([.,;:!?)])', '\1', 'g')), ' .,;:!?')
+DECLARE
+    t TEXT := coalesce(p_text, '');
+    m TEXT[];
+    v INT;
+    n INT := 0;
+BEGIN
+    -- 1. HTML entities: numeric (&#233; &#xE9;) decoded; a named letter entity (&eacute; &Ouml;) to its letter;
+    --    &szlig; to ss; every other named one (&nbsp; &amp; ...) to a space
+    LOOP
+        m := regexp_match(t, '&#([xX][0-9a-fA-F]{1,6}|[0-9]{1,7});');
+        EXIT WHEN m IS NULL OR n > 500;
+        n := n + 1;
+        v := CASE WHEN lower(left(m[1], 1)) = 'x' THEN ('x' || lpad(substr(m[1], 2), 8, '0'))::bit(32)::int ELSE m[1]::int END;
+        t := replace(t, '&#' || m[1] || ';', CASE WHEN v BETWEEN 1 AND 1114111 AND v NOT BETWEEN 55296 AND 57343 THEN chr(v) ELSE ' ' END);
+    END LOOP;
+    t := regexp_replace(t, '&([A-Za-z])(acute|grave|circ|uml|tilde|cedil|ring|slash|caron);', '\1', 'g');
+    t := regexp_replace(t, '&szlig;', 'ss', 'g');
+    t := regexp_replace(t, '&[A-Za-z][A-Za-z0-9]{1,31};', ' ', 'g');
+    -- 2. links: the text a reader sees - [[target|label]] -> label, [[target]] -> target, [label](url) -> label
+    t := regexp_replace(t, '\[\[(?:[^]|]*\|)?([^]]*)\]\]', '\1', 'g');
+    t := regexp_replace(t, '\[([^]\[]*)\]\([^)]*\)', '\1', 'g');
+    -- 3. markers and tags: footnotes ([^1] [^note-a], mid-word too), numeric / named citations ([3] [Source 2] [1, 2]),
+    --    <sup>..</sup> and <ref>..</ref> with their content, every other tag (its content kept)
+    t := regexp_replace(t, '\[\^[^]]*\]', '', 'g');
+    t := regexp_replace(t, '\[\s*((source|src|ref|cite|citation|note)\s*)?[0-9]+([\s,;-]+[0-9]+)*\s*\]', '', 'gi');
+    t := regexp_replace(t, '<sup([\s/][^>]*)?>.*?</sup\s*>', '', 'gi');
+    t := regexp_replace(t, '<ref([\s/][^>]*)?>.*?</ref\s*>', '', 'gi');
+    t := regexp_replace(t, '<[^>]*>', '', 'g');
+    -- 4. the skeleton: lower case, accents removed, letters and digits only (all spacing, punctuation, hyphenation gone)
+    t := lower(t);
+    t := replace(replace(replace(replace(t, 'ß', 'ss'), 'æ', 'ae'), 'œ', 'oe'), 'ø', 'o');
+    t := translate(t, 'àáâãäåçèéêëìíîïñòóôõöùúûüýÿāăąćĉčďđēĕėęěĝğġģĥĩīĭįıĵķĺļľłńņňōŏőŕŗřśŝşšţťũūŭůűųŵŷźżž',
+                      'aaaaaaceeeeiiiinooooouuuuyyaaacccddeeeeegggghiiiiijkllllnnnooorrrssssttuuuuuuwyzzz');
+    RETURN regexp_replace(t, '[^[:alnum:]]+', '', 'g');
+END;
 $$;
 -- the texts slot 570 withheld (no single owner): in its archive only, which may not exist yet
 CREATE OR REPLACE FUNCTION pg_temp.prc_withheld() RETURNS TABLE (text TEXT)
@@ -108,7 +136,7 @@ fns AS (
 app AS (
     SELECT (SELECT count(*) FROM pg_roles r WHERE r.rolname = 'ob_app_memory') AS role_n,
            (SELECT count(*) FROM fns f, pg_roles r WHERE r.rolname = 'ob_app_memory' AND has_function_privilege(r.oid, f.oid, 'EXECUTE')) AS exec_n),
-gated AS (SELECT count(*) AS n FROM fns f WHERE f.prosrc LIKE '%private_report_claims_caller_ok()%'),
+gated AS (SELECT count(*) AS n FROM fns f WHERE f.prosrc LIKE '%private_report_claims_caller_ok()%' OR f.prosrc LIKE '%private_report_claims_reader_ok()%'),
 -- a direct grant to anyone but service_role (the in-function gate keeps PostgREST out), ob_app_memory and ob_workbench
 grants AS (
     SELECT f.proname || '(' || ro.rolname || ')' AS g
