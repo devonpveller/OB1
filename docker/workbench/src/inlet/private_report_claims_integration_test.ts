@@ -464,6 +464,11 @@ t(BOTH, "[db] the wiki page carrying B's claim's text is withheld, and stays out
     ["ref-tag", `The ${W} <em>alpha</em> result<ref>Smith 2020</ref> reproduced in 12 trials across two labs.`],
     ["zero-width-curly", `The ${W} \u201calpha\u201d\u200b result reproduced in 12 trials across two labs.`],
     ["caps-accents", `THE ${W.toUpperCase()} \u00c1LPHA RESULT REPRODUCED IN 12 TRIALS ACROSS TWO LABS`],
+    // attempt 3: a citation number mid-sentence, a full-width number (the skeleton is letters only)
+    ["pandoc-sup", `The ${W} alpha result^1^ reproduced in 12 trials across two labs.`],
+    ["paren-number", `The ${W} alpha result (1) reproduced in 12 trials across two labs.`],
+    ["footnote-n", `The ${W} alpha result[^n] reproduced in 12 trials across two labs.`],
+    ["full-width-digits", `The ${W} alpha result reproduced in １２ trials across two labs.`],
   ];
   const leaked: string[] = [];
   for (const [name, body] of forms) {

@@ -46,12 +46,15 @@ BEGIN
     t := regexp_replace(t, '<sup([\s/][^>]*)?>.*?</sup\s*>', '', 'gi');
     t := regexp_replace(t, '<ref([\s/][^>]*)?>.*?</ref\s*>', '', 'gi');
     t := regexp_replace(t, '<[^>]*>', '', 'g');
-    -- 4. the skeleton: lower case, accents removed, letters and digits only (all spacing, punctuation, hyphenation gone)
-    t := lower(t);
+    -- 4. the skeleton: NFKC (full-width / compatibility forms folded), lower case, accents removed (NFKD, the marks
+    --    dropped), LETTERS ONLY - every digit, space, punctuation and hyphen gone (attempt 3: a citation number such as
+    --    ^1^ or (1) mid-sentence, or a full-width digit, split the substring while digits were kept). A shared page that
+    --    happens to carry a private claim's letters with other numbers is withheld too: conservative, accepted.
+    t := lower(normalize(t, NFKC));
     t := replace(replace(replace(replace(t, 'ß', 'ss'), 'æ', 'ae'), 'œ', 'oe'), 'ø', 'o');
     t := translate(t, 'àáâãäåçèéêëìíîïñòóôõöùúûüýÿāăąćĉčďđēĕėęěĝğġģĥĩīĭįıĵķĺļľłńņňōŏőŕŗřśŝşšţťũūŭůűųŵŷźżž',
                       'aaaaaaceeeeiiiinooooouuuuyyaaacccddeeeeegggghiiiiijkllllnnnooorrrssssttuuuuuuwyzzz');
-    RETURN regexp_replace(t, '[^[:alnum:]]+', '', 'g');
+    RETURN regexp_replace(normalize(t, NFKD), '[^[:alpha:]]+', '', 'g');
 END;
 $$;
 WITH

@@ -140,9 +140,9 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT '00000000-0000-4570-8000-00000
 REVOKE ALL ON FUNCTION public.private_report_claims_filed_batch() FROM PUBLIC;
 -- the SKELETON a page match compares, on BOTH sides (the claim and the page). Final round (tester attempt 2, the
 -- coordinator's stopping rule): no format list to keep up - HTML entities decoded; the text inside [[...]] and [..](..)
--- link labels kept; footnote / citation markers, <sup>/<ref> and every tag dropped; then letters and digits only, lower
+-- link labels kept; footnote / citation markers, <sup>/<ref> and every tag dropped; then LETTERS only (digits too go), lower
 -- case, accents removed, so all spacing, punctuation and hyphenation is gone. A claim matches when its skeleton (24+
--- characters) is a substring of the page's. check-private-report-claims.sql and count-private-report-claim-reuse.sql
+-- LETTERS) is a substring of the page's. check-private-report-claims.sql and count-private-report-claim-reuse.sql
 -- repeat it verbatim. Residual (accepted): a claim-id-only link (ids, no text); a paraphrase or synonyms.
 CREATE OR REPLACE FUNCTION public.private_report_claim_norm(p_text TEXT) RETURNS TEXT
 LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
@@ -176,12 +176,15 @@ BEGIN
     t := regexp_replace(t, '<sup([\s/][^>]*)?>.*?</sup\s*>', '', 'gi');
     t := regexp_replace(t, '<ref([\s/][^>]*)?>.*?</ref\s*>', '', 'gi');
     t := regexp_replace(t, '<[^>]*>', '', 'g');
-    -- 4. the skeleton: lower case, accents removed, letters and digits only (all spacing, punctuation, hyphenation gone)
-    t := lower(t);
+    -- 4. the skeleton: NFKC (full-width / compatibility forms folded), lower case, accents removed (NFKD, the marks
+    --    dropped), LETTERS ONLY - every digit, space, punctuation and hyphen gone (attempt 3: a citation number such as
+    --    ^1^ or (1) mid-sentence, or a full-width digit, split the substring while digits were kept). A shared page that
+    --    happens to carry a private claim's letters with other numbers is withheld too: conservative, accepted.
+    t := lower(normalize(t, NFKC));
     t := replace(replace(replace(replace(t, 'ß', 'ss'), 'æ', 'ae'), 'œ', 'oe'), 'ø', 'o');
     t := translate(t, 'àáâãäåçèéêëìíîïñòóôõöùúûüýÿāăąćĉčďđēĕėęěĝğġģĥĩīĭįıĵķĺļľłńņňōŏőŕŗřśŝşšţťũūŭůűųŵŷźżž',
                       'aaaaaaceeeeiiiinooooouuuuyyaaacccddeeeeegggghiiiiijkllllnnnooorrrssssttuuuuuuwyzzz');
-    RETURN regexp_replace(t, '[^[:alnum:]]+', '', 'g');
+    RETURN regexp_replace(normalize(t, NFKD), '[^[:alpha:]]+', '', 'g');
 END;
 $$;
 REVOKE ALL ON FUNCTION public.private_report_claim_norm(TEXT) FROM PUBLIC;
