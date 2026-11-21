@@ -1,22 +1,25 @@
 -- Revert init-ui-state.sql (rwr-ui-state-keys, slot 490).
 --   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -f revert-ui-state.sql
 -- Removes the four keys (ui.locked_document, ui.last_document, ui.start_screen, library.recent) and every
--- user's stored value of them (take a pg_dump of public.user_settings first if any of it matters), narrows the
--- section and type CHECKs back to slot 400's and restores slot 400's setting_problem() text. After it the
--- catalog is as it was after slot 400 alone. Run it BEFORE revert-settings.sql, and after the revert of any
--- later migration that added 'ui' keys (the narrowed CHECK would refuse their rows).
+-- user's stored value of them, drops user_setting_clear() and the tombstone table (every key's version numbers
+-- then count from its stored row again), narrows the section and type CHECKs back to slot 400's and restores
+-- slot 400's setting_problem() and user_setting_set() text. After it the catalog is as it was after slot 400
+-- alone. Run it BEFORE revert-settings.sql, and after the revert of any later migration that added 'ui' keys
+-- (the narrowed CHECK would refuse their rows). Take a pg_dump of public.user_settings first if any of it matters.
 -- Idempotent: a second run changes nothing.
 \set ON_ERROR_STOP on
 BEGIN;
 DELETE FROM public.user_settings WHERE key IN ('ui.locked_document', 'ui.last_document', 'ui.start_screen', 'library.recent');
 DELETE FROM public.settings_keys WHERE key IN ('ui.locked_document', 'ui.last_document', 'ui.start_screen', 'library.recent');
+DROP FUNCTION IF EXISTS public.user_setting_clear(TEXT, TEXT, INT);
+DROP TABLE IF EXISTS public.user_setting_tombstones;
 ALTER TABLE public.settings_keys DROP CONSTRAINT IF EXISTS settings_keys_section_check;
 ALTER TABLE public.settings_keys ADD CONSTRAINT settings_keys_section_check
     CHECK (section IN ('refinery', 'digest', 'research'));
 ALTER TABLE public.settings_keys DROP CONSTRAINT IF EXISTS settings_keys_type_check;
 ALTER TABLE public.settings_keys ADD CONSTRAINT settings_keys_type_check
     CHECK (type IN ('boolean', 'integer', 'number', 'string', 'time', 'enum', 'string_list', 'destination'));
--- slot 400's setting_problem(), verbatim
+-- slot 400's setting_problem() and user_setting_set(), verbatim
 CREATE OR REPLACE FUNCTION public.setting_problem(p_owner TEXT, p_key TEXT, p_value JSONB)
 RETURNS TEXT
 LANGUAGE plpgsql STABLE
@@ -79,6 +82,33 @@ BEGIN
         RETURN format('%s has a type this store cannot hold', p_key);
     END CASE;
     RETURN NULL;
+END;
+$$;
+
+-- Set one of an owner's user settings (the workbench's PUT). p_version, when given, must be the stored
+-- version (0 = no row yet): a stale write is refused (40001) and changes nothing.
+CREATE OR REPLACE FUNCTION public.user_setting_set(
+    p_owner TEXT, p_key TEXT, p_value JSONB, p_actor TEXT, p_version INT DEFAULT NULL)
+RETURNS INT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    cur INT;
+    out_version INT;
+BEGIN
+    SELECT version INTO cur FROM public.user_settings WHERE owner_sub = p_owner AND key = p_key FOR UPDATE;
+    IF p_version IS NOT NULL AND COALESCE(cur, 0) <> p_version THEN
+        RAISE EXCEPTION 'the setting changed since it was read (version %, not %)', COALESCE(cur, 0), p_version USING ERRCODE = '40001';
+    END IF;
+    INSERT INTO public.user_settings (owner_sub, key, value, updated_by)
+    VALUES (p_owner, p_key, p_value, p_actor)
+    ON CONFLICT (owner_sub, key) DO UPDATE
+       SET value = EXCLUDED.value, version = public.user_settings.version + 1,
+           updated_at = now(), updated_by = EXCLUDED.updated_by
+    RETURNING version INTO out_version;
+    RETURN out_version;
 END;
 $$;
 COMMIT;

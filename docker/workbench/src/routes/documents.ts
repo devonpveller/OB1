@@ -282,7 +282,7 @@ export function documentsRouter(rdeps: DocumentsDeps) {
 export function workspaceRouter(db: Db) {
   const w = new Hono();
   // the workspace keys its per-user browser state (layout, UI preferences) by this subject
-  w.get("/whoami", wrap(async (c, who) => c.json({ subject_sub: who.sub, actor_sub: who.actor, name: who.name })));
+  w.get("/whoami", wrap(async (c, who) => c.json({ subject_sub: who.sub, actor_sub: who.actor, name: who.name, kind: who.kind ?? null })));
   w.get("/notifications", wrap(async (c, who) => c.json({ acknowledged: await acknowledged(db, who) })));
   w.post("/notifications/:id/ack", wrap(async (c, who) => {
     const out = await acknowledge(db, str(c.req.param("id")), who);

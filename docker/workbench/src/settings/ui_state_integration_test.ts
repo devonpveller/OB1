@@ -73,7 +73,7 @@ const mine = async (who: Record<string, string>) => {
 const put = (who: Record<string, string>, key: string, value: unknown, version?: number) =>
   call("PUT", `${S}/${key}`, version === undefined ? { value } : { value, version }, who);
 
-const items = (n: number) => Array.from({ length: n }, (_, i) => ({ kind: "document", id: `item-${i}` }));
+const items = (n: number) => Array.from({ length: n }, (_, i) => ({ kind: "source", id: `item-${i}` }));
 
 t("U0: the four keys are registered: user tier, editable, in the ui section, and a fresh user reads them all at the default", async () => {
   const keys = await sql<{ key: string; tier: string; editable: boolean; section: string; type: string }>(
@@ -174,7 +174,15 @@ t("U4: values the registry refuses are 400 and nothing is stored: bad screen, do
     [K.recent, [{ kind: "document", id: "x".repeat(121) }]], [K.recent, [{ kind: "document", id: 5 }]],
     [K.recent, [{ kind: "document", id: "a", locked: "yes" }]],
     // text does not ride in the list, whatever it is called
-    [K.recent, [{ kind: "document", id: "a", title: "private words" }]], [K.recent, [{ kind: "document", id: "a", text: "x" }]],
+    [K.recent, [{ kind: "source", id: "a", title: "private words" }]], [K.recent, [{ kind: "source", id: "a", text: "x" }]],
+    // round 2 (F4, F6): credential-shaped ids, kinds outside the set, prose ids, dot segments, invisible and direction characters
+    [K.recent, [{ kind: "source", id: "sk-0123456789abcdef0123456789" }]], [K.recent, [{ kind: "source", id: "a:ghp_0123456789abcdef01234567" }]],
+    [K.recent, [{ kind: "source", id: "eyJhbGciOiJIUzI1NiJ9" }]], [K.recent, [{ kind: "secret_diagnosis", id: "a" }]],
+    [K.recent, [{ kind: "source", id: "my doctor said the biopsy" }]], [K.recent, [{ kind: "source", id: "a..b" }]],
+    [K.recent, [{ kind: "source", id: "a‮b" }]], [K.recent, [{ kind: "source", id: "a​b" }]], [K.recent, [{ kind: "source", id: "a\u0085b" }]],
+    [K.recent, [{ kind: "document", id: "notes/x.md" }]], [K.recent, [{ kind: "document", id: "documents/a/../b.md" }]],
+    [K.lock, "The meeting notes: we will lay off"], [K.lock, "documents/a/../b.md"], [K.lock, "documents/a/sk-0123456789abcdef0123456789.md"],
+    [K.last, "documents/a/‮.md"],
   ];
   for (const [k, v] of bad) {
     const r = await put(who, k, v);
@@ -184,7 +192,7 @@ t("U4: values the registry refuses are 400 and nothing is stored: bad screen, do
   // the cap exactly, an empty list, locked flags: accepted
   assertEquals((await put(who, K.recent, items(24))).status, 200);
   assertEquals((await put(who, K.recent, [])).status, 200);
-  assertEquals((await put(who, K.recent, [{ kind: "claim", id: "c1", locked: false }, { kind: "source", id: "s 1" }])).status, 200);
+  assertEquals((await put(who, K.recent, [{ kind: "claim", id: "c1", locked: false }, { kind: "source", id: "s-1" }])).status, 200);
   for (const s of ["home", "research", "chat", "documents", "ideas", "podcasts", "library"]) assertEquals((await put(who, K.start, s)).status, 200, s);
   // DELETE is back to the default
   const d = await call("DELETE", `${S}/${K.recent}`, undefined, who);
@@ -197,7 +205,7 @@ t("U5: the database refuses the same whoever writes: the app role inserting a ba
   assertEquals(await w(K.recent, [{ kind: "document", id: "a", title: "text" }]), "22023");
   assertEquals(await w(K.recent, items(25)), "22023");
   assertEquals(await w(K.start, "nowhere"), "22023");
-  assertEquals(await w(K.recent, [{ kind: "document", id: "a" }]), "");
+  assertEquals(await w(K.recent, [{ kind: "source", id: "a" }]), "");
   assertEquals(await codeAsApp(`INSERT INTO public.settings_keys (key, tier, type, section, label, read_by) VALUES ('ui.x', 'user', 'ref_list', 'ui', 't', 't')`), "42501", "the app role cannot add keys");
 });
 
@@ -235,4 +243,81 @@ t("U7: a locked document that is trashed is 'not live' to the documents state ro
   assertEquals(rs.status, 200, rs.text);
   const back = await st(path);
   assertEquals([back.status, back.json.listed, back.json.trashed], [200, true, false], back.text);
+});
+
+t("U8 (F2): two first writes that both send version 0 - exactly one wins, the other is refused as stale", async () => {
+  for (const key of [K.lock, K.start]) {
+    const who = { "X-Test-Sub": `ui-r-${rnd()}` };
+    const v = key === K.lock ? [`documents/${sub(who)}/one.md`, `documents/${sub(who)}/two.md`] : ["home", "chat"];
+    const rs = await Promise.all([put(who, key, v[0], 0), put(who, key, v[1], 0)]);
+    assertEquals(rs.map((r) => r.status).sort(), [200, 409], `${key}: ${rs.map((r) => r.text).join(" | ")}`);
+    const winner = rs.find((r) => r.status === 200)!;
+    assertEquals(winner.json.version, 1);
+    assertEquals((await mine(who))[key].value, winner.json.value);
+    assertEquals((await mine(who))[key].version, 1);
+  }
+  // many at once: still exactly one
+  const who = { "X-Test-Sub": `ui-r-${rnd()}` };
+  const many = await Promise.all(Array.from({ length: 8 }, (_, i) => put(who, K.recent, [{ kind: "source", id: `w${i}` }], 0)));
+  assertEquals(many.filter((r) => r.status === 200).length, 1, many.map((r) => r.status).join());
+  assertEquals(many.filter((r) => r.status === 409).length, 7);
+});
+
+t("U9 (F3): DELETE takes the version; a stale Unlock is refused; versions never go back after a delete (no ABA)", async () => {
+  const who = { "X-Test-Sub": `ui-u-${rnd()}` };
+  const P = (n: string) => `documents/${sub(who)}/${n}.md`;
+  assertEquals((await put(who, K.lock, P("one"), 0)).json.version, 1);
+  assertEquals((await put(who, K.lock, P("two"), 1)).json.version, 2); // another browser locks "two"
+  // this tab still holds version 1: its Unlock is refused and the newer lock stays
+  const stale = await call("DELETE", `${S}/${K.lock}?version=1`, undefined, who);
+  assertEquals(stale.status, 409, stale.text);
+  assertEquals((await mine(who))[K.lock].value, P("two"));
+  // the right version deletes, and the delete is itself a version
+  const del = await call("DELETE", `${S}/${K.lock}?version=2`, undefined, who);
+  assertEquals([del.status, del.json.is_default, del.json.version], [200, true, 3], del.text);
+  assertEquals((await mine(who))[K.lock].version, 3, "a key with no row reports the version the delete left, not 0");
+  // lock again: the number continues
+  assertEquals((await put(who, K.lock, P("three"), 3)).json.version, 4);
+  // ABA: a tab still holding an old version can no longer overwrite what it never saw
+  for (const old of [0, 1, 2, 3]) {
+    const r = await put(who, K.lock, P("four"), old);
+    assertEquals(r.status, 409, `version ${old}: ${r.text}`);
+  }
+  assertEquals((await mine(who))[K.lock].value, P("three"));
+  // a stale Unlock of the deleted key is refused too; an unversioned DELETE still works (the Settings panel's reset)
+  await call("DELETE", `${S}/${K.lock}?version=4`, undefined, who); // -> 5
+  assertEquals((await call("DELETE", `${S}/${K.lock}?version=4`, undefined, who)).status, 409);
+  assertEquals((await call("DELETE", `${S}/${K.lock}?version=x`, undefined, who)).status, 400);
+  assertEquals((await call("DELETE", `${S}/${K.lock}`, undefined, who)).status, 200);
+  assertEquals((await mine(who))[K.lock].version, 5);
+  // another subject's versions are its own
+  assertEquals((await mine(B))[K.lock].version, 0);
+});
+
+async function codeAs(role: string, text: string, args: unknown[] = []): Promise<string> {
+  const c = await pool!.connect();
+  try {
+    await c.queryObject("BEGIN");
+    await c.queryObject(`SET LOCAL ROLE ${role}`);
+    await c.queryObject(text, args);
+    await c.queryObject("ROLLBACK");
+    return "";
+  } catch (e) {
+    try { await c.queryObject("ROLLBACK"); } catch { /* broken */ }
+    return String((e as { fields?: { code?: string } }).fields?.code ?? (e as Error).message);
+  } finally {
+    c.release();
+  }
+}
+
+t("U10: slot 400's other keys count monotonically too; no other login reaches the tombstones or the clear function", async () => {
+  const who = { "X-Test-Sub": `ui-t-${rnd()}` };
+  await call("PUT", `${S}/refinery.dormancy_days`, { value: 5 }, who);
+  const d = await call("DELETE", `${S}/refinery.dormancy_days`, undefined, who);
+  assertEquals(d.json.version, 2);
+  assertEquals((await call("PUT", `${S}/refinery.dormancy_days`, { value: 6, version: 2 }, who)).json.version, 3);
+  for (const role of ["ob_pantry", "anon", "authenticated"]) {
+    assertEquals(await codeAs(role, `SELECT count(*) FROM public.user_setting_tombstones`), "42501", role);
+    assertEquals(await codeAs(role, `SELECT public.user_setting_clear($1, 'ui.start_screen', NULL)`, [sub(B)]), "42501", role);
+  }
 });

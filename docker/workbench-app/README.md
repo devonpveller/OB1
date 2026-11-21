@@ -26,3 +26,25 @@ image, `openbrain-workbench-app`. Later items fill it in. Not a stack service ye
   `WIKI_VIEWER_ALLOWED_HOSTS` - this service's own host name must be listed - and `WIKI_VIEWER_ALLOWED_ORIGINS`).
 - Build gate (fails the image): `tsc`, `vitest`, `node scripts/notices.mjs --check`, `node --test`.
   Locally: `npm ci && npm run test && npm run test:serve && npm run notices:check`.
+
+## The shell (item `rwr-shell-nav`)
+
+- `src/routes.ts` is the route table the left menu and the router share. A screen that is not built yet shows
+  "This screen is coming in phase N" (`shell/Placeholder.tsx`); a later item gives its route a real screen and
+  the menu does not change. `/what-moved-where` is the static Overview.
+- `shell/`: `TopBar` (Ctrl K search box, + Start research, avatar, locked-document chip), `Rail` (menu, counts,
+  Last / Locked document slot), `SearchOverlay` (empty on purpose; rwr-search fills it), `Banner` (default
+  subject), and the components later screens use: `ForDocumentBar` (amber, with a way back), `TypedConfirm`,
+  `Toast` (with Undo).
+- `lib/shell-data.ts` reads who you are (`/workspace/whoami`, `/auth/me`) and the three menu counts (running
+  sessions, intake jobs that offer a retry, cleanup sources + reopen candidates). Reads go through `lib/api.ts`
+  with `cache: "no-store"`; nothing read is stored, cached or logged. The six reads are independent (each lands
+  alone); the Research count is only the cards with `mine: true` (the sessions contract's server-computed owner
+  flag: a global list holds other people's cards); a read that came back full shows `N+`; a different subject
+  calls `resetState()`. The default-subject banner keys on the identity KIND (`/auth/me` `kind`, else
+  `/workspace/whoami` `kind`), not the sign-in mode.
+- `lib/state.ts` holds the locked and last document in memory (typed getters + subscribe). `rwr-ui-state-keys`
+  replaces its body with the account's settings keys; the shell does not change.
+- Tests: `npm test` (vitest incl. `test/contrast.test.ts`, AA for every token pair in light and dark) and the
+  headless-Chromium e2e with axe in an isolated lab: `e2e/run-e2e.ps1 -Image openbrain-workbench-app:wt-<id>
+  -AxeJs <axe.min.js>` (an `--internal` network, a stub workbench, no plane lease needed).

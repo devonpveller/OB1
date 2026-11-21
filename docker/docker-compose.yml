@@ -23,6 +23,8 @@ include:
 #
 #   --profile research   openbrain-curator, openbrain-research
 #   --profile wiki       openbrain-wiki, -wiki-viewer, -workbench, -wiki-backup
+#   --profile workbench-app   openbrain-workbench-app, the workbench's own front end alone (OFF until its
+#                        first deploy enables it; needs `wiki` for the workbench it fronts)
 #   --profile notebook   surrealdb, open-notebook-backup (the Open Notebook DATA side)
 #   --profile notebook-app   open_notebook, the app alone (intake-gate-relay round 2: the operator
 #                        retired it 2026-10-31 - OFF unless enabled; see open_notebook below)
@@ -1606,6 +1608,86 @@ services:
       test: ["CMD", "deno", "eval", "const r=await fetch('http://localhost:8000/health');Deno.exit(r.ok?0:1)"]
       interval: 30s
       timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  # The research workbench's OWN front end (rwr-app-container; plan: research-workbench-redesign,
+  # decision 2026-11-20 - its own service with its own door, like Open WebUI). The app is a static
+  # SPA served by a small Node server that also forwards /workbench/* to openbrain-workbench with
+  # the door key injected SERVER-SIDE (the viewer's forwarder, shared module): the browser never
+  # holds a key, and no client-sent identity header or proxy-chain header reaches the workbench.
+  # Image: openbrain-workbench-app (OB1/docker/workbench-app/, built by rwr-app-scaffold).
+  # STATELESS: no volume, no database, no backup (the item says so; see CONTAINER-REGISTRY.md).
+  # No new network and no new reach: obnet ONLY (it is on neither ai-stack_llm-net nor ai-stack_app-net,
+  # so it has no inference path, holds no LiteLLM key and gives llm-gateway nothing). Its one outbound
+  # call is the forwarder's, to openbrain-workbench on obnet; like every obnet member it sits on the
+  # plane's ordinary bridge, so "no egress" is the app's own behaviour (rwr-app-scaffold asserts it
+  # makes same-origin /workbench/* requests only), with every capability dropped here.
+  openbrain-workbench-app:
+    # OWN profile `workbench-app` (NOT `wiki`): the image is built by the gated first deploy, so no
+    # whole-plane `up` (recovery, `stack.py up`, a reboot) may build it as a side effect before that
+    # deploy enables the profile (`stack.py enable workbench-app`). It fronts openbrain-workbench (`wiki`),
+    # so the manifest `requires` wiki for it (compose refuses the project otherwise).
+    profiles: ["workbench-app"]
+    build:
+      context: ./workbench-app
+      dockerfile: Dockerfile
+      # The forwarder + security headers are the wiki viewer's own files (one module, not a fork):
+      # the Dockerfile copies them from the named context `viewerlib` (rwr-app-scaffold). A deploy
+      # that builds by hand must pass it: --build-context viewerlib=OB1/docker/wiki-viewer/lib.
+      # (compose resolves additional_contexts against THIS file's directory, OB1/docker - not the build context.)
+      additional_contexts:
+        viewerlib: ./wiki-viewer/lib
+    image: openbrain-workbench-app:local
+    container_name: openbrain-workbench-app
+    logging: # sysadmin log cap (disk-prune-watcher); applies on recreate
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+    depends_on:
+      openbrain-workbench:
+        condition: service_healthy
+    environment:
+      PORT: "8080"
+      # the forwarder routes /workbench/* here (the workbench's own port on obnet)
+      WORKBENCH_URL: http://openbrain-workbench:8000
+      # The door key the forwarder injects as X-Brain-Key: WORKSPACE_DOOR_KEY when set (the browser
+      # door's own key - required once the workbench signs users in), else WORKBENCH_KEY. Both are
+      # passed exactly as the viewer's entry passes them (the forwarder is the same module).
+      WORKBENCH_KEY: ${MCP_ACCESS_KEY}
+      WORKSPACE_DOOR_KEY: ${WORKSPACE_DOOR_KEY:-}
+      WORKSPACE_IDENTITY_HEADER: ${WORKSPACE_IDENTITY_HEADER:-}
+      WORKSPACE_IDENTITY_NAME_HEADER: ${WORKSPACE_IDENTITY_NAME_HEADER:-}
+      # The forwarder's CSRF / DNS-rebinding guard. The shared module (the viewer's own) reads the
+      # viewer's variable names and hard-codes the host `openbrain-wiki-viewer`, so THIS service's name
+      # is listed here (else a request by service name answers 421) and the door's public name / origin
+      # come from the operator's WORKBENCH_APP_ALLOWED_HOSTS / _ORIGINS (blank = loopback + the service
+      # name only; set both when Traefik fronts the door, else /workbench/* answers 421 / 403).
+      WIKI_VIEWER_ALLOWED_HOSTS: openbrain-workbench-app,${WORKBENCH_APP_ALLOWED_HOSTS:-}
+      WIKI_VIEWER_ALLOWED_ORIGINS: ${WORKBENCH_APP_ALLOWED_ORIGINS:-}
+    ports:
+      - "127.0.0.1:8820:8080"
+      # OPT-IN LAN BINDING (rwr-app-container, the edge-b2-pub pattern), SHIPPED INERT. WORKBENCH_APP_LAN_IP
+      # in OB1/docker/.env, set to the ONE host LAN address the Proxmox Traefik targets (never 0.0.0.0),
+      # adds <ip>:8820 BESIDE the loopback line; UNSET (or empty) it renders the loopback line a second
+      # time and compose collapses the pair to one binding. scripts/checks/check_lan_bindings.py proves
+      # it inert while unset and refuses any other binding. Apply the LAN firewall guard first
+      # (scripts/network/lan-ingress-firewall.ps1; 8820 is in stack.manifest.toml [lan_ingress.ports]);
+      # Authentik sits in front at the edge. Only the operator sets it, with the Traefik route.
+      - "${WORKBENCH_APP_LAN_IP:-127.0.0.1}:8820:8080"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - obnet
+    # healthy = /__health answers 200 (the server is up). The same command is the image's HEALTHCHECK.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/__health').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
       retries: 3
       start_period: 20s
     restart: unless-stopped

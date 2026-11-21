@@ -24,6 +24,11 @@
   --danger: #9b2c1f;
   --danger-soft: #fbe9e7;
   --focus: #0f6e6e;
+  --on-accent: #ffffff;
+  --lock-bg: #7a4a00;
+  --lock-fg: #fff7e8;
+  --lock-btn: #9a5f05;
+  --scrim: rgba(0, 0, 0, 0.45);
   --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
   color-scheme: light;
@@ -50,6 +55,11 @@
     --danger: #ee8a7c;
     --danger-soft: #3a1c17;
     --focus: #7fd0cd;
+    --on-accent: #0b1416;
+    --lock-bg: #5a3a06;
+    --lock-fg: #fff1d6;
+    --lock-btn: #7a4a00;
+    --scrim: rgba(0, 0, 0, 0.6);
     color-scheme: dark;
   }
 }
@@ -74,5 +84,10 @@
   --danger: #ee8a7c;
   --danger-soft: #3a1c17;
   --focus: #7fd0cd;
+  --on-accent: #0b1416;
+  --lock-bg: #5a3a06;
+  --lock-fg: #fff1d6;
+  --lock-btn: #7a4a00;
+  --scrim: rgba(0, 0, 0, 0.6);
   color-scheme: dark;
 }

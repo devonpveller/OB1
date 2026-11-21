@@ -12,7 +12,7 @@ const P4B_CARD = {
   phase: "plan", current_artifact: { kind: "stage", label: "plan" }, waiting_on: { kind: "stage", detail: "plan" },
   next_steering_point: { step_id: "s2", phase: "plan" },
   tree: [{ id: "99999999-9999-4999-8999-999999999999", parent_job_id: null, branch_kind: "root", status: "running", open: true, pending: false, rooted_step_id: null, query: "fixture question", created_at: "2026-10-17T12:00:00.000Z" }],
-  can_act: true, created_at: "2026-10-17T12:00:00.000Z", started_at: "2026-10-17T12:00:00.000Z", finished_at: null,
+  can_act: true, mine: false, created_at: "2026-10-17T12:00:00.000Z", started_at: "2026-10-17T12:00:00.000Z", finished_at: null,
 };
 
 export const EX = {

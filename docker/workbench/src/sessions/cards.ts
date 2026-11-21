@@ -57,6 +57,8 @@ export interface CardInput {
   // the job came from an idea (inlet kind idea): not private - it decides the badge for every viewer
   idea_inlet?: boolean;
   can_act: boolean;
+  // rwr-shell-nav: the viewer is the OWNER of the root session (not an admin acting on a service session)
+  mine: boolean;
   // round 2: the branch ids of the viewer's own steers - their text stays theirs
   own_steers?: ReadonlySet<string>;
   branches: BranchRow[];
@@ -211,10 +213,15 @@ export function adminOf(
   return who.sub === cfg.defaultSub;
 }
 
+// rwr-shell-nav: the viewer OWNS the session: the root's recorded owner is the viewer, or it has none and
+// the viewer is the ownerless owner (the default subject). Unlike mayActOn, an admin never "owns" a service's.
+export const ownsSession = (owner: string | null, who: { sub: string }, ownerless: string | null): boolean =>
+  owner === null ? ownerless !== null && ownerless === who.sub : owner === who.sub;
+
 // ── the card ───────────────────────────────────────────────────────────────────────────────────
 export const CARD_KEYS = [
   "id", "status", "state", "origin", "badge", "link", "caller", "query", "phase", "current_artifact", "waiting_on",
-  "next_steering_point", "tree", "can_act", "created_at", "started_at", "finished_at",
+  "next_steering_point", "tree", "can_act", "mine", "created_at", "started_at", "finished_at",
 ] as const;
 
 export function currentArtifact(jobId: string, events: EventRow[], phase: string): { kind: string; label: string } {
@@ -254,6 +261,7 @@ export function cardOf(r: CardInput, owui: string) {
     next_steering_point: r.status === "cancelled" || r.status === "error" ? null : nextSteeringPoint(r.id, r.events, r.can_act),
     tree,
     can_act: r.can_act,
+    mine: r.mine,
     created_at: r.created_at,
     started_at: r.started_at,
     finished_at: r.finished_at,

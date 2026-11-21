@@ -39,7 +39,7 @@ const FA = { iss: E("SESSIONS_TEST_FA_ISSUER"), aud: E("SESSIONS_TEST_FA_CLIENT_
 const ignore = !VIEWER;
 const opts = { ignore, sanitizeOps: false, sanitizeResources: false };
 const C = "/workbench/contract";
-const CARD_KEYS = ["badge", "caller", "can_act", "created_at", "current_artifact", "finished_at", "id", "link", "next_steering_point",
+const CARD_KEYS = ["badge", "caller", "can_act", "created_at", "current_artifact", "finished_at", "id", "link", "mine", "next_steering_point",
   "origin", "phase", "query", "started_at", "state", "status", "tree", "waiting_on"];
 
 async function sql<T = Record<string, any>>(text: string, args: unknown[] = []): Promise<T[]> {
@@ -620,4 +620,19 @@ Deno.test({ name: "S15 research_cancels: the grants refuse UPDATE / DELETE / TRU
   const g = await sql<{ p: string; ok: boolean }>(
     `SELECT p, has_table_privilege('service_role', 'public.research_cancels', p) AS ok FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) p`);
   assertEquals(Object.fromEntries(g.map((r) => [r.p, r.ok])), { SELECT: true, INSERT: true, UPDATE: false, DELETE: false, TRUNCATE: false });
+} });
+
+Deno.test({ name: "S16 rwr-shell-nav: `mine` is computed on the server from the caller's subject - alice's card is mine for alice only; an admin may act on a service job without owning it", ...opts, fn: async () => {
+  const L = await lab();
+  const view = async (who: string) => (await cardsOf(await new Browser().signIn(who)));
+  const alice = await view("alice"), bob = await view("bob"), admin = await view("admin");
+  assertEquals(alice.get(L.jobs.owui).mine, true, "alice's own card is mine for alice");
+  assertEquals(bob.get(L.jobs.owui).mine, false, "...not for bob");
+  assertEquals(admin.get(L.jobs.owui).mine, false, "...and not for an admin who is not alice");
+  assertEquals(admin.get(L.jobs.owui).can_act, false, "(an admin may not act on a user's job either)");
+  assertEquals([admin.get(L.jobs.nb).can_act, admin.get(L.jobs.nb).mine], [true, false], "a service's job: the admin may act on it, yet it is not theirs");
+  assertEquals(alice.get(L.jobs.nb).mine, false);
+  for (const [name, v] of [["alice", alice], ["bob", bob], ["admin", admin]] as const) {
+    for (const c of v.values()) assertEquals(typeof c.mine, "boolean", `${name}: every card carries mine`);
+  }
 } });

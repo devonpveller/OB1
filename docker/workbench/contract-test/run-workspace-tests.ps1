@@ -1320,10 +1320,10 @@ try {
     Check ((& $q "SELECT count(*) FROM public.user_settings") -eq '0') 'slot 400: the revert discarded the user tier (documented), init again starts it empty'
 
     # rwr-ui-state-keys [5m2]: slot 490 runs cleanly 3 times, its revert twice, and init again; the revert leaves the catalog
-    # exactly as after slot 400 alone (constraints, setting_problem's text with line endings normalised, its ACL and owner,
+    # exactly as after slot 400 alone (constraints, the text of setting_problem / user_setting_set with line endings normalised, their ACL and owner, no user_setting_clear, no tombstone table,
     # the key count), removes only its four keys (and every user's value of them), and init again restores them
     Write-Host '[5m2] init-ui-state.sql x2, revert-ui-state.sql x2 (the catalog is as after slot 400 alone), init again'
-    $fp = { & $q "SELECT md5(coalesce((SELECT string_agg(conname || ':' || pg_get_constraintdef(oid), '|' ORDER BY conname) FROM pg_constraint WHERE conrelid = 'public.settings_keys'::regclass), '') || (SELECT replace(pg_get_functiondef(p.oid), chr(13), '') || coalesce(p.proacl::text, '') || pg_get_userbyid(p.proowner) FROM pg_proc p WHERE p.proname = 'setting_problem') || (SELECT count(*)::text FROM public.settings_keys))" }
+    $fp = { & $q "SELECT md5(coalesce((SELECT string_agg(conname || ':' || pg_get_constraintdef(oid), '|' ORDER BY conname) FROM pg_constraint WHERE conrelid = 'public.settings_keys'::regclass), '') || (SELECT string_agg(replace(pg_get_functiondef(p.oid), chr(13), '') || coalesce(p.proacl::text, '') || pg_get_userbyid(p.proowner), '#' ORDER BY p.proname) FROM pg_proc p WHERE p.proname IN ('setting_problem', 'user_setting_set', 'user_setting_clear')) || (SELECT count(*)::text FROM public.settings_keys) || (to_regclass('public.user_setting_tombstones') IS NOT NULL)::text)" }
     $null = & $q "INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('ui-revert-$rand', 'refinery.dormancy_days', '9') ON CONFLICT DO NOTHING"
     $f400 = & $fp
     $uiRows = { & $q "SELECT count(*) FROM public.settings_keys WHERE key IN ('ui.locked_document','ui.last_document','ui.start_screen','library.recent')" }

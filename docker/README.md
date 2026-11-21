@@ -68,7 +68,7 @@ only — the knowledge store, the doors onto it, the workers that keep it
 coherent, and its backup. Groups sit behind compose profiles so a
 caller turns on the engines and surfaces it actually needs without editing
 `docker-compose.yml` (added 2026-09-19, ai-stack item `sl-ob1-profiles`;
-`pantry` and `intake` are opt-in and OFF by default):
+`pantry`, `intake` and `workbench-app` are opt-in and OFF by default):
 
 ```bash
 docker compose up -d                                     # core only
@@ -92,6 +92,7 @@ Core is everything NOT listed below: `openbrain-db`, `-mcp`, `-ext`,
 | `openbrain-wiki` | `wiki` | The vault compiler. It *produces* the wiki surface from the store; the store is complete and queryable with no vault compiled. |
 | `openbrain-wiki-viewer` | `wiki` | The Quartz renderer of the vault the compiler writes. `depends_on: openbrain-wiki`, so it belongs to the same group by construction — it has nothing to render otherwise. |
 | `openbrain-workbench` | `wiki` | The read/write half of the wiki surface, reached same-origin behind the viewer through the viewer's own `/workbench/*` forwarder (the portal Caddy route is gone since rw-identity-harden). Its only in-project caller is `openbrain-wiki` (`WORKBENCH_URL`, revision commits). Nothing core calls it. |
+| `openbrain-workbench-app` | `workbench-app` | The research workbench's OWN front end (rwr-app-container; image `openbrain-workbench-app`, source `workbench-app/`): a static app plus the `/workbench/*` forwarder to `openbrain-workbench` (the viewer's own forwarder module, via the `viewerlib` build context), door key injected server-side. `obnet` only; loopback `:8820` and the opt-in `WORKBENCH_APP_LAN_IP:8820` (inert as shipped). Stateless - no volume, no backup. Nothing core calls it. Its own profile (needs `wiki`): off until its first deploy enables it, so no plane `up` builds the `:local` image as a side effect. |
 | `openbrain-wiki-backup` | `wiki` | Tars `openbrain-wiki-data` + `wiki-assets` — the two volumes only the wiki group writes. With the group off there is no new vault state to protect. |
 | `surrealdb` | `notebook` | Open Notebook's local UI/queue/chat store and nothing else's; no other service in this project speaks to it. |
 | `open_notebook` | `notebook-app` | A surface onto `openbrain-db` (the canonical store since IKS), not an engine. `depends_on: surrealdb` (profile `notebook`, which `notebook-app` needs). Its OWN profile since intake-gate-relay round 2: the operator retired the app 2026-10-31 (stopped before intake writes bronze), so it is off unless `notebook-app` is enabled; `restart: unless-stopped`, so a stop holds across daemon restarts. |
