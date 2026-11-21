@@ -58,6 +58,10 @@
 # (inlet-owner-plant.sql), src/inlet/inlet_owner_integration_test.ts in phases around init-inlet-owner.sql / revert-inlet-owner.sql:
 # RED (the base, before 440 runs, and round 1's 410), the refusals, init x2, the reconcile repair, the deploy step, revert x2 byte-identical,
 # three mutants refused, init again, late unowned rows and the second run - the sweep then runs on that state.
+# rw-owner-private-view adds [5s] (slot 480; not with -Red or -SettingsOnly): contract-test/owner-private-view-lab.ps1 - the drift
+# [5r]'s 440 re-runs leave and 480's fix, the catalog, B's own private rows, three workbenches (sign-in on / off) and
+# src/inlet/owner_private_view_integration_test.ts, RED on -PvBaseSha and two database mutants, the deploy pre-check and the
+# readiness check; near the end the 480 revert twice and init again. The lab workbench logs in as ob_workbench.
 # It never touches the live stack. Exit 0 = every check passed (with -Red: every case FAILED).
 param(
   [string]$Id = 'wt-rw-p2b-workspace',
@@ -97,7 +101,9 @@ param(
   [string]$InletPrev2Sha = '6d79704',
   # rw-inlet-owner round 4: round 3's migration (the RED of the rebuild case, tester attempt 3's 4a)
   [string]$InletPrev3Sha = '3a4424f',
-  [string]$InletPrev4Sha = '51f00ea'
+  [string]$InletPrev4Sha = '51f00ea',
+  # rw-owner-private-view [5s]: the base whose workbench has no private routes (the RED of the owner cases): development's pin
+  [string]$PvBaseSha = '5566c18'
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -125,6 +131,7 @@ $refTag = "openbrain-idea-refinery:wt-$short-refinery" # rw-settings-store [5k]
 $baseChain = $IdeasOnly -or $SettingsOnly # the -Red run's chain comes from -BaseSha (the base has neither slot 370 nor 400)
 $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+$wbPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ }) # rw-owner-private-view: ob_workbench's lab password
 $key = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
 $wsKey = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
 $gateKey = -join ((48..57 + 97..122) | Get-Random -Count 40 | ForEach-Object { [char]$_ })
@@ -266,6 +273,9 @@ function Build-At([string]$sha, [string]$tag, [string]$target, [string]$what) {
   return DkLong @args2 $ctx
 }
 
+# rw-owner-private-view: step [5s] (Invoke-OwnerPrivateViewLab / Invoke-OwnerPrivateViewRevert)
+. (Join-Path $PSScriptRoot 'owner-private-view-lab.ps1')
+
 try {
   Write-Host "== rw-p2b-workspace lab run  owner=$Id  net=$net  red=$([bool]$Red)  evidence=$Evidence"
   $sha = (& git -C $ob1 rev-parse HEAD).Trim()
@@ -293,6 +303,8 @@ try {
   if (-not $Red) { Check (@($chain | Where-Object { $_[1] -eq '380-init-idea-privacy.sql' }).Count -eq 1) 'the chain mounts 380-init-idea-privacy.sql (rw-idea-privacy)' }
   if (-not $Red) { Check (@($chain | Where-Object { $_[1] -eq '400-init-settings.sql' }).Count -eq 1) 'the chain mounts 400-init-settings.sql (rw-settings-store)' }
   if (-not $Red) { Check (@($chain | Where-Object { $_[1] -eq '440-init-inlet-owner.sql' }).Count -eq 1) 'the chain mounts 440-init-inlet-owner.sql (rw-inlet-owner, after 430)' }
+  $has480 = @($chain | Where-Object { $_[1] -eq '480-init-owner-private-view.sql' }).Count -eq 1
+  if (-not $Red) { Check $has480 'the chain mounts 480-init-owner-private-view.sql (rw-owner-private-view, after 470)' }
 
   # ---------------------------------------------------------------- 2. network
   Write-Host '[2] the internal network'
@@ -352,6 +364,20 @@ try {
     $null = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -q -f "/tmp/$($m[1])"
     Check ($script:rc -eq 0) "$($m[1]) re-run after ob_app_memory exists (its grants)"
   }
+  # rw-owner-private-view (slot 480): the workbench logs in as ob_workbench. initdb ran 480 before ob_app_memory existed
+  # (the fresh-volume shape: no membership yet), so 480 runs again here - as the deploy notes say - and the lab sets the
+  # password (out of band on live)
+  $wbRole = 'ob_app_memory'; $wbRolePw = $appPw
+  if ($has480) {
+    $initLog = Dk logs $db
+    Check ($initLog -match 'ob_app_memory does not exist \(yet\)') '[480] on the fresh volume (initdb) 480 ran before ob_app_memory existed and said so'
+    $null = Dk cp (Join-Path $dockerDir 'init-owner-private-view.sql') "${db}:/tmp/i480.sql"
+    $o480 = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/i480.sql
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "ALTER ROLE ob_workbench PASSWORD '$wbPw'"
+    $mem = (Dk exec $db psql -U postgres -d openbrain -X -A -t -c "SELECT pg_has_role('ob_workbench', 'ob_app_memory', 'MEMBER')").Trim()
+    Check ($script:rc -eq 0 -and $mem -eq 't') "[480] run again after ob_app_memory exists: ob_workbench is its member; the workbench logs in as ob_workbench ($mem)"
+    $wbRole = 'ob_workbench'; $wbRolePw = $wbPw
+  }
   $null = Stamp-Guard 'DISABLE'   # rw-inlet-stamp: the fixtures are legacy-shaped (an unowned idea thought)
   $null = Dk cp (Join-Path $ct 'fixtures.sql') "${db}:/tmp/fixtures.sql"
   $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/fixtures.sql
@@ -380,7 +406,7 @@ try {
       '-e', 'NODE_OPTIONS=--max-old-space-size=2048', '-e', 'WORKBENCH_URL=http://openbrain-workbench:8000', '-e', "WORKBENCH_KEY=$key",
       '-e', "WIKI_VIEWER_ALLOWED_HOSTS=$P-viewer", '-v', "${vault}:/wiki:ro", $viewerTag)
   $wbArgs = @('--network-alias', 'openbrain-workbench', '-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$key",
-      '-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw", '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
+      '-e', "DB_HOST=$db", '-e', "DB_USER=$wbRole", '-e', "DB_PASSWORD=$wbRolePw", '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
       '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://stub-extract:8000', '-e', 'WIKI_GIT_DIR=/wiki',
       '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://stub-research:8000',
       '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'RESEARCH_SCORER_URL=http://stub-research:8000', '-e', "RESEARCH_SCORER_KEY=$wsKey", '-e', 'WORKBENCH_GATE_URL=http://stub-gate:8080', '-e', "WORKBENCH_GATE_KEY=$gateKey", '-e', "VIEWER_NAV_URL=http://$P-viewer:8082",
@@ -1192,6 +1218,8 @@ try {
     }
     Save 'inlet-psql.log' (($script:p410.GetEnumerator() | Sort-Object Name | ForEach-Object { "[$($_.Name)] $($_.Value)" }) -join "`n")
   }
+  # rw-owner-private-view [5s]: the owner's private view, on [5r]'s migrated state (440 + 470 in the live order, then 480)
+  if (-not $Red -and -not $SettingsOnly -and $has480 -and $inA) { Invoke-OwnerPrivateViewLab }
 
   if (-not $IdeasOnly -and -not $SettingsOnly) {
   # rw-p5a-intake: the intake and queue panel over the real workbench and database, two users and OWUI's key
@@ -1311,6 +1339,8 @@ try {
     foreach ($l in $rv) { Write-Host "    $l" }
     Check ($rv.Count -eq 6 -and @($rv | Where-Object { $_ -match 'REVERT-CHECK OK' }).Count -eq 2 -and @($rv | Where-Object { $_ -notmatch 'exit 0' }).Count -eq 0) 'the intake revert removes only its own rows, and init + revert re-run cleanly'
   }
+
+  if ($script:pvRan) { Invoke-OwnerPrivateViewRevert }
 
   # [5c] SUSPENDED (rwr-remove-workspace): the grammar byte-identity check compared src/documents/grammar.ts with the old
   # workspace's copy (wiki-viewer/workspace/src/lib/grammar.ts), deleted with the workspace. It returns, pointed at the new

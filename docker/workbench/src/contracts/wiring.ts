@@ -3,7 +3,8 @@
 // is set; unavailable - every debunked/credibility reopen refused - when it is not), the local
 // embedder and the chunker.
 import { pool } from "../db/pool.ts";
-import { embed } from "../util/embed.ts";
+import { embed, privateEmbedder } from "../util/embed.ts";
+import { privateViewConfig } from "../identity/private_view.ts";
 import { chunkText } from "../util/chunk.ts";
 import { poolDb } from "./db.ts";
 import { RegistryReader } from "./registry.ts";
@@ -28,5 +29,8 @@ export function contractDeps(): ContractDeps {
     // P7a: blank as shipped = a render request stays queued (nothing is rendered)
     podcastRenderUrl: (Deno.env.get("PODCAST_RENDER_URL") ?? "").trim(),
     podcastRenderKey: (Deno.env.get("WORKBENCH_KEY") || Deno.env.get("MCP_ACCESS_KEY") || "").trim(),
+    // rw-owner-private-view: the private views (identity mode; the private search's own embedding key)
+    privateEmbed: privateEmbedder(),
+    privateView: privateViewConfig(),
   };
 }

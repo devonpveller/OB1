@@ -280,6 +280,7 @@ try {
   if ($errs.Count) { Save 'initdb-errors.log' ($errs -join "`n") }
   $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) 'ob_app_memory (non-superuser, service_role) - the production shape'
+  . (Join-Path $PSScriptRoot 'ob-workbench-role.ps1'); $wbDb = Use-ObWorkbenchRole $appPw # rw-owner-private-view: the workbench's own role
   $null = Dk cp (Join-Path $ct 'fixtures.sql') "${db}:/tmp/fixtures.sql"
   # rw-inlet-stamp (slot 470): fixtures.sql is legacy-shaped (an unowned idea thought); the LAB switches 470's guards off
   # around this load only and on again right after (the migration has no escape hatch)
@@ -309,7 +310,7 @@ try {
       '-e', 'NODE_OPTIONS=--max-old-space-size=2048', '-e', 'WORKBENCH_URL=http://openbrain-workbench:8000', '-e', "WORKBENCH_KEY=$key",
       '-e', "WORKSPACE_DOOR_KEY=$door", '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub',
       '-e', "WIKI_VIEWER_ALLOWED_HOSTS=$P-viewer", '-v', "${vault}:/wiki:ro", $viewerTag)
-  $common = @('-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$key", '-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw",
+  $common = @('-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$key", '-e', "DB_HOST=$db", '-e', "DB_USER=$($wbDb.role)", '-e', "DB_PASSWORD=$($wbDb.pw)",
       '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid',
       '-e', 'WIKI_GIT_DIR=/wiki', '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', "RESEARCH_URL=http://$P-rs:8000",
       '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'FETCH_PROXY_URL=http://stub-proxy:3128', '-e', "VIEWER_NAV_URL=http://$P-viewer:8082",

@@ -10,7 +10,7 @@ import { isServiceKey, sameKey } from "./keys.ts";
 // one secret value each
 export const SECRET_VARS = [
   "WORKBENCH_KEY", "MCP_ACCESS_KEY", "WORKSPACE_DOOR_KEY", // the door and internal keys
-  "EMBEDDING_API_KEY", "EXPORT_VISION_KEY", "WORKBENCH_CHAT_KEY", // LiteLLM virtual keys
+  "EMBEDDING_API_KEY", "EXPORT_VISION_KEY", "WORKBENCH_CHAT_KEY", "PRIVATE_EMBEDDING_API_KEY", // LiteLLM virtual keys
   "RESEARCH_SCORER_KEY", "RESEARCH_WORKSPACE_KEY", "WORKBENCH_GATE_KEY", // sibling services' caller keys
   "OPENALEX_API_KEY", // the export resolver's OpenAlex key
   "DB_PASSWORD", // the database

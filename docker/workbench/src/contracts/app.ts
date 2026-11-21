@@ -13,6 +13,7 @@ import { registerCleanup } from "./routes/cleanup.ts";
 import { registerLibrary } from "./routes/library.ts";
 import { registerFlags } from "./routes/flags.ts";
 import { tombstoneActorMask } from "./routes/actor_mask.ts";
+import { registerPrivate } from "./routes/private.ts";
 
 export const CONTRACT_VERSION = "0.4.0"; // 0.2.0: P2a reference records; 0.3.0: P4b running sessions + P7a podcasts; 0.4.0: P8a core panels (source-states, the lift rule) + the cleanup view (additive)
 
@@ -31,6 +32,7 @@ export function createContractApp(deps: ContractDeps) {
   registerCleanup(app, deps); // P8a (rw-p8a2-cleanup): the cleanup view
   registerLibrary(app, deps); // rwr-home round 4: the shared-library reads behind the Home library cards
   registerFlags(app, deps); // rwr-flags-api: flag for cleanup (per user)
+  registerPrivate(app, deps); // rw-owner-private-view (slot 480): the owner's private views (no MCP tool)
   app.openAPIRegistry.registerComponent("securitySchemes", "brainKey", {
     type: "apiKey", in: "header", name: "X-Brain-Key",
     description: "the shared secret the door injects (the viewer's /workbench forwarder; G7); the browser never holds it",
