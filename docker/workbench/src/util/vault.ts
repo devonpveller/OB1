@@ -101,6 +101,15 @@ export async function vaultFileHistory(
   return out;
 }
 
+// The COMMITTER date of the latest commit touching `relPath` (the trash move's, for a trashed file): the
+// date git stamped when the commit was made, not the author date a caller can pass. null when unknown.
+export async function vaultLastCommitDate(relPath: string): Promise<Date | null> {
+  const r = await git(["log", "-1", "--format=%cI", "--", relPath]);
+  if (!r.ok || !r.out.trim()) return null;
+  const d = new Date(r.out.trim());
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 // Recent git history of a DIRECTORY: commits touching anything under it, each with
 // its changed-file list + status (A/M/D/R…). Powers the folder-history view and
 // recover-a-trashed-note. Bounded to `limit` commits.
@@ -231,10 +240,19 @@ async function commitIfStaged(
 // Delete a single file: `git rm` the tracked file (the removal is a recorded
 // commit, so the prior content stays recoverable via history), then commit. An
 // untracked draft (never committed) is just removed — no revision to preserve.
+// `strict`: a file that is not there at all is not "removed" - it throws VaultNotFound, so a second
+// caller racing the first learns it removed nothing (rwr-docs-lifecycle-api).
+export class VaultNotFound extends Error {
+  constructor(relPath: string) {
+    super(`not in the vault: ${relPath}`);
+  }
+}
+
 export async function gitRm(
   relPath: string,
   message: string,
   author?: string,
+  opts: { strict?: boolean } = {},
 ): Promise<{ committed: boolean }> {
   let rm = await git(["rm", "--quiet", "--", relPath]);
   if (!rm.ok && /index\.lock/.test(rm.err)) {
@@ -245,7 +263,10 @@ export async function gitRm(
     if (/did not match|not under version control/i.test(rm.err)) {
       try {
         await Deno.remove(safeJoin(config.vault.gitDir, relPath));
-      } catch { /* already gone */ }
+      } catch (e) {
+        if (opts.strict && e instanceof Deno.errors.NotFound) throw new VaultNotFound(relPath);
+        /* already gone */
+      }
       return { committed: false };
     }
     throw new Error(`git rm failed: ${rm.err.slice(0, 300)}`);
