@@ -9,15 +9,35 @@
 --   controls (the rule answers false): an ordinary note of A's and B's, an ordinary source and entity, a source holding
 --   10 of P1's 48 words (3 of 41 windows: under half), an entity holding P3 inside a longer text (not whole);
 --   and :filler ordinary rows (sources and entities), so a scan takes many chunks.
+-- phase=late (round 2, R1 case b; 470 off): a fourth unowned thought P4 (48 words) and its leaf, and a row stored
+--   before the text rule that carries P4 at an early slug (behind any cursor): false for the rule until 440 runs again
+--   and withholds P4's leaf (the store grows), true after.
+-- phase=big (round 2, N3): long bodies like the live long sources (:bigwords words each, comma-separated sizes): one
+--   ordinary source per size and one flagged source (P1 buried in the longest), at adjacent slugs (one chunk).
+-- phase=store (round 2, N3): the guard's store at the live scale (:storepages pages of :storechunks chunks each, of text no
+--   page carries: they match nothing), so the rule costs per window what it costs live.
 -- The planted slugs and what the lab expects of each are kept in public.lab_rescan_plant (this lab database only).
 \set ON_ERROR_STOP on
 \if :{?filler}
 \else
 \set filler 0
 \endif
+\if :{?storepages}
+\else
+\set storepages 23000
+\endif
+\if :{?storechunks}
+\else
+\set storechunks 100
+\endif
+\if :{?bigwords}
+\else
+\set bigwords 8000
+\endif
 CREATE TABLE IF NOT EXISTS public.lab_rescan_plant (slug TEXT PRIMARY KEY, kind TEXT NOT NULL, owner TEXT NOT NULL, flagged BOOLEAN NOT NULL, marker TEXT NOT NULL);
 SELECT set_config('lab.mark', :'mark', false) AS m_set, set_config('lab.phase', :'phase', false) AS p_set,
-       set_config('lab.filler', :'filler', false) AS f_set \gset
+       set_config('lab.filler', :'filler', false) AS f_set, set_config('lab.bigwords', :'bigwords', false) AS b_set,
+       set_config('lab.storepages', :'storepages', false) AS sp_set, set_config('lab.storechunks', :'storechunks', false) AS sc_set \gset
 DO $$
 DECLARE
     m   TEXT := current_setting('lab.mark');
@@ -25,9 +45,10 @@ DECLARE
     nf  INT := current_setting('lab.filler')::int;
     dim INT := (SELECT atttypmod FROM pg_attribute WHERE attrelid = 'public.thoughts'::regclass AND attname = 'embedding');
     v   TEXT;
-    p1  TEXT; p2 TEXT; p3 TEXT;
-    t1 BIGINT; t2 BIGINT; t3 BIGINT;
+    p1  TEXT; p2 TEXT; p3 TEXT; p4 TEXT;
+    t1 BIGINT; t2 BIGINT; t3 BIGINT; t4 BIGINT;
     i   INT;
+    nb  INT;
 BEGIN
     -- the private texts: distinct words carrying the marker, so no window is shared with anything else
     SELECT string_agg('alpha' || m || 'w' || g, ' ' ORDER BY g) INTO p1 FROM generate_series(1, 48) g;
@@ -42,6 +63,46 @@ BEGIN
             ('content/thought/' || t1, 'thought', 'Thought ' || t1, p1, '[]', '{}'),
             ('content/thought/' || t2, 'thought', 'Thought ' || t2, p2, '[]', '{}'),
             ('content/thought/' || t3, 'thought', 'Thought ' || t3, p3, '[]', '{}');
+        RETURN;
+    END IF;
+    IF ph = 'late' THEN
+        SELECT string_agg('delta' || m || 'w' || g, ' ' ORDER BY g) INTO p4 FROM generate_series(1, 48) g;
+        v := '[' || array_to_string(array_fill('0.02'::text, ARRAY[greatest(dim, 1)]), ',') || ']';
+        INSERT INTO public.thoughts (content, embedding, metadata, exposure) VALUES (p4, v::vector, '{"source":"mcp"}', 'ops') RETURNING id INTO t4;
+        INSERT INTO public.wiki_pages (slug, page_class, title, body, links, frontmatter) VALUES
+            ('content/thought/' || t4, 'thought', 'Thought ' || t4, p4, '[]', '{}');
+        PERFORM set_config('session_replication_role', 'replica', true);
+        INSERT INTO public.lab_rescan_plant (slug, kind, owner, flagged, marker) VALUES ('content/concept/0-late-' || m, 'entity', '-', true, m);
+        INSERT INTO public.wiki_pages (slug, page_class, entity_type, title, body, links, frontmatter)
+        VALUES ('content/concept/0-late-' || m, 'entity', 'concept', 'Lab late page', 'My own words first. ' || p4, '[]', jsonb_build_object('lab', true));
+        PERFORM set_config('session_replication_role', 'origin', true);
+        RETURN;
+    END IF;
+    IF ph = 'store' THEN
+        INSERT INTO public.inlet_owner_withheld_pages (page_ref, n_chunks, whole_hash)
+        SELECT -1000000 - g, current_setting('lab.storechunks')::int, md5('lab-store-' || m || '-' || g)
+          FROM generate_series(1, current_setting('lab.storepages')::int) g;
+        INSERT INTO public.inlet_owner_withheld_chunks (h, page_ref)
+        SELECT md5('lab-store-' || m || '-' || g || '-' || k), -1000000 - g
+          FROM generate_series(1, current_setting('lab.storepages')::int) g, generate_series(1, current_setting('lab.storechunks')::int) k;
+        RETURN;
+    END IF;
+    IF ph = 'big' THEN
+        PERFORM set_config('session_replication_role', 'replica', true);
+        FOREACH nb IN ARRAY string_to_array(current_setting('lab.bigwords'), ',')::int[] LOOP
+            INSERT INTO public.lab_rescan_plant (slug, kind, owner, flagged, marker) VALUES ('content/source/0big-' || m || '-' || lpad(nb::text, 7, '0'), 'big', '-', false, m);
+            INSERT INTO public.wiki_pages (slug, page_class, title, body, links, frontmatter)
+            SELECT 'content/source/0big-' || m || '-' || lpad(nb::text, 7, '0'), 'source', 'Lab long source ' || nb,
+                   string_agg('longword' || (g % 997) || 'x' || (g / 997), ' ' ORDER BY g), '[]', jsonb_build_object('lab', true)
+              FROM generate_series(1, nb) g;
+        END LOOP;
+        nb := (SELECT max(x) FROM unnest(string_to_array(current_setting('lab.bigwords'), ',')::int[]) x);
+        INSERT INTO public.lab_rescan_plant (slug, kind, owner, flagged, marker) VALUES ('content/source/0big-' || m || '-flag', 'big', '-', true, m);
+        INSERT INTO public.wiki_pages (slug, page_class, title, body, links, frontmatter)
+        SELECT 'content/source/0big-' || m || '-flag', 'source', 'Lab long flagged source',
+               string_agg('longword' || (g % 997) || 'y' || (g / 997), ' ' ORDER BY g) || ' ' || p1 || ' the end', '[]', jsonb_build_object('lab', true)
+          FROM generate_series(1, nb) g;
+        PERFORM set_config('session_replication_role', 'origin', true);
         RETURN;
     END IF;
     IF ph <> 'legacy' THEN RAISE EXCEPTION 'lab plant: unknown phase %', ph; END IF;

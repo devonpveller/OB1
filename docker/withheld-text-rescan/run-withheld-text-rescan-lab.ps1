@@ -2,7 +2,8 @@
 # withheld text are withheld by rescan-withheld-text.sql, with 440's text rule unchanged; resumable; revert byte-identical.
 #
 #   powershell -NoProfile -File OB1\docker\withheld-text-rescan\run-withheld-text-rescan-lab.ps1 [-Id <owner id>]
-#       [-Evidence <dir>] [-Filler 2400] [-Chunk 100]
+#       [-Evidence <dir>] [-Filler 2400] [-Chunk 100] [-BigWords 8000,16000,32000] [-StorePages 23000] [-StoreChunks 100] [-ScanSql <a scan file>]
+#   (-ScanSql: run the same checks against another scan file, e.g. round 1's, to see which checks it fails)
 #
 # What it does, and ONLY this:
 #   1. stages this checkout's initdb chain from docker/docker-compose.yml
@@ -19,20 +20,33 @@
 #      control and filler row untouched; output carries no planted text or slug
 #   6. after: nothing flagged presented to A or B; the guard keeps a re-write out; the count reads 0; a re-run on the
 #      clean database withholds nothing; the revert restores the whole table byte-identically; a second revert no-ops
-#   7. tears down exactly what it created and verifies nothing labelled <Id> is left
+#   7. round 2 (R1): a stale open run is never continued - (a) an interrupted scan, then 440's revert ALONE, 440
+#      re-applied, a scan; (b) an interrupted scan, then 440 run again adding withheld text that flags a row behind the
+#      cursor, a scan; (c) the guard's state changes while a scan runs. Each FAILS if any rule-true row is presented
+#      afterwards; the finish notice must count the run's archive rows still unrestored
+#   8. round 2 (N3): long planted bodies (-BigWords): the rule's time per row, and the row-lock hold per chunk at the
+#      default chunk, with a writer probing the long rows all through the scan (it must never wait)
+#   after EVERY scan that finishes (N1): count-withheld-text.sql, which must read rows_flagged = 0
+#   9. tears down exactly what it created and verifies nothing labelled <Id> is left
 # Exit code 0 = every check passed.
 param(
   [string]$Id = 'wt-rw-withheld-text-rescan',
   [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
   [string]$Evidence = '',
   [int]$Filler = 2400,
-  [int]$Chunk = 100
+  [int]$Chunk = 100,
+  [string]$BigWords = '8000,16000,32000',
+  [int]$StorePages = 23000,
+  [int]$StoreChunks = 100,
+  [string]$ScanSql = ''
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
 $label = "ai-stack.harness.owner=$Id"
 $labDir = $PSScriptRoot
 $dockerDir = Split-Path -Parent $labDir
+if ($BigWords -notmatch '^[0-9]+(,[0-9]+)*$') { throw "bad -BigWords '$BigWords'" }
+$scanFile = if ($ScanSql) { (Resolve-Path $ScanSql).Path } else { Join-Path $labDir 'rescan-withheld-text.sql' }
 $rand = -join ((48..57 + 97..102) | Get-Random -Count 6 | ForEach-Object { [char]$_ })
 $net = "rwtr-net-$rand"; $db = "rwtr-db-$rand"
 $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
@@ -57,6 +71,7 @@ function Get-Chain([string]$dir) {
   return , @($rx.Matches($compose) | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
 }
 function Q([string]$sql) { $r = Dk exec $db psql -U postgres -d openbrain -X -A -t -c $sql; return "$r".Trim() }
+function Qq([string]$sql) { $r = Dk exec $db psql -U postgres -d openbrain -X -A -t -q -c $sql; return "$r".Trim() }
 # a read as a shared surface: the role (service_role = the viewer's PostgREST anon; ob_app_memory = the workbench) and
 # the identity it serves
 function QAs([string]$role, [string]$sub, [string]$sql) {
@@ -74,6 +89,25 @@ function NoText([string]$what, [string]$out) {
   $leak = ($out -match [regex]::Escape($Mark)) -or ($out -match 'alpha|bravo|charlie|secret dinner|content/|notes/')
   Check (-not $leak) "$what printed no planted text and no slug (counts and md5 prefixes only)"
 }
+# N1: the procedure's last step after every scan that finished - the read-only count must read rows_flagged = 0
+function CountAfter([string]$name, $scan) {
+  if ($scan.out -notmatch 'run [0-9a-f]{8} finished') { return }
+  $c = PsqlFile (Join-Path $labDir 'count-withheld-text.sql') @()
+  Save "$name-count.log" $c.out
+  Check ($c.rc -eq 0 -and $c.out -match '\(all\)\s*\|\s*\d+\s*\|\s*0\s*\|' -and $c.out -notmatch '\|\s*[1-9]\d*\s*\|\s*[0-9a-f]{12}') "N1 after the scan ($name): count-withheld-text.sql reads rows_flagged = 0 in every row"
+  NoText "the count after $name" $c.out
+}
+function Scan([string]$name, [string[]]$vars) {
+  $r = PsqlFile $scanFile $vars
+  Save "$name.log" $r.out
+  CountAfter $name $r
+  return $r
+}
+# the finish notice's withheld count, and the run's archive rows still unrestored
+function FinishWithheld([string]$out) { if ($out -match 'finished[^:]*: \d+ chunk\(s\), \d+ row\(s\) scanned, (\d+) withheld') { return $Matches[1] } return '' }
+function RunUnrestored() { return Q "SELECT count(*) FROM public.inlet_owner_archive a WHERE a.action = 'w' AND a.restored_at IS NULL AND a.batch = (SELECT batch FROM public.inlet_owner_rescan_runs ORDER BY started_at DESC LIMIT 1)" }
+function RuleTrue() { return Q "SELECT count(*) FROM public.wiki_pages w WHERE public.inlet_owner_text_withheld(w.body)" }
+$people = @(@('service_role', $A, 'A (viewer role)'), @('service_role', $B, 'B (viewer role)'), @('ob_app_memory', $A, 'A (workbench role)'), @('ob_app_memory', $B, 'B (workbench role)'))
 $fp = "SELECT md5(string_agg(to_jsonb(w)::text, '|' ORDER BY slug)) || ':' || count(*) FROM public.wiki_pages w"
 $flagSlugs = "(SELECT slug FROM public.lab_rescan_plant WHERE flagged)"
 $ctlSlugs = "(SELECT slug FROM public.lab_rescan_plant WHERE NOT flagged)"
@@ -132,8 +166,7 @@ try {
   $fp0 = Q $fp
   $n0 = Q 'SELECT count(*) FROM public.wiki_pages'
   Check ((Q 'SELECT count(*) FROM public.inlet_owner_withheld_pages') -eq '0') 'the store of withheld text is empty (a fresh volume)'
-  $r = PsqlFile (Join-Path $labDir 'rescan-withheld-text.sql') @('-v', "chunk=$Chunk")
-  Save 'scan-0-empty-store.log' $r.out
+  $r = Scan 'scan-0-empty-store' @('-v', "chunk=$Chunk")
   $run0 = Q "SELECT n_scanned || '/' || n_withheld || '/' || (finished_at IS NOT NULL) FROM public.inlet_owner_rescan_runs"
   Check ($r.rc -eq 0 -and $run0 -eq "$n0/0/true" -and (Q $fp) -eq $fp0) "a scan with no withheld page in the store: $n0 scanned, nothing withheld, the table unchanged ($run0)"
   NoText 'the empty-store scan' $r.out
@@ -181,12 +214,11 @@ try {
   Check ($ro -match 'read-only transaction') "a write inside BEGIN READ ONLY is refused by the server (the count's guarantee)"
 
   Write-Host '[6] the scan: a clean stop, a killed backend, then continued'
-  $r = PsqlFile (Join-Path $labDir 'rescan-withheld-text.sql') @('-v', "chunk=$Chunk", '-v', 'max_chunks=3')
-  Save 'scan-1-stop.log' $r.out
+  $r = Scan 'scan-1-stop' @('-v', "chunk=$Chunk", '-v', 'max_chunks=3')
   $s1 = Q "SELECT n_chunks || '/' || n_scanned || '/' || (finished_at IS NULL) FROM public.inlet_owner_rescan_runs WHERE reverted_at IS NULL AND finished_at IS NULL"
   Check ($r.rc -eq 0 -and $s1 -eq "3/$(3 * $Chunk)/true") "stopped after 3 chunks: the run is open with 3 chunks, $(3 * $Chunk) rows scanned ($s1)"
   NoText 'the first scan session' $r.out
-  $null = Dk cp (Join-Path $labDir 'rescan-withheld-text.sql') "${db}:/tmp/rescan-kill.sql"
+  $null = Dk cp $scanFile "${db}:/tmp/rescan-kill.sql"
   $null = Dk exec -d $db sh -c "psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -v chunk=$Chunk -v pause_ms=1500 -f /tmp/rescan-kill.sql > /tmp/scan-kill.log 2>&1"
   $killedAt = ''
   for ($i = 0; $i -lt 60; $i++) {
@@ -205,8 +237,7 @@ try {
   Check ($killedAt -ne '' -and $k -eq '1' -and $s2 -match '^(\d+)/(\d+)/true$' -and [int]$Matches[1] -ge 6 -and [int]$Matches[1] -lt [math]::Ceiling($total / $Chunk)) "the backend was killed mid-run: the run is still open after $s2 (chunks/scanned)"
   $orph = Q "SELECT count(*) FROM public.inlet_owner_archive a JOIN public.inlet_owner_rescan_runs r ON r.batch = a.batch WHERE r.finished_at IS NULL AND NOT EXISTS (SELECT 1 FROM public.inlet_owner_rescan_chunks c WHERE c.batch = a.batch AND a.ref BETWEEN c.first_slug AND c.last_slug)"
   Check ($orph -eq '0') "the killed chunk left nothing behind: no archive row outside a committed chunk ($orph)"
-  $r = PsqlFile (Join-Path $labDir 'rescan-withheld-text.sql') @('-v', "chunk=$Chunk")
-  Save 'scan-3-continue.log' $r.out
+  $r = Scan 'scan-3-continue' @('-v', "chunk=$Chunk")
   Check ($r.rc -eq 0 -and $r.out -match 'continuing run' -and $r.out -match 'finished \(continued\)') 'the next run continued the open run to its end'
   NoText 'the continued scan' $r.out
   $runs = Q "SELECT count(*) || '/' || count(*) FILTER (WHERE finished_at IS NOT NULL) FROM public.inlet_owner_rescan_runs WHERE reverted_at IS NULL"
@@ -245,8 +276,7 @@ try {
   Save 'count-after.log' $c.out
   Check ($c.rc -eq 0 -and $c.out -match '\(all\)\s*\|\s*' + $now + '\s*\|\s*0\s*\|') "the read-only count after: $now rows, 0 flagged"
   $fpAfter = Q $fp
-  $r = PsqlFile (Join-Path $labDir 'rescan-withheld-text.sql') @('-v', "chunk=$Chunk")
-  Save 'scan-4-clean-rerun.log' $r.out
+  $r = Scan 'scan-4-clean-rerun' @('-v', "chunk=$Chunk")
   $re = Q "SELECT n_scanned || '/' || n_withheld || '/' || (finished_at IS NOT NULL) FROM public.inlet_owner_rescan_runs ORDER BY started_at DESC LIMIT 1"
   Check ($r.rc -eq 0 -and $re -eq "$now/0/true" -and (Q $fp) -eq $fpAfter) "a re-run on the clean database: a new run, $now scanned, nothing withheld, the table unchanged ($re)"
   NoText 'the clean re-run' $r.out
@@ -264,15 +294,149 @@ try {
   $r = PsqlFile (Join-Path $labDir 'revert-withheld-text-rescan.sql') @()
   Save 'revert-2.log' $r.out
   Check ($r.rc -eq 0 -and $r.out -match 'no run to revert' -and (Q $fp) -eq $fpBefore) 'a second revert has nothing to do and changes nothing'
-  $r = PsqlFile (Join-Path $labDir 'rescan-withheld-text.sql') @('-v', "chunk=$Chunk")
-  Save 'scan-5-after-revert.log' $r.out
+  $r = Scan 'scan-5-after-revert' @('-v', "chunk=$Chunk")
   $re = Q "SELECT n_scanned || '/' || n_withheld FROM public.inlet_owner_rescan_runs ORDER BY started_at DESC LIMIT 1"
   Check ($r.rc -eq 0 -and $re -eq "$total/6") "after the revert a new scan withholds the same 6 again ($re)"
+  # -- round 2 ---------------------------------------------------------------------------------------------------------
+  $half = [int][math]::Floor([math]::Ceiling($total / $Chunk) / 2)
+  $openRun = "FROM public.inlet_owner_rescan_runs r WHERE r.finished_at IS NULL AND r.reverted_at IS NULL ORDER BY r.started_at DESC LIMIT 1"
+  $storeQ = "SELECT count(*) || '/' || coalesce(sum(n_chunks), 0) FROM public.inlet_owner_withheld_pages"
+
+  Write-Host '[9] R1 case (a): an interrupted scan, then 440''s revert ALONE, 440 re-applied, a scan'
+  $r = PsqlFile (Join-Path $labDir 'revert-withheld-text-rescan.sql') @()
+  Save 'revert-a0.log' $r.out
+  Check ($r.rc -eq 0 -and (Q $fp) -eq $fpBefore) 'set-up: the rescan reverted, the 6 flagged rows back (the table as before the first scan)'
+  $r = Scan 'scan-a1-interrupted' @('-v', "chunk=$Chunk", '-v', "max_chunks=$half")
+  $a1 = Q "SELECT r.n_chunks || '/' || (SELECT count(*) FROM public.inlet_owner_archive a WHERE a.batch = r.batch AND a.restored_at IS NULL) $openRun"
+  Check ($r.rc -eq 0 -and $a1 -match "^$half/[1-5]$") "interrupted after $half chunks, some flagged rows behind its cursor already withheld (chunks/withheld $a1)"
+  NoText 'the interrupted scan (a)' $r.out
+  $r = PsqlFile (Join-Path $dockerDir 'revert-inlet-stamp.sql') @()
+  Check ($r.rc -eq 0) '470 reverted first (the slot order above 440)'
+  $r = PsqlFile (Join-Path $dockerDir 'revert-inlet-owner.sql') @()
+  Save '440-revert-a.log' $r.out
+  $back = Q "SELECT count(*) FROM public.wiki_pages WHERE slug IN $flagSlugs"
+  $runA = Q "SELECT (SELECT count(*) FILTER (WHERE a.restored_at IS NOT NULL) || '/' || count(*) FROM public.inlet_owner_archive a WHERE a.batch = r.batch) $openRun"
+  Check ($r.rc -eq 0 -and $back -eq '6' -and $runA -match '^([1-5])/\1$') "440's revert ALONE put the open run's withheld rows back and left the run open (flagged rows stored $back; the open run's archive rows restored/all $runA)"
+  $r = PsqlFile (Join-Path $dockerDir 'init-inlet-owner.sql') @('-v', "owner_sub=$A")
+  Save '440-reapply-a.log' $r.out
+  $r2 = PsqlFile (Join-Path $dockerDir 'init-inlet-stamp.sql') @()
+  $st = Q $storeQ
+  Check ($r.rc -eq 0 -and $r2.rc -eq 0 -and $st -eq '3/56') "440 re-applied (owner A), then 470: the store rebuilt ($st)"
+  $rt = RuleTrue
+  $p = Presented 'service_role' $B
+  Check ($rt -eq '6' -and $p -eq '6/6|6') "RED before the scan: the 6 rule-true rows are stored and presented to B again (rule-true $rt; presented $p)"
+  $r = Scan 'scan-a2-after-440-revert' @('-v', "chunk=$Chunk")
+  Check ($r.rc -eq 0 -and $r.out -notmatch 'continuing run' -and $r.out -match 'open run [0-9a-f]{8} closed, not continued' -and $r.out -match 'new run' -and $r.out -match 'finished') 'the scan did NOT continue the stale run: it closed it and ran a fresh full run to its end'
+  Check ($r.out -match '[1-5] of its [1-5] archive row\(s\) restored since it began') 'the reason it printed: the run''s archive rows were restored (counts only)'
+  NoText 'the scan after 440''s revert (a)' $r.out
+  $rt = RuleTrue
+  Check ($rt -eq '0') "(a) after the scan no wiki_pages row the rule answers true for is left ($rt)"
+  foreach ($who in $people) {
+    $p = Presented $who[0] $who[1]
+    Check ($p -eq '0/0|6') "(a) as $($who[2]) no flagged row is presented and every control is ($p)"
+  }
+  $fw = FinishWithheld $r.out; $ur = RunUnrestored
+  Check ($fw -eq '6' -and $ur -eq '6') "(a) the finish notice counts the run's archive rows still unrestored (notice $fw, archive $ur)"
+  $ab = Q "SELECT count(*) || '/' || count(*) FILTER (WHERE abandoned_why LIKE '%restored since it began%') FROM public.inlet_owner_rescan_runs WHERE abandoned_at IS NOT NULL AND finished_at IS NULL AND reverted_at IS NULL"
+  Check ($ab -eq '1/1') "(a) the stale run is closed (abandoned_at, its reason recorded), not finished ($ab)"
+
+  Write-Host '[10] R1 case (b): an interrupted scan, then 440 run again adding withheld text, a scan'
+  $r = PsqlFile (Join-Path $dockerDir 'revert-inlet-stamp.sql') @()
+  Check ($r.rc -eq 0) '470 taken off (so an unowned thought can be written)'
+  $r = PsqlFile (Join-Path $labDir 'lab-plant.sql') @('-v', "mark=$Mark", '-v', 'phase=late')
+  Check ($r.rc -eq 0) 'planted a fourth unowned thought and its leaf, and a row stored before the text rule carrying its text at an early slug'
+  $lateSel = "(SELECT slug FROM public.lab_rescan_plant WHERE slug LIKE 'content/concept/0-late-%')"
+  Check ((Q "SELECT public.inlet_owner_text_withheld(body) FROM public.wiki_pages WHERE slug = $lateSel") -eq 'f') 'before 440 runs again the rule answers false for that row'
+  $r = Scan 'scan-b1-interrupted' @('-v', "chunk=$Chunk", '-v', "max_chunks=$half")
+  $b1 = Q "SELECT (r.cursor_slug > $lateSel) || '/' || r.n_chunks || '/' || r.n_withheld $openRun"
+  Check ($r.rc -eq 0 -and $b1 -eq "true/$half/0") "interrupted after $half chunks with that row behind its cursor (behind/chunks/withheld $b1)"
+  NoText 'the interrupted scan (b)' $r.out
+  $st0 = Q $storeQ
+  $r = PsqlFile (Join-Path $dockerDir 'init-inlet-owner.sql') @('-v', "owner_sub=$A")
+  Save '440-rerun-b.log' $r.out
+  $st1 = Q $storeQ
+  $r2 = PsqlFile (Join-Path $dockerDir 'init-inlet-stamp.sql') @()
+  Check ($r.rc -eq 0 -and $r2.rc -eq 0 -and $st0 -eq '3/56' -and $st1 -eq '4/97') "440 run again (owner A, a new batch): the new leaf withheld, the store grew ($st0 -> $st1); 470 back"
+  $rt = RuleTrue
+  $p = Presented 'service_role' $B
+  Check ($rt -eq '1' -and $p -eq '1/0|6') "RED before the scan: the row behind the cursor now answers true and is presented to B (rule-true $rt; presented $p)"
+  $r = Scan 'scan-b2-after-440-rerun' @('-v', "chunk=$Chunk")
+  Check ($r.rc -eq 0 -and $r.out -notmatch 'continuing run' -and $r.out -match 'open run [0-9a-f]{8} closed, not continued' -and $r.out -match 'the guard''s state changed' -and $r.out -match 'finished') 'the scan did NOT continue the run whose guard state changed: closed it, ran a fresh full run to its end'
+  NoText 'the scan after 440 ran again (b)' $r.out
+  $rt = RuleTrue
+  Check ($rt -eq '0' -and (Q "SELECT count(*) FROM public.wiki_pages WHERE slug = $lateSel") -eq '0') "(b) after the scan no row the rule answers true for is left, the late row included ($rt)"
+  foreach ($who in $people) {
+    $p = Presented $who[0] $who[1]
+    Check ($p -eq '0/0|6') "(b) as $($who[2]) no flagged row is presented and every control is ($p)"
+  }
+  $fw = FinishWithheld $r.out; $ur = RunUnrestored
+  Check ($fw -eq '1' -and $ur -eq '1') "(b) the finish notice counts the run's archive rows still unrestored (notice $fw, archive $ur)"
+
+  Write-Host '[11] R1 case (c): the guard''s state changes while a scan runs'
+  $null = Dk cp $scanFile "${db}:/tmp/rescan-c.sql"
+  $null = Dk exec -d $db sh -c "psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -v chunk=$Chunk -v pause_ms=1500 -f /tmp/rescan-c.sql > /tmp/scan-c.log 2>&1; echo rc=`$? >> /tmp/scan-c.log"
+  $seen = ''
+  for ($i = 0; $i -lt 60; $i++) {
+    Start-Sleep -Milliseconds 500
+    $seen = Q "SELECT r.n_chunks $openRun"
+    if ($seen -match '^\d+$' -and [int]$seen -ge 2) { break }
+  }
+  # what 440 run again does to the store, by hand (a page no text matches): the count changes
+  $null = Q "INSERT INTO public.inlet_owner_withheld_pages (page_ref, n_chunks, whole_hash) VALUES (-1, 0, md5('lab-no-such-text-$rand'))"
+  $cl = ''
+  for ($i = 0; $i -lt 120; $i++) { Start-Sleep -Milliseconds 500; $cl = Dk exec $db cat /tmp/scan-c.log; if ($cl -match 'rc=\d+') { break } }
+  Save 'scan-c1-guard-changed-mid-run.log' $cl
+  $c1 = Q "SELECT count(*) FROM public.inlet_owner_rescan_runs WHERE abandoned_at IS NOT NULL AND finished_at IS NULL AND abandoned_why LIKE '%state changed%' AND started_at = (SELECT max(started_at) FROM public.inlet_owner_rescan_runs)"
+  Check ($cl -match 'refused - run [0-9a-f]{8} closed after \d+ chunk' -and $cl -match 'rc=3' -and $cl -notmatch 'finished' -and $c1 -eq '1') "a guard change under a running scan (after $seen chunks): the run is closed and the scan refuses, not finished"
+  NoText 'the refused scan (c)' $cl
+  $null = Q 'DELETE FROM public.inlet_owner_withheld_pages WHERE page_ref = -1'
+  $r = Scan 'scan-c2-after-refusal' @('-v', "chunk=$Chunk")
+  Check ($r.rc -eq 0 -and $r.out -notmatch 'continuing run' -and $r.out -match 'new run' -and $r.out -match 'finished' -and (RuleTrue) -eq '0') 'run again: a fresh full run (nothing left open to continue) to its end; nothing rule-true left'
+
+  Write-Host "[12] N3: long bodies ($BigWords words) - the rule's time per row; the row-lock hold per chunk at the default chunk, with a writer probing the long rows all through"
+  $r = PsqlFile (Join-Path $labDir 'lab-plant.sql') @('-v', "mark=$Mark", '-v', 'phase=big', '-v', "bigwords=$BigWords")
+  Check ($r.rc -eq 0) 'planted the long bodies (one ordinary source per size, one flagged source as long as the longest)'
+  $r = PsqlFile (Join-Path $labDir 'lab-plant.sql') @('-v', "mark=$Mark", '-v', 'phase=store', '-v', "storepages=$StorePages", '-v', "storechunks=$StoreChunks")
+  $null = Q 'ANALYZE public.inlet_owner_withheld_pages; ANALYZE public.inlet_owner_withheld_chunks'
+  $stN = Q $storeQ
+  Check ($r.rc -eq 0) "the guard's store grown to the live scale with text no page carries (pages/chunks $stN)"
+  $timing = Qq "CREATE FUNCTION pg_temp.rule_ms(b TEXT) RETURNS TEXT LANGUAGE plpgsql AS `$f`$ DECLARE t0 TIMESTAMPTZ := clock_timestamp(); v BOOLEAN; BEGIN v := public.inlet_owner_text_withheld(b); RETURN v || ' in ' || round(extract(epoch FROM clock_timestamp() - t0) * 1000) || ' ms'; END `$f`$; SELECT string_agg(length(w.body) || ' chars (' || array_length(string_to_array(w.body, ' '), 1) || ' words): rule ' || pg_temp.rule_ms(w.body), '; ' ORDER BY p.flagged, length(w.body)) FROM public.lab_rescan_plant p JOIN public.wiki_pages w USING (slug) WHERE p.kind = 'big'"
+  Write-Host "  INFO  the rule per long row: $timing"
+  $null = Dk cp $scanFile "${db}:/tmp/rescan-n3.sql"
+  $null = Dk exec -d $db sh -c "psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -f /tmp/rescan-n3.sql > /tmp/scan-n3.log 2>&1; echo rc=`$? >> /tmp/scan-n3.log"
+  # a writer' row lock on the long ordinary rows (what a compile UPDATE of them takes first), waiting at most 1 s
+  $probeSql = "SET lock_timeout = '1s'; DO `$p`$ DECLARE t0 TIMESTAMPTZ := clock_timestamp(); n INT; BEGIN SELECT count(*) INTO n FROM (SELECT 1 FROM public.wiki_pages WHERE slug IN (SELECT slug FROM public.lab_rescan_plant WHERE kind = 'big' AND NOT flagged) FOR UPDATE) x; RAISE NOTICE 'probe_ms=%', round(extract(epoch FROM clock_timestamp() - t0) * 1000); EXCEPTION WHEN lock_not_available THEN RAISE NOTICE 'probe_timeout'; END `$p`$"
+  $probes = New-Object System.Collections.Generic.List[int]; $timeouts = 0; $nl = ''
+  $sw = [Diagnostics.Stopwatch]::StartNew()
+  while ($sw.Elapsed.TotalMinutes -lt 20) {
+    $o = Dk exec $db psql -U postgres -d openbrain -X -A -t -q -c $probeSql
+    if ($o -match 'probe_ms=(\d+)') { $probes.Add([int]$Matches[1]) } elseif ($o -match 'probe_timeout') { $timeouts++ }
+    $nl = Dk exec $db cat /tmp/scan-n3.log
+    if ($nl -match 'rc=\d+') { break }
+    Start-Sleep -Milliseconds 100
+  }
+  Save 'scan-n3-default-chunk.log' $nl
+  $scanSec = [math]::Round($sw.Elapsed.TotalSeconds)
+  Check ($nl -match 'rc=0' -and $nl -match 'run [0-9a-f]{8} finished') "the scan at the default chunk finished ($scanSec s)"
+  NoText 'the long-body scan' $nl
+  CountAfter 'scan-n3-default-chunk' @{ out = $nl }
+  $mx = Q "SELECT max(c.n_scanned) || '/' || max(c.rule_ms) || '/' || max(c.lock_ms) || '/' || count(*) FILTER (WHERE c.n_withheld > 0) FROM public.inlet_owner_rescan_chunks c WHERE c.batch = (SELECT batch FROM public.inlet_owner_rescan_runs ORDER BY started_at DESC LIMIT 1)"
+  $bigChunk = Q "SELECT c.rule_ms || '/' || c.lock_ms || '/' || c.n_withheld FROM public.inlet_owner_rescan_chunks c WHERE c.batch = (SELECT batch FROM public.inlet_owner_rescan_runs ORDER BY started_at DESC LIMIT 1) AND (SELECT min(slug) FROM public.lab_rescan_plant WHERE kind = 'big') BETWEEN c.first_slug AND c.last_slug"
+  $pmax = if ($probes.Count) { ($probes | Measure-Object -Maximum).Maximum } else { -1 }
+  $meas = "default chunk rows/max rule ms/max lock ms/chunks that withheld: $mx; the long rows' chunk rule ms/lock ms/withheld: $bigChunk; writer probes $($probes.Count), longest $pmax ms, lock timeouts $timeouts; rule per long row: $timing"
+  Save 'n3-measured.txt' $meas
+  Write-Host "  INFO  $meas"
+  $parts = $mx -split '/'
+  Check ($parts.Count -eq 4 -and $parts[0] -eq '100') "the default chunk is 100 rows ($($parts[0]))"
+  Check ($parts.Count -eq 4 -and $parts[2] -match '^\d+$' -and [int]$parts[2] -le 1000) "no chunk held row locks for more than 1 s (longest $($parts[2]) ms, while the long rows' chunk ran the rule for $(($bigChunk -split '/')[0]) ms)"
+  Check ($probes.Count -ge 3 -and $timeouts -eq 0 -and $pmax -lt 1000) "a writer updating the long ordinary rows all through the scan never waited on it ($($probes.Count) probes, longest $pmax ms, $timeouts lock timeouts)"
+  Check ((RuleTrue) -eq '0' -and (Q "SELECT count(*) FROM public.wiki_pages WHERE slug IN (SELECT slug FROM public.lab_rescan_plant WHERE kind = 'big' AND flagged)") -eq '0') 'the long flagged source is withheld; nothing rule-true left'
+
   Check ((Get-FileHash (Join-Path $dockerDir 'init-inlet-owner.sql') -Algorithm SHA256).Hash -eq $guardBefore) 'init-inlet-owner.sql (the text rule and the guard) is unchanged by the run'
 } catch {
   Fail "aborted: $_"
 } finally {
-  Write-Host '[9] teardown'
+  Write-Host '[13] teardown'
   $null = Dk rm -f $db
   $null = Dk network rm $net
   $left = (Dk ps -a --filter "label=$label" --format '{{.Names}}') + (Dk network ls --filter "label=$label" --format '{{.Name}}')
