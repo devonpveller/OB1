@@ -4,6 +4,7 @@
 // screen. A read that fails says so (state "failed"); it never shows an invented number.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../lib/api";
+import { SEARCH_URL } from "../../components/picker";
 
 export type CardState<T> = { state: "loading" } | { state: "failed" } | { state: "ok"; data: T };
 
@@ -108,7 +109,7 @@ export async function readClaimsWaiting(): Promise<ClaimsWaiting> {
 
 // The ask box, in phase 0: a library search (pages, claims and sources; never a user document).
 export async function runSearch(q: string): Promise<SearchHit[]> {
-  const { data } = await api("GET", "/workbench/contract/search?q=" + encodeURIComponent(q) + "&limit=10");
+  const { data } = await api("GET", SEARCH_URL + "?q=" + encodeURIComponent(q) + "&limit=10");
   return listOf(data, "results").map((r) => ({ kind: String(r.kind), id: String(r.id), title: String(r.title ?? ""), snippet: String(r.snippet ?? "").replace(/<<\/?HL>>/g, "") }));
 }
 

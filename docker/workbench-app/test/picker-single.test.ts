@@ -99,8 +99,8 @@ describe("one picker, one list search (structural)", () => {
         "src/screens/Refs.tsx": `import { api } from "../lib/api";\nimport { ItemPicker } from "../components/picker";\nexport const r = (id: string) => api("GET", "/workbench/contract/references/" + id);\nexport const L = () => <label>Search for it<ItemPicker mode="multi" onConfirm={() => {}} /></label>;`,
       })).toEqual([]);
     });
-    it("the allow-list is the picker's own files only", () => {
-      expect(SEARCH_ALLOW.every((f) => f.startsWith("src/components/picker/"))).toBe(true);
+    it("the allow-list is the picker's own files plus exactly one named consumer (the Home ask box)", () => {
+      expect(SEARCH_ALLOW.filter((f) => !f.startsWith("src/components/picker/"))).toEqual(["src/screens/home/home-data.ts"]);
     });
     it("the harness page stays out of the production build", () => {
       expect(readFileSync(join(ROOT, "vite.config.ts"), "utf8")).toMatch(/PICKER_HARNESS === "1"/);

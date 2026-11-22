@@ -46,6 +46,8 @@ export const SEARCH_ALLOW = [
   "src/components/picker/index.ts",
   "src/components/picker/search.ts",
   "src/components/picker/harness/main.tsx",
+  // the Home ask box (rwr-home, phase 0) is a plain search; it asks the route through the picker's one SEARCH_URL, not a copy of the path
+  "src/screens/home/home-data.ts",
 ];
 const ROUTE_FILE = "src/components/picker/search.ts";
 const EXT = /\.(ts|tsx|js|jsx|mjs|mts|cjs)$/;
