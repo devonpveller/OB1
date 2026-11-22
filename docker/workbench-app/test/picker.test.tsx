@@ -2,7 +2,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, cleanup, waitFor, within } from "@testing-library/react";
 import {
-  ItemPicker, searchLibrary, searchUrl, applyFilters, countBy, sortItems, snippetParts, missingFacets, NO_FILTERS, keyOf,
+  ItemPicker, PickerResults, searchLibrary, searchUrl, applyFilters, countBy, sortItems, snippetParts, missingFacets, NO_FILTERS, keyOf,
   type PickerItem, type MineSearch,
 } from "../src/components/picker";
 import { setFetcher, requestLog, clearRequestLog, api, raw } from "../src/lib/api";
@@ -410,5 +410,26 @@ describe("two identities (privacy)", () => {
     expect(window.localStorage.length).toBe(0);
     expect(window.sessionStorage.length).toBe(0);
     setItem.mockRestore();
+  });
+});
+
+// rwr-picker attempt 4 (the tester's probe, made permanent): EVERY view the picker exports marks a private result.
+describe("the private marker on every view the picker exports", () => {
+  const HELD = [hit("source", "s3", "HELD-A note", { lifecycle: "held", state: "held" }), hit("source", "s1", "Shared note")];
+  const DOC = { kind: "document" as const, label: "My doc", topics: [], refineryId: "r-9" };
+  const marker = (li: Element | null) => li?.querySelector("[data-testid=private-tag]")?.textContent ?? null;
+  it("ItemPicker: the held source's row says private, the shared one does not", async () => {
+    libFetcher(HELD);
+    render(<ItemPicker {...props} scope={DOC} />);
+    type("note");
+    await waitFor(() => expect(keys()).toEqual(["source:s3", "source:s1"]));
+    expect([marker(row("source:s3")), marker(row("source:s1"))]).toEqual(["private", null]);
+  });
+  it("PickerResults (document scope with a refinery id): the held source's row says private, the shared one does not", async () => {
+    const seen = libFetcher(HELD);
+    render(<PickerResults query="note" scope={DOC} label="r" open={(_i, c) => <a href="/x">{c}</a>} />);
+    await waitFor(() => expect(screen.getByText("HELD-A note")).toBeTruthy());
+    expect(seen).toEqual(["/workbench/contract/search?q=note&limit=50&refinery_id=r-9"]);
+    expect([marker(screen.getByText("HELD-A note").closest("li")), marker(screen.getByText("Shared note").closest("li"))]).toEqual(["private", null]);
   });
 });

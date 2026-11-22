@@ -71,6 +71,12 @@ function Opt({ on, label: l, count, onClick }: { on: boolean; label: string; cou
   );
 }
 
+// THE private marker: every view the picker exports (ItemPicker's rows and tray, PickerResults' rows) renders a private
+// item through this one component, so no view can show a private result unmarked (acceptance 3).
+export function PrivateTag({ item, testId }: { item: Pick<PickerItem, "private">; testId?: string }) {
+  return item.private ? <span className="ip-tag priv" data-testid={testId}>private</span> : null;
+}
+
 export function ItemPicker(props: ItemPickerProps) {
   const { mode, scopes, alreadyLinked, mineSearch, onChange, onConfirm, onCancel } = props;
   const uid = useId();
@@ -265,7 +271,7 @@ export function ItemPicker(props: ItemPickerProps) {
                       <span className="ip-title">{i.title}</span>
                       <span className="ip-tag">{kindLabel(i.kind)}</span>
                       {i.type && <span className="ip-meta">{i.type}</span>}
-                      {i.private && <span className="ip-tag priv" data-testid="private-tag">private</span>}
+                      <PrivateTag item={i} testId="private-tag" />
                       {linked && <span className="ip-tag linked">already linked</span>}
                     </span>
                     {(i.author || i.date) && <span className="ip-meta ip-blk">{[i.author, i.date?.slice(0, 10)].filter(Boolean).join(" · ")}</span>}
@@ -294,7 +300,7 @@ export function ItemPicker(props: ItemPickerProps) {
               <li key={keyOf(i)} className="ip-ti" data-key={keyOf(i)}>
                 <span className="ip-main">
                   <span className="ip-title">{i.title}</span>
-                  <span className="ip-meta ip-blk">{kindLabel(i.kind)}{i.private && <> <span className="ip-tag priv">private</span></>}</span>
+                  <span className="ip-meta ip-blk">{kindLabel(i.kind)}{i.private && " "}<PrivateTag item={i} /></span>
                 </span>
                 <button type="button" className="ip-btn" aria-label={`Remove ${i.title}`} onClick={() => remove(keyOf(i))}>{"×"}</button>
               </li>
@@ -350,6 +356,7 @@ export function PickerResults({ query, scope = LIB, limit, label, open, testId =
             {open(i, <>
               <span className="row-main"><span className="row-title">{i.title || "(untitled)"}</span>{snip && <span className="meta">{snip}</span>}</span>
               <span className="pill">{i.kind}</span>
+              <PrivateTag item={i} testId="private-tag" />
             </>)}
           </li>
         );
