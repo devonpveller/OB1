@@ -27,7 +27,7 @@
 #   5. [writer] the real writer: compile flush, retry, viewer-style repair (and 390 through the writer)
 #   6. [viewer] /__health green with a withheld page's file present; two identities: no route shows the marker
 #   7. [regression] a genuinely missing page turns the viewer red; removed, green again
-#   8. [cleanup] an old refused file (left by the old writer) moved to a backup folder, the viewer green; the revert puts it back
+#   8. [cleanup] (run as the wiki service runs it: OPEN_BRAIN_REST_TOKEN = the WIKI token) an old refused file (left by the old writer) moved to a backup folder, the viewer green; the revert puts it back
 #   9. the owner's private rows are byte-identical (md5) from the plant to the end
 param(
   [string]$Id = 'wt-rw-wiki-guarded-pages',
@@ -291,14 +291,14 @@ COMMIT;
   Write-Host '[8] [cleanup] an old refused file left by the old writer: moved to a backup folder, the revert puts it back'
   $old = Join-Path $vault "content\notebooks\lab-$rand\c-refused.md"
   [System.IO.File]::WriteAllText($old, "---`ntitle: C refused`n---`n$text`n", (New-Object System.Text.UTF8Encoding $false))
-  $cl = Node-Run 'cleanup-apply' @() $sharedDir '/shared/withheld-pages-cleanup.mjs --apply --vault /vault --backup /vault/.withheld-backup-lab' 600
+  $cl = Node-Run 'cleanup-apply' @("OPEN_BRAIN_REST_TOKEN=$($script:tokWiki)") $sharedDir '/shared/withheld-pages-cleanup.mjs --apply --vault /vault --backup /vault/.withheld-backup-lab' 600
   $clLines = (($cl -split "`n") | Where-Object { $_ -match '^\[withheld-cleanup\]' }) -join ' | '
   Write-Host "    $clLines"
   $movedOk = -not (Test-Path $old) -and (Test-Path (Join-Path $vault ".withheld-backup-lab\files\content\notebooks\lab-$rand\c-refused.md"))
   Fix 'cleanup-apply' ($movedOk -and $clLines -match 'apply: (\d+) refused page file' -and [int]$Matches[1] -ge 1 -and $clLines -notmatch [regex]::Escape($MARK) -and $clLines -notmatch 'refused\.md|c-refused') 'the cleanup moved the old refused file(s) out of the served vault into the backup folder; its output is counts only'
   $h4 = Fresh-Health (Now-Iso)
   Fix 'viewer-green-after-cleanup' ($h4 -and $h4.s -eq 'ok' -and $h4.d -eq 0) "after the cleanup the viewer is green (drift $($h4.d))"
-  $rv = Node-Run 'cleanup-revert' @() $sharedDir '/shared/withheld-pages-cleanup.mjs --revert --vault /vault --backup /vault/.withheld-backup-lab' 600
+  $rv = Node-Run 'cleanup-revert' @("OPEN_BRAIN_REST_TOKEN=$($script:tokWiki)") $sharedDir '/shared/withheld-pages-cleanup.mjs --revert --vault /vault --backup /vault/.withheld-backup-lab' 600
   $rvLines = (($rv -split "`n") | Where-Object { $_ -match '^\[withheld-cleanup\]' }) -join ' | '
   Write-Host "    $rvLines"
   Fix 'cleanup-revert' ((Test-Path $old) -and $rvLines -match 'revert: (\d+) file\(s\) put back' -and [int]$Matches[1] -ge 1) 'the revert put the moved file(s) back'
