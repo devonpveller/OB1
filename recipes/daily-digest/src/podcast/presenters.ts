@@ -29,6 +29,15 @@ export interface Presenter {
   backstory: string;
   language: string;
   voice: VoiceLink;
+  // rwr-cast-edit-api (slot 560): how the presenter reads. Optional and "" when not set - then the cast block is exactly
+  // what it was before them (the golden-script test, cast-fields.test.ts). No model route: phase J (operator-gated).
+  role?: string;
+  focus?: string;
+  stance?: string;
+  tone?: string;
+  speakingStyle?: string;
+  systemPrompt?: string;
+  systemPromptMode?: string; // "built" (default: the line is built from the fields) | "own" (systemPrompt is the line)
 }
 
 export interface Team {
@@ -100,11 +109,28 @@ export function turnsFromHostScript(title: string, script: string, team: Team): 
   return { title, turns: spoken };
 }
 
-/** The cast block the script prompt carries: who each HOST label is and how they talk. */
+// A field the owner typed goes into the prompt on ONE line: line breaks and runs of spaces collapse, so it can never
+// start a line of its own (a fake "HOST B:" label, a new instruction block). Only the rwr-cast-edit-api fields pass
+// through it; the fields before them are written exactly as they always were (byte-identical output when none is set).
+const oneLine = (s: string | undefined) => (s ?? "").replace(/\s+/g, " ").trim();
+
+/** The rwr-cast-edit-api fields of a presenter, in a fixed order, each only where set. "" when none is. */
+export function castFields(p: Presenter): string {
+  const parts: [string, string | undefined][] = [
+    ["Role", p.role], ["Focus", p.focus], ["Stance", p.stance], ["Tone", p.tone], ["Speaking style", p.speakingStyle],
+  ];
+  return parts.map(([k, v]) => [k, oneLine(v)]).filter(([, v]) => v).map(([k, v]) => ` ${k}: ${v}`).join("");
+}
+
+/** The cast block the script prompt carries: who each HOST label is and how they talk. A presenter whose system prompt
+ *  is its owner's own ("own", with text) is described by that text; otherwise the line is built from the fields, the
+ *  rwr-cast-edit-api ones appended only where set (a presenter with none set reads exactly as before). */
 export function castBlock(team: Team): string {
-  const lines = team.presenters.map((p, i) =>
-    `${hostLabel(i)} is ${p.name}.${p.backstory ? ` Background: ${p.backstory}` : ""}${p.personality ? ` Personality: ${p.personality}` : ""}`
-  );
+  const lines = team.presenters.map((p, i) => {
+    const own = p.systemPromptMode === "own" ? oneLine(p.systemPrompt) : "";
+    if (own) return `${hostLabel(i)} is ${p.name}. ${own}`;
+    return `${hostLabel(i)} is ${p.name}.${p.backstory ? ` Background: ${p.backstory}` : ""}${p.personality ? ` Personality: ${p.personality}` : ""}${castFields(p)}`;
+  });
   return `THE CAST (write each host in their own voice; keep the "HOST A:" style labels):\n${lines.join("\n")}`;
 }
 

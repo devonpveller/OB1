@@ -74,7 +74,8 @@ Deno.test("every registry in registry.ts is seeded by the migrations (when the m
     sql = await Deno.readTextFile(new URL("../../../init-research-contract.sql", import.meta.url)) +
       await Deno.readTextFile(new URL("../../../init-references.sql", import.meta.url)) +
       await Deno.readTextFile(new URL("../../../init-research-credibility.sql", import.meta.url)) +
-      await Deno.readTextFile(new URL("../../../init-flags.sql", import.meta.url)); // rwr-flags-api
+      await Deno.readTextFile(new URL("../../../init-flags.sql", import.meta.url)) + // rwr-flags-api
+      await Deno.readTextFile(new URL("../../../init-cast.sql", import.meta.url)); // rwr-cast-edit-api
   } catch {
     return; // inside the image the migrations are not in the build context
   }
