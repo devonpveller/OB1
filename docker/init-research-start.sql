@@ -3,8 +3,9 @@
 -- On slot 420 (rw-boundary-core) and 460 (rw-boundary-digest).
 --
 --   * research_handbacks.purpose: 'user-start' joins the four purposes. A run the signed-in user starts (attached to
---     nothing, a document or an idea) is formed by the request boundary like every personal path; its private
---     hand-back says which purpose opened it. (A CHECK on the column: the old one is dropped and re-added widened.)
+--     nothing or a document; never an idea - operator decision: an idea is researched only through its owner's path,
+--     slot 580) is formed by the request boundary like every personal path; its private hand-back says which purpose
+--     opened it. (A CHECK on the column: the old one is dropped and re-added widened.)
 --   * request_boundary_options_ok (420's allow-list, widened by 460): a derived job's options may also carry
 --     `contract` = {"budget": {rounds, max_fetch, wall_ms}} - the depth preset (quick | standard | deep) the research
 --     service resolved INSIDE the admin ceilings (depth.ts: min(preset, MAX_ROUNDS / MAX_FETCH / MAX_WALL_MS)).
