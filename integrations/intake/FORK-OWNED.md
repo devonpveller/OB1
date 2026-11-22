@@ -101,4 +101,8 @@ reviewed-upstream: 1d78973e021e7280108b50897590dc2d3b47890c
 # are init-inlet-owner.sql's io_code_name list (screen_verdict, the read-only name match reviewed above) and this file's own
 # review entries; nothing of the list above changes.
 reviewed-upstream: 5566c18355140fad0e058874187ca09d8b662ed0
+# rw-rest-door-auth int3 (2026-11-21): reviewed. Not upstream - the fork's own work/rw-rest-door-auth-int2 (fc4bc78) merged
+# onto work/rw-owner-private-view-int3 (b22befd) as work/rw-rest-door-auth-int3 (the merge's second parent). The hits are
+# this file's own round-6 review entry above (naming screen_verdict); nothing of the list above changes.
+reviewed-upstream: fc4bc786878007911c7bb11c54132d39311b145f
 ```
