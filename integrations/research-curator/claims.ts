@@ -123,7 +123,20 @@ export interface WriteClaimsOpts {
    * reads claim_kind; a claim without one is scored under the registry's declared fallback kind.
    */
   claimMetadata?: Record<string, unknown>;
+  /**
+   * rw-private-report-claims (slot 570; operator 2026-11-21 "any information generated from private data remains
+   * private"): the claims of a PRIVATE report are filed into the report owner's store (PD1's inlet_private_claims /
+   * inlet_private_claim_sources) through private_report_claim_file / private_report_claim_edge - never into the shared
+   * claims table, never deduplicated onto a shared claim. The database names the owner from the report (key + job).
+   */
+  privateReport?: { researchKey: string; jobId: string };
 }
+
+/** The shared write (find_or_create_claim) and the private one (slot 570): the same arguments, the same answer. */
+export const SHARED_CLAIM_SQL = `SELECT * FROM find_or_create_claim($1, $2, $3, $4, $5, $6, $7::vector, $8::jsonb)`;
+export const PRIVATE_CLAIM_SQL =
+  `SELECT * FROM public.private_report_claim_file($9, $10::uuid, $1, $2::uuid, $4, $5, $6, $7::vector, $8::jsonb) WHERE $3::uuid IS NULL`;
+export const PRIVATE_EDGE_SQL = "SELECT public.private_report_claim_edge($1::uuid, $2::uuid, $3, $4::float8::real)";
 
 /**
  * research-workbench P3a attempt 2 (tester near-miss: "a claim filed after P3a without a kind
@@ -226,14 +239,18 @@ export async function writeClaims(
       try { emb = toVector(await opts.embed(claim.text)); } catch { emb = null; }
     }
 
+    const priv = opts.privateReport;
+    const args: unknown[] = [
+      claim.text, opts.threadId, opts.synthesisId, claim.tag,
+      opts.volatility ?? null, opts.revalidateDays ?? null, emb,
+      JSON.stringify({ ...(opts.claimMetadata ?? {}), source: "deep-research-claim" }),
+    ];
+    // a private report has no shared synthesis: $3 is null (the private statement files nothing otherwise)
     const fc = await client.queryObject<{ id: string; was_duplicate: boolean }>(
-      `SELECT * FROM find_or_create_claim($1, $2, $3, $4, $5, $6, $7::vector, $8::jsonb)`,
-      [
-        claim.text, opts.threadId, opts.synthesisId, claim.tag,
-        opts.volatility ?? null, opts.revalidateDays ?? null, emb,
-        JSON.stringify({ ...(opts.claimMetadata ?? {}), source: "deep-research-claim" }),
-      ],
+      priv ? PRIVATE_CLAIM_SQL : SHARED_CLAIM_SQL,
+      priv ? [...args, priv.researchKey, priv.jobId] : args,
     );
+    if (!fc.rows.length) throw new Error("claim refused: a private report's claim carries no shared synthesis");
     const claimId = fc.rows[0].id;
     res.claimIds.push(claimId);
     res.filed.push(claimId);
@@ -247,7 +264,7 @@ export async function writeClaims(
         throw new Error(`claim edge refused: weight ${String(e.weight)} is not 0 or in [1e-9, 1] (claim_sources.weight)`);
       }
       // attempt 5 (N1): the shared statement - the weight bound as a double, cast to REAL by the database
-      await client.queryObject(LINK_EDGE_SQL, [claimId, e.sourceId, e.edgeType, e.weight]);
+      await client.queryObject(priv ? PRIVATE_EDGE_SQL : LINK_EDGE_SQL, [claimId, e.sourceId, e.edgeType, e.weight]);
       res.edgesWritten++;
     }
   }
