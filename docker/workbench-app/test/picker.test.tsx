@@ -82,6 +82,10 @@ describe("the shared search (the one the Ctrl+K overlay is built on)", () => {
     expect(seen).toEqual(["/workbench/contract/search?q=vrm&limit=50"]);
     expect(searchUrl({ q: "vrm", scope: { kind: "document", label: "d", topics: ["t"], refineryId: "r-1" } })).toBe("/workbench/contract/search?q=vrm&limit=50&refinery_id=r-1");
   });
+  it("a smaller limit (Home's ask box asks for 10) is clamped to 1..the route's ceiling", () => {
+    const u = (limit?: number) => searchUrl({ q: "vrm", scope: { kind: "library" }, limit });
+    expect([u(10), u(), u(0), u(500), u(Number.NaN)]).toEqual(["10", "50", "1", "50", "50"].map((l) => `/workbench/contract/search?q=vrm&limit=${l}`));
+  });
   it("marks a held source private", async () => {
     libFetcher();
     const r = await searchLibrary({ q: "vrm", scope: { kind: "library" } });

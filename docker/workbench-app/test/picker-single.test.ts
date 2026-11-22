@@ -65,6 +65,44 @@ describe("one picker, one list search (structural)", () => {
       red({ "src/components/picker/harness/Other.tsx": `import { useLibrarySearch } from "../search"; export const O = () => { useLibrarySearch("a", {} as never); return null; };` }, /R2.*Other\.tsx/));
   });
 
+  // Attempt 3: an allow-list entry for a non-picker file (Home's data file) made it a laundering hop. Home's ask box is now
+  // a picker consumer (PickerResults through the index); the same shapes from ANY file outside the picker stay red.
+  describe("the tester's attempt-3 bypasses: a file outside picker/ re-binds or re-exports a search export", () => {
+    const HD = "src/screens/home/home-data.ts";
+    const hd = (extra: string) => real.get(HD)! + "\n" + extra;
+    const IMP = `import { SEARCH_URL } from "../../components/picker";\n`;
+    it("Home's data file and Home itself import no search export (the ask box asks through PickerResults)", () => {
+      expect(real.get(HD)).not.toMatch(/SEARCH_URL|useLibrarySearch|searchLibrary|searchUrl|contract\/search/);
+      expect(real.get("src/screens/home/Home.tsx")).toMatch(/import \{ PickerResults \} from "\.\.\/\.\.\/components\/picker"/);
+    });
+    it("H1 home-data re-binds SEARCH_URL as a const; another screen calls the route with it", () =>
+      red({
+        [HD]: hd(IMP + `export const HOME_URL = SEARCH_URL;`),
+        "src/screens/Second.tsx": `import { api } from "../lib/api";\nimport { HOME_URL } from "./home/home-data";\nexport const findAll = (q: string) => api("GET", HOME_URL + "?q=" + encodeURIComponent(q) + "&limit=50");`,
+      }, /R2 src\/screens\/home\/home-data\.ts.*SEARCH_URL/));
+    it("H2 home-data re-exports SEARCH_URL locally (no module specifier); another screen imports it", () =>
+      red({
+        [HD]: hd(IMP + `export { SEARCH_URL };`),
+        "src/screens/Second.tsx": `import { api } from "../lib/api";\nimport { SEARCH_URL } from "./home/home-data";\nexport const findAll = (q: string) => api("GET", \`\${SEARCH_URL}?q=\${q}\`);`,
+      }, /R2 src\/screens\/home\/home-data\.ts.*SEARCH_URL/));
+    it("H3 home-data re-exports useLibrarySearch from the picker (module specifier)", () =>
+      red({ [HD]: hd(`export { useLibrarySearch } from "../../components/picker";`) }, /R2 src\/screens\/home\/home-data\.ts.*useLibrarySearch/));
+    it("H4 home-data imports useLibrarySearch + searchLibrary and hands them on; a screen lists results", () =>
+      red({
+        [HD]: hd(`import { useLibrarySearch, searchLibrary } from "../../components/picker";\nexport const useHomeSearch = useLibrarySearch;\nexport const homeSearch = searchLibrary;`),
+        "src/screens/Sources.tsx": `import { useHomeSearch } from "./home/home-data";\nexport function SourcesScreen(){ const s: any = useHomeSearch("vrm", {kind:"library"} as any); return <ul className="hits">{(s.items ?? []).map((i:any)=><li key={i.key}>{i.title}</li>)}</ul>; }`,
+      }, /R2 src\/screens\/home\/home-data\.ts.*useLibrarySearch, searchLibrary/));
+    it("H5 home-data's own runSearch over SEARCH_URL; a second ask box elsewhere lists its hits", () =>
+      red({
+        [HD]: hd(IMP + `export async function runSearch(q: string) { const { data } = await api("GET", SEARCH_URL + "?q=" + encodeURIComponent(q) + "&limit=10"); return (data as any).results as { id: string; title: string }[]; }`),
+        "src/screens/Quick.tsx": `import { useState } from "react";\nimport { runSearch } from "./home/home-data";\nexport function QuickAsk(){ const [h,setH]=useState<{ id: string; title: string }[]>([]); return <div><input onChange={(e)=>runSearch(e.target.value).then(setH)} /><ul>{h.map((x)=><li key={x.id}>{x.title}</li>)}</ul></div>; }`,
+      }, /R2 src\/screens\/home\/home-data\.ts.*SEARCH_URL/));
+    it("H5 with the path written out instead of SEARCH_URL is R4", () =>
+      red({ [HD]: hd(`export const runSearch = (q: string) => api("GET", "/workbench/contract/search?q=" + q + "&limit=10");`) }, /R4 src\/screens\/home\/home-data\.ts/));
+    it("a screen using the picker's results view through the index stays green", () =>
+      expect(plus({ "src/screens/Peek.tsx": `import { PickerResults } from "../components/picker";\nexport const P = () => <PickerResults query="vrm" limit={5} label="r" open={(_i, c) => <a href="/library">{c}</a>} />;` })).toEqual([]));
+  });
+
   describe("further shapes", () => {
     it("an import through a tsconfig-style alias resolves to the picker's files", () =>
       red({ "src/screens/A.tsx": `import { searchLibrary } from "@picker/search";` }, /R2.*searchLibrary|R3/, { paths: { "@picker/*": ["src/components/picker/*"] }, baseUrl: "." }));

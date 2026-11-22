@@ -1291,8 +1291,8 @@ t("rwr-picker T3 metadata_filter (cloud view): new fields carry nothing local-on
       ($1, $2, $3, 'c', ARRAY['cloudtag'], '{"share":"cloud","author":"Cloud Author","credibility":{"score":0.7}}'::jsonb),
       ($4, $5, $6, 'c', ARRAY[$7], '{"author":"${LOC}-author","credibility":{"score":0.2}}'::jsonb)`,
     [sc, `https://example.org/tk/${sc}`, `tkfilter ${run} cloud source`, sl, `https://example.org/tk/${sl}`, `tkfilter ${run} local source`, `${LOC}-tag`]);
-  await sql(`INSERT INTO public.wiki_pages (slug, page_class, title, body, links, tags) VALUES ($1, 'concept', $2, $3, '[]'::jsonb, ARRAY[$4])`,
-    [`tk-${run}`, `tkfilter ${run} page`, `tkfilter ${run} body`, `${LOC}-pagetag`]);
+  await sql(`INSERT INTO public.wiki_pages (slug, page_class, title, body, links, tags) VALUES ($1, 'concept', $2, $3, '[]'::jsonb, $4::jsonb)`,
+    [`tk-${run}`, `tkfilter ${run} page`, `tkfilter ${run} body`, JSON.stringify([`${LOC}-pagetag`])]); // wiki_pages.tags is jsonb (a JSON array), not text[]
   await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1, $2, $3::jsonb, $4)`,
     [`documents/${LOC}.md`, `${LOC} doc`, JSON.stringify([{ kind: "source", id: sc, pin: null }]), A]);
   const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));

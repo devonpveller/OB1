@@ -10,13 +10,15 @@ export const MIN_QUERY = 2; // the route's own minimum (q min 2)
 export const SEARCH_LIMIT = 50; // the route's own ceiling (per kind)
 export const SEARCH_URL = "/workbench/contract/search";
 
-export type SearchSpec = { q: string; scope: PickerScope };
+// `limit` (optional) asks for fewer than the route's ceiling, e.g. Home's ask box shows ten; it is clamped to 1..SEARCH_LIMIT.
+export type SearchSpec = { q: string; scope: PickerScope; limit?: number };
 export type MineSearch = (q: string, signal: AbortSignal) => Promise<PickerItem[]>;
 
 // One request, ALL kinds: kind (and every other) filter is applied to this answer by model.ts, so the filtered
 // list is always a subset of what Ctrl+K gets for the same query and scope, and counts are live without extra calls.
 export function searchUrl(spec: SearchSpec): string {
-  const p = new URLSearchParams({ q: spec.q.trim(), limit: String(SEARCH_LIMIT) });
+  const limit = spec.limit === undefined || !Number.isFinite(spec.limit) ? SEARCH_LIMIT : Math.min(Math.max(1, Math.floor(spec.limit)), SEARCH_LIMIT);
+  const p = new URLSearchParams({ q: spec.q.trim(), limit: String(limit) });
   if (spec.scope.kind === "document" && spec.scope.refineryId) p.set("refinery_id", spec.scope.refineryId);
   return `${SEARCH_URL}?${p.toString()}`;
 }
@@ -28,8 +30,8 @@ export async function searchLibrary(spec: SearchSpec): Promise<PickerItem[]> {
 
 export type SearchState = { items: PickerItem[]; loading: boolean; error: string | null; query: string; mineUnavailable: boolean };
 
-export function useLibrarySearch(q: string, scope: PickerScope, opts: { mineSearch?: MineSearch; debounceMs?: number } = {}): SearchState {
-  const { mineSearch, debounceMs = 250 } = opts;
+export function useLibrarySearch(q: string, scope: PickerScope, opts: { mineSearch?: MineSearch; debounceMs?: number; limit?: number } = {}): SearchState {
+  const { mineSearch, debounceMs = 250, limit } = opts;
   const [state, setState] = useState<SearchState>({ items: [], loading: false, error: null, query: "", mineUnavailable: false });
   const seq = useRef(0);
   const scopeRef = useRef(scope);
@@ -50,7 +52,7 @@ export function useLibrarySearch(q: string, scope: PickerScope, opts: { mineSear
         const sc = scopeRef.current;
         const wantMine = sc.kind === "library+mine";
         const [lib, mine] = await Promise.all([
-          searchLibrary({ q: query, scope: sc }),
+          searchLibrary({ q: query, scope: sc, limit }),
           wantMine && mineSearch ? mineSearch(query, ctl.signal).catch(() => null) : Promise.resolve([] as PickerItem[]),
         ]);
         if (my !== seq.current) return;
@@ -66,6 +68,6 @@ export function useLibrarySearch(q: string, scope: PickerScope, opts: { mineSear
       clearTimeout(t);
       ctl.abort();
     };
-  }, [q, scopeKey, mineSearch, debounceMs]);
+  }, [q, scopeKey, mineSearch, debounceMs, limit]);
   return state;
 }

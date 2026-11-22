@@ -312,3 +312,48 @@ export function ItemPicker(props: ItemPickerProps) {
     </section>
   );
 }
+
+// The picker's read-only results view, for a screen that OPENS what it finds instead of picking it (Home's ask box in
+// phase 0; rwr-quick-ask later). It is the picker, not a second list search: the same hook (useLibrarySearch), the
+// same query shape (searchUrl, with an optional smaller `limit`), the same hit mapping (itemFromHit, snippetParts).
+// The screen supplies only the submitted query and the link a row opens; remount it (a `key`) to ask again.
+export type PickerResultsProps = {
+  /** the submitted query; shorter than MIN_QUERY asks nothing */
+  query: string;
+  scope?: PickerScope;
+  /** at most this many per kind (clamped to the route's ceiling) */
+  limit?: number;
+  /** the list's accessible name */
+  label: string;
+  /** wraps a row's content in the screen's own link (the screen decides where a hit goes) */
+  open: (item: PickerItem, content: ReactNode) => ReactNode;
+  /** prefix for the empty / failed lines' test ids: `${testId}-none`, `${testId}-failed` */
+  testId?: string;
+  debounceMs?: number;
+};
+
+export function PickerResults({ query, scope = LIB, limit, label, open, testId = "picker-results", debounceMs = 0 }: PickerResultsProps) {
+  const found = useLibrarySearch(query, scope, { limit, debounceMs });
+  const q = query.trim();
+  if (q.length < MIN_QUERY) return null;
+  const done = !found.loading && found.query === q;
+  if (found.loading || !done) return <p className="meta">Searching...</p>;
+  if (found.error) return <p className="meta" data-testid={testId + "-failed"}>The search did not answer. Try again.</p>;
+  const shown = found.items.filter((i) => inScope(i, scope));
+  if (shown.length === 0) return <p className="empty" data-testid={testId + "-none"}>Nothing in the library matches "{q}".</p>;
+  return (
+    <ul className="hits" aria-label={label}>
+      {shown.map((i) => {
+        const snip = snippetParts(i.snippet).map((p) => p.text).join("");
+        return (
+          <li key={keyOf(i)}>
+            {open(i, <>
+              <span className="row-main"><span className="row-title">{i.title || "(untitled)"}</span>{snip && <span className="meta">{snip}</span>}</span>
+              <span className="pill">{i.kind}</span>
+            </>)}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
