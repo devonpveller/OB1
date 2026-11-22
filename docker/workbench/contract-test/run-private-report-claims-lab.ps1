@@ -20,6 +20,12 @@
 # any red gate counts (a missing plant is a FAIL, never a vacuous red); the gap work (P1), the wiki variants (P3) and the
 # P2 count (count-private-report-claim-reuse.sql, before and after 570 - an operator decision, not a pass/fail gate).
 # Exit 0 = every check passed. Counts, route names and pass/fail only - never a claim's text. Never the live stack.
+# Round 3 (slots 450 + 480 landed; the base of this layer is OB1 58bbc30): the REST door is the one the stack runs -
+# rest-door-lab.ps1's Start-LabRestDoor (lab secret, the real mint script, never the live .env). The workbenches reach the
+# database directly (DB_USER) and send NO REST token, as compose has them; the only HTTP reach is [guard] PostgREST's rpc,
+# now called through the door with no token (401) and with EACH minted caller's own token (every door role: refused, no
+# claim text). 480 is in the chain, so ob_workbench is the chain's own role (ob-workbench-role.ps1, as the sibling labs) and
+# [9] re-runs the tree's init-owner-private-view.sql, not a branch of another item. No superuser / service_role shortcut.
 param(
   [string]$Id = 'wt-rw-private-report-claims',
   [string]$Subnet = '',
@@ -62,7 +68,7 @@ if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "$P-evidence" }
 New-Item -ItemType Directory -Force $Evidence | Out-Null
 $stage = Join-Path $env:TEMP "$P-initdb"
 $script:fail = 0
-$script:made = @{ net = $false; containers = @(); images = @() }
+$script:made = @{ net = $false; containers = @(); images = @(); dirs = @() }
 function Pass([string]$m) { Write-Host "  PASS  $m" }
 function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
@@ -154,7 +160,7 @@ function Invoke-Test([string]$phase) {
     '-e', "PRC_FA_ISSUER=$faIssuer", '-e', "PRC_FA_CLIENT=$faClient", '-e', "PRC_FA_SECRET=$faSecret",
     '-e', "PRC_A=$subA", '-e', "PRC_B=$subB", '-e', "PRC_C=$subC",
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
-    '-e', "PRC_APP_PASSWORD=$appPw", '-e', "PRC_WB_PASSWORD=$wbPw", '-e', "PRC_PGRST=http://$P-postgrest:3000",
+    '-e', "PRC_APP_PASSWORD=$appPw", '-e', "PRC_WB_PASSWORD=$wbPw", '-e', "PRC_PGRST=http://$P-rest/rest/v1", '-e', "PRC_REST_TOKENS=$restTokens",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/inlet/private_report_claims_integration_test.ts')
   $o = Lab-Docker 900 $a
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
@@ -210,10 +216,11 @@ try {
   Check ($r0.rc -ne 0 -and $r0.msg -match 'ob_app_memory does not exist') "a live 570 without ob_app_memory is refused (exit $($r0.rc))"
   $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) 'ob_app_memory (non-superuser, service_role) - the production shape'
-  # final round (tester attempt 2 F3): slot 480's workbench login in 480's own shape (init-owner-private-view.sql lines
-  # 58-66: LOGIN INHERIT NOSUPERUSER NOBYPASSRLS, a member of ob_app_memory); 480 itself is staged in [9]
-  $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_workbench LOGIN INHERIT NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION PASSWORD '$wbPw'; GRANT ob_app_memory TO ob_workbench"
-  Check ($script:rc -eq 0) 'ob_workbench (slot 480''s shape: a member of ob_app_memory)'
+  # slot 480 is in the chain (it landed with 58bbc30): ob_workbench exists already, without the membership (ob_app_memory did not
+  # exist at initdb). Use-ObWorkbenchRole (as the sibling labs) runs 480 again now, sets the lab password and checks the membership.
+  . (Join-Path $PSScriptRoot 'ob-workbench-role.ps1'); $wbDb = Use-ObWorkbenchRole $appPw
+  if ($wbDb.role -eq 'ob_workbench') { $wbPw = $wbDb.pw }
+  Check ($wbDb.role -eq 'ob_workbench') 'ob_workbench is the chain''s slot 480 role (a member of ob_app_memory)'
   # round 2 (tester F2): the role is created AFTER the chain's 570 (the house labs and a fresh volume), and 570 is NOT
   # re-run: its grant must reach the role anyway (the workbench's owner read, as the real login)
   $o = Dk exec -e "PGPASSWORD=$appPw" $db psql -h 127.0.0.1 -U ob_app_memory -d openbrain -X -A -t -q -c "SELECT count(*) FROM public.private_report_claims_of_idea(gen_random_uuid(), 'prc-nobody')"
@@ -222,9 +229,13 @@ try {
   Check ($c00 -match "ob_app_memory may execute the slot's functions=3 of 3" -and $c00 -match 'check: OK') 'the check script on the fresh chain: the grant reaches ob_app_memory, OK'
   $ctMount = "${ct}:/ct:ro"
   $null = Run-Detached "$P-embed" @('--network-alias', 'stub-embed', '-v', $ctMount, '--entrypoint', 'deno', $wbTag, 'run', '--allow-net', '/ct/stub-embed.ts')
-  $null = Run-Detached "$P-postgrest" @('--network-alias', 'openbrain-postgrest', '-e', "PGRST_DB_URI=postgres://postgres:$pw@openbrain-db:5432/openbrain",
-      '-e', 'PGRST_DB_SCHEMAS=public', '-e', 'PGRST_DB_ANON_ROLE=service_role', '-e', 'PGRST_DB_POOL=4', '-e', 'PGRST_SERVER_PORT=3000', $PgrstImage)
-  $null = Run-Detached "$P-rest" @('--network-alias', 'openbrain-rest', '-v', "$(Join-Path $dockerDir 'Caddyfile'):/etc/caddy/Caddyfile:ro", $CaddyImage)
+  # rw-rest-door-auth (slot 450): the door as compose stands it up - PostgREST as the authenticator with the JWT secret, no
+  # anonymous role, behind the real Caddyfile - and a lab token per caller from the real mint script (lab secret)
+  . (Join-Path $PSScriptRoot 'rest-door-lab.ps1')
+  $restDoor = Start-LabRestDoor -Db $db -Pw $pw
+  Check ($restDoor.Door -eq 'auth' -and $restDoor.Tokens.Count -ge 1) "the REST door is the authenticated one (slot 450); lab tokens minted for $($restDoor.Tokens.Count) caller(s): $((@($restDoor.Tokens.Keys) | Sort-Object) -join ',')"
+  if ($restDoor.Door -ne 'auth') { throw 'rest door' }
+  $restTokens = (@($restDoor.Tokens.Keys | Sort-Object | ForEach-Object { "$_=$($restDoor.Tokens[$_])" })) -join ','
   $common = @('-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$key", '-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw",
       '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid',
       '-e', 'WIKI_GIT_DIR=/wiki', '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://unreachable.invalid',
@@ -311,22 +322,19 @@ try {
   # final round (tester attempt 2 F3): 480's own migration (from OB1 work/rw-owner-private-view-int, not on this tree),
   # run on the migrated database as its lab runners do (ob-workbench-role.ps1: after ob_app_memory exists); then the
   # ob_workbench login reads the owner's private-report claims, owner-scoped
-  Write-Host '[9] slot 480 staged (init-owner-private-view.sql from work/rw-owner-private-view-int)'
-  $i480 = Join-Path $env:TEMP "$P-480.sql"
-  $src480 = (& git -C $ob1 show 'origin/work/rw-owner-private-view-int:docker/init-owner-private-view.sql' 2>$null)
-  if ($LASTEXITCODE -eq 0 -and $src480) {
-    [System.IO.File]::WriteAllText($i480, (($src480 -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding $false))
+  Write-Host '[9] slot 480 re-run (init-owner-private-view.sql of this tree; 480 is in the chain)'
+  $i480 = Join-Path $dockerDir 'init-owner-private-view.sql'
+  if (Test-Path $i480) {
     $r480 = Psql-File $i480 '480'
-    Check ($r480.rc -eq 0) "slot 480 applied on the migrated database (exit $($r480.rc))"
+    Check ($r480.rc -eq 0) "slot 480 applied again on the migrated database (exit $($r480.rc))"
     $mem = Q "SELECT pg_has_role('ob_workbench', 'ob_app_memory', 'MEMBER')"
     Check ($mem -eq 't') "after 480 ob_workbench is a member of ob_app_memory ($mem)"
     $t480 = Invoke-Test 'p480'
-    Check ($t480.m.Success -and $t480.m.Groups[1].Value -eq 'ok' -and [int]$t480.m.Groups[2].Value -ge 1) "with 480 staged the ob_workbench login reads B's private-report claims, owner-scoped, and files none ($($t480.m.Value))"
+    Check ($t480.m.Success -and $t480.m.Groups[1].Value -eq 'ok' -and [int]$t480.m.Groups[2].Value -ge 1) "with 480 the ob_workbench login reads B's private-report claims, owner-scoped, and files none ($($t480.m.Value))"
     $c480 = Check-Script; Save 'check-after-480.log' $c480
-    Check ($c480 -match 'check: OK') 'with 480 staged the check script still says OK'
-    Remove-Item -Force $i480 -ErrorAction SilentlyContinue
+    Check ($c480 -match 'check: OK') 'with 480 the check script still says OK'
   } else {
-    Write-Host '  NOTE  slot 480 not staged: origin/work/rw-owner-private-view-int is not reachable from this OB1 clone (git fetch)'
+    Fail 'this tree has no docker/init-owner-private-view.sql (slot 480 is expected at the 58bbc30 base)'
   }
   Write-Host '[8] the revert with a post-570 filing'
   $v3 = Psql-File (Join-Path $dockerDir 'revert-private-report-claims.sql') 'revert with a curator filing'
@@ -341,6 +349,7 @@ try {
   if ($script:made.net) { $null = Dk network rm $net }
   if (-not $KeepImages) { foreach ($i in $script:made.images) { $null = Dk rmi $i } }
   if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+  foreach ($d in @($script:made.dirs)) { if ($d) { try { Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue } catch { } } }
   $left = (Dk ps -a --filter "label=$label" --format '{{.Names}}' | Out-String).Trim()
   Check (-not $left) "nothing labelled $label is left running ($left)"
 }
