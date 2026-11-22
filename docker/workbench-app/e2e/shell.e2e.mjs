@@ -87,6 +87,11 @@ const SIX = ["/workbench/auth/me", "/workbench/contract/cleanup/reopen-candidate
 // the stub's log also holds the Home visits earlier in this run (Home's own reads are checked in home.e2e.mjs)
 ok(SIX.every((x) => seenPaths.includes(x)) && lg.every((x) => x.method === "GET" && x.keyOk), `the stub saw the shell's 6 GET reads, all with the door key: ${seenPaths.join(", ")}`);
 ok(["/workbench/settings", "/workbench/documents/file", "/workbench/documents/state"].every((x) => seenPaths.includes(x)), `and the account's reads (settings, then the locked document's state and title) are in the log too`);
+// the exact set: bar Home's own named reads (checked in home.e2e.mjs), the shell and the account read nothing beyond the
+// six and the account's three (settings, the locked document's file and state)
+const HOME_READS = ["/workbench/contract/documents", "/workbench/contract/ideas", "/workbench/contract/library/recent", "/workbench/contract/library/waiting-claims", "/workbench/contract/podcasts", "/workbench/contract/podcasts/requests", "/workbench/contract/search"];
+const shellReads = seenPaths.filter((p) => !HOME_READS.includes(p));
+ok(shellReads.join() === [...SIX, "/workbench/documents/file", "/workbench/documents/state", "/workbench/settings"].sort().join(), `exactly those: the shell and the account read only the six and the three: ${shellReads.join(", ")}`);
 
 // ---- 3. Ctrl+K opens, Esc closes, over every screen (real key events)
 for (const [path] of ALL) {

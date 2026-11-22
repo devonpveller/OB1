@@ -160,8 +160,23 @@ t("U3: a write carrying a stale version is refused and changes nothing; the righ
   assertEquals((await mine(who))[K.start].version, 2);
 });
 
-t("U4: values the registry refuses are 400 and nothing is stored: bad screen, document text shapes, malformed or oversize lists", async () => {
+t("U4: values the registry refuses are 400, a documents/ path that is not the caller's is 404 (the owner-scope gate), and nothing is stored", async () => {
   const who = { "X-Test-Sub": `ui-x-${rnd()}` };
+  const me = sub(who); // a safe subject: its documents directory key is the subject itself (middleware/identity.ts ownerKey)
+  // Layer 1, the request gate (middleware/owner-scope.ts) runs before any route: a body naming a documents/ path that is
+  // not the caller's - another user's directory, or a path whose `..` resolves outside the caller's own - answers 404
+  // "no such document", exactly as a missing document does (no existence leak). The registry never sees these.
+  const foreign: [string, unknown][] = [
+    [K.recent, [{ kind: "document", id: "documents/a/../b.md" }]], [K.recent, [{ kind: "document", id: "documents/a/x.md" }]],
+    [K.lock, "documents/a/../b.md"], [K.lock, "documents/a/sk-0123456789abcdef0123456789.md"], [K.lock, `documents/${me}/../b.md`],
+    [K.last, "documents/a/‮.md"],
+  ];
+  for (const [k, v] of foreign) {
+    const r = await put(who, k, v);
+    assertEquals([r.status, r.json.error], [404, "no such document"], `${k}=${JSON.stringify(v).slice(0, 60)}: ${r.text}`);
+  }
+  // Layer 2, the registry (setting_problem, via the settings route): every malformed value that reaches it is 400 -
+  // including the caller's OWN documents/ paths with dot segments, credential shapes or direction characters
   const bad: [string, unknown][] = [
     [K.start, "nowhere"], [K.start, 3], [K.start, ""],
     [K.lock, ""], [K.lock, "   "], [K.lock, 7], [K.lock, "a\nb"], [K.lock, "x".repeat(401)], [K.last, ["a-list"]],
@@ -180,9 +195,11 @@ t("U4: values the registry refuses are 400 and nothing is stored: bad screen, do
     [K.recent, [{ kind: "source", id: "eyJhbGciOiJIUzI1NiJ9" }]], [K.recent, [{ kind: "secret_diagnosis", id: "a" }]],
     [K.recent, [{ kind: "source", id: "my doctor said the biopsy" }]], [K.recent, [{ kind: "source", id: "a..b" }]],
     [K.recent, [{ kind: "source", id: "a‮b" }]], [K.recent, [{ kind: "source", id: "a​b" }]], [K.recent, [{ kind: "source", id: "a\u0085b" }]],
-    [K.recent, [{ kind: "document", id: "notes/x.md" }]], [K.recent, [{ kind: "document", id: "documents/a/../b.md" }]],
-    [K.lock, "The meeting notes: we will lay off"], [K.lock, "documents/a/../b.md"], [K.lock, "documents/a/sk-0123456789abcdef0123456789.md"],
-    [K.last, "documents/a/‮.md"],
+    [K.recent, [{ kind: "document", id: "notes/x.md" }]], [K.recent, [{ kind: "document", id: `documents/${me}/a/../b.md` }]],
+    [K.recent, [{ kind: "document", id: `documents/${me}/sk-0123456789abcdef0123456789.md` }]],
+    [K.lock, "The meeting notes: we will lay off"], [K.lock, `documents/${me}/a/../b.md`], [K.lock, `documents/${me}/./b.md`],
+    [K.lock, `documents/${me}/sk-0123456789abcdef0123456789.md`],
+    [K.last, `documents/${me}/‮.md`], [K.last, `documents/${me}/a​b.md`],
   ];
   for (const [k, v] of bad) {
     const r = await put(who, k, v);

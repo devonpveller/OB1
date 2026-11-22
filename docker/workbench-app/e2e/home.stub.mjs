@@ -51,6 +51,14 @@ const LIB = {
     { id: "b", title: "Shared source second", url: null, content_type: "pdf", created_at: ago(D) } ] },
   waiting: { total: 14292, claims: [LONG, "Shared claim two", "Shared claim three", "four", "five"].map((text, i) => ({ id: "k" + i, text, created_at: ago(i * H) })) },
 };
+// The account (rwr-ui-state-keys): the shell reads /workbench/settings on every page. The four per-person UI state keys,
+// per mode, versioned (a delete is a version), answered as the shell's own stub (stub.mjs) answers them; nobody here has
+// anything stored, so the shell reads no document for a lock.
+const UI_KEYS = ["ui.locked_document", "ui.last_document", "ui.start_screen", "library.recent"];
+const ACCOUNT = {}, TOMBS = {};
+const acct = (m) => (ACCOUNT[m] ??= new Map());
+const tombs = (m) => (TOMBS[m] ??= new Map());
+const ver = (m, k) => acct(m).get(k)?.version ?? tombs(m).get(k) ?? 0;
 let mode = "alice";
 let emptyLibrary = false;
 const log = [];
@@ -65,6 +73,31 @@ http.createServer((req, res) => {
   const f = PEOPLE[mode];
   const u = new URL(req.url, "http://x");
   const p = u.pathname;
+  if (p === "/workbench/settings" && req.method === "GET") {
+    return json({ admin: false, settings: UI_KEYS.map((k) => ({ key: k, value: acct(mode).get(k)?.value ?? null, version: ver(mode, k) })) });
+  }
+  const sm = p.match(/^\/workbench\/settings\/(.+)$/);
+  if (sm) {
+    const k = decodeURIComponent(sm[1]);
+    if (!UI_KEYS.includes(k)) return json({ error: "not a setting" }, 404);
+    const q = u.searchParams.get("version");
+    if (req.method === "DELETE") {
+      if (q !== null && Number(q) !== ver(mode, k)) return json({ error: `the setting changed since it was read (version ${ver(mode, k)}, not ${q})` }, 409);
+      if (acct(mode).has(k)) { const n = ver(mode, k) + 1; acct(mode).delete(k); tombs(mode).set(k, n); }
+      return json({ key: k, value: null, version: ver(mode, k) });
+    }
+    if (req.method === "PUT") {
+      let raw = "";
+      req.on("data", (c) => (raw += c));
+      req.on("end", () => {
+        const b = raw ? JSON.parse(raw) : {};
+        if (b.version !== undefined && b.version !== ver(mode, k)) return json({ error: `the setting changed since it was read (version ${ver(mode, k)}, not ${b.version})` }, 409);
+        const n = ver(mode, k) + 1; acct(mode).set(k, { value: b.value, version: n }); tombs(mode).delete(k);
+        json({ key: k, value: b.value, version: n });
+      });
+      return;
+    }
+  }
   if (p === "/workbench/workspace/whoami") return json({ subject_sub: SUB[mode], actor_sub: SUB[mode], name: NAME[mode] });
   if (p === "/workbench/auth/me") return json({ mode: "forward-auth", signed_in: true, kind: "user", subject_sub: SUB[mode], name: NAME[mode] });
   if (p === "/workbench/intake/jobs") return json({ jobs: [] });

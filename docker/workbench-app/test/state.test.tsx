@@ -357,9 +357,15 @@ describe("the shell wiring (rwr-shell-nav's App over this module)", () => {
     render(<App load={shellWith(who)} />);
     await waitFor(() => expect(srv.seen.some((r) => r.url === "/workbench/settings")).toBe(true));
     await waitFor(() => expect(requestLog().some((r) => r.url.startsWith("/workbench/documents/state"))).toBe(true));
+    // let the lock's read settle: an error shown for it would render after the state read answers
+    await new Promise((r) => setTimeout(r, 300));
     expect(screen.queryByTestId("lock-chip")).toBeNull();
-    // scoped to the document slot: Home (rwr-home) shows its own per-card "could not load" text over this test's stub
-    expect(screen.getByTestId("doc-slot-empty").textContent).not.toMatch(/error|could not/i);
+    expect(screen.getByTestId("doc-slot-empty")).toBeTruthy();
+    // never an error anywhere on the page - bar Home's (rwr-home) own per-card "could not load" cards, which this test's
+    // stub leaves unanswered (each carries data-testid="failed-<card>")
+    const page = document.body.cloneNode(true) as HTMLElement;
+    page.querySelectorAll('[data-testid^="failed-"]').forEach((e) => e.remove());
+    expect(page.textContent).not.toMatch(/error|could not/i);
   });
   it("Unlock sends a versioned DELETE; Undo re-locks with the next version", async () => {
     srv.live(A1, "Plan");
