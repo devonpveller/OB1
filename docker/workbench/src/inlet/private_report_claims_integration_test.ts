@@ -49,7 +49,9 @@ const WB_PW = Deno.env.get("PRC_WB_PASSWORD") ?? "";
 const wbPool = !off && WB_PW
   ? new Pool({ hostname: HOST!, port: 5432, database: "openbrain", user: "ob_workbench", password: WB_PW }, 1, true)
   : null;
-const PGRST = (Deno.env.get("PRC_PGRST") ?? "").replace(/\/+$/, "");   // PostgREST itself (its anon role is service_role)
+// the REST door (slot 450: Caddy + PostgREST, no anonymous role) as /rest/v1, and every minted caller's own token (ROLE=jwt,...)
+const PGRST = (Deno.env.get("PRC_PGRST") ?? "").replace(/\/+$/, "");
+const REST_TOKENS = (Deno.env.get("PRC_REST_TOKENS") ?? "").split(",").filter(Boolean).map((x) => [x.slice(0, x.indexOf("=")), x.slice(x.indexOf("=") + 1)] as [string, string]);
 const t = (phases: string[], name: string, fn: () => Promise<void>) =>
   Deno.test({ name: `[${phases.join("|")}] ${name}`, ignore: off || !phases.includes(PHASE), fn, sanitizeOps: false, sanitizeResources: false });
 const BOTH = ["red", "migrated"];
@@ -606,17 +608,26 @@ t([...BOTH, "p480"], "[db] slot 480's ob_workbench login reads only the verified
     assertEquals(code, "42501", "ob_workbench files nothing");
   } finally { c.release(); }
 });
-// PostgREST itself (the anon role service_role, over HTTP): the slot's functions answer no row to an rpc call
-t(BOTH, "[guard] PostgREST's rpc never reads or files a private-report claim", async () => {
+// the REST door over HTTP (slot 450): no token is refused at the door (401); EVERY door caller's own token (wiki, viewer, entity,
+// digest, ...) is refused the slot's functions - no row, no claim text. Fails closed: no minted token = the lab is wrong.
+t(BOTH, "[guard] the REST door's rpc never reads or files a private-report claim, with no token or any caller's token", async () => {
   if (!PGRST) throw new Error("PRC_PGRST is not set");
+  if (REST_TOKENS.length < 1) throw new Error("PRC_REST_TOKENS is not set (the lab mints one per caller)");
   const p = await plant();
-  const call = async (fn: string, body: unknown) => {
-    const r = await fetch(`${PGRST}/rpc/${fn}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const call = async (fn: string, body: unknown, token: string) => {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (token) headers.authorization = `Bearer ${token}`;
+    const r = await fetch(`${PGRST}/rpc/${fn}`, { method: "POST", headers, body: JSON.stringify(body) });
     return { status: r.status, text: await r.text() };
   };
-  const read = await call("private_report_claims_of_idea", { p_idea_id: p.bIdea.id, p_sub: B });
-  assert(read.status >= 400, `the owner read is refused over rpc (${read.status})`);
-  for (const s of secretsOf(p)) assert(!read.text.includes(s), "no claim text or id in the refusal");
-  const file = await call("private_report_claim_file", { p_research_key: `rk-prc-b-${p.R}`, p_job_id: p.bIdea.job, p_text: "a claim text over rpc" });
-  assert(file.status >= 400, `filing is refused over rpc (${file.status})`);
+  const callers: [string, string][] = [["(no token)", ""], ...REST_TOKENS];
+  for (const [who, token] of callers) {
+    const read = await call("private_report_claims_of_idea", { p_idea_id: p.bIdea.id, p_sub: B }, token);
+    assert(read.status >= 400, `${who}: the owner read is refused over rpc (${read.status})`);
+    if (!token) assertEquals(read.status, 401, "no token: refused at the door");
+    for (const s of secretsOf(p)) assert(!read.text.includes(s), `${who}: no claim text or id in the refusal`);
+    const file = await call("private_report_claim_file", { p_research_key: `rk-prc-b-${p.R}`, p_job_id: p.bIdea.job, p_text: "a claim text over rpc" }, token);
+    assert(file.status >= 400, `${who}: filing is refused over rpc (${file.status})`);
+    for (const s of secretsOf(p)) assert(!file.text.includes(s), `${who}: no claim text or id in the filing refusal`);
+  }
 });
