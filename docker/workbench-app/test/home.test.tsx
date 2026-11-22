@@ -7,7 +7,7 @@ import { setFetcher, requestLog, clearRequestLog } from "../src/lib/api";
 import { resetState } from "../src/lib/state";
 import { ago } from "../src/screens/home/home-data";
 import { parseRoute } from "../src/lib/router";
-import { matchRoute } from "../src/routes";
+import { matchRoute, type RouteDef } from "../src/routes";
 
 type Id = "alice" | "bob" | "nobody" | "admin";
 const NOW = Date.now();
@@ -197,7 +197,9 @@ describe("every card title opens the right screen (acceptance 4)", () => {
       await renderHome();
       fireEvent.click(screen.getByTestId(t));
       expect(window.location.pathname).toBe(path);
-      expect(screen.getByTestId("coming")).toBeTruthy();
+      // a built screen (its route has a `screen`) shows itself, never the placeholder; the others their phase
+      if ((matchRoute(path) as RouteDef).screen) expect(screen.queryByTestId("placeholder")).toBeNull();
+      else expect(screen.getByTestId("coming")).toBeTruthy();
     });
   }
   it("Start research, and a row, open their screens", async () => {
@@ -373,8 +375,7 @@ describe("round 3 (tester attempt 1)", () => {
     await renderHome();
     fireEvent.click(within(card("docs")).getAllByTestId("row-doc")[0]);
     expect(screen.queryByTestId("not-found")).toBeNull();
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Document");
-    expect(screen.getByTestId("coming").textContent).toMatch(/phase 1/);
+    expect(screen.getByTestId("document")).toBeTruthy();
     // and on a reload of that URL
     cleanup(); await renderHome();
     expect(screen.queryByTestId("not-found")).toBeNull();

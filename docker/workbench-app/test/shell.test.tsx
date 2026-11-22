@@ -56,7 +56,7 @@ describe("every menu entry opens its route (acceptance 1)", () => {
     expect(MENU.filter((r) => r.group === "everywhere").map((r) => r.label)).toEqual(["Home", "Research", "Chat", "Documents", "Ideas", "Podcasts", "Library"]);
     expect(MENU.filter((r) => r.group === "housekeeping").map((r) => r.label)).toEqual(["Imports", "Removals and trail", "Cleanup", "Settings"]);
   });
-  for (const r of MENU.filter((m) => m.path !== "/")) { // Home is a real screen now: home.test.tsx
+  for (const r of MENU.filter((m) => !m.screen)) { // a built screen (a `screen` on its route) has its own tests
     it(`${r.label}: click opens ${r.path}, a heading and a plain "coming in phase ${r.phase}" state`, () => {
       render(<App load={load()} />);
       fireEvent.click(within(screen.getByRole("navigation", { name: "Main" })).getByText(r.label));
@@ -77,10 +77,11 @@ describe("every menu entry opens its route (acceptance 1)", () => {
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("What moved where");
     expect(screen.getAllByRole("row").length).toBeGreaterThan(10);
   });
-  it("deep links: /documents/x and /research/start show their phase; an unknown path says so, never blank", () => {
+  it("deep links: /documents/x opens the document screen, /research/start shows its phase; an unknown path says so, never blank", () => {
     window.history.pushState({}, "", "/documents/some-id");
     render(<App load={load()} />);
-    expect(screen.getByTestId("coming").textContent).toMatch(/phase 1/);
+    expect(screen.getByTestId("document")).toBeTruthy();
+    expect(screen.queryByTestId("not-found")).toBeNull();
     expect(screen.getByRole("link", { name: "Documents", current: "page" })).toBeTruthy();
     act(() => { window.history.pushState({}, "", "/research/start"); window.dispatchEvent(new PopStateEvent("popstate")); });
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Start research");
