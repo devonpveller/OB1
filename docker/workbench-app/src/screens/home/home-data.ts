@@ -18,7 +18,6 @@ export type NewInLibrary = { sources: { id: string; title: string }[]; sourcesTo
 export type SessionsRead = { rows: SessionRow[]; capped: boolean };
 export const SESSIONS_LIMIT = 200; // the shell asks the same: the read is every user's sessions, newest first
 export type ClaimsWaiting = { total: number; samples: { id: string; text: string }[] };
-export type SearchHit = { kind: string; id: string; title: string; snippet: string };
 
 const arr = (x: unknown): any[] => (Array.isArray(x) ? x : []);
 // The list a read must hold. A 200 that is not the expected JSON (a login page, a wrong shape) is a FAILURE of
@@ -106,11 +105,9 @@ export async function readClaimsWaiting(): Promise<ClaimsWaiting> {
   return { total: intOf(data.total, "total"), samples: claims.slice(0, 3).map((c) => ({ id: String(c.id), text: String(c.text ?? "") })) };
 }
 
-// The ask box, in phase 0: a library search (pages, claims and sources; never a user document).
-export async function runSearch(q: string): Promise<SearchHit[]> {
-  const { data } = await api("GET", "/workbench/contract/search?q=" + encodeURIComponent(q) + "&limit=10");
-  return listOf(data, "results").map((r) => ({ kind: String(r.kind), id: String(r.id), title: String(r.title ?? ""), snippet: String(r.snippet ?? "").replace(/<<\/?HL>>/g, "") }));
-}
+// The ask box (Home.tsx) lists at most this many hits per kind. It does not search here: it shows the shared picker's
+// results view (components/picker), the one caller of the search route.
+export const ASK_LIMIT = 10;
 
 // One read per card, its own state, a retry.
 export const READ_TIMEOUT_MS = 20000;

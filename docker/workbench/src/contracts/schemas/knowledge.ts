@@ -87,6 +87,25 @@ export const SearchHit = z.object({
   state: recordState("current"),
   lifecycle: registryValue(REGISTRY.sourceStates, "active").nullable(),
   page_class: registryValue(REGISTRY.pageClasses, "entity").nullable(),
+  // rwr-picker: what a list of hits needs to filter and sort (all additive; null / [] when the record has none)
+  topics: z.array(z.string()).openapi({
+    description: "a source's tags, a page's tags, a claim's thread name; [] when it has none (and under metadata_filter " +
+      "for a claim, whose thread carries no metadata: fail closed)",
+  }),
+  date: Iso.nullable().openapi({
+    description: "when the record entered the library: a source's or claim's created_at, a page's updated_at, a held source's created_at",
+  }),
+  quality: z.number().min(0).max(1).nullable().openapi({
+    description: "a claim's confidence, or a source's STAMPED admission score (metadata.credibility.score); null when none is " +
+      "stamped (never derived here: the quality route computes the full model)",
+  }),
+  cited_by: z.number().int().min(0).nullable().openapi({
+    description: "for a source: how many of THE CALLER'S OWN documents link to it (a user document is its owner's; another " +
+      "user's links are never counted, so the number cannot reveal a private document; a document in the caller's trash is not " +
+      "counted). null for claims and pages, for a " +
+      "held source, and whenever metadata_filter is set (fail closed)",
+  }),
+  author: z.string().nullable().openapi({ description: "a source's metadata.author when it is a string; null otherwise" }),
 }).openapi("SearchHit");
 
 export const Search = z.object({

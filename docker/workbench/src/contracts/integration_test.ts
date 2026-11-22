@@ -70,7 +70,7 @@ async function call(method: string, path: string, body?: unknown, opts: { asDefa
   try {
     json = JSON.parse(text);
   } catch { /* SSE */ }
-  return { status: r.status, json, text };
+  return { status: r.status, json, text, headers: r.headers };
 }
 const uuid = () => crypto.randomUUID();
 async function newSource(over: { url?: string | null; title?: string; content?: string } = {}) {
@@ -1155,6 +1155,189 @@ t("P7a the three appendix stubs are backed: their not_implemented registry entri
     `SELECT key, retired_at IS NOT NULL AS retired FROM public.contract_registry_entries WHERE registry = 'implementation_states' AND key IN ('podcasts','presenters','teams') ORDER BY key`);
   assertEquals(rows.map((x) => [x.key, x.retired]), [["podcasts", true], ["presenters", true], ["teams", true]]);
   for (const p of ["/podcasts", "/presenters", "/teams"]) assertEquals((await call("GET", p)).status, 200, p);
+});
+
+// ── rwr-picker: the fields a list of hits filters and sorts on, and the two-identity rule for cited_by ──────
+t("search hits carry topics, date, quality, cited_by and author - additive, from the rows themselves", async () => {
+  const tag = `pk${uuid().slice(0, 8)}`;
+  const src = uuid(), cl = uuid(), th = uuid();
+  await sql(`INSERT INTO public.sources (id, url, title, content, tags, metadata) VALUES ($1, $2, $3, $3, ARRAY['cooling','vrm'], $4::jsonb)`,
+    [src, `https://example.org/${tag}`, `${tag} source`, JSON.stringify({ author: "Ada Lovelace", credibility: { score: 0.8, family: "general" } })]);
+  await sql(`INSERT INTO public.threads (id, name) VALUES ($1, $2)`, [th, `${tag} thread`]);
+  await sql(`INSERT INTO public.claims (id, text, thread_id, confidence) VALUES ($1, $2, $3, 0.6)`, [cl, `${tag} claim text`, th]);
+  const r = await call("GET", `/search?q=${tag}`);
+  assertEquals(r.status, 200);
+  assert(K.Search.safeParse(r.json).success, JSON.stringify(K.Search.safeParse(r.json).error?.issues?.slice(0, 2)));
+  const s1 = r.json.results.find((h: any) => h.id === src);
+  const c1 = r.json.results.find((h: any) => h.id === cl);
+  assertEquals([s1.topics, s1.quality, s1.author, s1.cited_by], [["cooling", "vrm"], 0.8, "Ada Lovelace", 0]);
+  assert(Date.parse(s1.date) > 0);
+  assertEquals([c1.topics, c1.quality, c1.cited_by, c1.author], [[`${tag} thread`], 0.6, null, null]);
+  assert(Date.parse(c1.date) > 0);
+  // a source with no stamp, no author: nulls, never a derived number
+  const plain = await newSource({ title: `${tag} plain` });
+  const p = (await call("GET", `/search?q=${tag}%20plain&kinds=source`)).json.results.find((h: any) => h.id === plain);
+  assertEquals([p.quality, p.author, p.topics], [null, null, []]);
+  // the same hits, the same order, with the fields as without (the fields add nothing to matching)
+  const ids = r.json.results.map((h: any) => h.id);
+  assertEquals(ids.includes(src) && ids.includes(cl), true);
+});
+
+t("a search answer is never cacheable by the browser: Cache-Control no-store, private on its 2xx", async () => {
+  const ok = await call("GET", `/search?q=fixture`);
+  assertEquals(ok.status, 200);
+  assertEquals(ok.headers.get("cache-control"), "no-store, private");
+  const held = await call("GET", `/search?q=refinery&kinds=source&refinery_id=${FX.idea}`);
+  assertEquals([held.status, held.headers.get("cache-control")], [200, "no-store, private"]);
+});
+
+t("cited_by counts only the CALLER's own documents: another user's private documents never change a count", async () => {
+  const src = await newSource({ title: `pkcite ${uuid().slice(0, 8)}` });
+  const A = `pk-a-${uuid().slice(0, 8)}`, Bu = `pk-b-${uuid().slice(0, 8)}`, C = `pk-c-${uuid().slice(0, 8)}`;
+  await sql(`UPDATE public.sources SET metadata = '{"share":"cloud"}'::jsonb WHERE id = $1`, [src]);
+  const link = JSON.stringify([{ kind: "source", id: src, pin: null, reference_id: null }]);
+  await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1, 'a1', $4::jsonb, $5), ($2, 'b1', $4::jsonb, $6), ($3, 'b2', $4::jsonb, $6)`,
+    [`documents/pk-${uuid()}.md`, `documents/pk-${uuid()}.md`, `documents/pk-${uuid()}.md`, link, A, Bu]);
+  const title = (await sql<{ title: string }>(`SELECT title FROM public.sources WHERE id = $1`, [src]))[0].title;
+  const count = async (as: string, qs = "") => (await call("GET", `/search?q=${encodeURIComponent(title)}&kinds=source${qs}`, undefined, { as })).json.results.find((h: any) => h.id === src).cited_by;
+  assertEquals(await count(A), 1);   // A's one document, not B's two
+  assertEquals(await count(Bu), 2);  // B's two, not A's one
+  assertEquals(await count(C), 0);   // C holds none: no inference from A or B
+  // a document of B's that does not link the source changes nothing for anyone
+  await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1, 'b3', '[]'::jsonb, $2)`, [`documents/pk-${uuid()}.md`, Bu]);
+  assertEquals([await count(A), await count(C)], [1, 0]);
+  // rwr-picker-r2 F3: A's documents in the trash (top-level and in a folder, slot 510) are not "your documents"
+  await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1, 'at1', $3::jsonb, $4), ($2, 'at2', $3::jsonb, $4)`,
+    [`documents/.trash/pk-${uuid()}.md`, `documents/pkf/.trash/pk-${uuid()}.md`, link, A]);
+  assertEquals(await count(A), 1);
+  // a folder whose name merely contains "trash" is a live document and counts
+  await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1, 'a2', $2::jsonb, $3)`, [`documents/trash-notes/pk-${uuid()}.md`, link, A]);
+  assertEquals(await count(A), 2);
+  // under a metadata filter (the cloud door) no document count is read at all
+  const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));
+  const filtered = (await call("GET", `/search?q=${encodeURIComponent(title)}&kinds=source&metadata_filter=${f}`, undefined, { as: A })).json.results;
+  assertEquals(filtered.length > 0 && filtered.every((h: any) => h.cited_by === null), true);
+});
+
+// ── rwr-picker: two-identity attacks on the new hit fields (the tester's T1-T3, committed as part of the gate) ──
+t("rwr-picker T1 cited_by: A's private docs never change B / admin / service / anonymous counts; ownerless docs counted for nobody", async () => {
+  const run = uuid().slice(0, 8);
+  const src = await newSource({ title: `tkcite ${run}` });
+  const A = `tk-a-${run}`, Bu = `tk-b-${run}`, ADM = `tk-adm-${run}`;
+  await sql(`INSERT INTO public.workspace_users (sub, name, is_admin) VALUES ($1, 'admin', true)`, [ADM]);
+  const link = JSON.stringify([{ kind: "source", id: src, pin: null, reference_id: null }]);
+  const count = async (as?: string, qs = "") => {
+    const r = await call("GET", `/search?q=${encodeURIComponent(`tkcite ${run}`)}&kinds=source${qs}`, undefined, as ? { as } : {});
+    return r.json.results.find((h: any) => h.id === src)?.cited_by;
+  };
+  const before = { B: await count(Bu), ADM: await count(ADM), DEF: await count() };
+  // A plants 3 private documents linking the source (one links it twice), plus an ownerless (legacy) document
+  await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1,'A-PRIV-1',$4::jsonb,$5),($2,'A-PRIV-2',$4::jsonb,$5),($3,'A-PRIV-3',$6::jsonb,$5)`,
+    [`documents/tk-${uuid()}.md`, `documents/tk-${uuid()}.md`, `documents/tk-${uuid()}.md`, link, A, JSON.stringify([...JSON.parse(link), ...JSON.parse(link)])]);
+  await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links) VALUES ($1, 'ownerless', $2::jsonb)`, [`documents/tk-${uuid()}.md`, link]);
+  const after = { A: await count(A), B: await count(Bu), ADM: await count(ADM), DEF: await count() };
+  console.log("rwr-picker T1", JSON.stringify({ before, after }));
+  assertEquals(after.A, 3, "A counts its own 3 documents (distinct paths; a doubled link counts once)");
+  assertEquals([after.B, after.ADM], [before.B, before.ADM], "B and a non-owner admin see the same count before and after A's private documents");
+  assertEquals([after.B, after.ADM], [0, 0]);
+  // the default (no header) identity: ownerless docs belong to the default owner elsewhere; record what it sees
+  console.log("rwr-picker T1 default identity before/after", before.DEF, after.DEF);
+  // under ANY metadata filter (not only the cloud one) cited_by is null for A
+  for (const f of [{ share: "cloud" }, { x: "y" }]) {
+    const r = await call("GET", `/search?q=${encodeURIComponent(`tkcite ${run}`)}&kinds=source&metadata_filter=${encodeURIComponent(JSON.stringify(f))}`, undefined, { as: A });
+    assert(r.json.results.every((h: any) => h.cited_by === null), `cited_by under ${JSON.stringify(f)}: ${JSON.stringify(r.json.results.map((h: any) => h.cited_by))}`);
+  }
+  // a link stored with an upper-case uuid (correctness probe, not privacy)
+  const C = `tk-c-${run}`;
+  await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1, 'c1', $2::jsonb, $3)`,
+    [`documents/tk-${uuid()}.md`, JSON.stringify([{ kind: "source", id: src.toUpperCase(), pin: null }]), C]);
+  console.log("rwr-picker T1 upper-case link counted for its owner:", await count(C));
+  // response headers of the search: is a private-bearing answer marked no-store?
+  const raw = await front!.request(`${B}/search?q=${encodeURIComponent(`tkcite ${run}`)}`, { headers: { "X-Test-Sub": A } });
+  assertEquals(raw.headers.get("cache-control"), "no-store, private");
+  await raw.text();
+});
+
+t("rwr-picker T2 held source of A: B naming A's refinery gets no hit, no date, no count change; A gets it with a date only", async () => {
+  const run = uuid().slice(0, 8);
+  const A = `tk-ha-${run}`, Bu = `tk-hb-${run}`;
+  const idea = uuid();
+  await sql(`INSERT INTO public.ideas (id, title, owner_sub) VALUES ($1, $2, $3)`, [idea, `tk idea ${run}`, A]);
+  const held = uuid();
+  await sql(`INSERT INTO public.held_sources (id, refinery_id, title, content, metadata) VALUES ($1, $2, $3, 'x', $4::jsonb)`,
+    [held, idea, `HELDSECRET ${run} note`, JSON.stringify({ author: "A-AUTHOR-SECRET", credibility: { score: 0.9 }, share: "cloud" })]);
+  const q = encodeURIComponent(`HELDSECRET ${run}`);
+  const ra = await call("GET", `/search?q=${q}&refinery_id=${idea}`, undefined, { as: A });
+  const h = ra.json.results.find((x: any) => x.id === held);
+  console.log("rwr-picker T2 A's held hit", JSON.stringify(h));
+  assert(h && h.lifecycle === "held" && Date.parse(h.date) > 0);
+  assertEquals([h.quality, h.author, h.cited_by, h.topics], [null, null, null, []]);
+  assert(K.Search.safeParse(ra.json).success);
+  for (const qs of [`&refinery_id=${idea}`, "", `&refinery_id=${idea}&metadata_filter=${encodeURIComponent('{"share":"cloud"}')}`]) {
+    const rb = await call("GET", `/search?q=${q}${qs}`, undefined, { as: Bu });
+    assertEquals([rb.status, rb.json.count, rb.json.results.length], [200, 0, 0], `B ${qs}`);
+    // the route echoes the caller's OWN query, so the whole body legitimately contains it: assert on `results`
+    // and on every field except the echoed `query` (a leak would show in results, count or scope)
+    const rest = JSON.stringify({ ...rb.json, query: undefined });
+    assert(!JSON.stringify(rb.json.results).includes("HELDSECRET") && !rest.includes("HELDSECRET") && !rest.includes("A-AUTHOR-SECRET"), rest);
+  }
+  // A under the cloud filter: the held source is out of scope even though its own metadata says share=cloud
+  const rf = await call("GET", `/search?q=${q}&refinery_id=${idea}&metadata_filter=${encodeURIComponent('{"share":"cloud"}')}`, undefined, { as: A });
+  assertEquals(rf.json.results.length, 0, JSON.stringify(rf.json.results));
+});
+
+t("rwr-picker T3 metadata_filter (cloud view): new fields carry nothing local-only (thread names, pages, local sources, doc counts)", async () => {
+  const run = uuid().slice(0, 8);
+  const LOC = `TKLOCAL-${run}`;
+  const A = `tk-fa-${run}`;
+  const th = uuid(), cl = uuid(), clLocal = uuid(), sc = uuid(), sl = uuid();
+  await sql(`INSERT INTO public.threads (id, name) VALUES ($1, $2)`, [th, `${LOC} thread`]);
+  await sql(`INSERT INTO public.claims (id, text, thread_id, confidence, metadata) VALUES ($1, $2, $3, 0.7, '{"share":"cloud"}'), ($4, $5, $3, 0.7, '{}')`,
+    [cl, `tkfilter ${run} cloud claim`, th, clLocal, `tkfilter ${run} ${LOC} local claim`]);
+  await sql(`INSERT INTO public.sources (id, url, title, content, tags, metadata) VALUES
+      ($1, $2, $3, 'c', ARRAY['cloudtag'], '{"share":"cloud","author":"Cloud Author","credibility":{"score":0.7}}'::jsonb),
+      ($4, $5, $6, 'c', ARRAY[$7], '{"author":"${LOC}-author","credibility":{"score":0.2}}'::jsonb)`,
+    [sc, `https://example.org/tk/${sc}`, `tkfilter ${run} cloud source`, sl, `https://example.org/tk/${sl}`, `tkfilter ${run} local source`, `${LOC}-tag`]);
+  await sql(`INSERT INTO public.wiki_pages (slug, page_class, title, body, links, tags) VALUES ($1, 'concept', $2, $3, '[]'::jsonb, $4::jsonb)`,
+    [`tk-${run}`, `tkfilter ${run} page`, `tkfilter ${run} body`, JSON.stringify([`${LOC}-pagetag`])]); // wiki_pages.tags is jsonb (a JSON array), not text[]
+  await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1, $2, $3::jsonb, $4)`,
+    [`documents/${LOC}.md`, `${LOC} doc`, JSON.stringify([{ kind: "source", id: sc, pin: null }]), A]);
+  const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));
+  const r = await call("GET", `/search?q=tkfilter%20${run}&metadata_filter=${f}`, undefined, { as: A });
+  console.log("rwr-picker T3 filtered", r.text.slice(0, 1500));
+  assertEquals(r.status, 200);
+  assert(K.Search.safeParse(r.json).success);
+  assert(!r.text.includes(LOC), "the filtered answer carries a local-only string");
+  const ids = r.json.results.map((h: any) => h.id).sort();
+  assertEquals(ids, [cl, sc].sort());
+  const c = r.json.results.find((h: any) => h.id === cl), s = r.json.results.find((h: any) => h.id === sc);
+  assertEquals([c.topics, c.cited_by, c.author], [[], null, null]);
+  assertEquals([s.topics, s.author, s.quality, s.cited_by], [["cloudtag"], "Cloud Author", 0.7, null]);
+  // unfiltered, the same caller sees the thread name and its doc count (the local view), proving the filter is what hid them
+  const u = await call("GET", `/search?q=tkfilter%20${run}`, undefined, { as: A });
+  assert(u.text.includes(`${LOC} thread`));
+  assertEquals(u.json.results.find((h: any) => h.id === sc).cited_by, 1);
+  // the other filter values, as parseMetadataFilter (logic/scope.ts) defines them: an EMPTY object is no filter at all
+  // (the caller's own local view, the same answer as no metadata_filter - the cloud door never sends it, it forces
+  // {"share":"cloud"}); a non-object is refused (400, no results); a non-empty object is a real filter (the cloud view:
+  // cited_by null and no local-only string in the new fields).
+  const asked = (raw: string) => call("GET", `/search?q=tkfilter%20${run}&metadata_filter=${raw.startsWith("%") ? raw : encodeURIComponent(raw)}`, undefined, { as: A });
+  const empty = await asked("{}");
+  assertEquals(empty.status, 200);
+  assertEquals(empty.json.results, u.json.results, "an empty filter object is no filter: the unfiltered answer");
+  for (const raw of ["[]", "null"]) {
+    const rr = await asked(raw);
+    assertEquals(rr.status, 400, raw);
+    assert(!rr.text.includes(LOC) && !("results" in (rr.json ?? {})), `a refused filter ${raw} carries no result`);
+  }
+  for (const raw of ["%7B%22share%22%3A%22cloud%22%2C%22x%22%3A1%7D", encodeURIComponent('{"share":"cloud"}')]) {
+    const rr = await asked(raw);
+    assertEquals(rr.status, 200, raw);
+    for (const h of rr.json.results ?? []) {
+      assertEquals(h.cited_by, null, `cited_by under filter ${raw}`);
+      assert(!JSON.stringify([h.topics, h.author, h.cited_by, h.quality]).includes(LOC), `a local-only string in the new fields under filter ${raw}`);
+    }
+  }
 });
 
 Deno.test({ name: "close the pool", ignore, fn: async () => {

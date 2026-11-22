@@ -396,6 +396,15 @@ describe("round 3 (tester attempt 1)", () => {
       expect(screen.queryByTestId("empty-" + id), id).toBeNull();
     }
   });
+  it("F4 (rwr-picker-r2 F1): the ask box shows its failed line for a 200 that is not the expected JSON, never 'nothing matches'", async () => {
+    malformed = ["/contract/search"];
+    await renderHome();
+    fireEvent.change(screen.getByTestId("ask-input"), { target: { value: "cpu" } });
+    fireEvent.submit(screen.getByRole("search"));
+    await waitFor(() => expect(screen.getByTestId("ask-failed")).toBeTruthy());
+    expect(screen.queryByTestId("ask-none")).toBeNull();
+    expect(screen.queryAllByTestId("hit")).toHaveLength(0);
+  });
   it("F6: a read that never answers becomes Could not load with Try again after the timeout", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     hanging = ["/contract/ideas"];

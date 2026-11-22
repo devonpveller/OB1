@@ -1207,6 +1207,11 @@ export type SearchHit = {
   state: string; /** registry: record_states */
   lifecycle: string | null; /** registry: source_states */
   page_class: string | null; /** registry: page_classes */
+  topics: Array<string>;
+  date: string | null;
+  quality: number | null;
+  cited_by: number | null;
+  author: string | null;
 };
 
 export type Session = {
