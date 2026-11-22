@@ -358,7 +358,8 @@ describe("the shell wiring (rwr-shell-nav's App over this module)", () => {
     await waitFor(() => expect(srv.seen.some((r) => r.url === "/workbench/settings")).toBe(true));
     await waitFor(() => expect(requestLog().some((r) => r.url.startsWith("/workbench/documents/state"))).toBe(true));
     expect(screen.queryByTestId("lock-chip")).toBeNull();
-    expect(document.body.textContent).not.toMatch(/error|could not/i);
+    // scoped to the document slot: Home (rwr-home) shows its own per-card "could not load" text over this test's stub
+    expect(screen.getByTestId("doc-slot-empty").textContent).not.toMatch(/error|could not/i);
   });
   it("Unlock sends a versioned DELETE; Undo re-locks with the next version", async () => {
     srv.live(A1, "Plan");
