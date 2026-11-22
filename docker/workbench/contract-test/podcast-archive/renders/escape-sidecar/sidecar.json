@@ -1,0 +1,8 @@
+{
+  "schema": "podcast-archive-sidecar/1",
+  "audio": {
+    "file": "../fixture/audio.mp3",
+    "format": "mp3"
+  },
+  "note": "planted: names a path outside its own directory; must be refused"
+}

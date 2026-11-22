@@ -213,5 +213,10 @@ INSERT INTO public.podcast_render_requests (id, requester_sub, actor_sub, team_i
   ('e8000000-0000-4000-8000-000000000001', 'lab-podcaster-0001', 'lab-podcaster-0001', 'pod-fx-team', 'Fixture request',
    '{"transcript": {"title": "Fixture request", "turns": [{"presenterId": "pod-fx-presenter-a", "text": "Hello."}, {"presenterId": "pod-fx-presenter-b", "text": "Hi."}]}}',
    'queued', '2026-10-17T12:00:00Z', '2026-10-17T12:00:00Z');
+-- rwr-podcast-audio-api: a FAILED request of the same requester (POST .../requests/{id}/retry moves it to queued once)
+INSERT INTO public.podcast_render_requests (id, requester_sub, actor_sub, team_id, title, input, state, error, created_at, updated_at) VALUES
+  ('e8000000-0000-4000-8000-000000000002', 'lab-podcaster-0001', 'lab-podcaster-0001', 'pod-fx-team', 'Fixture failed request',
+   '{"transcript": {"title": "Fixture failed request", "turns": [{"presenterId": "pod-fx-presenter-a", "text": "Hello."}]}}',
+   'failed', 'fixture: the renderer failed', '2026-10-17T12:00:00Z', '2026-10-17T12:00:00Z');
 
 COMMIT;

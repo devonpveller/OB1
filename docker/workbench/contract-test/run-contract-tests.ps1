@@ -268,7 +268,9 @@ try {
   # ---------------------------------------------------------------- 4. integration tests
   Write-Host '[4] database A + src/contracts/integration_test.ts (as ob_app_memory)'
   if (-not (Start-Db $dbA)) { throw 'db A' }
+  # rwr-podcast-audio-api: the fixture podcast archive, READ-ONLY as in production, under the test's mounts root
   $o = Dk run --rm --label $label --network $net -e "CONTRACT_TEST_DB_HOST=$dbA" -e CONTRACT_TEST_DB_USER=ob_app_memory `
+    -v "$(Join-Path $ct 'podcast-archive'):/tmp/contract-mounts/podcast-archive:ro" `
     -e "CONTRACT_TEST_DB_PASSWORD=$appPw" $testTag deno test --allow-net --allow-env --allow-read src/contracts/integration_test.ts src/contracts/library_integration_test.ts
   Save 'integration-test.log' $o
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
@@ -326,7 +328,8 @@ try {
   $o = Dk run -d --name $wbName --label $label --network $net -e PORT=8000 -e "WORKBENCH_KEY=$key" `
     -e "DB_HOST=$dbB" -e DB_USER=ob_app_memory -e "DB_PASSWORD=$appPw" -e OPEN_BRAIN_URL=http://unreachable.invalid `
     -e "EMBEDDING_API_BASE=http://${embName}:8080/v1" -e WIKI_GIT_DIR=/tmp/wiki -e WIKI_ASSETS_DIR=/tmp/wiki/assets `
-    -e CONTRACT_MOUNTS_ROOT=/mounts -e WORKSPACE_IDENTITY_HEADER=X-Test-Sub -v "$(Join-Path $ob1 'recipes'):/recipes:ro" $tag
+    -e CONTRACT_MOUNTS_ROOT=/mounts -e WORKSPACE_IDENTITY_HEADER=X-Test-Sub -v "$(Join-Path $ob1 'recipes'):/recipes:ro" `
+    -v "$(Join-Path $ct 'podcast-archive'):/mounts/podcast-archive:ro" $tag
   Check ($script:rc -eq 0) "workbench $wbName started"
   if ($script:rc -eq 0) { $made.containers += $wbName }
   $up = $false
@@ -337,6 +340,9 @@ try {
   }
   Check $up 'workbench /health answers'
   Check (Seed-Vault $wbName) "fixture vault seeded in $wbName"
+  # rwr-podcast-audio-api: the archive mount is read-only to the workbench (as compose mounts it): a write fails
+  $o = Dk exec $wbName sh -c '(echo x > /mounts/podcast-archive/renders/fixture/write-probe) 2>&1; echo rc=$?'
+  Check ((($o -join ' ') -match 'rc=[1-9]') -and (($o -join ' ') -match 'Read-only')) "the podcast archive mount refuses a write: $(($o -join ' ').Trim())"
   # the workbench's start-up reconcile removed the fixture document listings (their files were not there yet):
   # re-list them now the files are (fixtures-documents.sql; the owner of both is the default identity Dredd uses)
   $null = Dk cp (Join-Path $ct 'fixtures-documents.sql') "${dbB}:/tmp/fixtures-documents.sql"

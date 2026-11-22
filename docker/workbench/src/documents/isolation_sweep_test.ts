@@ -261,6 +261,14 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const podReq = await wb("POST", "/workbench/contract/podcasts/requests",
     { team_id: pod.team, title: pod.request, refinery_id: bRefinery, transcript: { title: pod.request, turns: [{ presenterId: `${pod.team}-p`, text: pod.turn }] } }, B);
   assertEquals(podReq.status, 202, podReq.text);
+  // rwr-podcast-audio-api: B's UNSHARED episode (its title a marker) and B's FAILED request (its error a marker): their
+  // ids go into every route parameter A calls - the audio route and the retry route included - and A must neither hear
+  // the episode nor move the request (checked at the end)
+  const podEp = { title: `PodEpisodeSecret${rnd()}`, error: `PodFailedSecret${rnd()}` };
+  const bEpisode = (await sql<{ id: string }>(`INSERT INTO public.podcast_episodes (owner_sub, shared, title, team_id, audio_format, archive_dir)
+    VALUES ($1, false, $2, $3, 'mp3', '/mounts/podcast-archive/renders/sweep-b') RETURNING id::text AS id`, [bSub, podEp.title, pod.team]))[0].id;
+  const bFailed = (await sql<{ id: string }>(`INSERT INTO public.podcast_render_requests (requester_sub, actor_sub, team_id, title, input, state, error)
+    VALUES ($1, $1, $2, $3, '{"transcript":{"title":"t","turns":[]}}', 'failed', $4) RETURNING id::text AS id`, [bSub, pod.team, pod.request, podEp.error]))[0].id;
   // rw-settings-store: B's own settings - B's team as B's podcast.team (so the podTeam marker covers it) and a
   // refinery dormancy. No route names an owner: A must never read them, and A's calls must not change them.
   const bSet = await wb("PUT", "/workbench/settings/podcast.team", { value: pod.team }, B);
@@ -431,6 +439,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const markers: Record<string, string> = { ...M, ...(pv.pvMarker ? { pvMarker: pv.pvMarker } : {}), path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret, viaSecret,
     ...(bIntake.add ? { intakeUrl: intakeMk.url, intakeAdd: bIntake.add } : {}), ...(bIntake.import ? { intakeFile: intakeMk.file, intakeImport: bIntake.import } : {}),
     podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id,
+    podEpisodeTitle: podEp.title, podFailedError: podEp.error, podEpisodeId: bEpisode, podFailedId: bFailed,
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
     exportSecret, leadSecret, ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])),
     privReport: privMk.text, privTitle: privMk.title, privKey: privMk.key, privReportId: bReport, privClaim: privMk.claim, privClaimId: bReportClaim,
@@ -476,7 +485,8 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // 1. TEMPLATED: B's ids and paths in every parameter, query and body field (the request gate)
   const LIFECYCLE_IRREVERSIBLE = ["/workbench/documents/delete-forever", "/workbench/documents/empty-trash"];
   let lifecycleTrashCalls = 0;
-  const ids = [bPath, bTrashed, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob].filter(Boolean);
+  const ids = [bPath, bTrashed, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob,
+    podReq.json.id, bEpisode, bFailed].filter(Boolean);
   const query = (v: string) => new URLSearchParams({
     path: bPath, ref: bPath, from: bPath, id: v, idea_id: bRefinery, refinery_id: bRefinery, job_id: bJob,
     source_id: bHeld || v, kind: "user_document", holder_kind: "user_document", format: "md", limit: "500", q: "fixture",
@@ -659,6 +669,9 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const bScope = bRoomRead.json.room?.scope;
   assertEquals(bScope, { enabled: true, sources: [FX_ACTIVE] }, "user A's calls left B's chat scope unchanged");
   console.log(`sweep: B's rooms (idea + session) unchanged by A; B still reads them`);
+  // rwr-podcast-audio-api: A's calls (the retry route among them, with B's id) left B's failed request failed
+  assertEquals((await sql<{ state: string; error: string }>(`SELECT state, error FROM public.podcast_render_requests WHERE id = $1`, [bFailed]))[0],
+    { state: "failed", error: podEp.error }, "user A's calls did not retry B's failed request");
   // rw-settings-store: B's settings are B's - unchanged by A's calls, still B's own through the read function and B's GET
   if (settingsPlanted) {
     assertEquals(await sql(`SELECT key, value, version FROM public.user_settings WHERE owner_sub = $1 ORDER BY key`, [bSub]), bSettingsBefore,

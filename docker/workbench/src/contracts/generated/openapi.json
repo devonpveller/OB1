@@ -12694,6 +12694,193 @@
         }
       }
     },
+    "/workbench/contract/podcasts/requests/{id}/retry": {
+      "post": {
+        "operationId": "podcastRequestRetry",
+        "tags": [
+          "podcasts (P7a)"
+        ],
+        "summary": "try a failed render request again: the caller's own request only, failed -> queued once, then handed to the renderer",
+        "description": "Only a FAILED request moves (to queued, its error cleared); a second retry finds it queued and is refused (409). Another user's request is the same 404 as a request that does not exist.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "render request id"
+            },
+            "required": true,
+            "description": "render request id",
+            "name": "id",
+            "in": "path",
+            "example": "e8000000-0000-4000-8000-000000000002"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "moved back to queued (and handed to the renderer when configured)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "e8000000-0000-4000-8000-000000000002",
+                  "team_id": "pod-fx-team",
+                  "title": "Fixture failed request",
+                  "state": "queued",
+                  "episode_id": null,
+                  "error": null,
+                  "turns": 1,
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/PodcastRenderRequest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/podcasts/{id}/audio": {
+      "get": {
+        "operationId": "podcastAudio",
+        "tags": [
+          "podcasts (P7a)"
+        ],
+        "summary": "an episode's archived audio: to its owner, or to any signed-in user when it is shared; one byte range for seeking",
+        "description": "The id names an episode row, never a path: the row names its archive directory and the archive's sidecar.json names the file. Another user's unshared episode, an id that is no row, and a row whose stored path leaves the archive root are the same 404, with no file bytes. A single `Range: bytes=` range answers 206 with Content-Range; a range past the end is 416; any other Range header is ignored (200, the whole file). Content-Type follows the episode's format (audio/mpeg for the renderer's native mp3; the transcode menu's own types otherwise). Cache-Control is always `private, no-store`.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "episode id"
+            },
+            "required": true,
+            "description": "episode id",
+            "name": "id",
+            "in": "path",
+            "example": "e7000000-0000-4000-8000-000000000001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the whole file",
+            "content": {
+              "audio/mpeg": {
+                "example": "ID3fixture-audio-0123456789",
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "the requested byte range (Content-Range: bytes start-end/size)",
+            "content": {
+              "audio/mpeg": {
+                "example": "ID3f",
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "the range selects no byte of the file (Content-Range: bytes */size)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/workbench/contract/sessions": {
       "get": {
         "operationId": "sessions",

@@ -87,3 +87,40 @@ export async function createRequest(db: Db, who: { sub: string; actor: string },
     return rows[0];
   });
 }
+
+// rwr-podcast-audio-api: the row an episode's audio is served from. Visible to the caller exactly
+// as podcasts() lists it - the caller's own render, or one shared with everyone (when the caller
+// may hear shared ones) - and nothing else: another user's unshared episode and an id that is no
+// row both come back null, so the route answers them the same way. The id is the only input; the
+// archive directory comes from the row, never from the request.
+export async function episodeAudio(db: Db, sub: string, id: string, shared: boolean) {
+  const rows = await db.query<{ id: string; archive_dir: string; audio_format: string; shared: boolean }>(
+    `SELECT e.id::text AS id, e.archive_dir, e.audio_format, e.shared
+       FROM public.podcast_episodes e
+      WHERE e.id = $1::uuid AND e.origin = 'render' AND (e.owner_sub = $2 OR ($3::boolean AND e.shared))`,
+    [id, sub, shared],
+  );
+  return rows[0] ?? null;
+}
+
+// rwr-podcast-audio-api: retry a failed render request - the requester's own only. ONE conditional
+// UPDATE moves failed -> queued, so two retries racing move it once and the second is refused (the
+// row is then queued, not failed). Another user's request and an id that is no row are the same
+// NotFound; the requester's own request in another state is a Conflict naming its state (the
+// requester can see that state in their own list anyway).
+export const NO_SUCH_REQUEST = "no such request";
+
+export async function retryRequest(db: Db, sub: string, id: string) {
+  const moved = await db.query<Record<string, unknown>>(
+    `UPDATE public.podcast_render_requests AS r SET state = 'queued', error = NULL, updated_at = now()
+      WHERE r.id = $1::uuid AND r.requester_sub = $2 AND r.state = 'failed'
+      RETURNING ${REQUEST_COLS}`,
+    [id, sub],
+  );
+  if (moved.length) return moved[0];
+  const mine = await db.query<{ state: string }>(
+    `SELECT r.state FROM public.podcast_render_requests r WHERE r.id = $1::uuid AND r.requester_sub = $2`, [id, sub],
+  );
+  if (!mine.length) throw new NotFound(NO_SUCH_REQUEST);
+  throw new Conflict(`only a failed request can be retried: this one is ${mine[0].state}`, { state: mine[0].state });
+}

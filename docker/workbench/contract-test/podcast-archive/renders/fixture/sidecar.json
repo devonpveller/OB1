@@ -1,0 +1,15 @@
+{
+  "schema": "podcast-archive-sidecar/1",
+  "origin": "render",
+  "episode_id": "e7000000-0000-4000-8000-000000000001",
+  "audio": {
+    "file": "audio.mp3",
+    "format": "mp3",
+    "bytes": 27,
+    "sha256": "8af29c487b80dd39df788c1841ffbc2eaa4cd8e0cfb5ed9e027ec79366a9f97b",
+    "seconds": null
+  },
+  "parts": [],
+  "transcodes": [],
+  "note": "rwr-podcast-audio-api lab fixture: not real audio"
+}

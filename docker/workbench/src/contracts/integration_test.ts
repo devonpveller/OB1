@@ -1157,6 +1157,118 @@ t("P7a the three appendix stubs are backed: their not_implemented registry entri
   for (const p of ["/podcasts", "/presenters", "/teams"]) assertEquals((await call("GET", p)).status, 200, p);
 });
 
+// ── rwr-podcast-audio-api: episode audio and retry over the real tables. The fixture archive
+// (contract-test/podcast-archive) is mounted READ-ONLY at /tmp/contract-mounts/podcast-archive by
+// run-contract-tests.ps1 (step 4), as compose mounts the real one at /mounts/podcast-archive. Two
+// real-shaped identities, AU_A and AU_B, through the seam's test header. ──
+const AU_A = "rwr-audio-user-a", AU_B = "rwr-audio-user-b";
+const ARC = "/tmp/contract-mounts/podcast-archive/renders";
+const AU_BYTES = "ID3fixture-audio-0123456789"; // contract-test/podcast-archive/renders/fixture/audio.mp3
+async function raw(method: string, path: string, as: string, headers: Record<string, string> = {}) {
+  const r = await front!.request(B + path, { method, headers: { "X-Test-Sub": as, ...headers } });
+  const text = new TextDecoder().decode(new Uint8Array(await r.arrayBuffer()));
+  return { status: r.status, headers: r.headers, text };
+}
+async function auEpisode(owner: string, shared: boolean, dir: string) {
+  return (await sql<{ id: string }>(
+    `INSERT INTO public.podcast_episodes (owner_sub, shared, title, audio_format, archive_dir) VALUES ($1, $2, 'rwr audio', 'mp3', $3) RETURNING id::text AS id`,
+    [owner, shared, dir],
+  ))[0].id;
+}
+async function auRequest(requester: string, state: string, error: string | null = null) {
+  return (await sql<{ id: string }>(
+    `INSERT INTO public.podcast_render_requests (requester_sub, actor_sub, team_id, title, input, state, error)
+     VALUES ($1, $1, 'pod-fx-team', 'rwr retry', '{"transcript":{"title":"t","turns":[]}}', $2, $3) RETURNING id::text AS id`,
+    [requester, state, error],
+  ))[0].id;
+}
+
+t("rwr-podcast-audio-api: B gets 404 for A's unshared episode (the same as no row) and 200 for a shared one; A hears their own", async () => {
+  const own = await auEpisode(AU_A, false, `${ARC}/fixture`);
+  const shared = await auEpisode(AU_A, true, `${ARC}/fixture`);
+  const a = await raw("GET", `/podcasts/${own}/audio`, AU_A);
+  assertEquals([a.status, a.text, a.headers.get("content-type")], [200, AU_BYTES, "audio/mpeg"]);
+  const b = await raw("GET", `/podcasts/${own}/audio`, AU_B);
+  const none = await raw("GET", `/podcasts/${uuid()}/audio`, AU_B);
+  assertEquals([b.status, b.text], [404, none.text], "A's unshared episode is, to B, no row at all");
+  assert(!b.text.includes("ID3"));
+  const s = await raw("GET", `/podcasts/${shared}/audio`, AU_B);
+  assertEquals([s.status, s.text], [200, AU_BYTES]);
+  // and B's list never shows A's unshared episode, while the shared one carries mine=false and no team
+  const list = await call("GET", `/podcasts?limit=200`, undefined, { as: AU_B });
+  const ids = list.json.podcasts.map((p: any) => p.id);
+  assert(!ids.includes(own) && ids.includes(shared));
+  assertEquals(list.json.podcasts.find((p: any) => p.id === shared).mine, false);
+});
+
+t("rwr-podcast-audio-api: a range request is 206 with the right Content-Range and bytes; past the end is 416", async () => {
+  const id = await auEpisode(AU_A, false, `${ARC}/fixture`);
+  const n = AU_BYTES.length;
+  for (const [range, s, e] of [["bytes=0-3", 0, 3], ["bytes=10-", 10, n - 1], ["bytes=-5", n - 5, n - 1]] as [string, number, number][]) {
+    const r = await raw("GET", `/podcasts/${id}/audio`, AU_A, { range });
+    assertEquals([r.status, r.headers.get("content-range"), r.text], [206, `bytes ${s}-${e}/${n}`, AU_BYTES.slice(s, e + 1)], range);
+  }
+  const past = await raw("GET", `/podcasts/${id}/audio`, AU_A, { range: `bytes=${n}-` });
+  assertEquals([past.status, past.headers.get("content-range")], [416, `bytes */${n}`]);
+});
+
+t("rwr-podcast-audio-api: ids that are no row, and rows whose stored path escapes the archive root (planted), are 404 with no file bytes", async () => {
+  const none = await raw("GET", `/podcasts/${uuid()}/audio`, AU_A);
+  assertEquals(none.status, 404);
+  const planted = [
+    "/etc", "/tmp/contract-mounts/podcast-archive/../../../etc", `${ARC}/../../../../etc`, "/tmp/contract-mounts-alt/x",
+    `${ARC}/escape-sidecar`, // its sidecar names ../fixture/audio.mp3
+    "/app", `${ARC}/does-not-exist`,
+  ];
+  for (const dir of planted) {
+    const id = await auEpisode(AU_A, true, dir); // shared, and A's own: only the path can refuse it
+    const r = await raw("GET", `/podcasts/${id}/audio`, AU_A);
+    assertEquals([r.status, r.text], [404, none.text], dir);
+    assert(!r.text.includes("ID3") && !r.text.includes("root:"), dir);
+  }
+  for (const id of ["not-a-uuid", "00000000-0000-0000-0000-000000000000"]) {
+    const r = await raw("GET", `/podcasts/${id}/audio`, AU_A);
+    assertEquals([r.status, r.text], [404, none.text], id);
+  }
+});
+
+t("rwr-podcast-audio-api: audio responses carry no public or shared-cache header", async () => {
+  const own = await auEpisode(AU_A, false, `${ARC}/fixture`);
+  for (const range of ["", "bytes=0-1"]) {
+    const r = await raw("GET", `/podcasts/${own}/audio`, AU_A, range ? { range } : {});
+    assertEquals(r.headers.get("cache-control"), "private, no-store", range);
+    assert(!r.headers.get("expires") && !r.headers.get("cdn-cache-control") && !r.headers.get("surrogate-control"));
+  }
+});
+
+t("rwr-podcast-audio-api: retry moves failed -> queued once (also under a race); a second retry and a non-failed request are refused", async () => {
+  const id = await auRequest(AU_A, "failed", "renderer fell over");
+  const rs = await Promise.all([1, 2, 3].map(() => call("POST", `/podcasts/requests/${id}/retry`, undefined, { as: AU_A })));
+  assertEquals(rs.map((r) => r.status).sort(), [200, 409, 409], rs.map((r) => r.text).join(" | "));
+  const ok = rs.find((r) => r.status === 200)!;
+  assertEquals([ok.json.id, ok.json.state, ok.json.error], [id, "queued", null]);
+  const row = (await sql<{ state: string; error: string | null }>(`SELECT state, error FROM public.podcast_render_requests WHERE id = $1`, [id]))[0];
+  assertEquals([row.state, row.error], ["queued", null]);
+  assertEquals((await call("POST", `/podcasts/requests/${id}/retry`, undefined, { as: AU_A })).status, 409);
+  for (const st of ["queued", "rendering", "done"]) {
+    const other = await auRequest(AU_A, st);
+    assertEquals((await call("POST", `/podcasts/requests/${other}/retry`, undefined, { as: AU_A })).status, 409, st);
+    assertEquals((await sql<{ state: string }>(`SELECT state FROM public.podcast_render_requests WHERE id = $1`, [other]))[0].state, st);
+  }
+});
+
+t("rwr-podcast-audio-api: another user's retry is the same response as a missing request, and moves nothing; nothing of A's leaks to B", async () => {
+  const a = await auRequest(AU_A, "failed", "A-private-error-text");
+  const missing = await call("POST", `/podcasts/requests/${uuid()}/retry`, undefined, { as: AU_B });
+  const theirs = await call("POST", `/podcasts/requests/${a}/retry`, undefined, { as: AU_B });
+  assertEquals([theirs.status, theirs.text], [missing.status, missing.text]);
+  assertEquals(missing.status, 404);
+  assert(!theirs.text.includes("A-private-error-text") && !theirs.text.includes("failed"));
+  assertEquals((await sql<{ state: string }>(`SELECT state FROM public.podcast_render_requests WHERE id = $1`, [a]))[0].state, "failed");
+  const listB = await call("GET", `/podcasts/requests?limit=200`, undefined, { as: AU_B });
+  assert(!listB.text.includes(a) && !listB.text.includes("A-private-error-text"), "B's request list holds nothing of A's");
+});
+
 Deno.test({ name: "close the pool", ignore, fn: async () => {
   await pool!.end();
   await legacy?.pool.end();
