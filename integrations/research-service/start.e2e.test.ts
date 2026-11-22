@@ -296,6 +296,18 @@ Deno.test({ name: "S8. an idea is not a start: preview and start refuse it alike
     assertFalse(answers[0].text.includes(idea), "the refusal names no idea");
     assertEquals(st.log.proposer.length, proposed, "nothing was formed: the proposer was never asked");
     assertEquals(await counts(), before, "no job and no hand-back");
+    // round 2 (tester A2): user-start takes chat and document items only - the other personal kinds are a 400 at both doors
+    for (const kind of ["gmail", "google_activity", "brainstorm"]) {
+      for (const path of ["/research/derived/preview", "/research/derived"]) {
+        const r = await post(svc.base, path, { purpose: "user-start", item: { ...item(OWNER.sub), kind, id: `${kind}:s8` }, run: { depth: "quick" }, deliver: { attach: "none" } });
+        const t = await r.text();
+        assertEquals(r.status, 400, `${kind} ${path}: ${t.slice(0, 200)}`);
+        assert(t.includes("user-start takes item.kind chat or document"), t.slice(0, 200));
+      }
+    }
+    assertEquals(await counts(), before, "the refused kinds created no job and no hand-back");
+    assertEquals(st.log.proposer.length, proposed, "and formed nothing");
+    out.push("user-start with a gmail / google_activity / brainstorm item: 6 x 400 at the preview and start doors, nothing formed or written");
     const onIdea = await q<{ n: number }>(su, `SELECT count(*)::int AS n FROM public.research_jobs WHERE refinery_id::text = $1 OR inlet_ref->>'id' = $1`, [idea]);
     assertEquals(onIdea[0].n, 0, "no job of any kind (personal or derived) is tied to the idea");
     const hb = await q<{ n: number }>(su, `SELECT count(*)::int AS n FROM public.research_handbacks WHERE lower(inlet_id) LIKE $1::text || '%'`, [idea]);

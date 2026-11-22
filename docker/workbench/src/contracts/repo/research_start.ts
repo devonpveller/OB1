@@ -10,7 +10,6 @@
 // The workbench's own caller key (RESEARCH_WORKSPACE_KEY, as documents/clients.ts) is used; no new key, no new egress:
 // the service's model call stays on its own LiteLLM key. Shipped inert: no URL or key = the stated 503.
 import type { Db } from "../db.ts";
-import { DocError } from "../../documents/repo.ts";
 import type { Identity } from "../../middleware/identity.ts";
 import { NotFound } from "./lifecycle.ts";
 import { buildItem, type Loaded, type StartRequest } from "../logic/research_start.ts";
@@ -51,8 +50,9 @@ export function doorClient(env = (k: string) => Deno.env.get(k)): DoorClient | n
 export interface StartDeps {
   db: Db;
   door: DoorClient | null;
-  /** the owner's document, read as theirs (documents/repo.ts readDocument): throws DocError 404 for another user's or a missing one */
-  readDoc: (path: string, who: Identity) => Promise<{ path: string; content: string }>;
+  /** the owner's document, read as theirs (documents/repo.ts readDocument, injected by src/app.ts): null for another
+   *  user's or a missing one. Not imported here: documents/repo.ts would put config.ts in the contract's module graph. */
+  readDoc: (path: string, who: Identity) => Promise<{ path: string; content: string } | null>;
   newId?: () => string;
 }
 
@@ -62,14 +62,10 @@ const NO_DOC = "no such document";
  *  words). An idea never gets here: parseStart refuses it (logic/research_start.ts IDEA_REFUSED). */
 export async function loadAttach(deps: StartDeps, req: StartRequest, who: Identity): Promise<Loaded | null> {
   if (req.attach.kind === "none") return null;
-  try {
-    const d = await deps.readDoc(req.attach.path, who);
-    const title = (/^#\s+(.+)$/m.exec(d.content)?.[1] ?? "").trim();
-    return { ref: d.path, title, text: d.content };
-  } catch (e) {
-    if (e instanceof DocError) throw new NotFound(NO_DOC);
-    throw e;
-  }
+  const d = await deps.readDoc(req.attach.path, who);
+  if (!d) throw new NotFound(NO_DOC);
+  const title = (/^#\s+(.+)$/m.exec(d.content)?.[1] ?? "").trim();
+  return { ref: d.path, title, text: d.content };
 }
 
 function doorBody(who: Identity, req: StartRequest, loaded: Loaded | null, newId: () => string) {

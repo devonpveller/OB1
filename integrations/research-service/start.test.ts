@@ -4,7 +4,7 @@
  *   deno test --allow-read start.test.ts
  */
 import { assert, assertEquals, assertFalse } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { type BoundaryDeps, formDerivedRequest, parseDoorBody, parseRun, type PersonalItem, PURPOSES, runOptions } from "./boundary.ts";
+import { type BoundaryDeps, formDerivedRequest, parseDoorBody, parseRun, type PersonalItem, PURPOSES, runOptions, USER_START_KINDS } from "./boundary.ts";
 import { DEPTHS, resolveDepth, runCeilings } from "./depth.ts";
 import { approvedDeps, doorRefusesIdea, formForDoor, previewBody, startChanged } from "./start.ts";
 import { MK, OWNER } from "./fixtures/boundary-markers.ts";
@@ -141,4 +141,22 @@ Deno.test("the preview refuses an idea exactly as the derived door does: item ki
     assert(!("error" in p), JSON.stringify(b));
     if (!("error" in p)) assert(doorRefusesIdea(p), JSON.stringify(b));
   }
+});
+
+// ── round 2 (tester A2): purpose user-start takes only the kinds a user's start sends ─────────────────────────────────
+Deno.test("purpose user-start: chat and document only - gmail, google_activity and brainstorm items are refused at the parse", () => {
+  assertEquals([...USER_START_KINDS].sort(), ["chat", "document"]);
+  const body = (kind: string, purpose = "user-start") =>
+    ({ purpose, item: { kind, id: `${kind}:1`, owner_sub: OWNER.sub, fields: { question: "q" }, links: [] }, run: { depth: "quick" } });
+  for (const kind of ["chat", "document"]) assert(!("error" in parseDoorBody(body(kind))), kind);
+  for (const kind of ["gmail", "google_activity", "brainstorm"]) {
+    const p = parseDoorBody(body(kind));
+    assert("error" in p && /user-start takes item\.kind chat or document/.test(p.error), `${kind}: ${JSON.stringify(p)}`);
+  }
+  // the other purposes keep their kinds (unchanged): a brainstorm gap and a gmail digest item still parse
+  assert(!("error" in parseDoorBody(body("brainstorm", "brainstorm-gap"))));
+  assert(!("error" in parseDoorBody(body("gmail", "digest-article"))));
+  // an idea under user-start parses here and is refused by the doors' idea rule (one answer for every idea)
+  const idea = parseDoorBody(body("idea"));
+  assert(!("error" in idea) && doorRefusesIdea(idea));
 });

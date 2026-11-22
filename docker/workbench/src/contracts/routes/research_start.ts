@@ -9,7 +9,6 @@
 // one. Personal text goes to the research service's request boundary only (repo/research_start.ts) and is stored
 // nowhere by this item.
 import { createRoute } from "../deps.ts";
-import { readDocument } from "../../documents/repo.ts";
 import { identityOf } from "../../middleware/identity.ts";
 import { BadRequest } from "../logic/scope.ts";
 import { parseStart } from "../logic/research_start.ts";
@@ -35,7 +34,8 @@ export function registerResearchStart(app: ContractApp, deps: ContractDeps, seam
   const who = seams.identity ?? identityOf;
   const sd: StartDeps = {
     db: deps.db, door,
-    readDoc: seams.readDoc ?? ((path, id) => readDocument({ db: deps.db, reg: deps.registry }, path, id)),
+    // injected (src/app.ts): this module never imports documents/repo.ts (config.ts would enter the contract's graph)
+    readDoc: seams.readDoc ?? deps.readOwnDocument ?? (() => Promise.resolve(null)),
     newId: seams.newId,
   };
   const unavailable = (c: Parameters<typeof fail>[0], e: unknown) => {

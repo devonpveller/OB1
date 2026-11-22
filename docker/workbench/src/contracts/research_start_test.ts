@@ -7,7 +7,6 @@ import type { Db } from "./db.ts";
 import { newApp } from "./routes/http.ts";
 import { registerResearchStart } from "./routes/research_start.ts";
 import { type DoorAnswer, type DoorClient } from "./repo/research_start.ts";
-import { DocError } from "../documents/repo.ts";
 import type { Identity } from "../middleware/identity.ts";
 import { buildItem, extractLinks, IDEA_REFUSED, parseStart } from "./logic/research_start.ts";
 import { BadRequest } from "./logic/scope.ts";
@@ -46,7 +45,7 @@ function rig(opts: { door?: DoorClient | null; previewBody?: Record<string, unkn
     door: opts.door === undefined ? door : opts.door,
     readDoc: (path, id) => {
       if (id.sub === A && path === DOC_A) return Promise.resolve({ path: DOC_A, content: `# Cabin notes\n${M.DOC} heat pump ideas, see https://news.example.org/hp` });
-      return Promise.reject(new DocError("no such document", 404));
+      return Promise.resolve(null); // another user's or a missing one (the injected reader answers null)
     },
     identity: (c: Context) => Promise.resolve(who(c.req.header("x-test-sub") ?? A)),
     newId: () => "start-id-1",

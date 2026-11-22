@@ -24,6 +24,8 @@ export type InletKind = "idea" | "gmail" | "google_activity" | "brainstorm" | "d
 export type Purpose = "idea-research" | "digest-article" | "digest-gap" | "brainstorm-gap" | "user-start";
 export const INLET_KINDS: ReadonlySet<string> = new Set(["idea", "gmail", "google_activity", "brainstorm", "document", "chat"]);
 export const PURPOSES: ReadonlySet<string> = new Set(["idea-research", "digest-article", "digest-gap", "brainstorm-gap", "user-start"]);
+/** rwr-research-start-api: the item kinds a user's start sends (attach to nothing = chat; a document) */
+export const USER_START_KINDS: ReadonlySet<string> = new Set(["chat", "document"]);
 
 export interface PersonalItem {
   kind: InletKind;
@@ -341,6 +343,12 @@ export function parseDoorBody(body: unknown): { item: PersonalItem; purpose: Pur
   if (!PURPOSES.has(purpose)) return { error: `purpose is one of ${[...PURPOSES].join(", ")}` };
   const kind = String(it.kind ?? "");
   if (!INLET_KINDS.has(kind)) return { error: `item.kind is one of ${[...INLET_KINDS].join(", ")}` };
+  // rwr-research-start-api (round 2, tester A2): a user's start is a chat item (attach to nothing) or a document - never
+  // a gmail / google_activity / brainstorm item under the user-start purpose. (An idea is left to the doors' own idea
+  // refusal, slot 580's rule, so every idea answers the one idea refusal.)
+  if (purpose === "user-start" && !USER_START_KINDS.has(kind) && kind !== "idea") {
+    return { error: `purpose user-start takes item.kind ${[...USER_START_KINDS].join(" or ")}` };
+  }
   const id = String(it.id ?? "").trim();
   if (!id || id.length > 500) return { error: "item.id required (<= 500 chars)" };
   const fields: Record<string, string> = {};

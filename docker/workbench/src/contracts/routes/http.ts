@@ -28,6 +28,10 @@ export interface ContractDeps {
   privateEmbed?: ((text: string) => Promise<number[]>) | null;
   // rw-owner-private-view: who may see the private views (the identity mode; identity/private_view.ts)
   privateView?: import("../../identity/private_view.ts").PrivateViewConfig;
+  // rwr-research-start-api: the signed-in owner's document (documents/repo.ts readDocument), or null for another
+  // user's / a missing one. Injected by src/app.ts, never imported here: documents/repo.ts pulls config.ts (DB_* read
+  // at import) into the contract's module graph (see repo/trust.ts ownedDocument). Absent = every document is null.
+  readOwnDocument?: (path: string, who: import("../../middleware/identity.ts").Identity) => Promise<{ path: string; content: string } | null>;
 }
 
 export const PREFIX = "/workbench/contract";
