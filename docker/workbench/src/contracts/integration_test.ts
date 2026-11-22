@@ -1310,9 +1310,21 @@ t("rwr-picker T3 metadata_filter (cloud view): new fields carry nothing local-on
   const u = await call("GET", `/search?q=tkfilter%20${run}`, undefined, { as: A });
   assert(u.text.includes(`${LOC} thread`));
   assertEquals(u.json.results.find((h: any) => h.id === sc).cited_by, 1);
-  // a filter value that is not an object / an empty object: what happens to the fields?
-  for (const raw of ["{}", "[]", "null", "%7B%22share%22%3A%22cloud%22%2C%22x%22%3A1%7D"]) {
-    const rr = await call("GET", `/search?q=tkfilter%20${run}&metadata_filter=${raw.startsWith("%") ? raw : encodeURIComponent(raw)}`, undefined, { as: A });
+  // the other filter values, as parseMetadataFilter (logic/scope.ts) defines them: an EMPTY object is no filter at all
+  // (the caller's own local view, the same answer as no metadata_filter - the cloud door never sends it, it forces
+  // {"share":"cloud"}); a non-object is refused (400, no results); a non-empty object is a real filter (the cloud view:
+  // cited_by null and no local-only string in the new fields).
+  const asked = (raw: string) => call("GET", `/search?q=tkfilter%20${run}&metadata_filter=${raw.startsWith("%") ? raw : encodeURIComponent(raw)}`, undefined, { as: A });
+  const empty = await asked("{}");
+  assertEquals(empty.status, 200);
+  assertEquals(empty.json.results, u.json.results, "an empty filter object is no filter: the unfiltered answer");
+  for (const raw of ["[]", "null"]) {
+    const rr = await asked(raw);
+    assertEquals(rr.status, 400, raw);
+    assert(!rr.text.includes(LOC) && !("results" in (rr.json ?? {})), `a refused filter ${raw} carries no result`);
+  }
+  for (const raw of ["%7B%22share%22%3A%22cloud%22%2C%22x%22%3A1%7D", encodeURIComponent('{"share":"cloud"}')]) {
+    const rr = await asked(raw);
     assertEquals(rr.status, 200, raw);
     for (const h of rr.json.results ?? []) {
       assertEquals(h.cited_by, null, `cited_by under filter ${raw}`);
