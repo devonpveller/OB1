@@ -305,7 +305,7 @@ Deno.test({ name: "S8. an idea is not a start: preview and start refuse it alike
     const e = await refused(su, `INSERT INTO public.research_handbacks (owner_sub, inlet_kind, inlet_id, purpose, state, deliver)
                                  VALUES ($1, 'idea', $2, 'user-start', 'refused', '{}'::jsonb)`, [OWNER.sub, idea]);
     assert(/an idea hand-back is inlet idea with purpose idea-research/.test(e), e);
-    out.push("slot 580's trigger: a user-start hand-back on the owner's idea is refused (23514)");
+    out.push("slot 580: its trigger refuses a user-start hand-back on the owner's idea is refused (23514)");
   } finally {
     await svc.stop();
     await st.close();

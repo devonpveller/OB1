@@ -187,7 +187,7 @@ try {
     $testTag deno test --unstable-net --allow-net --allow-env --allow-read --allow-run start.e2e.test.ts
   $o = $o -replace [regex]::Escape($pw), '***' -replace [regex]::Escape($appPw), '***'
   Save 'start-e2e.log' $o
-  foreach ($l in ($o -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(slot 540|preview|start|approved_question|attach to nothing|the jobs ran|sweep|search egress|two identities|idea|slot 580's trigger):' }) { Write-Host "    $l" }
+  foreach ($l in ($o -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(slot 540|preview|start|approved_question|attach to nothing|the jobs ran|sweep|search egress|two identities|idea|slot 580):' }) { Write-Host "    $l" }
   $sum = Summary $o
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 4) "start e2e (round 2: S8, an idea is not a start): $($sum.Value)"
 
