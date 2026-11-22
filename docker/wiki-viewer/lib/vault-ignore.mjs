@@ -43,6 +43,9 @@ export const REQUIRED_IGNORES = [
   ".structural-failures.json.tmp-*",
   ".unsynced-rows.json.tmp-*",
   ".*.wp-staged-*",
+  ".withheld-pages.json",
+  ".withheld-pages.json.tmp-*",
+  ".withheld-backup-*/",
 ];
 
 function globToRegex(glob) {

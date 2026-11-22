@@ -20,7 +20,13 @@
  * the viewer image import it too).
  *
  * Entry: { name, version, pageClass, priority, match(rel, parts) -> boolean,
- *          entityType?(parts) -> string|null }
+ *          entityType?(parts) -> string|null,
+ *          regenerable?: boolean | (parts) -> boolean }
+ *   regenerable  true when the compile WRITES this file and writes it again
+ *                from Open Brain (so moving it aside loses nothing a person
+ *                wrote); false / absent = the file may be its own source of
+ *                truth (an owner's note, an AI note) - never moved or deleted
+ *                by a tool that tidies refused pages (rw-wiki-guarded-pages-r2).
  *   rel    vault-relative path without the .md ("content/person/person-x")
  *   parts  rel.split("/")
  */
@@ -33,6 +39,7 @@ export function registerCompileClass(entry) {
   if (typeof e.pageClass !== "string" || !e.pageClass) throw new Error(`compile class ${e.name}: pageClass required`);
   if (typeof e.priority !== "number") throw new Error(`compile class ${e.name}: priority must be a number`);
   if (typeof e.match !== "function") throw new Error(`compile class ${e.name}: match() required`);
+  if (e.regenerable !== undefined && typeof e.regenerable !== "boolean" && typeof e.regenerable !== "function") throw new Error(`compile class ${e.name}: regenerable must be a boolean or a function`);
   if (_entries.has(e.name)) throw new Error(`compile class ${e.name}: already registered`);
   // A tie would decide by name, i.e. silently by spelling: refuse it.
   const tie = [..._entries.values()].find((x) => x.priority === e.priority);
@@ -67,24 +74,43 @@ export function classify(relPath) {
   return { slug, page_class: "root", entity_type: null, class: "root" };
 }
 
+// Is this vault file regenerable compile output? (rw-wiki-guarded-pages-r2, review B2.) The class that classify() picks
+// for the path decides; a class that does not say is NOT regenerable (fail safe: the file is kept).
+export function isRegenerable(relPath) {
+  const c = classify(relPath);
+  const e = _entries.get(c.class);
+  const r = e ? e.regenerable : false;
+  return typeof r === "function" ? r(c.slug.split("/")) === true : r === true;
+}
+
 // ── built-in classes (the pre-registry mapping, unchanged) ──────────────────
 // The legacy Quartz note tree (notes/...), written by the workbench at save.
+// Author-owned (the workbench writes it; the compiler never edits notes/): never regenerable.
 registerCompileClass({ name: "note", version: 1, pageClass: "note", priority: 100,
-  match: (_s, p) => p[0] === "notes" });
+  match: (_s, p) => p[0] === "notes", regenerable: false });
 // Everything outside content/, and content/<file> one level deep: roots/MOCs.
+// Not regenerable as a class: it also holds whatever a person puts outside content/.
 registerCompileClass({ name: "root", version: 1, pageClass: "root", priority: 90,
-  match: (_s, p) => p[0] !== "content" || p.length < 3 });
+  match: (_s, p) => p[0] !== "content" || p.length < 3, regenerable: false });
 // content/notebooks/<nb>/... - notebook hubs, the notebooks MOC and AI notes
-// inside a notebook (stored as "note", as before the registry).
+// inside a notebook (stored as "note", as before the registry). Regenerable:
+// only what the notebook synthesis writes (synthesize-notebooks.mjs) - the hub
+// content/notebooks/<nb>/<nb> (the one file the hub sweep removes, wiki-
+// service.mjs) and the MOC content/notebooks/index. Every other file there is
+// an AI note (workbench writeStructuredNote): author-owned-in-content, its
+// file the source of truth, never regenerated.
 registerCompileClass({ name: "notebook-tree", version: 1, pageClass: "note", priority: 84,
-  match: (_s, p) => p[1] === "notebooks" });
+  match: (_s, p) => p[1] === "notebooks",
+  regenerable: (p) => p[0] === "content" && ((p.length === 4 && p[3] === p[2]) || (p.length === 3 && p[2] === "index")) });
+// The leaves and the retired hubs layer: written by the compile, swept against their own kept-sets.
 registerCompileClass({ name: "source", version: 1, pageClass: "source", priority: 83,
-  match: (_s, p) => p[1] === "source" });
+  match: (_s, p) => p[1] === "source", regenerable: true });
 registerCompileClass({ name: "thought", version: 1, pageClass: "thought", priority: 82,
-  match: (_s, p) => p[1] === "thought" });
+  match: (_s, p) => p[1] === "thought", regenerable: true });
 registerCompileClass({ name: "notebook", version: 1, pageClass: "notebook", priority: 81,
-  match: (_s, p) => p[1] === "notebook" });
+  match: (_s, p) => p[1] === "notebook", regenerable: true });
 // content/<entity_type>/<slug> - every other generated page is an entity page
 // whose directory IS its entity_type.
+// (topic pages are entity pages of type topic.)
 registerCompileClass({ name: "entity", version: 1, pageClass: "entity", priority: 10,
-  match: (_s, p) => p[0] === "content" && p.length >= 3, entityType: (p) => p[1] });
+  match: (_s, p) => p[0] === "content" && p.length >= 3, entityType: (p) => p[1], regenerable: true });

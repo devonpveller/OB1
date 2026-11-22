@@ -47,3 +47,19 @@ test("registering a class: its files get its page_class, reconciliation counts i
     unregisterCompileClass("glossary");
   }
 });
+
+// rw-wiki-guarded-pages-r2 (review B2): what a tidy-up of refused pages may move. Only compile output the compile writes
+// again from Open Brain; an owner's note and an AI note in a notebook are their own source of truth.
+test("isRegenerable: entity / topic / source / thought pages and the notebook hubs + MOC yes; owner notes, AI notes, roots no", async () => {
+  const { isRegenerable } = await import("./page-classes.mjs");
+  const yes = ["content/person/person-ada.md", "content/topic/t-x.md", "content/source/uuid-1.md", "content/thought/9001.md",
+    "content/notebook/nb-x.md", "content/notebooks/nb/nb.md", "content/notebooks/index.md"];
+  const no = ["notes/my-note.md", "notes/notebooks/nb/a-note.md", "notes/notebooks/nb/nb.md", "content/notebooks/nb/an-ai-note.md",
+    "content/notebooks/nb/sub/deeper.md", "index.md", "content/entities.md", "other/file.md"];
+  for (const rel of yes) assert.equal(isRegenerable(rel), true, rel);
+  for (const rel of no) assert.equal(isRegenerable(rel), false, rel);
+  registerCompileClass({ name: "silent", version: 1, pageClass: "x", priority: 51, match: (_s, p) => p[1] === "silent" });
+  try { assert.equal(isRegenerable("content/silent/a.md"), false, "a class that does not say is not regenerable (fail safe)"); }
+  finally { unregisterCompileClass("silent"); }
+  assert.throws(() => registerCompileClass({ name: "badregen", version: 1, pageClass: "x", priority: 52, match: () => false, regenerable: "yes" }), /regenerable/);
+});

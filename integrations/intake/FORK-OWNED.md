@@ -105,4 +105,8 @@ reviewed-upstream: 5566c18355140fad0e058874187ca09d8b662ed0
 # onto work/rw-owner-private-view-int3 (b22befd) as work/rw-rest-door-auth-int3 (the merge's second parent). The hits are
 # this file's own round-6 review entry above (naming screen_verdict); nothing of the list above changes.
 reviewed-upstream: fc4bc786878007911c7bb11c54132d39311b145f
+# rw-wiki-guarded-pages stack layer 1 (2026-11-22): reviewed. Not upstream - the fork's own work/rw-wiki-guarded-pages (b44c4ea)
+# merged onto development pin 58bbc30 (the merge's second parent). The hit is run-wiki-guarded-lab.ps1, a lab fixture INSERT
+# that names screen_verdict as a column of idea_thought_archive (read-only name match); nothing of the list above changes.
+reviewed-upstream: b44c4ea0f2d9c47858eefb6df382ebe97ba80502
 ```

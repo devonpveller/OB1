@@ -38,6 +38,11 @@ export const REQUIRED_IGNORES = [
   // writeWikiPage's hidden staged updates (".<name>.wp-staged-<pid>"), left only
   // by a hard kill between staging and rename; swept at start (staged-sweep.mjs)
   ".*.wp-staged-*",
+  // rw-wiki-guarded-pages: the withheld record (slug hashes; *.lock above covers its lock), its temp files, and the
+  // cleanup's backup folders of refused page files (withheld-pages-cleanup.mjs)
+  ".withheld-pages.json",
+  ".withheld-pages.json.tmp-*",
+  ".withheld-backup-*/",
 ];
 
 const HEADER = "# openbrain-wiki: state files the wiki-service and its recipes write (never committed)";
