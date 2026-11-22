@@ -9,7 +9,7 @@ import { registerResearchStart } from "./routes/research_start.ts";
 import { type DoorAnswer, type DoorClient } from "./repo/research_start.ts";
 import { DocError } from "../documents/repo.ts";
 import type { Identity } from "../middleware/identity.ts";
-import { buildItem, extractLinks, parseStart } from "./logic/research_start.ts";
+import { buildItem, extractLinks, IDEA_REFUSED, parseStart } from "./logic/research_start.ts";
 import { BadRequest } from "./logic/scope.ts";
 
 const A = "sub-alice-0001", B = "sub-bob-0002";
@@ -71,7 +71,8 @@ Deno.test("preview creates no job, no row, and never calls the start door (asser
 
 Deno.test("the preview and the start hand the boundary the SAME item, purpose and run", async () => {
   const r = rig();
-  const body = { attach: { kind: "idea", id: IDEA_A }, question: `${M.Q} cabin`, depth: "quick", passages: [`${M.PAS} line`] };
+  // round 2: was an idea attach - an idea is refused now (below); the same equality is asserted over a document
+  const body = { attach: { kind: "document", path: DOC_A }, question: `${M.Q} cabin`, depth: "quick", passages: [`${M.PAS} line`] };
   await r.post("/workbench/research/preview", body);
   await r.post("/workbench/research", body);
   assertEquals(r.calls.map((c) => c.op), ["preview", "start"]);
@@ -125,7 +126,7 @@ Deno.test("the identity is the seam's: an owner or user field in the body is ref
   assertEquals((r.calls[0].body.item as { owner_sub: string }).owner_sub, B);
 });
 
-Deno.test("two identities: B attaching A's document or idea gets the same 404 as a missing one, and nothing reaches the door", async () => {
+Deno.test("two identities: B attaching A's document gets the same 404 as a missing one; any idea attach is the same 400; nothing reaches the door", async () => {
   const r = rig();
   const missingDoc = await r.post("/workbench/research/preview", { attach: { kind: "document", path: "documents/alice/none.md" }, question: "q" }, B);
   const foreignDoc = await r.post("/workbench/research/preview", { attach: { kind: "document", path: DOC_A }, question: "q" }, B);
@@ -134,14 +135,19 @@ Deno.test("two identities: B attaching A's document or idea gets the same 404 as
   const missingIdea = await r.post("/workbench/research", { attach: { kind: "idea", id: IDEA_NONE }, question: "q" }, B);
   const foreignIdea = await r.post("/workbench/research", { attach: { kind: "idea", id: IDEA_A }, question: "q" }, B);
   const junkIdea = await r.post("/workbench/research", { attach: { kind: "idea", id: "not-a-uuid" }, question: "q" }, B);
-  assertEquals([missingIdea.status, foreignIdea.status, junkIdea.status], [404, 404, 404]);
+  // round 2: an idea attach is refused before anything is read (was 404 for B; it is 400 for everyone now)
+  assertEquals([missingIdea.status, foreignIdea.status, junkIdea.status], [400, 400, 400]);
   const t = await foreignIdea.text();
   assertEquals(t, await missingIdea.text());
   assertEquals(t, await junkIdea.text());
   assertFalse(t.includes(IDEA_A) || t.includes(M.TIT), "the refusal names nothing of A's");
   assertEquals(r.calls, [], "nothing of A's was read into a door call");
-  // and A, the owner, can
-  assertEquals((await r.post("/workbench/research/preview", { attach: { kind: "idea", id: IDEA_A }, question: "q" }, A)).status, 200);
+  assertFalse(r.sql.some((q) => /ideas/i.test(q)), "no idea was read at all");
+  // and A, the owner, can attach their document; their own idea is the same 400 as B's (preview and start alike)
+  assertEquals((await r.post("/workbench/research/preview", { attach: { kind: "document", path: DOC_A }, question: "q" }, A)).status, 200);
+  const own = await r.post("/workbench/research/preview", { attach: { kind: "idea", id: IDEA_A }, question: "q" }, A);
+  assertEquals(own.status, 400);
+  assertEquals(await own.text(), t, "the owner's own idea answers exactly as another user's");
 });
 
 Deno.test("a service identity has no user front end: no owner, nothing started", async () => {
@@ -169,7 +175,9 @@ Deno.test("a refusal starts nothing and carries the code only; a changed questio
 Deno.test("inert without RESEARCH_URL / RESEARCH_WORKSPACE_KEY: the stated 503, nothing read", async () => {
   const r = rig({ door: null });
   for (const path of ["/workbench/research/preview", "/workbench/research"]) {
-    assertEquals((await r.post(path, { question: "q", attach: { kind: "idea", id: IDEA_A } })).status, 503);
+    // round 2: was an idea attach (refused now, 400, below); the inert 503 is asserted over a document
+    assertEquals((await r.post(path, { question: "q", attach: { kind: "document", path: DOC_A } })).status, 503);
+    assertEquals((await r.post(path, { question: "q", attach: { kind: "idea", id: IDEA_A } })).status, 400);
   }
   assertEquals(r.sql, []);
 });
@@ -192,4 +200,42 @@ Deno.test("parseStart / buildItem / extractLinks (pure)", () => {
   assertEquals(it.links, ["https://n.example.org/z"]);
   assertEquals(Object.keys(it.fields).sort(), ["document", "document_title", "passage_1", "question"]);
   try { parseStart(null); assert(false); } catch (e) { assert(e instanceof BadRequest); }
+});
+
+// ── round 2 (the coordinator's decision, operator rule PD0b / slot 580): an idea is researched only through its owner's
+// request path (the idea's research-now -> idea_research -> the drain), never through the shared derived door. That
+// path cannot serve this start as its preview shows it (it takes neither the question nor the passages, answers a
+// request id, not a job, and runs privately only after the owner's review) - so idea attach is removed, alike for
+// preview and start.
+Deno.test("idea attach is refused alike by the preview and the start, for the owner and for anyone: 400, one answer, nothing read, no door call", async () => {
+  const r = rig();
+  const answers: Array<{ status: number; text: string }> = [];
+  for (const path of ["/workbench/research/preview", "/workbench/research"]) {
+    for (const [id, sub] of [[IDEA_A, A], [IDEA_A, B], [IDEA_NONE, A], ["not-a-uuid", B]] as const) {
+      for (const extra of [{}, { passages: [`${M.PAS} p`] }, { approved_question: "What is known about heat pumps and winter bills?" }]) {
+        const res = await r.post(path, { attach: { kind: "idea", id }, question: `${M.Q} q`, ...extra }, sub);
+        answers.push({ status: res.status, text: await res.text() });
+      }
+    }
+  }
+  assertEquals(new Set(answers.map((a) => a.status)), new Set([400]));
+  assertEquals(new Set(answers.map((a) => a.text)).size, 1, "the owner's idea, another user's, a missing one and junk: one answer");
+  assertEquals(JSON.parse(answers[0].text), { error: IDEA_REFUSED }, "a clear message: research an idea from the idea itself");
+  for (const m of [...Object.values(M), IDEA_A]) assertFalse(answers[0].text.includes(m), `the refusal names ${m}`);
+  assertEquals(r.calls, [], "no preview door and no start door call: the derived door is never asked to take an idea");
+  assertEquals(r.sql, [], "nothing read: not the idea, not anything");
+});
+
+Deno.test("parseStart: an idea attach is a BadRequest with the one message; a document and nothing still parse", () => {
+  for (const a of [{ kind: "idea", id: IDEA_A }, { kind: "idea" }, { kind: "idea", id: "" }]) {
+    try { parseStart({ attach: a, question: "q" }); assert(false, JSON.stringify(a)); } catch (e) {
+      assert(e instanceof BadRequest);
+      assertEquals((e as Error).message, IDEA_REFUSED);
+    }
+  }
+  assertEquals(parseStart({ attach: { kind: "document", path: DOC_A }, question: "q" }).attach, { kind: "document", path: DOC_A });
+  assertEquals(parseStart({ question: "q" }).attach, { kind: "none" });
+  const it = buildItem(A, parseStart({ question: "q" }), null, "s2");
+  assertEquals(it.kind, "chat");
+  assertFalse("revision" in it, "no idea revision on any item");
 });

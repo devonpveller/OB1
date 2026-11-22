@@ -2,10 +2,12 @@
 // subject (never a user the caller names - the body has no user field, and an unknown field is refused):
 //   POST /workbench/research/preview   what WOULD leave the workbench: the boundary's question, topic and public links;
 //                                      creates no job, no row, and asks only the boundary's preview (no start call)
-//   POST /workbench/research           starts the run (attach to nothing / a document / an idea; depth quick | standard
+//   POST /workbench/research           starts the run (attach to nothing / a document; depth quick | standard
 //                                      | deep inside the admin ceilings); the same boundary function as the preview
-// Another user's document or idea is the same 404 as a missing one. Personal text goes to the research service's
-// request boundary only (repo/research_start.ts) and is stored nowhere by this item.
+// Attach to an idea is refused by both, alike (400, nothing read): an idea is researched from the idea itself, its
+// owner's request path (slot 580 PD0b; logic/research_start.ts). Another user's document is the same 404 as a missing
+// one. Personal text goes to the research service's request boundary only (repo/research_start.ts) and is stored
+// nowhere by this item.
 import { createRoute } from "../deps.ts";
 import { readDocument } from "../../documents/repo.ts";
 import { identityOf } from "../../middleware/identity.ts";
@@ -57,7 +59,7 @@ export function registerResearchStart(app: ContractApp, deps: ContractDeps, seam
     method: "post", path: `${START_PATH}/preview`, operationId: "researchStartPreview", tags: T,
     summary: "what would leave the workbench if this research were started - and nothing else happens",
     description: "Runs the request boundary in preview: the question, topic and public links it forms from the caller's " +
-      "question and attached document or idea. Creates no job and no row; the start call forms the same request by the " +
+      "question and attached document. Creates no job and no row; the start call forms the same request by the " +
       "same function. The personal text itself is never in the answer.",
     request: { body: body(StartRequestBody, RSX.request) },
     responses: { 200: json(StartPreview, RSX.preview, "what would leave (or the boundary's refusal)"), ...errors, 503: unavailableResponse },
@@ -73,10 +75,11 @@ export function registerResearchStart(app: ContractApp, deps: ContractDeps, seam
 
   op(app, createRoute({
     method: "post", path: START_PATH, operationId: "researchStart", tags: T,
-    summary: "start research: attached to nothing, a document or an idea, at a chosen depth",
+    summary: "start research: attached to nothing or a document, at a chosen depth",
     description: "The same boundary function as the preview forms the question; a refusal starts nothing (200, started " +
       "false). With approved_question, a start that would send a different question answers 409 and starts nothing. " +
-      "Depth quick | standard | deep is a preset of today's research limits, never above the admin ceilings.",
+      "Depth quick | standard | deep is a preset of today's research limits, never above the admin ceilings. " +
+      "Attach to an idea is refused (400) as in the preview: an idea is researched from the idea itself.",
     request: { body: body(StartRequestBody, RSX.request) },
     responses: { 200: json(StartStarted, { ...RSX.started, started: false, job_id: null, question: null, links: [], depth: null, refusal: "no_candidate_passed" }, "the boundary refused: nothing was started"),
       202: json(StartStarted, RSX.started, "queued"), ...errors, 503: unavailableResponse },

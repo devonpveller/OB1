@@ -17,6 +17,10 @@
  *      of any shared table, in the search egress or the page fetches - and the markers ARE in what the hostile proposer
  *      was given (the zero is not vacuous).
  *   7. two identities: another subject's hand-back list holds none of this owner's rows.
+ *   8. round 2 - an IDEA is not a start (slot 580 PD0b; the coordinator's decision): the preview and the start doors both
+ *      answer the same 400 for an idea item (the owner's real idea, another subject naming it, purpose idea-research),
+ *      nothing is formed or written (no job, no hand-back, no personal job on the idea), and slot 580's trigger still
+ *      refuses a user-start hand-back on an idea (23514) - its rules are untouched.
  *
  * IGNORED unless BND_E2E_DB_HOST is set (run-boundary-e2e.ps1 sets it inside a disposable internal network).
  */
@@ -262,6 +266,50 @@ Deno.test({ name: "S2-S7. preview writes nothing; start forms the same request i
   } finally {
     await svc.stop();
     await st.close();
+    console.log(out.join("\n"));
+  }
+}});
+
+Deno.test({ name: "S8. an idea is not a start: preview and start refuse it alike (owner or not), nothing written; slot 580's trigger still refuses", ...opts, fn: async () => {
+  await q(su, `INSERT INTO public.workspace_users (sub, name, email) VALUES ($1, $2, $3) ON CONFLICT (sub) DO NOTHING`, [OWNER.sub, OWNER.name, OWNER.email]);
+  const idea = (await q<{ id: string }>(su, `INSERT INTO public.ideas (title, owner_sub) VALUES ('start lab idea', $1) RETURNING id::text AS id`, [OWNER.sub]))[0].id;
+  const st = stubs();
+  const svc = await startService(st.base);
+  const out: string[] = [];
+  try {
+    const before = await counts();
+    const proposed = st.log.proposer.length;
+    const item = (owner: string) => ({
+      kind: "idea", id: `${idea}#s8`, revision: 1, owner_sub: owner, links: [],
+      fields: { question: `${MK.SUM} should I build it`, title: `${MK.TIT} my idea`, summary: `${MK.BODY} the plan`, passage_1: `${MK.REPLY} a passage` },
+    });
+    const answers: Array<{ path: string; status: number; text: string }> = [];
+    for (const path of ["/research/derived/preview", "/research/derived"]) {
+      for (const [owner, purpose] of [[OWNER.sub, "user-start"], [BEE, "user-start"], [OWNER.sub, "idea-research"]]) {
+        const r = await post(svc.base, path, { purpose, item: item(owner), run: { depth: "quick" }, deliver: { attach: "idea" } });
+        answers.push({ path, status: r.status, text: await r.text() });
+      }
+    }
+    assertEquals(answers.map((a) => a.status), [400, 400, 400, 400, 400, 400], JSON.stringify(answers));
+    assertEquals(new Set(answers.map((a) => a.text)).size, 1, "the preview and the start answer an idea alike, whoever names it");
+    for (const [k, m] of Object.entries(PERSONAL)) assertFalse(answers[0].text.includes(m), `a marker (${k}) is in the refusal`);
+    assertFalse(answers[0].text.includes(idea), "the refusal names no idea");
+    assertEquals(st.log.proposer.length, proposed, "nothing was formed: the proposer was never asked");
+    assertEquals(await counts(), before, "no job and no hand-back");
+    const onIdea = await q<{ n: number }>(su, `SELECT count(*)::int AS n FROM public.research_jobs WHERE refinery_id::text = $1 OR inlet_ref->>'id' = $1`, [idea]);
+    assertEquals(onIdea[0].n, 0, "no job of any kind (personal or derived) is tied to the idea");
+    const hb = await q<{ n: number }>(su, `SELECT count(*)::int AS n FROM public.research_handbacks WHERE lower(inlet_id) LIKE $1::text || '%'`, [idea]);
+    assertEquals(hb[0].n, 0, "no hand-back names the idea");
+    out.push(`idea: preview + start x (owner, another subject, purpose idea-research) = 6 x 400, one answer, no marker; jobs ${before.j} -> ${(await counts()).j}, hand-backs ${before.h} -> ${(await counts()).h}`);
+    // slot 580 untouched: a user-start hand-back on an idea is still refused by its trigger, for the owner too
+    const e = await refused(su, `INSERT INTO public.research_handbacks (owner_sub, inlet_kind, inlet_id, purpose, state, deliver)
+                                 VALUES ($1, 'idea', $2, 'user-start', 'refused', '{}'::jsonb)`, [OWNER.sub, idea]);
+    assert(/an idea hand-back is inlet idea with purpose idea-research/.test(e), e);
+    out.push("slot 580's trigger: a user-start hand-back on the owner's idea is refused (23514)");
+  } finally {
+    await svc.stop();
+    await st.close();
+    await q(su, `DELETE FROM public.ideas WHERE id = $1::uuid`, [idea]).catch(() => {});
     console.log(out.join("\n"));
   }
 }});

@@ -36,7 +36,7 @@ import { type BoundaryDeps, insertDerivedJob, openHandback, parseDeliveries, par
 import { canonicalLink } from "./boundary-gate.ts";
 import { approveIdeaQuestion, drainIdeaHandbacks } from "./boundary-ideas.ts";
 import { runCeilings } from "./depth.ts";
-import { formForDoor, previewBody, startChanged } from "./start.ts";
+import { doorRefusesIdea, formForDoor, IDEA_DOOR_REFUSAL, previewBody, startChanged } from "./start.ts";
 import { actorOf, FOREIGN_PROMPTS_SQL, HIDDEN_STEER_TEXTS_SQL, nonActorView, LISTED_FOR, MAY_ACT_SQL, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
 import { assess } from "./admission.ts";
@@ -1391,6 +1391,8 @@ Deno.serve({ port: PORT }, async (req) => {
     try { raw = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
     const parsed = parseDoorBody(raw);
     if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+    // the start door below refuses an idea (slot 580 PD0b): so does its preview - the same 400, nothing formed
+    if (doorRefusesIdea(parsed)) return Response.json({ error: IDEA_DOOR_REFUSAL }, { status: 400 });
     try {
       return Response.json(previewBody(await formForDoor(parsed, boundaryDeps), parsed.run, runCeilings()), { status: 200 });
     } catch (e) {

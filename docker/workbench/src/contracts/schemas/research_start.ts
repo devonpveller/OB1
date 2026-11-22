@@ -5,16 +5,16 @@ import { z } from "../deps.ts";
 import { uuid } from "./common.ts";
 
 export const StartAttach = z.object({
-  kind: z.string().openapi({ example: "document", description: "none (attach to nothing), document or idea" }),
+  kind: z.string().openapi({ example: "document", description: "none (attach to nothing) or document. idea is refused (400, the same answer for every idea, nothing read): an idea is researched from the idea itself (POST /workbench/ideas/{id}/research-now), its owner's request path" }),
   path: z.string().optional().openapi({ example: "documents/lab-user/notes.md", description: "kind document: the caller's own document" }),
-  id: z.string().optional().openapi({ example: "8b0c4f5e-1d2a-4b3c-9e8f-7a6b5c4d3e2f", description: "kind idea: the caller's own idea" }),
+  id: z.string().optional().openapi({ example: "8b0c4f5e-1d2a-4b3c-9e8f-7a6b5c4d3e2f", description: "not accepted: it named an idea, and kind idea is refused (400)" }),
 }).strict().openapi("ResearchStartAttach");
 
 export const StartRequestBody = z.object({
   attach: StartAttach.optional().openapi({ description: "what the run is about; omitted = attach to nothing" }),
   question: z.string().min(1).max(2000).openapi({ example: "Should I buy a heat pump?", description: "what the person wants to know - private; only the boundary's de-personalised question leaves" }),
   depth: z.string().optional().openapi({ example: "standard", description: "quick, standard (default) or deep: a preset of today's research limits, never above the admin ceilings" }),
-  passages: z.array(z.string().max(4000)).max(20).optional().openapi({ description: "selected passages of the attached document or idea - private, like the question" }),
+  passages: z.array(z.string().max(4000)).max(20).optional().openapi({ description: "selected passages of the attached document - private, like the question" }),
   approved_question: z.string().max(300).optional().openapi({ description: "start only: the question the preview showed; the start refuses (409) rather than send a different one" }),
 }).strict().openapi("ResearchStartRequest");
 

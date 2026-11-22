@@ -7043,7 +7043,7 @@
               "maxLength": 4000
             },
             "maxItems": 20,
-            "description": "selected passages of the attached document or idea - private, like the question"
+            "description": "selected passages of the attached document - private, like the question"
           },
           "approved_question": {
             "type": "string",
@@ -7062,7 +7062,7 @@
           "kind": {
             "type": "string",
             "example": "document",
-            "description": "none (attach to nothing), document or idea"
+            "description": "none (attach to nothing) or document. idea is refused (400, the same answer for every idea, nothing read): an idea is researched from the idea itself (POST /workbench/ideas/{id}/research-now), its owner's request path"
           },
           "path": {
             "type": "string",
@@ -7072,7 +7072,7 @@
           "id": {
             "type": "string",
             "example": "8b0c4f5e-1d2a-4b3c-9e8f-7a6b5c4d3e2f",
-            "description": "kind idea: the caller's own idea"
+            "description": "not accepted: it named an idea, and kind idea is refused (400)"
           }
         },
         "required": [
@@ -15845,7 +15845,7 @@
           "research start"
         ],
         "summary": "what would leave the workbench if this research were started - and nothing else happens",
-        "description": "Runs the request boundary in preview: the question, topic and public links it forms from the caller's question and attached document or idea. Creates no job and no row; the start call forms the same request by the same function. The personal text itself is never in the answer.",
+        "description": "Runs the request boundary in preview: the question, topic and public links it forms from the caller's question and attached document. Creates no job and no row; the start call forms the same request by the same function. The personal text itself is never in the answer.",
         "requestBody": {
           "required": true,
           "content": {
@@ -15960,8 +15960,8 @@
         "tags": [
           "research start"
         ],
-        "summary": "start research: attached to nothing, a document or an idea, at a chosen depth",
-        "description": "The same boundary function as the preview forms the question; a refusal starts nothing (200, started false). With approved_question, a start that would send a different question answers 409 and starts nothing. Depth quick | standard | deep is a preset of today's research limits, never above the admin ceilings.",
+        "summary": "start research: attached to nothing or a document, at a chosen depth",
+        "description": "The same boundary function as the preview forms the question; a refusal starts nothing (200, started false). With approved_question, a start that would send a different question answers 409 and starts nothing. Depth quick | standard | deep is a preset of today's research limits, never above the admin ceilings. Attach to an idea is refused (400) as in the preview: an idea is researched from the idea itself.",
         "requestBody": {
           "required": true,
           "content": {

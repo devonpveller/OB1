@@ -1,5 +1,5 @@
 // Starting research from anywhere (rwr-research-start-api): what the routes do, over two seams - the research service's
-// request-boundary door (a client) and the owner-checked reads of a document or an idea. THIS FILE WRITES NOTHING: no
+// request-boundary door (a client) and the owner-checked read of a document (an idea is refused by parseStart). THIS FILE WRITES NOTHING: no
 // INSERT, no UPDATE, no job row, no hand-back row. The job and its private hand-back are written by the
 // research service's door (boundary.ts), from the boundary's output alone; the
 // workbench only hands it the personal item (transient) and relays its answer.
@@ -57,29 +57,19 @@ export interface StartDeps {
 }
 
 const NO_DOC = "no such document";
-const NO_IDEA = "no idea with this id";
-const UUIDISH = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/** The attached thing, read as the caller's. Another user's and a missing one are the same NotFound (the same words). */
+/** The attached document, read as the caller's. Another user's and a missing one are the same NotFound (the same
+ *  words). An idea never gets here: parseStart refuses it (logic/research_start.ts IDEA_REFUSED). */
 export async function loadAttach(deps: StartDeps, req: StartRequest, who: Identity): Promise<Loaded | null> {
   if (req.attach.kind === "none") return null;
-  if (req.attach.kind === "document") {
-    try {
-      const d = await deps.readDoc(req.attach.path, who);
-      const title = (/^#\s+(.+)$/m.exec(d.content)?.[1] ?? "").trim();
-      return { ref: d.path, title, text: d.content };
-    } catch (e) {
-      if (e instanceof DocError) throw new NotFound(NO_DOC);
-      throw e;
-    }
+  try {
+    const d = await deps.readDoc(req.attach.path, who);
+    const title = (/^#\s+(.+)$/m.exec(d.content)?.[1] ?? "").trim();
+    return { ref: d.path, title, text: d.content };
+  } catch (e) {
+    if (e instanceof DocError) throw new NotFound(NO_DOC);
+    throw e;
   }
-  if (!UUIDISH.test(req.attach.id)) throw new NotFound(NO_IDEA);
-  const rows = await deps.db.query<{ id: string; title: string; summary: string; current_revision: number }>(
-    `SELECT id::text AS id, title, summary, current_revision FROM public.ideas WHERE id = $1::uuid AND owner_sub = $2`,
-    [req.attach.id, who.sub],
-  );
-  if (!rows.length) throw new NotFound(NO_IDEA);
-  return { ref: rows[0].id, title: rows[0].title, text: rows[0].summary, revision: rows[0].current_revision };
 }
 
 function doorBody(who: Identity, req: StartRequest, loaded: Loaded | null, newId: () => string) {

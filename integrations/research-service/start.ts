@@ -13,6 +13,14 @@ import { type Budget, resolveDepth } from "./depth.ts";
 
 export interface DoorParsed { item: PersonalItem; purpose: Purpose; deliver: Record<string, unknown>; run: DerivedRun; approved?: string }
 
+/** rwr-research-start-api, round 2: the PREVIEW refuses an idea exactly as the derived door does (slot 580 PD0b: an
+ *  idea's research is queued by the database and formed by the idea drain, never through these doors), so a preview
+ *  never shows what no start could do. The derived door keeps its own inline check (index.ts); this mirrors it. */
+export const IDEA_DOOR_REFUSAL = "an idea's research is queued by the database (capture, update, research now); this door does not take it";
+export function doorRefusesIdea(p: Pick<DoorParsed, "item" | "purpose">): boolean {
+  return p.purpose === "idea-research" || p.item.kind === "idea";
+}
+
 export function approvedDeps(base: BoundaryDeps, approved?: string): BoundaryDeps {
   return approved === undefined ? base : { ...base, propose: () => Promise.resolve([approved]) };
 }

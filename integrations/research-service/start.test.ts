@@ -6,7 +6,7 @@
 import { assert, assertEquals, assertFalse } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { type BoundaryDeps, formDerivedRequest, parseDoorBody, parseRun, type PersonalItem, PURPOSES, runOptions } from "./boundary.ts";
 import { DEPTHS, resolveDepth, runCeilings } from "./depth.ts";
-import { approvedDeps, formForDoor, previewBody, startChanged } from "./start.ts";
+import { approvedDeps, doorRefusesIdea, formForDoor, previewBody, startChanged } from "./start.ts";
 import { MK, OWNER } from "./fixtures/boundary-markers.ts";
 
 const CEIL = { rounds: 3, max_fetch: 80, wall_ms: 900_000 };
@@ -124,4 +124,21 @@ Deno.test("approved_question: the model is not asked again, the gate still decid
   assert(!v2.ok || v2.request.question !== bad, "a question made of the owner's own words cannot pass the gate");
   if (v2.ok) assert(startChanged(v2, bad));
   assertEquals(typeof approvedDeps(mk([]), approved).fetchPublic, "function");
+});
+
+// ── round 2: an idea is not a start (slot 580 PD0b) - the preview refuses it as the derived door does ─────────────────
+Deno.test("the preview refuses an idea exactly as the derived door does: item kind idea or purpose idea-research", () => {
+  const base = { purpose: "user-start", item: { kind: "document", id: "d#1", owner_sub: OWNER.sub, fields: { question: "q" }, links: [] }, run: { depth: "quick" } };
+  const doc = parseDoorBody(base);
+  assert(!("error" in doc));
+  if (!("error" in doc)) assertFalse(doorRefusesIdea(doc), "a document start is not refused");
+  for (const b of [
+    { ...base, item: { ...base.item, kind: "idea", id: "8b0c4f5e-1d2a-4b3c-9e8f-7a6b5c4d3e2f#s1", revision: 3 } },
+    { ...base, purpose: "idea-research" },
+    { ...base, purpose: "idea-research", item: { ...base.item, kind: "idea" } },
+  ]) {
+    const p = parseDoorBody(b);
+    assert(!("error" in p), JSON.stringify(b));
+    if (!("error" in p)) assert(doorRefusesIdea(p), JSON.stringify(b));
+  }
 });
