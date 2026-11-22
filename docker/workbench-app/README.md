@@ -54,3 +54,16 @@ image, `openbrain-workbench-app`. Later items fill it in. Not a stack service ye
 - `src/screens/home/`: `Home.tsx` (the ask box and six cards) and `home-data.ts` (one read per card, its own loading/failed/ok state, a Try again). `App.tsx` mounts it for `/`; nothing else of the shell changed.
 - Every read goes through `lib/api.ts`: `contract/documents`, `contract/sessions?state=recent&limit=200` (own cards only: `mine`, the server's owner flag; a full page is shown as capped), `contract/podcasts` + `contract/podcasts/requests`, `contract/ideas`, `contract/library/recent` and `contract/library/waiting-claims` (the two shared-library reads added for Home; exact server totals) for the two library cards, `contract/search` for the ask box (phase 0: a search, results listed on Home; phase 4 makes it a library-wide ask).
 - Nothing is stored: no storage, cookie, cache or console call (a vitest source scan holds it). Tests: `test/home.test.tsx`; `e2e/home.e2e.mjs` with `e2e/home.stub.mjs` via `e2e/run-home-e2e.ps1` (same method as `run-e2e.ps1`).
+
+## The item picker (`rwr-picker`)
+
+`src/components/picker/` is THE picker: one searchable, filterable, single- or multi-select list for choosing
+library items (kind / type / state / topic / date / quality / private filters with live counts, sort, a selected tray
+that survives filtering, a private tag on every private row, keyboard use, a `scope` prop). Screens import it only from
+`components/picker` (`ItemPicker`); the Ctrl+K overlay is built on the same `useLibrarySearch` and `model.ts`.
+`test/picker-single.test.ts` fails if a second picker or list-search component appears. It asks the contract search
+route through `lib/api.ts` only, caches nothing and writes nothing to the browser.
+
+- Tests: `npx vitest run` (unit + component + two-identity), and the headless-Chromium e2e with axe on an `--internal`
+  network: build with `--build-arg PICKER_HARNESS=1` (adds the dev-only `/picker-harness.html`; the default image has
+  none) then `test/e2e/run-picker-lab.ps1`.

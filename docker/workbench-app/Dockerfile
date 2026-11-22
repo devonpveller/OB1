@@ -13,6 +13,9 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY . .
+# rwr-picker: PICKER_HARNESS=1 also builds /picker-harness.html (the picker's dev-only test page); the default image has none.
+ARG PICKER_HARNESS=
+ENV PICKER_HARNESS=$PICKER_HARNESS
 COPY --from=viewerlib workbench-proxy.mjs security-headers.mjs workbench-proxy.test.mjs security-headers.test.mjs /app/lib/shared/
 RUN set -e; \
   npx tsc --noEmit; \

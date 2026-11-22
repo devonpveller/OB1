@@ -203,10 +203,14 @@ function registerKnowledgeReads(app: ContractApp, deps: ContractDeps) {
       // rw-p2b-workspace: a refinery's held sources are its owner's - another user's refinery scopes nothing
       const owner = (await identityOf(c)).sub;
       const refinery = q.refinery_id && await requireIdea(deps.db, q.refinery_id, owner).then(() => q.refinery_id, () => null);
-      return send(c, Search, await kn.search(deps.db, {
+      // rwr-picker round 3: a search answer can hold the caller's own held sources (and, later, own thoughts); the
+      // browser must not keep it in its HTTP cache (the URL is the same for whoever signs in next)
+      const res = send(c, Search, await kn.search(deps.db, {
         q: q.q.trim(), kinds: parseList(q.kinds), refinery_id: refinery || null, limit: parseLimit(q.limit, 25, 50),
-        evidenceOnly: parseFlag(q.evidence_only), filter: parseMetadataFilter(q.metadata_filter),
+        evidenceOnly: parseFlag(q.evidence_only), filter: parseMetadataFilter(q.metadata_filter), owner,
       }));
+      if (res.status < 300) res.headers.set("Cache-Control", "no-store, private");
+      return res;
     } catch (e) {
       return fail(c, e);
     }
