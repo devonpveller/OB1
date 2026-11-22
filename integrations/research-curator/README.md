@@ -30,7 +30,11 @@ Full design: [`../../../documentation/implementation-guide/expand-OB1-research-i
 **An idea's research (rw-report-isolation, slot 390)** - a package whose `job_id` the database's rule
 (`research_job_report_owner`) calls an idea's: persist files the report privately (`research_private_reports`, the
 idea's owner only; the answer says `report: "private"` and names no id), the readable prose is stamped there, and the
-claims are filed shared with no `synthesis_id`, linked back in `research_private_report_claims`. The resolver may
+claims are filed PRIVATE (rw-private-report-claims, slot 570, operator 2026-11-21: "any information generated from
+private data remains private"): `private_report_claim_file` / `private_report_claim_edge` write them into the report
+owner's store (PD1's `inlet_private_claims` / `inlet_private_claim_sources`) and link them in
+`research_private_report_claims` - never the shared `claims` table, never a shared claim's dedup, and no conflict
+detection against shared claims. The resolver may
 attach the run to an EXISTING thread but never mints one (a new thread's name and description come from the report):
 it files the run unthreaded instead, and no thread description is ever refreshed from such a report. Lab:
 `../kubernetes-deployment/run-filed-e2e.ps1` [4c] (`report-isolation.e2e.test.ts`) and [4d] (the slot-390 drill).
