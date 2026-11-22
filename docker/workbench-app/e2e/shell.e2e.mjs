@@ -86,6 +86,7 @@ const seenPaths = [...new Set(lg.map((x) => x.url.split("?")[0]))].sort();
 const SIX = ["/workbench/auth/me", "/workbench/contract/cleanup/reopen-candidates", "/workbench/contract/cleanup/sources", "/workbench/contract/sessions", "/workbench/intake/jobs", "/workbench/workspace/whoami"];
 // the stub's log also holds the Home visits earlier in this run (Home's own reads are checked in home.e2e.mjs)
 ok(SIX.every((x) => seenPaths.includes(x)) && lg.every((x) => x.method === "GET" && x.keyOk), `the stub saw the shell's 6 GET reads, all with the door key: ${seenPaths.join(", ")}`);
+ok(["/workbench/settings", "/workbench/documents/file", "/workbench/documents/state"].every((x) => seenPaths.includes(x)), `and the account's reads (settings, then the locked document's state and title) are in the log too`);
 
 // ---- 3. Ctrl+K opens, Esc closes, over every screen (real key events)
 for (const [path] of ALL) {
@@ -170,7 +171,7 @@ await go("/research");
 const fromCache = events.filter((e) => e.method === "Network.responseReceived" && /\/workbench\//.test(e.params.response.url) && (e.params.response.fromDiskCache || e.params.response.fromServiceWorker));
 ok(fromCache.length === 0, "no /workbench/ read was answered from the browser's cache");
 const wbReqs = events.filter((e) => e.method === "Network.requestWillBeSent" && /\/workbench\//.test(e.params.request.url));
-ok(wbReqs.length === 6, `each page load reads the six endpoints fresh (${wbReqs.length})`);
+ok(wbReqs.length === 7, `each page load reads the six shell endpoints and the account (/workbench/settings) fresh (${wbReqs.length})`);
 
 // ---- 8. the theme button cycles
 await scheme("light"); await go("/");
@@ -201,6 +202,28 @@ for (const [w, h, dsf, label] of [[400, 800, 1, "400px"], [640, 450, 2, "zoom 20
   ok(m.sw <= m.cw && m.clip.length === 0 && !m.railX && m.searchW >= 150 && m.counts === 3, `F5 ${label}: no sideways page scroll (${m.sw}/${m.cw}), counts not clipped (${m.clip.join(",") || "none"}), rail does not scroll sideways, search box ${m.searchW}px, ${m.counts} counts`);
 }
 await vp(1440, 900);
+
+// ---- 10. rwr-ui-state-keys: the locked document lives in the ACCOUNT (the stub's alice has one stored)
+await setMode("alice"); await go("/");
+for (let i = 0; i < 20 && !(await ev(`!!document.querySelector('[data-testid=lock-chip]')`)); i++) await sleep(150);
+ok((await ev(`document.querySelector('[data-testid=lock-chip]')?.textContent || ''`)).includes("Alice plan"), "the shell shows the locked document read from the account at start (title read from the document)");
+const keep2 = JSON.parse(await ev(`(async()=>JSON.stringify({ls:{...localStorage},ss:{...sessionStorage},ck:document.cookie}))()`));
+ok(!/plan|documents\//i.test(JSON.stringify(keep2)), `the locked document is not kept in the browser: ${JSON.stringify(keep2)}`);
+await setMode("bob"); await go("/");
+await sleep(500);
+ok(await ev(`!document.querySelector('[data-testid=lock-chip]') && !/Alice plan/.test(document.body.innerText)`), "bob, same browser, sees no lock and nothing of alice's");
+await setMode("alice"); await go("/");
+for (let i = 0; i < 20 && !(await ev(`!!document.querySelector('[data-testid=lock-chip]')`)); i++) await sleep(150);
+await ev(`document.querySelector('[data-testid=lock-unlock]').click()`);
+await sleep(600);
+const acc = await stub("/__account/alice");
+ok(!("ui.locked_document" in acc), "Unlock removes the lock from the account (a versioned DELETE)");
+const del = (await stub("/__log")).filter((x) => x.method === "DELETE");
+ok(del.length === 1 && /\?version=1$/.test(del[0].url), `the Unlock carried the version it had read: ${JSON.stringify(del.map((d) => d.url))}`);
+await ev(`document.querySelector('[data-testid=toast-undo]').click()`);
+await sleep(600);
+const acc2 = await stub("/__account/alice");
+ok(acc2["ui.locked_document"]?.value === "documents/k-7f3a/plan.md" && acc2["ui.locked_document"].version === 3, `Undo re-locks the same document with the next version: ${JSON.stringify(acc2)}`);
 
 ws.close();
 await fetch(`http://${CH}:9222/json/close/${tgt.id}`).catch(() => {});

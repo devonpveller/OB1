@@ -1,2 +1,4 @@
 # pantry-core: psql meta-commands and Dockerfile builds must not see CR line endings
 init-pantry.sql text eol=lf
+init-ui-state.sql text eol=lf
+revert-ui-state.sql text eol=lf
