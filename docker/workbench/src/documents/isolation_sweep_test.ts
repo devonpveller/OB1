@@ -219,6 +219,13 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // the reconcile repairs B's listing when B's workspace next connects; B's file as it now stands
   await wb("GET", `/workbench/contract/documents`, undefined, B);
   const before = await Deno.readTextFile(`${VAULT}/${bPath}`);
+  // rwr-docs-lifecycle-api round 2 (F6): B's TRASHED document - the irreversible routes (delete-forever,
+  // empty-trash) are called below WITH confirm: true, so they reach their ownership checks; B's trashed
+  // document must still be there at the end
+  const madeTrash = await wb("POST", "/workbench/documents", { title: `TrashSecret${rnd()}`, body: M.body }, B);
+  assertEquals(madeTrash.status, 201, madeTrash.text);
+  const bTrashed: string = (await wb("POST", "/workbench/documents/trash", { path: madeTrash.json.path }, B)).json.trashed;
+  assert(bTrashed, "B's trashed document planted");
   // rw-p4b-sessions round 3 (tester t-p4b-sessions2): an ADMIN steers a SERVICE's job with a marker. The
   // service's job is shared, but the steer's text is the admin's (and who may act's): for a non-admin A every
   // route below must carry none of it (the timeline leaked it in attempt 2). Only where the lab passes the
@@ -467,7 +474,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const reads = routes.filter((x) => ["GET", "HEAD"].includes(x.method));
 
   // 1. TEMPLATED: B's ids and paths in every parameter, query and body field (the request gate)
-  const ids = [bPath, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob].filter(Boolean);
+  const ids = [bPath, bTrashed, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob].filter(Boolean);
   const query = (v: string) => new URLSearchParams({
     path: bPath, ref: bPath, from: bPath, id: v, idea_id: bRefinery, refinery_id: bRefinery, job_id: bJob,
     source_id: bHeld || v, kind: "user_document", holder_kind: "user_document", format: "md", limit: "500", q: "fixture",
@@ -475,7 +482,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const body = (v: string) => ({
     path: bPath, ref: bPath, from: bPath, to: bPath, id: v, refinery_id: bRefinery, idea_id: bRefinery, job_id: bJob,
     source_id: bHeld || v, holder: { kind: "user_document", ref: bPath }, holder_kind: "user_document", holder_ref: bPath,
-    title: "sweep", content: "sweep",
+    title: "sweep", content: "sweep", confirm: true,
   });
   for (const r of routes) {
     const values = r.path.includes(":") ? ids : [bRefinery];
@@ -619,6 +626,10 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   }
   // B's document is B's: unchanged by A's calls, and B still reads it
   assertEquals(await Deno.readTextFile(`${VAULT}/${bPath}`), before, "user A's calls left B's document unchanged");
+  assert(await Deno.stat(`${VAULT}/${bTrashed}`).then(() => true, () => false), "user A's confirmed delete-forever / empty-trash calls left B's trashed document in B's trash");
+  assertEquals((await wb("GET", "/workbench/documents/trail", undefined, B)).json.total, 0, "nothing of B's was removed: B's trail is empty");
+  assert(await Deno.stat(`${VAULT}/${bTrashed}`).then(() => true, () => false), "user A's confirmed delete-forever / empty-trash calls left B's trashed document in B's trash");
+  assertEquals((await wb("GET", "/workbench/documents/trail", undefined, B)).json.total, 0, "nothing of B's was removed: B's trail is empty");
   assertEquals((await wb("GET", `/workbench/documents/file?path=${encodeURIComponent(bPath)}`, undefined, B)).status, 200);
   // rw-p8a3-room: B's room is B's - B still reads its transcript and draft, and A's calls added nothing to it
   const bRoomRead = await wb("GET", `/workbench/rooms/${bRoom}`, undefined, B);
