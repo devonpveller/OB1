@@ -1206,6 +1206,13 @@ t("cited_by counts only the CALLER's own documents: another user's private docum
   // a document of B's that does not link the source changes nothing for anyone
   await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1, 'b3', '[]'::jsonb, $2)`, [`documents/pk-${uuid()}.md`, Bu]);
   assertEquals([await count(A), await count(C)], [1, 0]);
+  // rwr-picker-r2 F3: A's documents in the trash (top-level and in a folder, slot 510) are not "your documents"
+  await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1, 'at1', $3::jsonb, $4), ($2, 'at2', $3::jsonb, $4)`,
+    [`documents/.trash/pk-${uuid()}.md`, `documents/pkf/.trash/pk-${uuid()}.md`, link, A]);
+  assertEquals(await count(A), 1);
+  // a folder whose name merely contains "trash" is a live document and counts
+  await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1, 'a2', $2::jsonb, $3)`, [`documents/trash-notes/pk-${uuid()}.md`, link, A]);
+  assertEquals(await count(A), 2);
   // under a metadata filter (the cloud door) no document count is read at all
   const f = encodeURIComponent(JSON.stringify({ share: "cloud" }));
   const filtered = (await call("GET", `/search?q=${encodeURIComponent(title)}&kinds=source&metadata_filter=${f}`, undefined, { as: A })).json.results;

@@ -433,3 +433,41 @@ describe("the private marker on every view the picker exports", () => {
     expect([marker(screen.getByText("HELD-A note").closest("li")), marker(screen.getByText("Shared note").closest("li"))]).toEqual(["private", null]);
   });
 });
+
+// rwr-picker-r2 F1: a 200 that is not the expected JSON (an expired sign-in page, a proxy page, a wrong shape) is a
+// FAILED search in every view, never an empty result. F2: the private marker is the picker's, beside what a screen renders.
+describe("a failed search never looks like an empty result (r2 F1)", () => {
+  const signIn = () => setFetcher(async () => new Response("<html>please sign in</html>", { status: 200 }));
+  it("searchLibrary throws when the answer has no results array", async () => {
+    signIn();
+    await expect(searchLibrary({ q: "vrm", scope: { kind: "library" } })).rejects.toThrow(/results/);
+    setFetcher(async () => new Response(JSON.stringify({ results: "nope" }), { status: 200 }));
+    await expect(searchLibrary({ q: "vrm", scope: { kind: "library" } })).rejects.toThrow(/results/);
+    setFetcher(async () => new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    await expect(searchLibrary({ q: "vrm", scope: { kind: "library" } })).resolves.toEqual([]);
+  });
+  it("ItemPicker shows its error line, not 'Nothing matches'", async () => {
+    signIn();
+    render(<ItemPicker {...props} />);
+    type("vrm");
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/did not answer/));
+    expect(screen.queryByTestId("picker-empty")).toBeNull();
+  });
+  it("PickerResults shows its failed line, not 'Nothing in the library matches'", async () => {
+    signIn();
+    render(<PickerResults query="vrm" label="r" testId="t" open={(_i, c) => <a href="/x">{c}</a>} />);
+    await waitFor(() => expect(screen.getByTestId("t-failed")).toBeTruthy());
+    expect(screen.queryByTestId("t-none")).toBeNull();
+  });
+});
+
+describe("the private marker cannot be dropped by a consuming screen (r2 F2)", () => {
+  it("a screen whose open() ignores the content it is handed still shows the marker on the private row only", async () => {
+    libFetcher([hit("source", "s3", "HELD-A note", { lifecycle: "held", state: "held" }), hit("source", "s1", "Shared note")]);
+    render(<PickerResults query="note" scope={{ kind: "document", label: "d", topics: [], refineryId: "r-9" }} label="r"
+      open={(i) => <a href="/x">{i.title}</a>} />);
+    await waitFor(() => expect(screen.getByText("HELD-A note")).toBeTruthy());
+    const tag = (t: string) => screen.getByText(t).closest("li")?.querySelector("[data-testid=private-tag]")?.textContent ?? null;
+    expect([tag("HELD-A note"), tag("Shared note")]).toEqual(["private", null]);
+  });
+});

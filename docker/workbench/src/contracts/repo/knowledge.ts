@@ -307,10 +307,13 @@ async function enrich(db: Db, hits: Hit[], s: SearchQuery): Promise<Hit[]> {
       });
     }
     if (s.owner && !s.filter) {
+      // a document in the caller's trash (documents/.trash/ or documents/<folder>/.trash/, slot 510) is not one of
+      // "your documents": the same exclusion as documents/candidates.ts (rwr-picker-r2 F3)
       const cites = await db.query<{ id: string; n: number }>(
         `SELECT lk ->> 'id' AS id, count(DISTINCT l.path)::int AS n
            FROM public.user_document_listings l, jsonb_array_elements(l.outbound_links) lk
           WHERE l.owner_sub = $2 AND lk ->> 'kind' = 'source' AND lk ->> 'id' = ANY($1::text[])
+            AND l.path !~ '^documents/([^./][^/]*/)?[.]trash/'
           GROUP BY 1`,
         [sources.map((h) => h.id), s.owner],
       );

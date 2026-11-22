@@ -24,8 +24,12 @@ export function searchUrl(spec: SearchSpec): string {
 }
 
 export async function searchLibrary(spec: SearchSpec): Promise<PickerItem[]> {
-  const r = await api<{ results?: SearchHit[] }>("GET", searchUrl(spec));
-  return (r.data.results ?? []).map(itemFromHit);
+  const r = await api<{ results?: unknown }>("GET", searchUrl(spec));
+  // A 200 that is not the expected JSON (an expired sign-in page, a proxy page, a wrong shape: api() turns unparsable
+  // text into {text}) is a FAILED search, never an empty one - the same rule as Home's listOf (rwr-picker-r2 F1).
+  const results = r.data && typeof r.data === "object" ? (r.data as { results?: unknown }).results : undefined;
+  if (!Array.isArray(results)) throw new Error("unexpected answer: no results");
+  return (results as SearchHit[]).map(itemFromHit);
 }
 
 export type SearchState = { items: PickerItem[]; loading: boolean; error: string | null; query: string; mineUnavailable: boolean };

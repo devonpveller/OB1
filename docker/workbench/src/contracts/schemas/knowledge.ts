@@ -101,7 +101,8 @@ export const SearchHit = z.object({
   }),
   cited_by: z.number().int().min(0).nullable().openapi({
     description: "for a source: how many of THE CALLER'S OWN documents link to it (a user document is its owner's; another " +
-      "user's links are never counted, so the number cannot reveal a private document). null for claims and pages, for a " +
+      "user's links are never counted, so the number cannot reveal a private document; a document in the caller's trash is not " +
+      "counted). null for claims and pages, for a " +
       "held source, and whenever metadata_filter is set (fail closed)",
   }),
   author: z.string().nullable().openapi({ description: "a source's metadata.author when it is a string; null otherwise" }),
