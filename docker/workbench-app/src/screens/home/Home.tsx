@@ -3,9 +3,10 @@
 // lib/api.ts; the title of each card opens its screen. Nothing here is stored in the browser.
 import { useRef, useState, type ReactNode } from "react";
 import { Link } from "../../shell/Link";
+import { PickerResults } from "../../components/picker";
 import {
-  ago, readClaimsWaiting, readDocuments, readIdeas, readNewInLibrary, readPodcasts, readSessions, runSearch, SESSIONS_LIMIT, SHOW, useCard,
-  type CardState, type SearchHit,
+  ago, ASK_LIMIT, readClaimsWaiting, readDocuments, readIdeas, readNewInLibrary, readPodcasts, readSessions, SESSIONS_LIMIT, SHOW, useCard,
+  type CardState,
 } from "./home-data";
 
 type Empty = { text: string; to: string; action: string } | null;
@@ -41,18 +42,17 @@ const pillOf = (status: string, waiting: string): [string, string] =>
   : status === "done" ? ["finished", "done"]
   : status === "cancelled" ? ["cancelled", "done"] : ["failed", "wait"];
 
+// The ask box, in phase 0: a library search (pages, claims and sources; never a user document). Home does not search
+// itself: the results are the shared picker's read-only view (one search hook, one query shape, one hit mapping).
 function AskBox() {
   const [q, setQ] = useState("");
-  const [hits, setHits] = useState<SearchHit[] | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState(false);
   const [asked, setAsked] = useState("");
+  const [n, setN] = useState(0); // every Ask is a fresh read, even of the same words
   const go = (e: React.FormEvent) => {
     e.preventDefault();
     const t = q.trim();
-    if (t.length < 2 || busy) return;
-    setBusy(true); setErr(false); setAsked(t);
-    runSearch(t).then((h) => setHits(h), () => { setHits(null); setErr(true); }).finally(() => setBusy(false));
+    if (t.length < 2) return;
+    setAsked(t); setN((x) => x + 1);
   };
   return (
     <section className="card ask-card" aria-labelledby="h-ask" data-testid="ask">
@@ -64,26 +64,15 @@ function AskBox() {
           <span className="pill">Looks in: the shared library</span>
           <span className="meta">Your own documents are not searched here yet.</span>
           <span className="ask-actions">
-            <button type="submit" className="btn" disabled={busy || q.trim().length < 2} data-testid="ask-go">Ask</button>
+            <button type="submit" className="btn" disabled={q.trim().length < 2} data-testid="ask-go">Ask</button>
             <Link to="/research/start" className="btn pri">Start research</Link>
           </span>
         </div>
       </form>
       <div role="status" aria-live="polite" data-testid="ask-results">
-        {busy && <p className="meta">Searching...</p>}
-        {err && <p className="meta" data-testid="ask-failed">The search did not answer. Try again.</p>}
-        {!busy && !err && hits && hits.length === 0 && <p className="empty" data-testid="ask-none">Nothing in the library matches "{asked}".</p>}
-        {!busy && !err && hits && hits.length > 0 && (
-          <ul className="hits" aria-label={"Results for " + asked}>
-            {hits.map((h) => (
-              <li key={h.kind + h.id}>
-                <Link to="/library" className="row" data-testid="hit">
-                  <span className="row-main"><span className="row-title">{h.title || "(untitled)"}</span>{h.snippet && <span className="meta">{h.snippet}</span>}</span>
-                  <span className="pill">{h.kind}</span>
-                </Link>
-              </li>
-            ))}
-          </ul>
+        {asked && (
+          <PickerResults key={n} query={asked} limit={ASK_LIMIT} label={"Results for " + asked} testId="ask"
+            open={(_item, content) => <Link to="/library" className="row" data-testid="hit">{content}</Link>} />
         )}
       </div>
     </section>
