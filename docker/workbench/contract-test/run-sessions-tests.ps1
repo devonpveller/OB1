@@ -271,6 +271,13 @@ try {
   $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) 'ob_app_memory (non-superuser, service_role) - the production shape'
   . (Join-Path $PSScriptRoot 'ob-workbench-role.ps1'); $wbDb = Use-ObWorkbenchRole $appPw # rw-owner-private-view: the workbench's own role
+  # rw-sessions-lab-pd0b: the boundary slots grant EXECUTE to ob_app_memory only and initdb ran them before the role existed - re-run each
+  # one the chain mounted (idempotent, as production does) so the research service's idea drain (42501 otherwise) can run
+  foreach ($m in @($chain | Where-Object { $_[1] -match '^[0-9]{3}-init-(request-boundary|boundary-digest|boundary-ideas)\.sql$' })) {
+    $null = Dk cp (Join-Path $stage $m[1]) "${db}:/tmp/$($m[1])"
+    $null = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -q -f "/tmp/$($m[1])"
+    Check ($script:rc -eq 0) "$($m[1]) re-run after ob_app_memory exists (its grants)"
+  }
   $null = Dk cp (Join-Path $ct 'fixtures.sql') "${db}:/tmp/fixtures.sql"
   # rw-inlet-stamp (slot 470): fixtures.sql is legacy-shaped (an unowned idea thought); the LAB switches 470's guards off
   # around this load only and on again right after (the migration has no escape hatch)
@@ -297,7 +304,8 @@ try {
   $null = Run-Detached "$P-rs" @('-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw", '-e', "MCP_ACCESS_KEY=$key",
       '-e', "RESEARCH_CALLERS=owui-tool=owui:$kOwui;agent-org=mattermost:$kAo;digest=notebook:$kNb;workspace=workspace:$wsKey", '-e', "WORKSPACE_DEFAULT_SUB=$profSub",
       '-e', 'CHAT_API_BASE=http://stub-gateway:8080/v1', '-e', 'EMBEDDING_API_BASE=http://stub-gateway:8080/v1',
-      '-e', 'CURATOR_URL=http://unreachable.invalid', '-e', 'SEARCH_API_BASE=http://unreachable.invalid', $rsTag)
+      '-e', 'CURATOR_URL=http://unreachable.invalid', '-e', 'SEARCH_API_BASE=http://unreachable.invalid',
+      '-e', 'BOUNDARY_PROPOSE_TIMEOUT_MS=4000', $rsTag)
   $null = Run-Detached "$P-viewer" @('--network-alias', 'openbrain-wiki-viewer', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', "OPEN_BRAIN_REST_TOKEN=$viewerRestToken", '-e', 'WIKI_NAV_MIN_ROWS=0',
       '-e', 'WIKI_BUILDER=0', '-e', 'WIKI_DB_TCP=openbrain-db:5432', '-e', 'WIKI_DB_PROBE_MS=1000', '-e', 'WIKI_RECONCILE_INTERVAL_MS=5000',
       '-e', 'NODE_OPTIONS=--max-old-space-size=2048', '-e', 'WORKBENCH_URL=http://openbrain-workbench:8000', '-e', "WORKBENCH_KEY=$key",

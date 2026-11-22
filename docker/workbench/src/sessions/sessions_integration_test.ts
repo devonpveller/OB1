@@ -175,12 +175,28 @@ function lab(): Promise<Lab> {
     const q = await a.req("POST", "/workbench/documents/research", { path: alicePath, query: prompts.ws, kind: "research" });
     assertEquals(q.status, 202, q.text);
     jobs.ws = String(q.json.job_id);
-    // the Idea Refinery: alice's idea captured; its revision engages research at once (P4a trigger)
+    // the Idea Refinery (slot 580, rw-boundary-ideas): alice's idea captured; its revision queues ONE pending private
+    // hand-back - no job. The research service's own drain (every BOUNDARY_IDEA_DRAIN_MS, in this lab) forms the question:
+    // the lab has no model and the idea names no public link, so the boundary cannot phrase it and the hand-back waits
+    // for its owner (awaiting_owner). Alice then "runs privately" (idea_handback_run_private, the owner's own decision):
+    // the idea's tied, private session. No research_jobs row is written here for the idea.
     const idea = (await sql<{ id: string }>(`INSERT INTO public.ideas (title, summary, status, owner_sub, thread_root)
                    VALUES ($1, 'an idea to research', 'new', $2, 'mm-room-p4b') RETURNING id::text`, [`Idea ${rnd()}`, sub("alice")]))[0].id;
     await sql(`INSERT INTO public.idea_revisions (idea_id, revision, summary) VALUES ($1, 1, 'an idea to research')`, [idea]);
-    jobs.idea = (await sql<{ id: string }>(`SELECT id::text FROM public.research_jobs WHERE refinery_id = $1 ORDER BY created_at DESC LIMIT 1`, [idea]))[0]?.id;
-    assert(jobs.idea, "the idea's revision queued its research");
+    const review = () => sql<{ handback_id: string; state: string }>(`SELECT handback_id::text, state FROM public.idea_handback_review($1, $2::uuid)`, [sub("alice"), idea]);
+    const first = await review();
+    assertEquals(first.length, 1, "the idea's revision queued one hand-back (580: no job)");
+    assertEquals((await sql(`SELECT 1 FROM public.research_jobs WHERE refinery_id = $1`, [idea])).length, 0, "no job before the drain");
+    let hb = first[0];
+    for (let i = 0; i < 120 && hb.state === "pending"; i++) { // the drain's pass (the stub gateway holds the proposer until its timeout)
+      await sleep(500);
+      hb = (await review())[0];
+    }
+    assertEquals(hb.state, "awaiting_owner", "the research service's drain settled the hand-back: the boundary cannot phrase this idea");
+    const run = await sql<{ j: string | null }>(`SELECT public.idea_handback_run_private($1, $2, $3::uuid, $4)::text AS j`,
+      [sub("alice"), sub("alice"), hb.handback_id, `Which soil mixes suit raised beds ${rnd()}?`]);
+    jobs.idea = String(run[0]?.j ?? "");
+    assert(jobs.idea, "the owner's private run made the idea's session");
     // every job claimed (it then waits in the stub gateway) - or still queued; both are running sessions
     for (let i = 0; i < 60; i++) {
       const st = await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.research_jobs WHERE id = ANY($1::uuid[]) AND status IN ('queued','running')`, [Object.values(jobs)]);
