@@ -11,6 +11,7 @@ import { SearchOverlay } from "./shell/SearchOverlay";
 import { Placeholder, NotFound } from "./shell/Placeholder";
 import { Overview } from "./shell/Overview";
 import { Home } from "./screens/home/Home";
+import { Removals } from "./screens/removals/Removals";
 import { ToastProvider, useToast } from "./shell/Toast";
 
 const NEXT: Record<ThemeChoice, ThemeChoice> = { system: "light", light: "dark", dark: "system" };
@@ -65,7 +66,7 @@ function Shell({ load }: { load: Load }) {
         <Rail path={route.path} d={d} locked={locked} last={last} theme={theme}
           onTheme={() => { const n = NEXT[theme]; applyTheme(n); setTheme(n); }} />
         <main className="main" id="main" tabIndex={-1} data-testid="main">
-          {def === "overview" ? <Overview /> : def?.path === "/" ? <Home subject={d.who?.subject ?? null} whoAnswered={d.whoDone === true} /> : def ? <Placeholder def={def} /> : <NotFound path={route.path} />}
+          {def === "overview" ? <Overview /> : def?.path === "/" ? <Home subject={d.who?.subject ?? null} whoAnswered={d.whoDone === true} /> : def?.path === "/removals" ? <Removals key={d.who?.subject ?? ""} subject={d.who?.subject ?? null} ready={d.whoDone === true} /> : def ? <Placeholder def={def} /> : <NotFound path={route.path} />}
         </main>
       </div>
       </div>

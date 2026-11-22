@@ -56,7 +56,7 @@ async function axe(label) {
 // ---- 1. every route, opened directly and by clicking its menu entry: never blank, plain phase message, no errors
 await setMode("alice");
 await scheme("light");
-for (const [path, label, phase] of ALL.filter((a) => a[0] !== "/")) { // Home is a real screen: e2e/home.e2e.mjs
+for (const [path, label, phase] of ALL.filter((a) => a[0] !== "/" && a[0] !== "/removals")) { // Home and Removals are real screens: e2e/home.e2e.mjs, e2e/removals.e2e.mjs
   await go(path);
   const s = await ev(`JSON.stringify({h1:document.querySelector('h1')?.textContent, coming:document.querySelector('[data-testid=coming]')?.textContent||null, len:document.querySelector('main').innerText.trim().length, cur:document.querySelector('[aria-current=page]')?.textContent?.replace(/\\d+ \\w+( \\w+)?$/,'').trim(), title:document.title})`);
   const o = JSON.parse(s);
@@ -90,7 +90,9 @@ ok(["/workbench/settings", "/workbench/documents/file", "/workbench/documents/st
 // the exact set: bar Home's own named reads (checked in home.e2e.mjs), the shell and the account read nothing beyond the
 // six and the account's three (settings, the locked document's file and state)
 const HOME_READS = ["/workbench/contract/documents", "/workbench/contract/ideas", "/workbench/contract/library/recent", "/workbench/contract/library/waiting-claims", "/workbench/contract/podcasts", "/workbench/contract/podcasts/requests", "/workbench/contract/search"];
-const shellReads = seenPaths.filter((p) => !HOME_READS.includes(p));
+// ...and the Removals screen's own reads (the run opens it by its menu entry; they are checked in removals.e2e.mjs)
+const REMOVALS_READS = ["/workbench/contract/trail", "/workbench/contract/cleanup/actions", "/workbench/documents/trail"];
+const shellReads = seenPaths.filter((p) => !HOME_READS.includes(p) && !REMOVALS_READS.includes(p));
 ok(shellReads.join() === [...SIX, "/workbench/documents/file", "/workbench/documents/state", "/workbench/settings"].sort().join(), `exactly those: the shell and the account read only the six and the three: ${shellReads.join(", ")}`);
 
 // ---- 3. Ctrl+K opens, Esc closes, over every screen (real key events)
