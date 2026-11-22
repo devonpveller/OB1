@@ -116,8 +116,18 @@ export async function drainIdeaHandbacks(
         if (v.ok) out.formed++;
       } catch (e) {
         await c.queryObject("ROLLBACK").catch(() => {});
+        const code = (e as { fields?: { code?: string } }).fields?.code;
+        // rw-private-report-claims (slot 570): a derived question that carries a private report's claim is refused by
+        // the database (23514); it is never queued - the hand-back waits for its owner instead of retrying every pass
+        if (v.ok && code === "23514") {
+          try {
+            const ok = (await c.queryObject<{ ok: boolean }>(`SELECT public.idea_handback_settle($1::uuid, $2, NULL, 'awaiting_owner', $3::jsonb, $4::jsonb) AS ok`,
+              [p.id, row.inlet_revision, JSON.stringify({ refusal: "private_claim" }), JSON.stringify({ candidate: "", failing: [], code: "private_claim" })])).rows[0]?.ok === true;
+            if (ok) { out.awaiting++; continue; }
+          } catch { /* left pending; logged below */ }
+        }
         // the error's own text may quote a value: its class / code only
-        log(`[boundary-ideas] settling hand-back ${p.id.slice(0, 8)} failed (${(e as { fields?: { code?: string } }).fields?.code ?? (e as Error).name})`);
+        log(`[boundary-ideas] settling hand-back ${p.id.slice(0, 8)} failed (${code ?? (e as Error).name})`);
       }
     } finally { c.release(); }
   }
