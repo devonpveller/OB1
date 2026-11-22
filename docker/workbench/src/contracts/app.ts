@@ -13,6 +13,7 @@ import { registerCleanup } from "./routes/cleanup.ts";
 import { registerLibrary } from "./routes/library.ts";
 import { registerFlags } from "./routes/flags.ts";
 import { registerResearchStart } from "./routes/research_start.ts";
+import { registerIdeaCapture } from "./routes/idea_capture.ts";
 import { tombstoneActorMask } from "./routes/actor_mask.ts";
 import { registerPrivate } from "./routes/private.ts";
 
@@ -35,6 +36,7 @@ export function createContractApp(deps: ContractDeps) {
   registerFlags(app, deps); // rwr-flags-api: flag for cleanup (per user)
   registerPrivate(app, deps); // rw-owner-private-view (slot 480): the owner's private views (no MCP tool)
   registerResearchStart(app, deps); // rwr-research-start-api: POST /workbench/research and /research/preview
+  registerIdeaCapture(app, deps); // rwr-idea-capture-api: POST /workbench/ideas (owner = the seam's subject)
   app.openAPIRegistry.registerComponent("securitySchemes", "brainKey", {
     type: "apiKey", in: "header", name: "X-Brain-Key",
     description: "the shared secret the door injects (the viewer's /workbench forwarder; G7); the browser never holds it",

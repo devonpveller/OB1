@@ -518,6 +518,25 @@ export type Idea = {
   refinery: Refinery;
 };
 
+export type IdeaCaptureRequest = {
+  summary: string;
+  title?: string | null;
+};
+
+export type IdeaCaptureResearch = {
+  mode: string;
+  queued: boolean;
+  job_id: string | null;
+  next_start: string | null;
+};
+
+export type IdeaCaptured = {
+  idea_id: string;
+  title: string;
+  status: string;
+  research: IdeaCaptureResearch;
+};
+
 export type IdeaDraft = {
   state: string;
   text: string;
