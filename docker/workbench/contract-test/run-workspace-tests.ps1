@@ -512,6 +512,19 @@ try {
   if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the settings integration test fails on the base ($($sum.Value))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the settings integration test ($($sum.Value))" }
 
+  # rwr-ui-state-keys [5j2]: the four per-user UI state keys (slot 490) over the real workbench and database, two identities
+  Write-Host '[5j2] the UI state keys integration test (locked / last document, start screen, Recently viewed: two users, stale version, validation, the database guard, a trashed document)'
+  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
+    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
+    '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/settings/ui_state_integration_test.ts')
+  $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+  Save 'ui-state-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|Values are not equal|\[Diff\]|^\s+[-+]' }) -join "`n")
+  foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+  if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the UI state keys integration test fails on the base ($($sum.Value))" }
+  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the UI state keys integration test ($($sum.Value))" }
+
   if (-not $Red) {
     # rw-settings-store [5k]: "a stored refinery value is what the service reads on its next run" - the REAL refinery
     # (its image, as ob_app_memory, the production role) ages two users' quiet ideas on POST /run
@@ -565,6 +578,11 @@ try {
   $rpc = { (Dk run --rm --label $label --network $net --entrypoint node $viewerTag -e "fetch('$legacyRest/rest/v1/rpc/setting_get',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({p_owner:'g2-probe',p_key:'refinery.dormancy_days'})}).then(async r=>{const j=await r.json().catch(()=>({}));console.log('rpc',r.status,j&&j.code?j.code:'')}).catch(e=>console.log('rpc ERR',e.message))") -replace '[^0-9A-Za-z ]', '' }
   $waitRpc = { param($want) $last = ''; for ($i = 0; $i -lt 15; $i++) { $last = & $rpc; if ($last -match "rpc $want") { break }; Start-Sleep -Seconds 1 }; $last }
   $g2 = @("before: $(& $rpc)")
+  if (-not $Red) {   # rwr-ui-state-keys: slot 490 sits on 400's tables; its revert goes first
+    $null = Dk cp (Join-Path $chainDir 'revert-ui-state.sql') "${db}:/tmp/g2-revert-ui.sql"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-revert-ui.sql
+    Check ($script:rc -eq 0) '[5n] revert-ui-state.sql (slot 490) runs before revert-settings.sql'
+  }
   $null = Dk cp (Join-Path $chainDir 'revert-settings.sql') "${db}:/tmp/g2-revert.sql"
   $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-revert.sql
   # PGRST202 = PostgREST's own cache no longer lists the function; a plain 404 with 42883 is the DATABASE refusing a
@@ -581,6 +599,11 @@ try {
   $initExit = $script:rc
   $afterInit = & $waitRpc 200
   $g2 += "init (exit $initExit), PostgREST NOT restarted: $afterInit"
+  if (-not $Red) {   # rwr-ui-state-keys: slot 490 again, on 400's fresh tables
+    $null = Dk cp (Join-Path $chainDir 'init-ui-state.sql') "${db}:/tmp/g2-init-ui.sql"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-init-ui.sql
+    Check ($script:rc -eq 0) '[5n] init-ui-state.sql (slot 490) applies again after init-settings.sql'
+  }
   Save 'postgrest-reload.log' ($g2 -join "`n")
   foreach ($l in $g2) { Write-Host "    $l" }
   if ($Red) { Check ($initExit -eq 0 -and $afterInit -match 'rpc 404 PGRST202') "RED: without the NOTIFY the running PostgREST still answers 404 after slot 400 is applied ($afterInit)" }
@@ -1330,6 +1353,10 @@ try {
     $objs0 = "SELECT (SELECT count(*) FROM pg_proc WHERE proname IN ('setting_get','setting_problem','user_setting_set','trg_user_settings_guard'))::text || ' fns, ' || (to_regclass('public.settings_keys') IS NOT NULL)::text || ' ' || (to_regclass('public.user_settings') IS NOT NULL)::text"
     $objsFn = { $r = & $q $objs0; $p = $r -split ' '; if ($p[2] -eq 'true') { $k = (& $q "SELECT count(*) FROM public.settings_keys") + ' keys' } else { $k = 'no keys' }; "$($p[0]) $($p[1]) $k, $(if ($p[3] -eq 'true') { 'user_settings' } else { 'no user_settings' })" }
     $kept = "SELECT (SELECT coalesce(md5(string_agg(key || value::text || version, ',' ORDER BY key)), '-') FROM public.contract_settings) || ' / ' || (SELECT count(*)::text || ':' || coalesce(md5(string_agg(owner_sub || mode || coalesce(at_time::text, '') || tz, ',' ORDER BY owner_sub)), '-') FROM public.idea_schedule)"
+    # rwr-ui-state-keys: slot 490 sits on 400's tables, so its revert goes first (400's cycle below is then as before)
+    $null = Dk cp (Join-Path $dockerDir 'revert-ui-state.sql') "${db}:/tmp/rv490.sql"
+    $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv490.sql
+    Check ($script:rc -eq 0) '[5m] revert-ui-state.sql (slot 490) runs before 400''s cycle'
     $null = & $q "INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('settings-revert-$rand', 'refinery.dormancy_days', '9') ON CONFLICT DO NOTHING"
     $keptBefore = & $q $kept
     $objsBefore = & $objsFn
@@ -1344,6 +1371,34 @@ try {
     $afterRevert = @($rv4 | Where-Object { $_ -match '^\[revert-settings\.sql\] exit 0 -> 0 fns, no keys, no user_settings' }).Count
     Check (@($rv4 | Where-Object { $_ -match 'exit 0 ' }).Count -eq 5 -and $afterRevert -eq 2 -and $rv4[-1] -match "-> $([regex]::Escape(($objsBefore -split ' keys')[0])) keys, user_settings" -and @($rv4 | Where-Object { $_ -match '^\[' -and $_ -notmatch ([regex]::Escape("kept: $keptBefore") + '$') }).Count -eq 0) 'slot 400: init runs 3 times, revert twice (removing exactly its own objects), init again restores them; contract_settings and idea_schedule untouched'
     Check ((& $q "SELECT count(*) FROM public.user_settings") -eq '0') 'slot 400: the revert discarded the user tier (documented), init again starts it empty'
+
+    # rwr-ui-state-keys [5m2]: slot 490 runs cleanly 3 times, its revert twice, and init again; the revert leaves the catalog
+    # exactly as after slot 400 alone (constraints, the text of setting_problem / user_setting_set with line endings normalised, their ACL and owner, no user_setting_clear, no tombstone table,
+    # the key count), removes only its four keys (and every user's value of them), and init again restores them
+    Write-Host '[5m2] init-ui-state.sql x2, revert-ui-state.sql x2 (the catalog is as after slot 400 alone), init again'
+    $fp = { & $q "SELECT md5(coalesce((SELECT string_agg(conname || ':' || pg_get_constraintdef(oid), '|' ORDER BY conname) FROM pg_constraint WHERE conrelid = 'public.settings_keys'::regclass), '') || (SELECT string_agg(replace(pg_get_functiondef(p.oid), chr(13), '') || coalesce(p.proacl::text, '') || pg_get_userbyid(p.proowner), '#' ORDER BY p.proname) FROM pg_proc p WHERE p.proname IN ('setting_problem', 'user_setting_set', 'user_setting_clear')) || (SELECT count(*)::text FROM public.settings_keys) || (to_regclass('public.user_setting_tombstones') IS NOT NULL)::text)" }
+    $null = & $q "INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('ui-revert-$rand', 'refinery.dormancy_days', '9') ON CONFLICT DO NOTHING"
+    $f400 = & $fp
+    $uiRows = { & $q "SELECT count(*) FROM public.settings_keys WHERE key IN ('ui.locked_document','ui.last_document','ui.start_screen','library.recent')" }
+    $rv5 = @("after slot 400 alone: $f400 | ui keys $(& $uiRows)")
+    $f490 = ''
+    foreach ($f in @('init-ui-state.sql', 'init-ui-state.sql', 'revert-ui-state.sql', 'revert-ui-state.sql', 'init-ui-state.sql')) {
+      $null = Dk cp (Join-Path $dockerDir $f) "${db}:/tmp/rv490.sql"
+      $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv490.sql
+      $rc490 = $script:rc
+      if ($f -eq 'init-ui-state.sql' -and -not $f490) { $f490 = & $fp }
+      if ($f -eq 'init-ui-state.sql' -and $rc490 -eq 0) { $null = & $q "INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('ui-revert-$rand', 'ui.start_screen', '""library""') ON CONFLICT DO NOTHING" }
+      $rv5 += "[$f] exit $rc490$(if ($o -match 'ERROR') { ': ' + (($o -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ') }) -> $(& $fp) | ui keys $(& $uiRows) | ui values $(& $q "SELECT count(*) FROM public.user_settings WHERE key IN ('ui.locked_document','ui.last_document','ui.start_screen','library.recent')")"
+    }
+    Save 'revert-ui-state.log' ($rv5 -join "`n")
+    foreach ($l in $rv5) { Write-Host "    $l" }
+    Check (@($rv5 | Where-Object { $_ -match '^\[.*\] exit 0 ' }).Count -eq 5) '[5m2] slot 490: all five runs exit 0'
+    Check ($f490 -and $f490 -ne $f400) '[5m2] slot 490 changes the catalog (it is not a no-op)'
+    Check ($rv5[3] -match "-> $f400 \| ui keys 0" -and $rv5[4] -match "-> $f400 \| ui keys 0") '[5m2] slot 490: after the revert (and again) the catalog is exactly as after slot 400 alone, no ui keys left'
+    Check ($rv5[1] -match "-> $f490 \| ui keys 4" -and $rv5[2] -match "-> $f490 \| ui keys 4" -and $rv5[5] -match "-> $f490 \| ui keys 4") '[5m2] slot 490: a second init changes nothing, init again restores the same catalog and four keys'
+    Check ($rv5[3] -match 'ui values 0$' -and $rv5[4] -match 'ui values 0$') '[5m2] slot 490: the revert discarded the stored ui values (documented)'
+    Check ((& $q "SELECT count(*) FROM public.user_settings WHERE key = 'refinery.dormancy_days' AND owner_sub = 'ui-revert-$rand'") -eq '1') '[5m2] slot 490: the revert touched no other key''s stored value'
+    $null = & $q "DELETE FROM public.user_settings WHERE owner_sub = 'ui-revert-$rand'"
   }
   if (-not $Red) {
     # rw-p8a4-ideas: the slot-370 revert runs cleanly twice and leaves the slot-230 notification trigger as it was

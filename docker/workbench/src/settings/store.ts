@@ -34,11 +34,13 @@ interface Stored {
 // What the panel shows for one key. `value` is the stored value or null; `is_default` says the service is
 // using its env value / code default (the workbench cannot see another container's env, so `default` is the
 // code default and `env` names the variable that may override it there).
-export function keyOut(k: KeyRow, s: Stored | undefined) {
+// `gone` is the version a DELETED user key left behind (slot 490's tombstone): versions never go back, so a key with no
+// row reports that, not 0 (0 = never stored)
+export function keyOut(k: KeyRow, s: Stored | undefined, gone = 0) {
   return {
     key: k.key, tier: k.tier, type: k.type, section: k.section, position: k.position, label: k.label, help: k.help,
     default: k.default_value ?? null, env: k.env_name, read_by: k.read_by, validation: k.validation ?? {}, editable: k.editable,
-    value: s ? s.value : null, is_default: !s, version: s?.version ?? 0, updated_at: s?.updated_at ?? null,
+    value: s ? s.value : null, is_default: !s, version: s?.version ?? gone, updated_at: s?.updated_at ?? null,
   };
 }
 
@@ -55,14 +57,20 @@ export async function userSettings(db: Db, owner: string) {
     `SELECT key, value, version, updated_at::text AS updated_at, updated_by FROM public.user_settings WHERE owner_sub = $1`, [owner],
   );
   const by = new Map(rows.map((r) => [r.key, r]));
-  return keys.map((k) => keyOut(k, by.get(k.key)));
+  const gone = new Map((await db.query<{ key: string; version: number }>(
+    `SELECT key, version FROM public.user_setting_tombstones WHERE owner_sub = $1`, [owner],
+  )).map((r) => [r.key, r.version]));
+  return keys.map((k) => keyOut(k, by.get(k.key), gone.get(k.key) ?? 0));
 }
 
 export async function userSetting(db: Db, owner: string, k: KeyRow) {
   const s = (await db.query<Stored>(
     `SELECT value, version, updated_at::text AS updated_at, updated_by FROM public.user_settings WHERE owner_sub = $1 AND key = $2`, [owner, k.key],
   ))[0];
-  return keyOut(k, s);
+  const gone = s ? 0 : (await db.query<{ version: number }>(
+    `SELECT version FROM public.user_setting_tombstones WHERE owner_sub = $1 AND key = $2`, [owner, k.key],
+  ))[0]?.version ?? 0;
+  return keyOut(k, s, gone);
 }
 
 export class SettingRefused extends Error {
@@ -91,8 +99,15 @@ export async function setUserSetting(db: Db, owner: string, actor: string, k: Ke
   return await userSetting(db, owner, k);
 }
 
-export async function clearUserSetting(db: Db, owner: string, k: KeyRow) {
-  await db.query(`DELETE FROM public.user_settings WHERE owner_sub = $1 AND key = $2`, [owner, k.key]);
+// DELETE: back to the default. `version`, when given, must be the key's current one (a stale Unlock is refused, 409);
+// the delete is itself a new version (user_setting_clear), so the number never goes back.
+export async function clearUserSetting(db: Db, owner: string, k: KeyRow, version: number | null = null) {
+  try {
+    await db.query(`SELECT public.user_setting_clear($1, $2, $3)`, [owner, k.key, version]);
+  } catch (e) {
+    if (pgCode(e) === "40001") throw new SettingRefused(409, pgMessage(e));
+    throw e;
+  }
   return await userSetting(db, owner, k);
 }
 
