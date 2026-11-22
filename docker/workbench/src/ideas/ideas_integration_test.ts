@@ -594,17 +594,29 @@ async function plantIdeaReport(owner: string, ideaId: string, mk: { report: stri
   const job = (await sql<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, query, finished_at) VALUES ('done', 'manual', 'research for an idea', now()) RETURNING id::text AS id`))[0].id;
   await sql(`UPDATE public.idea_revisions SET research_job_id = $2 WHERE idea_id = $1 AND revision = 1`, [ideaId, job]);
   await sql(`UPDATE public.research_jobs SET refinery_id = NULL, inlet_ref = NULL WHERE id = $1`, [job]);
-  const claim = (await sql<{ id: string }>(`SELECT f.id::text AS id FROM public.find_or_create_claim($1, NULL, NULL, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb) f`,
-    [`The ${mk.word} result held in 12 trials.`]))[0].id;
-  await sql(`SELECT public.link_claim_to_source($1::uuid, $2::uuid, 'states', 1.0)`, [claim, FX.active]);
   const priv = (await sql<{ ok: boolean }>(`SELECT to_regclass('public.research_private_reports') IS NOT NULL AS ok`))[0].ok;
+  // rw-private-report-claims (slot 570): a private report's claim is filed into its owner's store, as the curator files it
+  const has570 = (await sql<{ ok: boolean }>(`SELECT to_regprocedure('public.private_report_claim_file(text,uuid,text,uuid,text,text,integer,vector,jsonb)') IS NOT NULL AS ok`))[0].ok;
+  let claim = "";
+  if (!(priv && has570)) {
+    claim = (await sql<{ id: string }>(`SELECT f.id::text AS id FROM public.find_or_create_claim($1, NULL, NULL, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb) f`,
+      [`The ${mk.word} result held in 12 trials.`]))[0].id;
+    await sql(`SELECT public.link_claim_to_source($1::uuid, $2::uuid, 'states', 1.0)`, [claim, FX.active]);
+  }
   let ref: string;
   if (priv) {
     ref = (await sql<{ id: string }>(
       `INSERT INTO public.research_private_reports (research_key, owner_sub, idea_id, job_id, title, content, metadata)
        VALUES ($1, $2, $3, $4, $5, $6, jsonb_build_object('prose_synthesis', $7::text)) RETURNING id::text AS id`,
       [mk.key, owner, ideaId, job, mk.title, `${mk.report} the report body`, mk.prose]))[0].id;
-    await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2)`, [ref, claim]);
+    if (has570) {
+      claim = (await sql<{ id: string }>(
+        `SELECT f.id::text AS id FROM public.private_report_claim_file($1, $2::uuid, $3, NULL, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb) f`,
+        [mk.key, job, `The ${mk.word} result held in 12 trials.`]))[0].id;
+      await sql(`SELECT public.private_report_claim_edge($1::uuid, $2::uuid, 'states', 1.0)`, [claim, FX.active]);
+    } else {
+      await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2)`, [ref, claim]);
+    }
   } else {
     ref = (await sql<{ id: string }>(
       `INSERT INTO public.sources (title, content, content_type, research_key, metadata)
@@ -619,12 +631,13 @@ async function plantIdeaReport(owner: string, ideaId: string, mk: { report: stri
   return { job, claim, ref };
 }
 
-t("I16 (rw-report-isolation): an idea's research report is private - B and the lane get no text, title, key or id of it anywhere (the claim, its nested fields, search, the session, the report and source routes); its claim stays shared; the owner reads the report", async () => {
+t("I16 (rw-report-isolation + rw-private-report-claims): an idea's research report AND the claims drawn from it are private - B and the lane get no text, title, key or id of either anywhere (the claims read, its nested fields, search, the session, the report and source routes); the owner reads the report and its claim", async () => {
   const tag = rnd();
   const mk = { report: `PrivReport${tag}`, title: `PrivTitle${tag}`, prose: `PrivProse${tag}`, key: `rk-priv-${tag}`, word: `privclaimword${tag}` };
   const ideaId = await captured(sub(A), `report idea ${tag}`);
   const { job, claim, ref } = await plantIdeaReport(sub(A), ideaId, mk);
-  const secrets = [mk.report, mk.title, mk.prose, mk.key, ref];
+  // slot 570 (operator 2026-11-21): the claim's text and id are A's too
+  const secrets = [mk.report, mk.title, mk.prose, mk.key, ref, mk.word, claim];
   const leaks = (label: string, text: string) => secrets.filter((s) => text.includes(s)).map((s) => `${label} carries ${s}`);
   const LANE: Record<string, string> = {}; // no identity header: the default subject - what the MCP lanes act as
   const found: string[] = [];
@@ -645,12 +658,11 @@ t("I16 (rw-report-isolation): an idea's research report is private - B and the l
       const body = path.includes(ref) ? raw.replaceAll(ref, "") : raw;
       found.push(...leaks(`${who} ${path} -> ${r.status}`, body));
     }
-    // the claim drawn from the report: present for every user, pointing at no report
+    // the claim drawn from the report: absent for every other user (slot 570), its count included
     const c = await call("GET", `/workbench/contract/claims?q=${encodeURIComponent(mk.word)}`, undefined, h);
     assertEquals(c.status, 200, c.text);
-    const mine = (c.json.claims as any[]).find((x) => x.id === claim);
-    assert(mine, `${who}: the claim from A's idea report is shared knowledge`);
-    assertEquals(mine.synthesis_id, null, `${who}: the claim names no report`);
+    assertEquals((c.json.claims as any[]).filter((x) => x.id === claim).length, 0, `${who}: the claim from A's idea report is A's alone`);
+    assertEquals((c.json.claims as any[]).length, 0, `${who}: the claims read finds nothing for the claim's word`);
     const bySyn = await call("GET", `/workbench/contract/claims?synthesis_id=${ref}`, undefined, h);
     assertEquals((bySyn.json.claims ?? []).length, 0, `${who}: following the report id finds nothing`);
   }
