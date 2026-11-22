@@ -109,4 +109,9 @@ reviewed-upstream: fc4bc786878007911c7bb11c54132d39311b145f
 # merged onto development pin 58bbc30 (the merge's second parent). The hit is run-wiki-guarded-lab.ps1, a lab fixture INSERT
 # that names screen_verdict as a column of idea_thought_archive (read-only name match); nothing of the list above changes.
 reviewed-upstream: b44c4ea0f2d9c47858eefb6df382ebe97ba80502
+# rw-wiki-guarded-pages-r2 int2 (2026-11-22): reviewed. Not upstream - the fork's own work/rw-wiki-guarded-pages-r2 (defeb8a)
+# merged onto development pin 6008fd5 (the merge's second parent). The hits are the same lab fixture INSERT naming
+# screen_verdict in run-wiki-guarded-lab.ps1 (round 1's, already reviewed as b44c4ea; defeb8a's own diff names no
+# screen_verdict) and this file's own b44c4ea entry; nothing of the list above changes.
+reviewed-upstream: defeb8a02c439af9c8c73b6c4f3ac8387e028ae2
 ```
