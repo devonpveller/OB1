@@ -17,7 +17,8 @@
 --
 -- Idempotent (IF NOT EXISTS); re-running it changes nothing. Fresh-volume slot 510; the live DB gets it
 -- by hand (psql -f, BEFORE the new workbench image, a fresh backup first).
--- Revert: revert-document-trail.sql (THIS DISCARDS the trail rows).
+-- Revert: revert-document-trail.sql (THIS DISCARDS the trail rows); revert-document-trail-grants.sql puts back only the
+-- first version's grants (ALL to service_role, no trigger) and keeps the rows.
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS public.user_document_trail (
@@ -32,11 +33,41 @@ CREATE TABLE IF NOT EXISTS public.user_document_trail (
 );
 CREATE INDEX IF NOT EXISTS idx_user_document_trail_owner ON public.user_document_trail (owner_sub, created_at DESC);
 
--- ── RLS + grants (the P0 shape) ─────────────────────────────────────────
+-- -- RLS + grants: append-only for the app (rwr-trail-grants-exact; review F-1 of rwr-docs-lifecycle-api-r2) --
 ALTER TABLE public.user_document_trail ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS user_document_trail_service_role_all ON public.user_document_trail;
 CREATE POLICY user_document_trail_service_role_all ON public.user_document_trail FOR ALL TO service_role USING (true) WITH CHECK (true);
+-- The schema's default privileges (init-grants.sql) hand every new table ALL to service_role, so a plain GRANT of
+-- three rights below would leave UPDATE and TRUNCATE in place. Take back every direct grant first (PUBLIC, service_role,
+-- any other role: slots 470 and 570 do the same), then grant exactly what the app needs: read, add, and delete (the
+-- nightly run and the lab's cleanup remove lines; nothing edits one). Re-running it on a database that already ran
+-- the first version of this slot converges to the same ACL.
+REVOKE ALL ON public.user_document_trail FROM PUBLIC;
+DO $$
+DECLARE r RECORD;
+BEGIN
+    FOR r IN SELECT DISTINCT ro.rolname AS grantee
+               FROM pg_class cl, aclexplode(cl.relacl) a JOIN pg_roles ro ON ro.oid = a.grantee
+              WHERE cl.oid = 'public.user_document_trail'::regclass AND NOT ro.rolsuper AND ro.oid <> cl.relowner
+    LOOP
+        EXECUTE format('REVOKE ALL ON public.user_document_trail FROM %I', r.grantee);
+    END LOOP;
+END $$;
 GRANT SELECT, INSERT, DELETE ON public.user_document_trail TO service_role;
+
+-- The grant is the first layer; this is the second (admin_audit's shape): a line is never edited and the table is never
+-- wiped, by any role, even one that is later granted UPDATE or TRUNCATE (a superuser must drop the trigger on purpose).
+CREATE OR REPLACE FUNCTION public.user_document_trail_no_edit() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'user_document_trail is append-only for the app (% refused)', TG_OP USING ERRCODE = 'insufficient_privilege';
+END $$;
+REVOKE ALL ON FUNCTION public.user_document_trail_no_edit() FROM PUBLIC;
+DROP TRIGGER IF EXISTS trg_user_document_trail_no_update ON public.user_document_trail;
+CREATE TRIGGER trg_user_document_trail_no_update BEFORE UPDATE ON public.user_document_trail
+    FOR EACH ROW EXECUTE FUNCTION public.user_document_trail_no_edit();
+DROP TRIGGER IF EXISTS trg_user_document_trail_no_truncate ON public.user_document_trail;
+CREATE TRIGGER trg_user_document_trail_no_truncate BEFORE TRUNCATE ON public.user_document_trail
+    FOR EACH STATEMENT EXECUTE FUNCTION public.user_document_trail_no_edit();
 -- this table's own sequence only (round 2, F7): nothing else in the schema is touched, so the revert is exact
 GRANT USAGE, SELECT ON SEQUENCE public.user_document_trail_id_seq TO service_role;
 
