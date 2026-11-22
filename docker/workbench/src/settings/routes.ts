@@ -2,7 +2,8 @@
 //
 //   GET    /                 my settings (the user tier, for the seam's subject only) and whether I am an admin
 //   PUT    /:key {value, version?}   set one of mine (a registered, editable USER key; the registry validates)
-//   DELETE /:key             mine back to the default (the service's env value / code default)
+//   DELETE /:key[?version=N] mine back to the default (the service's env value / code default); N, when sent, must
+//                            be the version last read (a stale one is refused 409); the delete is itself a version
 //   GET    /admin            admins only: the shared settings (the admin tier = public.contract_settings),
 //                            research tuning among them, read-only
 //   PUT    /admin/:key {value}   admins only: set a shared one (editable admin keys only)
@@ -134,7 +135,14 @@ export function settingsRouter(deps: SettingsDeps) {
     const k = await known(c);
     if (k instanceof Response) return k;
     if (k.tier !== "user") return c.json({ error: `${k.key} is a shared setting: only an admin changes it` }, 403);
-    return c.json(await store.clearUserSetting(deps.db, who.sub, k));
+    // ?version=N: the version the caller last read; a stale one is refused (409) and nothing is deleted
+    const v = c.req.query("version");
+    if (v !== undefined && !/^\d{1,9}$/.test(v)) return c.json({ error: "version must be a whole number" }, 400);
+    try {
+      return c.json(await store.clearUserSetting(deps.db, who.sub, k, v === undefined ? null : Number(v)));
+    } catch (e) {
+      return refused(c, e);
+    }
   });
   return r;
 }

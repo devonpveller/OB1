@@ -112,7 +112,7 @@ describe("the counts match the reads (acceptance 2)", () => {
     // exactly these reads, GET only, all through the one door
     expect(seen.map((u) => u.split("?")[0]).sort()).toEqual([
       "/workbench/auth/me", "/workbench/contract/cleanup/reopen-candidates", "/workbench/contract/cleanup/sources",
-      "/workbench/contract/sessions", "/workbench/intake/jobs", "/workbench/workspace/whoami"]);
+      "/workbench/contract/sessions", "/workbench/intake/jobs", "/workbench/settings", "/workbench/workspace/whoami"]);
     expect(requestLog().every((r) => r.method === "GET" && r.url.startsWith("/workbench/"))).toBe(true);
   });
   it("zero is shown as zero; a read that fails shows no count (never an invented one)", async () => {

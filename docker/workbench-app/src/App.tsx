@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { applyTheme, readTheme, type ThemeChoice } from "./lib/theme";
 import { useRoute } from "./lib/router";
-import { getLastDocument, getLockedDocument, setLockedDocument, subscribeState } from "./lib/state";
+import { getLastDocument, getLockedDocument, loadAccountState, setLockedDocument, stateEpoch, subscribeState } from "./lib/state";
 import { loadShellData, useShellData, type Load } from "./lib/shell-data";
 import { matchRoute } from "./routes";
 import { TopBar } from "./shell/TopBar";
@@ -38,11 +38,20 @@ function Shell({ load }: { load: Load }) {
     document.title = (def === "overview" ? "What moved where" : def ? def.label : "Not found") + " - Research workbench";
   }, [def]);
 
+  // The locked / last document and the rest of the per-person state live in the ACCOUNT: read them once the person
+  // is known, and again when a different person is on the page (shell-data has just reset the local copy).
+  const subject = d.who?.subject ?? null;
+  useEffect(() => {
+    if (subject !== null) void loadAccountState();
+  }, [subject]);
+
   const unlock = useCallback(() => {
     const was = getLockedDocument();
     if (!was) return;
+    const epoch = stateEpoch();
     setLockedDocument(null);
-    toast({ message: "Unlocked a document.", onUndo: () => setLockedDocument(was) });
+    // Undo restores the document only for the person who unlocked it: after a switch of person it does nothing
+    toast({ message: "Unlocked a document.", onUndo: () => { if (stateEpoch() === epoch) setLockedDocument(was); } });
   }, [toast]);
 
   return (
