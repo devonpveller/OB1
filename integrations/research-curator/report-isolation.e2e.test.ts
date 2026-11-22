@@ -1,6 +1,7 @@
 /**
  * report-isolation.e2e.test.ts - rw-report-isolation against a LAB database: an idea job's final report is private
- * to the idea's owner; the claims drawn from it stay shared; every other report is filed shared, exactly as before.
+ * to the idea's owner; rw-private-report-claims (slot 570): so are the claims drawn from it (the owner's store, never
+ * the shared claims table, never a shared claim's dedup); every other report is filed shared, exactly as before.
  *
  * The REAL curator (index.ts) and the REAL kubernetes-deployment persist route, spawned as the containers run them,
  * against a throwaway Postgres (the full initdb chain, slot 390 included), plus a stub embeddings/chat endpoint
@@ -16,6 +17,8 @@ const DB_HOST = Deno.env.get("RI_E2E_DB_HOST") ?? "";
 const DB_PASSWORD = Deno.env.get("RI_E2E_DB_PASSWORD") ?? "test";
 const K8S_DIR = Deno.env.get("RI_E2E_K8S_DIR") ?? "/app";
 const CURATOR_DIR = Deno.env.get("RI_E2E_CURATOR_DIR") ?? "/curator";
+// the research service directory: RI6 imports its viewer.ts, ideaWithJob its idea drain (boundary-ideas.ts)
+const RESEARCH_DIR = Deno.env.get("RI_E2E_RESEARCH_DIR") ?? "/research";
 const KEY = "ri-e2e-key";
 const ignore = !DB_HOST;
 const opts = { ignore, sanitizeOps: false, sanitizeResources: false };
@@ -96,13 +99,42 @@ async function lab(runTag: string) {
 }
 
 const EMB = `[${Array(1024).fill(0.01).join(",")}]`;
-/** an idea captured the way capture_idea captures it (idea_capture); its research job is queued by the revision trigger */
+/** what the research service's boundary may use in this lab: no model (the proposer is unreachable), no public page,
+ *  no identity tokens, no resolver - the lab's shape, where an idea that names no public link cannot be phrased */
+const NO_MODEL = {
+  propose: () => Promise.reject(new Error("no model in this lab")),
+  fetchPublic: () => Promise.resolve(null),
+  identity: () => Promise.resolve([] as string[]),
+  resolve: () => Promise.resolve([] as string[]),
+};
+/** an idea captured the way capture_idea captures it (idea_capture), and its research job made the way production makes
+ *  it since slot 580 (rw-boundary-ideas, PD0b): the capture queues ONE pending private hand-back and no job; the research
+ *  service's own drain (its drainIdeaHandbacks, imported from the research service, run here with NO_MODEL) cannot form a
+ *  de-personalised question, so it settles the hand-back awaiting_owner; the owner then runs it privately
+ *  (idea_handback_run_private, the owner's decision) - the idea's tied job (branch_kind 'idea', refinery_id = the idea),
+ *  the job whose report slot 390 makes private and whose claims slot 570 files private. Same question for the same title
+ *  (RI5's alike ideas). */
 async function ideaWithJob(owner: string, title: string) {
   const idea = (await sql<{ id: string }>(`SELECT public.idea_capture($1, 'service:openbrain-mcp', $2, $3, NULL, $4)::text AS id`,
     [owner, title, `${title} statement`, EMB]))[0].id;
-  const job = (await sql<{ id: string }>(
-    `SELECT id::text FROM public.research_jobs WHERE refinery_id = $1 AND branch_kind = 'idea' ORDER BY created_at DESC LIMIT 1`, [idea]))[0]?.id;
-  assert(job, `the capture queued the idea's research job (${idea})`);
+  const review = () => sql<{ handback_id: string; state: string }>(`SELECT handback_id::text, state FROM public.idea_handback_review($1, $2::uuid)`, [owner, idea]);
+  const first = await review();
+  eq(first.length, 1, `the capture queued one hand-back (slot 580) (${idea})`);
+  eq((await sql(`SELECT 1 FROM public.research_jobs WHERE refinery_id = $1`, [idea])).length, 0, `no job before the drain (${idea})`);
+  const d = await import(`file://${RESEARCH_DIR}/boundary-ideas.ts`) as {
+    drainIdeaHandbacks: (connect: () => Promise<unknown>, deps: typeof NO_MODEL, o?: { log?: (l: string) => void }) => Promise<Record<string, number>>;
+  };
+  let hb = first[0];
+  for (let i = 0; i < 5 && hb.state === "pending"; i++) {
+    await d.drainIdeaHandbacks(() => pool!.connect(), NO_MODEL, { log: () => {} });
+    hb = (await review())[0];
+  }
+  eq(hb.state, "awaiting_owner", `the research service's drain settled the hand-back for its owner (${idea})`);
+  const job = (await sql<{ j: string | null }>(`SELECT public.idea_handback_run_private($1, $1, $2::uuid, $3)::text AS j`,
+    [owner, hb.handback_id, `Which evidence decides ${title}?`]))[0]?.j;
+  assert(job, `the owner's private run made the idea's research job (${idea})`);
+  const shape = await sql<{ r: string | null; k: string | null }>(`SELECT refinery_id::text AS r, branch_kind AS k FROM public.research_jobs WHERE id = $1`, [job]);
+  eq([shape[0]?.r, shape[0]?.k], [idea, "idea"], `the job is the idea's own branch job (${idea})`);
   return { idea, job };
 }
 const plainJob = async (query = "report isolation e2e", extra: Record<string, unknown> = {}) =>
@@ -131,7 +163,8 @@ const send = (base: string, body: unknown) =>
 
 /** every shared surface the report could reach, for the markers of one run */
 async function sharedHits(mk: Mk, key: string, tag: string) {
-  const report = [mk.report, mk.prose];
+  // rw-private-report-claims (slot 570): the claims' word is the report's text too - on no shared surface
+  const report = [mk.report, mk.prose, mk.claimWord];
   const out: Record<string, number> = {};
   for (const m of report) {
     out[`sources:${m}`] = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.sources WHERE content LIKE '%'||$1||'%' OR title LIKE '%'||$1||'%' OR metadata::text LIKE '%'||$1||'%' OR coalesce(research_query,'') LIKE '%'||$1||'%'`, [m]))[0].n;
@@ -165,12 +198,22 @@ async function expectPrivate(L: Awaited<ReturnType<typeof lab>>, r: Awaited<Retu
   eq(ev.length, 1, `${ctx}: one filed event`);
   eq([ev[0].payload.synthesis_id ?? null, ev[0].payload.report], [null, "private"], `${ctx}: the filed event says private, names no report`);
   assert(!JSON.stringify(ev[0].payload).includes(p[0].id), `${ctx}: the event names the private report's id`);
-  // the claims drawn from it: SHARED (present, no synthesis), linked to the private report for the owner
-  const cl = await sql<{ id: string; synthesis_id: string | null; thread_id: string | null }>(
-    `SELECT id::text, synthesis_id::text, thread_id::text FROM public.claims WHERE text LIKE '%'||$1||'%'`, [mk.claimWord]);
-  assert(cl.length >= 2, `${ctx}: the claims were filed: ${JSON.stringify(cl)}`);
+  // rw-private-report-claims (slot 570, operator 2026-11-21): the claims drawn from it are PRIVATE - in the report
+  // owner's store (PD1's inlet_private_claims), their edges in the owner's edge store, none in the shared tables
+  eq((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.claims WHERE text LIKE '%'||$1||'%'`, [mk.claimWord]))[0].n, 0,
+    `${ctx}: no claim of the private report is in the shared claims table`);
+  const cl = await sqlMaybe<{ id: string; synthesis_id: string | null; thread_id: string | null; owner: string }>(
+    `SELECT id::text, synthesis_id::text, thread_id::text, inlet_owner_sub AS owner FROM public.inlet_private_claims WHERE text LIKE '%'||$1||'%'`, [mk.claimWord]);
+  assert(cl.length >= 2, `${ctx}: the claims were filed into the owner's store: ${JSON.stringify(cl.map((c) => [c.synthesis_id, c.owner === owner]))}`);
+  eq(cl.filter((c) => c.owner !== owner).length, 0, `${ctx}: every private claim is the report owner's`);
   eq(cl.filter((c) => c.synthesis_id !== null).length, 0, `${ctx}: no claim points at a report`);
   eq(p[0].claims, cl.length, `${ctx}: every claim is linked to the private report (the owner's way back)`);
+  const ids = cl.map((c) => c.id);
+  eq((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.claim_sources WHERE claim_id = ANY($1::uuid[]) OR parent_claim_id = ANY($1::uuid[])`, [ids]))[0].n, 0,
+    `${ctx}: no shared edge of a private claim`);
+  const pe = await sql<{ n: number; o: number }>(
+    `SELECT count(*)::int AS n, count(*) FILTER (WHERE owner_sub <> $2)::int AS o FROM public.inlet_private_claim_sources WHERE claim_id = ANY($1::uuid[])`, [ids, owner]);
+  assert(pe[0].n >= cl.length && pe[0].o === 0, `${ctx}: each private claim keeps its grounding edges for the owner (${pe[0].n} edge(s))`);
   const lookup = await fetch(`${L.k8s.base}/research/lookup?key=${encodeURIComponent(key)}`, { headers: { "x-brain-key": KEY } }).then((x) => x.json());
   eq(lookup.found, false, `${ctx}: the shared reuse lookup does not serve it`);
   return { report: p[0], claims: cl };
@@ -269,7 +312,7 @@ Deno.test({ name: "RI5 (round 2, tester F1): two users whose ideas read alike sh
     const key = `rs-${tag}`; const mkA = marks(`${tag}a`), mkB = marks(`${tag}b`);
     const rows = async () => await sql<{ owner_sub: string; idea_id: string; job_id: string; content: string; prose: string | null; claims: string[] }>(
       `SELECT p.owner_sub, p.idea_id::text, p.job_id::text, p.content, p.metadata ->> 'prose_synthesis' AS prose,
-              coalesce((SELECT array_agg(c.text ORDER BY c.text) FROM public.research_private_report_claims pc JOIN public.claims c ON c.id = pc.claim_id WHERE pc.report_id = p.id), '{}') AS claims
+              coalesce((SELECT array_agg(c.text ORDER BY c.text) FROM public.research_private_report_claims pc JOIN public.inlet_private_claims c ON c.id = pc.claim_id AND c.inlet_owner_sub = p.owner_sub WHERE pc.report_id = p.id), '{}') AS claims
          FROM public.research_private_reports p WHERE p.research_key = $1 ORDER BY p.owner_sub`, [key]);
     const check = async (ctx: string, proseA: string, proseB: string) => {
       const r = await rows();
@@ -293,7 +336,31 @@ Deno.test({ name: "RI5 (round 2, tester F1): two users whose ideas read alike sh
   } finally { await L.stop(); }
 } });
 
-const RESEARCH_DIR = Deno.env.get("RI_E2E_RESEARCH_DIR") ?? "/research";
+Deno.test({ name: "RI7 (rw-private-report-claims): a private report whose claim text matches a SHARED claim in the same thread files its own private claim - the shared claim is untouched (no link, no edge, no freshness bump, no contradicts edge)", ...opts, fn: async () => {
+  const tag = `RI7${rnd()}`; const L = await lab(tag);
+  try {
+    const owner = `owner-a-${rnd()}`;
+    const { idea, job } = await ideaWithJob(owner, `idea ${tag}`);
+    const thread = (await sql<{ id: string }>(`INSERT INTO public.threads (name, description, status) VALUES ($1, 'shared', 'active') RETURNING id::text`, [`${tag} existing`]))[0].id;
+    const mk = marks(tag); const key = `rs-${tag}`;
+    // the shared claim: the same text the private report will carry, in the same thread, filed a day ago
+    const text = `The ${mk.claimWord} alpha result reproduced in 12 trials across two labs.`;
+    const shared = (await sql<{ id: string }>(
+      `SELECT f.id::text AS id FROM public.find_or_create_claim($1, $2::uuid, NULL, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb) f`, [text, thread]))[0].id;
+    await sql(`UPDATE public.claims SET researched_on = CURRENT_DATE - 1 WHERE id = $1`, [shared]);
+    const before = (await sql<{ row: string }>(`SELECT to_jsonb(c)::text AS row FROM public.claims c WHERE id = $1`, [shared]))[0].row;
+    const r = await send(L.cur.base, { ...pkgFor(key, job, mk), thread_id: thread });
+    assert(r.status === 200, `RI7: ${r.status} ${r.text.slice(0, 300)}
+${L.log()}`);
+    eq((await sql<{ row: string }>(`SELECT to_jsonb(c)::text AS row FROM public.claims c WHERE id = $1`, [shared]))[0].row, before, "RI7: the shared claim is byte-identical");
+    eq((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.research_private_report_claims WHERE claim_id = $1`, [shared]))[0].n, 0, "RI7: the shared claim is not linked");
+    eq((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.claim_sources WHERE claim_id = $1 OR parent_claim_id = $1`, [shared]))[0].n, 0, "RI7: the shared claim gained no edge");
+    const priv = await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.inlet_private_claims WHERE text = $1 AND inlet_owner_sub = $2 AND thread_id = $3::uuid`, [text, owner, thread]);
+    eq(priv[0].n, 1, "RI7: the owner has their own private copy");
+    void idea;
+  } finally { await L.stop(); }
+} });
+
 Deno.test({ name: "RI6 (round 2): the research service's job view (GET /research/jobs/:id) withholds an idea job's report from anyone but the idea's owner - the default subject included", ...opts, fn: async () => {
   const v = await import(`file://${RESEARCH_DIR}/viewer.ts`) as {
     FOREIGN_PROMPTS_SQL: string; sharedJobView: (job: Record<string, unknown>, o?: { privateReport?: boolean }) => Record<string, unknown>;

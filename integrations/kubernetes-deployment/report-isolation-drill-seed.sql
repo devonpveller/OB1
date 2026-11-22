@@ -10,6 +10,28 @@
 \set ON_ERROR_STOP on
 BEGIN;
 CREATE TABLE IF NOT EXISTS public._ri_drill (name TEXT PRIMARY KEY, id TEXT NOT NULL);
+-- rw-private-report-claims (attempt 4): since slot 580 (rw-boundary-ideas, PD0b) an idea capture queues ONE pending
+-- private hand-back and no job. An idea's own branch job is made the way production makes it now: the research service's
+-- drain settles the hand-back awaiting_owner (an idea that names no public link and no model to phrase it: the drain's
+-- own SQL calls on a refusal - idea_handback_item for the revision, then idea_handback_settle), and the owner runs it
+-- privately (idea_handback_run_private): the idea's tied job, branch_kind 'idea', refinery_id = the idea.
+CREATE OR REPLACE FUNCTION pg_temp.drill_idea_job(p_owner TEXT, p_idea UUID) RETURNS UUID LANGUAGE plpgsql AS $f$
+DECLARE v_hb UUID; v_rev INT; v_job UUID;
+BEGIN
+    SELECT r.handback_id INTO v_hb FROM public.idea_handback_review(p_owner, p_idea) r WHERE r.state = 'pending';
+    IF v_hb IS NULL THEN RAISE EXCEPTION 'drill: the capture queued no pending hand-back'; END IF;
+    IF EXISTS (SELECT 1 FROM public.research_jobs WHERE refinery_id = p_idea) THEN RAISE EXCEPTION 'drill: a job before the drain'; END IF;
+    SELECT i.inlet_revision INTO v_rev FROM public.idea_handback_item(v_hb) i;
+    IF NOT public.idea_handback_settle(v_hb, v_rev, NULL, 'awaiting_owner', '{"refusal":"no_public_evidence"}'::jsonb,
+                                       '{"candidate":"","failing":[],"code":"no_public_evidence"}'::jsonb) THEN
+        RAISE EXCEPTION 'drill: the drain could not settle the hand-back';
+    END IF;
+    v_job := public.idea_handback_run_private(p_owner, p_owner, v_hb, 'Which evidence decides this drill idea?');
+    IF v_job IS NULL OR NOT EXISTS (SELECT 1 FROM public.research_jobs WHERE id = v_job AND refinery_id = p_idea AND branch_kind = 'idea') THEN
+        RAISE EXCEPTION 'drill: the owner''s private run made no idea job';
+    END IF;
+    RETURN v_job;
+END $f$;
 DO $$
 DECLARE
     v_i1 UUID; v_i2 UUID; v_i4 UUID;
@@ -28,8 +50,8 @@ BEGIN
     v_i1 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea one', 'drill idea one statement', NULL, NULL);
     v_i2 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea two', 'drill idea two statement', NULL, NULL);
     v_i4 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea four', 'drill idea four statement', NULL, NULL);
-    SELECT id INTO v_j1 FROM public.research_jobs WHERE refinery_id = v_i1 AND branch_kind = 'idea';
-    SELECT id INTO v_j4 FROM public.research_jobs WHERE refinery_id = v_i4 AND branch_kind = 'idea';
+    v_j1 := pg_temp.drill_idea_job('drill-owner', v_i1);
+    v_j4 := pg_temp.drill_idea_job('drill-owner', v_i4);
     INSERT INTO public.research_jobs (status, origin, query) VALUES ('done', 'manual', 'drill j2') RETURNING id INTO v_j2;
     UPDATE public.idea_revisions SET research_job_id = v_j2::text WHERE idea_id = v_i2 AND revision = 1;
     UPDATE public.research_jobs SET refinery_id = NULL, inlet_ref = NULL WHERE id = v_j2;
@@ -92,8 +114,8 @@ BEGIN
     -- reused the filed thread ('explicit') and the filed-event recovery (no thread_decision) - each on its own idea job
     v_i6 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea six', 'drill idea six statement', NULL, NULL);
     v_i7 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea seven', 'drill idea seven statement', NULL, NULL);
-    SELECT id INTO v_j6 FROM public.research_jobs WHERE refinery_id = v_i6 AND branch_kind = 'idea';
-    SELECT id INTO v_j7 FROM public.research_jobs WHERE refinery_id = v_i7 AND branch_kind = 'idea';
+    v_j6 := pg_temp.drill_idea_job('drill-owner', v_i6);
+    v_j7 := pg_temp.drill_idea_job('drill-owner', v_i7);
     INSERT INTO public.sources (id, url, title, content, content_type, research_key, metadata) VALUES
       (v_s6, NULL, 'Drill idea report six', 'DrillReportSix text', 'research_synthesis', 'rk-drill-6', '{"claim":"DrillReportSix claim"}'),
       (v_s7, NULL, 'Drill idea report seven', 'DrillReportSeven text', 'research_synthesis', 'rk-drill-7', '{"claim":"DrillReportSeven claim"}'),
@@ -118,8 +140,8 @@ BEGIN
     -- mid-requeue, started_at reset to NULL (tD)
     v_i8 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea eight', 'drill idea eight statement', NULL, NULL);
     v_i9 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea nine', 'drill idea nine statement', NULL, NULL);
-    SELECT id INTO v_j8 FROM public.research_jobs WHERE refinery_id = v_i8 AND branch_kind = 'idea';
-    SELECT id INTO v_j9 FROM public.research_jobs WHERE refinery_id = v_i9 AND branch_kind = 'idea';
+    v_j8 := pg_temp.drill_idea_job('drill-owner', v_i8);
+    v_j9 := pg_temp.drill_idea_job('drill-owner', v_i9);
     INSERT INTO public.sources (id, url, title, content, content_type, research_key, metadata) VALUES
       (v_s8, NULL, 'Drill idea report eight', 'DrillReportEight text', 'research_synthesis', 'rk-drill-8', '{"claim":"DrillReportEight claim"}'),
       (v_s9, NULL, 'Drill idea report nine', 'DrillReportNine text', 'research_synthesis', 'rk-drill-9', '{"claim":"DrillReportNine claim"}'),
@@ -140,7 +162,7 @@ BEGIN
     -- round 6 (tester attempt 5, tF): the job that minted the thread (j10) ERRORED after filing - no curator answer, only
     -- its typed 'filed' event names the thread; a later job of the same idea (j11) filed into it as 'existing'
     v_i10 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea ten', 'drill idea ten statement', NULL, NULL);
-    SELECT id INTO v_j10 FROM public.research_jobs WHERE refinery_id = v_i10 AND branch_kind = 'idea';
+    v_j10 := pg_temp.drill_idea_job('drill-owner', v_i10);
     INSERT INTO public.research_jobs (status, origin, query, refinery_id) VALUES ('done', 'manual', 'drill j11', v_i10) RETURNING id INTO v_j11;
     INSERT INTO public.sources (id, url, title, content, content_type, research_key, metadata) VALUES
       (v_s10, NULL, 'Drill idea report ten', 'DrillReportTen text', 'research_synthesis', 'rk-drill-10', '{"claim":"DrillReportTen claim"}'),
@@ -156,7 +178,7 @@ BEGIN
     -- web sources were labelled with it, and the USER then renamed the notebook - the thread's name is no longer the
     -- label. w12: linked, labelled the filing-time name; w13: linked, some other label; w14: NOT linked, the old name
     v_i12 := public.idea_capture('drill-owner', 'service:drill', 'Drill idea twelve', 'drill idea twelve statement', NULL, NULL);
-    SELECT id INTO v_j12 FROM public.research_jobs WHERE refinery_id = v_i12 AND branch_kind = 'idea';
+    v_j12 := pg_temp.drill_idea_job('drill-owner', v_i12);
     INSERT INTO public.sources (id, url, title, content, content_type, research_key, notebook, metadata) VALUES
       (v_s12, NULL, 'Drill idea report twelve', 'DrillReportTwelve text', 'research_synthesis', 'rk-drill-12', NULL, '{"claim":"DrillReportTwelve claim"}'),
       (v_w12, 'https://example.org/drill-web-twelve', 'drill web twelve', 'drill web twelve text', 'web_article', NULL, 'MintedName DrillReportTwelve', '{}'),
