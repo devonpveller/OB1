@@ -129,3 +129,23 @@ Deno.test("approve (D7): the owner's identity / a marker is refused; a clean edi
   const decided = fakeDb(row({ state: "queued" }));
   assertEquals((await approveIdeaQuestion(decided.client, OWNER.sub, waiting.id, "Which roofs suit a cabin?", deps)).status, 409);
 });
+
+Deno.test("drain (rw-private-report-claims, slot 570): a derived question refused by the database (23514: it carries a private report's claim) is never queued - the hand-back waits for its owner", async () => {
+  const q = "What is known about cheap solar roof designs for cold towns?";
+  const db = fakeDb(row());
+  const base = db.connect;
+  const connect = async () => {
+    const c = await base();
+    const inner = c.queryObject.bind(c);
+    c.queryObject = (<T>(sql: string, args: unknown[] = []) => sql.includes("INSERT INTO public.research_jobs")
+      ? (db.calls.push({ sql, args }), Promise.reject(Object.assign(new Error("guard"), { fields: { code: "23514" } })))
+      : inner<T>(sql, args)) as typeof c.queryObject;
+    return c;
+  };
+  const o = await drainIdeaHandbacks(connect, honest(q), quiet);
+  assertEquals([o.formed, o.awaiting], [0, 1]);
+  const settles = db.calls.filter((c) => c.sql.includes("idea_handback_settle"));
+  assertEquals(settles.length, 1);
+  assert(settles[0].sql.includes("'awaiting_owner'") && String(settles[0].args[2]).includes("private_claim"), "settled awaiting_owner, refusal private_claim");
+  assert(!db.calls.some((c) => c.sql === "COMMIT"), "nothing of the refused job is committed");
+});

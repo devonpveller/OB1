@@ -96,21 +96,52 @@ async function producedOf(db: Db, sessionIds: string[], dossierId: string | null
     [sessionIds, dossierId],
   );
   const claims = await db.query<{ id: string; text: string; confidence: number }>(
-    `SELECT DISTINCT c.id, c.text, c.confidence
-       FROM public.claims c
-      WHERE c.synthesis_id IN (SELECT ss.source_id FROM public.session_sources ss
-                                JOIN public.sources s ON s.id = ss.source_id AND s.content_type = 'research_synthesis'
-                               WHERE ss.session_id = ANY($1::uuid[]))
-         OR c.synthesis_id = $2::uuid
-         -- rw-report-isolation: the claims drawn from the idea's PRIVATE reports (the owner's link back; the claims
-         -- are shared, their synthesis_id NULL)
-         OR c.id IN (SELECT pc.claim_id FROM public.research_private_report_claims pc
-                       JOIN public.research_private_reports p ON p.id = pc.report_id
-                      WHERE p.idea_id = $3::uuid AND p.owner_sub = $4)
-      ORDER BY c.text LIMIT 200`,
+    `SELECT x.id, x.text, x.confidence FROM (
+       SELECT c.id, c.text, c.confidence
+         FROM public.claims c
+        WHERE c.synthesis_id IN (SELECT ss.source_id FROM public.session_sources ss
+                                  JOIN public.sources s ON s.id = ss.source_id AND s.content_type = 'research_synthesis'
+                                 WHERE ss.session_id = ANY($1::uuid[]))
+           OR c.synthesis_id = $2::uuid
+           -- rw-report-isolation: a claim of the idea's PRIVATE report that a shared synthesis also filed (it stays
+           -- shared, slot 570's "mixed" claim), through the owner's link back
+           OR c.id IN (SELECT pc.claim_id FROM public.research_private_report_claims pc
+                         JOIN public.research_private_reports p ON p.id = pc.report_id
+                        WHERE p.idea_id = $3::uuid AND p.owner_sub = $4)
+     ) x ORDER BY x.text LIMIT 200`,
     [sessionIds, dossierId, ideaId, owner],
   );
-  return { sources, claims: claims.map((c) => ({ ...c, confidence: Number(c.confidence) })) };
+  // rw-private-report-claims (slot 570): the claims drawn from the idea's private reports live in the owner's store;
+  // the owner-checked read gives the owner theirs and nobody else anything. Read on its own (round 2, tester F2): when
+  // the read is absent (slot 570 not applied, or reverted) or refused, the dossier still answers, without them.
+  const own = await ownPrivateReportClaims(db, ideaId, owner);
+  const seen = new Set(claims.map((c) => c.id));
+  const extra = own.filter((c) => !seen.has(c.id));
+  const all = extra.length
+    ? [...claims, ...extra].sort((a, b) => (a.text < b.text ? -1 : a.text > b.text ? 1 : 0)).slice(0, 200)
+    : claims;
+  return { sources, claims: all.map((c) => ({ ...c, confidence: Number(c.confidence) })) };
+}
+
+/** The owner's private-report claims of an idea (slot 570's owner-checked read), or none - fail closed - when the read
+ *  is absent (42883: slot 570 not applied, or reverted) or refused (42501: this role may not run it). Any other error
+ *  is the dossier's. In a savepoint, so a refusal never aborts the caller's transaction. */
+export async function ownPrivateReportClaims(db: Db, ideaId: string, owner: string): Promise<Array<{ id: string; text: string; confidence: number }>> {
+  return await db.tx(async (t) => {
+    await t.query("SAVEPOINT prc_own");
+    try {
+      const rows = await t.query<{ id: string; text: string; confidence: number }>(
+        `SELECT o.id, o.text, o.confidence FROM public.private_report_claims_of_idea($1::uuid, $2) o`, [ideaId, owner]);
+      await t.query("RELEASE SAVEPOINT prc_own");
+      return rows;
+    } catch (e) {
+      const code = (e as { fields?: { code?: string } }).fields?.code;
+      if (code !== "42883" && code !== "42501") throw e;
+      await t.query("ROLLBACK TO SAVEPOINT prc_own");
+      console.warn(`[ideas] the owner's private-report claims are not readable (${code}); the dossier is served without them`);
+      return [];
+    }
+  });
 }
 
 // rw-p8a4-ideas (ingestion model 2026-09-25, agreed 19:59): every source the user added, with its fold status, its
