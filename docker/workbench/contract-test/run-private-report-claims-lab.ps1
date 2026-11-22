@@ -22,7 +22,8 @@
 # Exit 0 = every check passed. Counts, route names and pass/fail only - never a claim's text. Never the live stack.
 # Round 3 (slots 450 + 480 landed; the base of this layer is OB1 58bbc30): the REST door is the one the stack runs -
 # rest-door-lab.ps1's Start-LabRestDoor (lab secret, the real mint script, never the live .env). The workbenches reach the
-# database directly (DB_USER) and send NO REST token, as compose has them; the only HTTP reach is [guard] PostgREST's rpc,
+# database directly and send NO REST token, as compose has them (DB_USER=ob_workbench, slot 480's login - attempt 5: the lab
+# ran them as ob_app_memory before); the only HTTP reach is [guard] PostgREST's rpc,
 # now called through the door with no token (401) and with EACH minted caller's own token (every door role: refused, no
 # claim text). 480 is in the chain, so ob_workbench is the chain's own role (ob-workbench-role.ps1, as the sibling labs) and
 # [9] re-runs the tree's init-owner-private-view.sql, not a branch of another item. No superuser / service_role shortcut.
@@ -221,6 +222,7 @@ try {
   . (Join-Path $PSScriptRoot 'ob-workbench-role.ps1'); $wbDb = Use-ObWorkbenchRole $appPw
   if ($wbDb.role -eq 'ob_workbench') { $wbPw = $wbDb.pw }
   Check ($wbDb.role -eq 'ob_workbench') 'ob_workbench is the chain''s slot 480 role (a member of ob_app_memory)'
+  if ($wbDb.role -ne 'ob_workbench') { throw 'ob_workbench' } # the workbenches log in as it below, as compose runs them
   # round 2 (tester F2): the role is created AFTER the chain's 570 (the house labs and a fresh volume), and 570 is NOT
   # re-run: its grant must reach the role anyway (the workbench's owner read, as the real login)
   $o = Dk exec -e "PGPASSWORD=$appPw" $db psql -h 127.0.0.1 -U ob_app_memory -d openbrain -X -A -t -q -c "SELECT count(*) FROM public.private_report_claims_of_idea(gen_random_uuid(), 'prc-nobody')"
@@ -236,7 +238,7 @@ try {
   Check ($restDoor.Door -eq 'auth' -and $restDoor.Tokens.Count -ge 1) "the REST door is the authenticated one (slot 450); lab tokens minted for $($restDoor.Tokens.Count) caller(s): $((@($restDoor.Tokens.Keys) | Sort-Object) -join ',')"
   if ($restDoor.Door -ne 'auth') { throw 'rest door' }
   $restTokens = (@($restDoor.Tokens.Keys | Sort-Object | ForEach-Object { "$_=$($restDoor.Tokens[$_])" })) -join ','
-  $common = @('-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$key", '-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw",
+  $common = @('-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$key", '-e', "DB_HOST=$db", '-e', "DB_USER=$($wbDb.role)", '-e', "DB_PASSWORD=$($wbDb.pw)",
       '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid',
       '-e', 'WIKI_GIT_DIR=/wiki', '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://unreachable.invalid',
       '-e', "WORKSPACE_SERVICE_KEYS=prc-test=$svcKey", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")

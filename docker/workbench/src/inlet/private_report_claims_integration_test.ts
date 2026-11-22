@@ -609,25 +609,45 @@ t([...BOTH, "p480"], "[db] slot 480's ob_workbench login reads only the verified
   } finally { c.release(); }
 });
 // the REST door over HTTP (slot 450): no token is refused at the door (401); EVERY door caller's own token (wiki, viewer, entity,
-// digest, ...) is refused the slot's functions - no row, no claim text. Fails closed: no minted token = the lab is wrong.
+// digest, ...) is refused the slot's functions BY PRIVILEGE (exactly 403 - a mis-addressed route or an unresolved function is a
+// 404 and fails the case) - no row, no claim text. Self-proving controls on the same /rest/v1 prefix: an unknown rpc answers
+// 404 for every token (the request reached PostgREST's function lookup), and a table the wiki / viewer token is granted
+// answers 200 (the prefix is right). In the red phase the revert dropped the functions: they must be 404 then (absent), not 403.
+// Fails closed: no minted token, no granted-table control token, or PRC_PGRST unset = the lab is wrong.
 t(BOTH, "[guard] the REST door's rpc never reads or files a private-report claim, with no token or any caller's token", async () => {
   if (!PGRST) throw new Error("PRC_PGRST is not set");
   if (REST_TOKENS.length < 1) throw new Error("PRC_REST_TOKENS is not set (the lab mints one per caller)");
   const p = await plant();
-  const call = async (fn: string, body: unknown, token: string) => {
+  const present = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM unnest(ARRAY[
+      to_regprocedure('public.private_report_claims_of_idea(uuid,text)'),
+      to_regprocedure('public.private_report_claim_file(text,uuid,text,uuid,text,text,integer,vector,jsonb)')]) f WHERE f IS NOT NULL`))[0].n;
+  assertEquals(present, PHASE === "red" ? 0 : 2, `the slot's functions in the catalog (${PHASE})`);
+  const refused = PHASE === "red" ? 404 : 403; // red: absent; after 570: present and refused by privilege
+  const req = async (method: string, path: string, body: unknown, token: string) => {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (token) headers.authorization = `Bearer ${token}`;
-    const r = await fetch(`${PGRST}/rpc/${fn}`, { method: "POST", headers, body: JSON.stringify(body) });
+    const r = await fetch(`${PGRST}/${path}`, { method, headers, body: body === null ? undefined : JSON.stringify(body) });
     return { status: r.status, text: await r.text() };
   };
+  const call = (fn: string, body: unknown, token: string) => req("POST", `rpc/${fn}`, body, token);
   const callers: [string, string][] = [["(no token)", ""], ...REST_TOKENS];
   for (const [who, token] of callers) {
+    const want = token ? refused : 401;
     const read = await call("private_report_claims_of_idea", { p_idea_id: p.bIdea.id, p_sub: B }, token);
-    assert(read.status >= 400, `${who}: the owner read is refused over rpc (${read.status})`);
-    if (!token) assertEquals(read.status, 401, "no token: refused at the door");
+    assertEquals(read.status, want, `${who}: the owner read over rpc (${read.text.slice(0, 120)})`);
     for (const s of secretsOf(p)) assert(!read.text.includes(s), `${who}: no claim text or id in the refusal`);
     const file = await call("private_report_claim_file", { p_research_key: `rk-prc-b-${p.R}`, p_job_id: p.bIdea.job, p_text: "a claim text over rpc" }, token);
-    assert(file.status >= 400, `${who}: filing is refused over rpc (${file.status})`);
+    assertEquals(file.status, want, `${who}: filing over rpc (${file.text.slice(0, 120)})`);
     for (const s of secretsOf(p)) assert(!file.text.includes(s), `${who}: no claim text or id in the filing refusal`);
+    // control: an unknown function on the same prefix - the door lets the token through and PostgREST answers "not found"
+    const none = await call("no_such_function_prcprobe", {}, token);
+    assertEquals(none.status, token ? 404 : 401, `${who}: an unknown rpc on the same prefix`);
+  }
+  // control: a granted read on the same prefix succeeds (slot 450's door map: wiki and viewer read wiki_pages)
+  const granted = REST_TOKENS.filter(([who]) => /^(WIKI|VIEWER)$/i.test(who));
+  if (granted.length < 1) throw new Error("no wiki / viewer token minted: the granted-route control cannot run");
+  for (const [who, token] of granted) {
+    const ok = await req("GET", "wiki_pages?select=slug&limit=1", null, token);
+    assertEquals(ok.status, 200, `${who}: a granted table on the same /rest/v1 prefix answers`);
   }
 });

@@ -17,6 +17,8 @@ const DB_HOST = Deno.env.get("RI_E2E_DB_HOST") ?? "";
 const DB_PASSWORD = Deno.env.get("RI_E2E_DB_PASSWORD") ?? "test";
 const K8S_DIR = Deno.env.get("RI_E2E_K8S_DIR") ?? "/app";
 const CURATOR_DIR = Deno.env.get("RI_E2E_CURATOR_DIR") ?? "/curator";
+// the research service directory: RI6 imports its viewer.ts, ideaWithJob its idea drain (boundary-ideas.ts)
+const RESEARCH_DIR = Deno.env.get("RI_E2E_RESEARCH_DIR") ?? "/research";
 const KEY = "ri-e2e-key";
 const ignore = !DB_HOST;
 const opts = { ignore, sanitizeOps: false, sanitizeResources: false };
@@ -97,13 +99,42 @@ async function lab(runTag: string) {
 }
 
 const EMB = `[${Array(1024).fill(0.01).join(",")}]`;
-/** an idea captured the way capture_idea captures it (idea_capture); its research job is queued by the revision trigger */
+/** what the research service's boundary may use in this lab: no model (the proposer is unreachable), no public page,
+ *  no identity tokens, no resolver - the lab's shape, where an idea that names no public link cannot be phrased */
+const NO_MODEL = {
+  propose: () => Promise.reject(new Error("no model in this lab")),
+  fetchPublic: () => Promise.resolve(null),
+  identity: () => Promise.resolve([] as string[]),
+  resolve: () => Promise.resolve([] as string[]),
+};
+/** an idea captured the way capture_idea captures it (idea_capture), and its research job made the way production makes
+ *  it since slot 580 (rw-boundary-ideas, PD0b): the capture queues ONE pending private hand-back and no job; the research
+ *  service's own drain (its drainIdeaHandbacks, imported from the research service, run here with NO_MODEL) cannot form a
+ *  de-personalised question, so it settles the hand-back awaiting_owner; the owner then runs it privately
+ *  (idea_handback_run_private, the owner's decision) - the idea's tied job (branch_kind 'idea', refinery_id = the idea),
+ *  the job whose report slot 390 makes private and whose claims slot 570 files private. Same question for the same title
+ *  (RI5's alike ideas). */
 async function ideaWithJob(owner: string, title: string) {
   const idea = (await sql<{ id: string }>(`SELECT public.idea_capture($1, 'service:openbrain-mcp', $2, $3, NULL, $4)::text AS id`,
     [owner, title, `${title} statement`, EMB]))[0].id;
-  const job = (await sql<{ id: string }>(
-    `SELECT id::text FROM public.research_jobs WHERE refinery_id = $1 AND branch_kind = 'idea' ORDER BY created_at DESC LIMIT 1`, [idea]))[0]?.id;
-  assert(job, `the capture queued the idea's research job (${idea})`);
+  const review = () => sql<{ handback_id: string; state: string }>(`SELECT handback_id::text, state FROM public.idea_handback_review($1, $2::uuid)`, [owner, idea]);
+  const first = await review();
+  eq(first.length, 1, `the capture queued one hand-back (slot 580) (${idea})`);
+  eq((await sql(`SELECT 1 FROM public.research_jobs WHERE refinery_id = $1`, [idea])).length, 0, `no job before the drain (${idea})`);
+  const d = await import(`file://${RESEARCH_DIR}/boundary-ideas.ts`) as {
+    drainIdeaHandbacks: (connect: () => Promise<unknown>, deps: typeof NO_MODEL, o?: { log?: (l: string) => void }) => Promise<Record<string, number>>;
+  };
+  let hb = first[0];
+  for (let i = 0; i < 5 && hb.state === "pending"; i++) {
+    await d.drainIdeaHandbacks(() => pool!.connect(), NO_MODEL, { log: () => {} });
+    hb = (await review())[0];
+  }
+  eq(hb.state, "awaiting_owner", `the research service's drain settled the hand-back for its owner (${idea})`);
+  const job = (await sql<{ j: string | null }>(`SELECT public.idea_handback_run_private($1, $1, $2::uuid, $3)::text AS j`,
+    [owner, hb.handback_id, `Which evidence decides ${title}?`]))[0]?.j;
+  assert(job, `the owner's private run made the idea's research job (${idea})`);
+  const shape = await sql<{ r: string | null; k: string | null }>(`SELECT refinery_id::text AS r, branch_kind AS k FROM public.research_jobs WHERE id = $1`, [job]);
+  eq([shape[0]?.r, shape[0]?.k], [idea, "idea"], `the job is the idea's own branch job (${idea})`);
   return { idea, job };
 }
 const plainJob = async (query = "report isolation e2e", extra: Record<string, unknown> = {}) =>
@@ -330,7 +361,6 @@ ${L.log()}`);
   } finally { await L.stop(); }
 } });
 
-const RESEARCH_DIR = Deno.env.get("RI_E2E_RESEARCH_DIR") ?? "/research";
 Deno.test({ name: "RI6 (round 2): the research service's job view (GET /research/jobs/:id) withholds an idea job's report from anyone but the idea's owner - the default subject included", ...opts, fn: async () => {
   const v = await import(`file://${RESEARCH_DIR}/viewer.ts`) as {
     FOREIGN_PROMPTS_SQL: string; sharedJobView: (job: Record<string, unknown>, o?: { privateReport?: boolean }) => Record<string, unknown>;
