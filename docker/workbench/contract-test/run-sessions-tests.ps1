@@ -371,7 +371,11 @@ try {
     $null = F 'revert-research-sessions.sql'
     $tmIdea = ((Q "insert into ideas (title, summary, status, owner_sub, thread_root) values ('TM3 idea', 'pre 320', 'new', 'tm3-idea-owner', 'mm-tm3') returning id") -split "`n")[0].Trim()
     $null = Q "insert into idea_revisions (idea_id, revision, summary) values ('$tmIdea', 1, 'pre 320')"
-    $tmJob = Q "select id from research_jobs where refinery_id = '$tmIdea' and branch_kind = 'idea' order by created_at desc limit 1"
+    # slot 580 (PD0b): an idea revision no longer queues a research job, so the legacy job is inserted directly,
+    # shaped as the pre-580 engage function wrote it (origin mattermost, caller idea-engagement, branch idea, the idea as refinery).
+    $tmJob = ((Q "insert into research_jobs (status, origin, caller, query, anchor, branch_kind, refinery_id, inlet_ref, options) values ('queued', 'mattermost', 'idea-engagement', 'TM3 idea pre 320', 'TM3 idea pre 320', 'idea', '$tmIdea', jsonb_build_object('kind', 'idea', 'id', '$tmIdea'), jsonb_build_object('idea_revision', 1, 'lane', 'research-branch')) returning id") -split "`n")[0].Trim()
+    $null = Q "update ideas set last_job_id = '$tmJob' where id = '$tmIdea'"
+    Check ($tmJob -match '^[0-9a-f-]{36}$') "T-M3 fixture: the legacy idea job exists ($tmJob)"
     $null = F 'init-identity.sql' '-c workspace.default_sub=tm3-default-sub'
     $a290 = Q "select owner_sub || ' ' || actor_sub from research_prompts where job_id = '$tmJob'"
     $null = F 'init-research-sessions.sql'; $ra = $script:rc
