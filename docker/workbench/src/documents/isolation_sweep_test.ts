@@ -474,6 +474,8 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const reads = routes.filter((x) => ["GET", "HEAD"].includes(x.method));
 
   // 1. TEMPLATED: B's ids and paths in every parameter, query and body field (the request gate)
+  const LIFECYCLE_IRREVERSIBLE = ["/workbench/documents/delete-forever", "/workbench/documents/empty-trash"];
+  let lifecycleTrashCalls = 0;
   const ids = [bPath, bTrashed, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob].filter(Boolean);
   const query = (v: string) => new URLSearchParams({
     path: bPath, ref: bPath, from: bPath, id: v, idea_id: bRefinery, refinery_id: bRefinery, job_id: bJob,
@@ -496,7 +498,19 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
         judge(`${r.method} ${r.path} templated (${doorName(door)})`, url + JSON.stringify(reqBody), await call(door, r.method, url, reqBody));
       }
     }
+    // rwr-docs-lifecycle-api round 2 (review R3): the irreversible routes are also called with B's TRASHED
+    // document as the body's path (confirm: true), through both doors - so "B's trashed document survives"
+    // below is a real check of these routes, not of a body that only ever named B's live document
+    if (r.method === "POST" && LIFECYCLE_IRREVERSIBLE.includes(r.path)) {
+      const trashBody = { ...body(bTrashed), path: bTrashed, ref: bTrashed, from: bTrashed, to: bTrashed, holder_ref: bTrashed, holder: { kind: "user_document", ref: bTrashed } };
+      for (const door of [BASE, VIEWER]) {
+        calls++;
+        lifecycleTrashCalls++;
+        judge(`${r.method} ${r.path} B's trashed document in the body (${doorName(door)})`, r.path + JSON.stringify(trashBody), await call(door, r.method, r.path, trashBody));
+      }
+    }
   }
+  assertEquals(lifecycleTrashCalls, 2 * LIFECYCLE_IRREVERSIBLE.length, "both irreversible routes were called with B's trashed document in the body, through both doors");
 
   // 2. BARE: every read route with no parameter, nothing of B's in the request; every id the answers
   // carry is HARVESTED - the ids user A can really discover (job ids from A's own lists, ids in shared lists)
@@ -626,8 +640,6 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   }
   // B's document is B's: unchanged by A's calls, and B still reads it
   assertEquals(await Deno.readTextFile(`${VAULT}/${bPath}`), before, "user A's calls left B's document unchanged");
-  assert(await Deno.stat(`${VAULT}/${bTrashed}`).then(() => true, () => false), "user A's confirmed delete-forever / empty-trash calls left B's trashed document in B's trash");
-  assertEquals((await wb("GET", "/workbench/documents/trail", undefined, B)).json.total, 0, "nothing of B's was removed: B's trail is empty");
   assert(await Deno.stat(`${VAULT}/${bTrashed}`).then(() => true, () => false), "user A's confirmed delete-forever / empty-trash calls left B's trashed document in B's trash");
   assertEquals((await wb("GET", "/workbench/documents/trail", undefined, B)).json.total, 0, "nothing of B's was removed: B's trail is empty");
   assertEquals((await wb("GET", `/workbench/documents/file?path=${encodeURIComponent(bPath)}`, undefined, B)).status, 200);

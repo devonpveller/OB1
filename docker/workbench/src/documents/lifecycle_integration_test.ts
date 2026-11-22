@@ -260,3 +260,40 @@ t("L9: the irreversible routes under concurrency and bad input: parallel delete-
   }
   assert(await exists(t1), "nothing removed by a non-JSON body");
 });
+
+t("L10 (round 2, review R1): the JSON-only rule is this item's three routes only - every other documents POST answers as before", async () => {
+  // a raw call: no content-type at all when there is no body, or the type given
+  const raw = async (path: string, ct: string | null, body: string | undefined, who: Record<string, string> = A) => {
+    const headers: Record<string, string> = { "x-brain-key": KEY, ...who };
+    if (ct) headers["content-type"] = ct;
+    const r = await fetch(BASE + path, { method: "POST", headers, body });
+    const text = await r.text();
+    let json: Record<string, any> = {};
+    try {
+      json = JSON.parse(text);
+    } catch { /* not json */ }
+    if (r.status === 415) throw new Error(`POST ${path} got 415 (${text}): the JSON-only rule reached a route outside this item`);
+    return { status: r.status, json, text };
+  };
+  // body-less by design: reconcile ("run when the workspace connects")
+  const rec = await raw(`${D}/reconcile`, null, undefined);
+  assertEquals(rec.status, 200, rec.text);
+  // re-pin reads its input from the query: a body-less POST reaches the handler (no such record: its own 404)
+  const own = await newDoc(A, `lc-r1-${run}`, "R1-BODY");
+  const rp = await raw(`${D}/references/00000000-0000-0000-0000-000000000000/repin?path=${encodeURIComponent(own)}`, null, undefined);
+  assertEquals([rp.status, rp.json.error], [404, "no reference record with this id"], rp.text);
+  // a text/plain JSON body on create, trash and folders works as it did before this item
+  const cr = await raw(D, "text/plain", JSON.stringify({ title: `lc-r1-plain-${run}`, body: "R1-PLAIN" }));
+  assert(cr.status === 201 || cr.status === 207, cr.text);
+  const fo = await raw(`${D}/folders`, "text/plain", JSON.stringify({ path: `lc-r1-folder-${run}` }));
+  assert(fo.status === 201 || fo.status === 200, fo.text);
+  // ...and the handlers' own owner checks still refuse another user, whatever the body type
+  const bTrash = await raw(`${D}/trash`, "text/plain", JSON.stringify({ path: own }), B);
+  assertEquals([bTrash.status, bTrash.json.error], [404, "no such document"], bTrash.text);
+  const bRepin = await raw(`${D}/references/00000000-0000-0000-0000-000000000000/repin?path=${encodeURIComponent(own)}`, null, undefined, B);
+  assertEquals(bRepin.status, 404, bRepin.text);
+  assert(await exists(own), "B's calls left A's document where it was");
+  const tr = await raw(`${D}/trash`, "text/plain", JSON.stringify({ path: own }));
+  assertEquals(tr.status, 200, tr.text);
+  assert(!(await exists(own)) && (await exists(tr.json.trashed)), "A's own text/plain trash moved it to the trash");
+});

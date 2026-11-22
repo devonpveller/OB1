@@ -25,7 +25,7 @@ export interface TrailInput {
   trashed_at: Date | null;
 }
 
-// Writes the line and returns its id (the caller removes the line again if the removal then fails).
+// Writes the line and returns its id. It is written only after the file is really gone (removeTrashed).
 export async function writeTrail(db: Db, t: TrailInput): Promise<string> {
   const r = await db.query<{ id: string }>(
     `INSERT INTO public.user_document_trail (owner_sub, actor_sub, kind, document_id, path, trashed_at)
@@ -33,10 +33,6 @@ export async function writeTrail(db: Db, t: TrailInput): Promise<string> {
     [t.owner_sub, t.actor_sub, t.kind, t.document_id, t.path, t.trashed_at],
   );
   return r[0].id;
-}
-
-export async function dropTrail(db: Db, id: string): Promise<void> {
-  await db.query(`DELETE FROM public.user_document_trail WHERE id = $1::bigint`, [id]);
 }
 
 // The caller's own lines, newest first. The owner filter is the identity seam's subject, in the query.

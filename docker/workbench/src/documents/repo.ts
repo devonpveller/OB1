@@ -26,7 +26,7 @@ import { safeJoin } from "../util/paths.ts";
 import { parseDocument, setFrontmatterField } from "./grammar.ts";
 import { expired, later, TRASH_KEEP_DAYS } from "./trash_age.ts";
 import { VAULT_GIT, withPathLock } from "./path_lock.ts";
-import { dropTrail, NIGHTLY_ACTOR, type TrailKind, writeTrail } from "./trail.ts";
+import { NIGHTLY_ACTOR, type TrailKind, writeTrail } from "./trail.ts";
 import { deleteListing, listingRow, type ListingRow, moveListing, syncListing } from "./listing.ts";
 import {
   ARCHIVE, DOCUMENTS_ROOT, docRel, folderRel, inSubtree, isArchived, isTrashed, liveRel, rootOf, slugify, TRASH,
@@ -255,7 +255,7 @@ export async function trashedAtOf(row: ListingRow | null, rel: string): Promise<
 
 // Whose an unlisted document in documents/<key>/... is: the user whose directory key it is (the subjects
 // the workbench knows: signed-in users, listing owners, the default identity); otherwise nobody.
-async function ownerOfDirectory(db: Db, rel: string): Promise<string> {
+export async function ownerOfDirectory(db: Db, rel: string): Promise<string> {
   const key = rel.split("/")[1] ?? "";
   const subs = new Set<string>([identityConfig().defaultSub]);
   for (const q of [`SELECT sub FROM public.workspace_users`, `SELECT DISTINCT owner_sub AS sub FROM public.user_document_listings`]) {

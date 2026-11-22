@@ -262,6 +262,36 @@ Deno.test("F4: a nightly line for an unlisted document in a user's own directory
   assertEquals(trailRows[trailRows.length - 1].owner_sub, "system:unowned");
 });
 
+Deno.test("R4: an unlisted trashed file is dated by its trash commit's COMMITTER date: an old author date with a recent committer date is kept", async () => {
+  const now = new Date();
+  // no listing row, so the commit date alone decides; the author date says 40 days, the committer date 1 day
+  const rel = await plant(A, ".trash", "R4-BODY", "R4Unlisted", {
+    when: new Date(now.getTime() - 1 * DAY), authorWhen: new Date(now.getTime() - 40 * DAY), listed: false,
+  });
+  assert(!listings.has(rel));
+  const r = await docs.emptyTrash(deps, "nightly-cleanup", { now });
+  assert(!r.removed.includes(rel) && (await exists(rel)), "an old author date cannot age an unlisted document");
+  // and the committer date really is what counts: 31 days on from it, the same file goes
+  const later = await docs.emptyTrash(deps, "nightly-cleanup", { now: new Date(now.getTime() + 31 * DAY) });
+  assert(later.removed.includes(rel) && !(await exists(rel)));
+});
+
+Deno.test("R2: an admin delete forever of an unlisted trashed file in another user's folder names that user in the audit row and the trail line", async () => {
+  const rel = await plant(B, ".trash", "R2-BODY", "R2Unlisted", { listed: false });
+  assert(!listings.has(rel));
+  const auditBefore = auditRows.length;
+  const out = await life.deleteForever(deps, rel, ADMIN);
+  assertEquals(out.removed, true);
+  assert(!(await exists(rel)));
+  assertEquals(auditRows.length, auditBefore + 1);
+  assertEquals([auditRows[auditBefore].actor_sub, auditRows[auditBefore].subject_sub], ["root", "bob"], "the audit names whose data it was");
+  const line = trailRows.find((r) => r.path === rel)!;
+  assertEquals([line.owner_sub, line.actor_sub, line.kind], ["bob", "root", "delete_forever"]);
+  assert(!trailRows.some((r) => r.owner_sub === "system:unowned" && r.path === rel));
+  // the owner sees it in their own trail
+  assert((await trail.readTrail(db, B)).lines.some((l) => l.path === rel), "B's GET /trail shows the admin's removal");
+});
+
 Deno.test("each hard removal writes exactly one trail line and the line holds no body text or title (any letter case)", async () => {
   trailRows.length = 0;
   const marker = "BODYMARK-" + crypto.randomUUID();

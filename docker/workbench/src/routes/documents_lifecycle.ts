@@ -6,7 +6,7 @@
 // (400, nothing touched) without it, before the document is even looked up. WHO the user is comes from
 // the identity seam alone.
 import { Hono } from "hono";
-import type { Context } from "hono";
+import type { Context, Next } from "hono";
 import { type Identity, identityOf } from "../middleware/identity.ts";
 import { DocError, type DocDeps } from "../documents/repo.ts";
 import { deleteForever, emptyOwnTrash, unarchiveDocument } from "../documents/lifecycle.ts";
@@ -30,6 +30,18 @@ function fail(c: Context, e: unknown) {
   return c.json({ error: "internal" }, 500);
 }
 
+// This item's three POST routes take a JSON body and nothing else: a text/plain or form body (which the
+// owner scope does not search for paths) is refused before the handler (round 2, F6). It is attached to
+// those three routes only, never as a router-wide middleware: this router shares the /workbench/documents
+// prefix with documentsRouter, and a wildcard here would reach every documents POST (round 2 review R1).
+export async function jsonOnly(c: Context, next: Next) {
+  const media = (c.req.header("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  if (media !== "application/json" && !media.endsWith("+json")) {
+    return c.json({ error: "this route takes application/json" }, 415);
+  }
+  await next();
+}
+
 const wrap = (fn: (c: Context, who: Identity) => Promise<Response>) => async (c: Context) => {
   try {
     return await fn(c, await identityOf(c));
@@ -42,20 +54,8 @@ export function documentsLifecycleRouter(rdeps: RefineryDeps) {
   const deps: DocDeps = { db: rdeps.db, reg: rdeps.reg };
   const r = new Hono();
 
-  // these routes take a JSON body and nothing else: a text/plain or form body (which the owner scope does
-  // not search for paths) is refused before any handler (rwr-docs-lifecycle-api round 2, F6)
-  r.use("*", async (c, next) => {
-    if (c.req.method === "POST") {
-      const media = (c.req.header("content-type") ?? "").split(";")[0].trim().toLowerCase();
-      if (media !== "application/json" && !media.endsWith("+json")) {
-        return c.json({ error: "this route takes application/json" }, 415);
-      }
-    }
-    await next();
-  });
-
   // archive's way back: the document returns to its folder; a refinery archived with it is reopened
-  r.post("/unarchive", wrap(async (c, who) => {
+  r.post("/unarchive", jsonOnly, wrap(async (c, who) => {
     const path = str((await body(c)).path);
     const out = await unarchiveDocument(deps, path, who);
     const refinery = await reopenRefinery(rdeps, out.unarchived, who).catch((e) => {
@@ -65,13 +65,13 @@ export function documentsLifecycleRouter(rdeps: RefineryDeps) {
     return c.json({ ...out, refinery });
   }));
 
-  r.post("/delete-forever", wrap(async (c, who) => {
+  r.post("/delete-forever", jsonOnly, wrap(async (c, who) => {
     const b = await body(c);
     if (!confirmed(b)) return c.json({ error: "delete forever cannot be undone: send confirm: true" }, 400);
     return c.json(await deleteForever(deps, str(b.path), who));
   }));
 
-  r.post("/empty-trash", wrap(async (c, who) => {
+  r.post("/empty-trash", jsonOnly, wrap(async (c, who) => {
     if (!confirmed(await body(c))) return c.json({ error: "empty trash cannot be undone: send confirm: true" }, 400);
     return c.json(await emptyOwnTrash(deps, who));
   }));

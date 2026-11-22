@@ -3,7 +3,7 @@
 // document that does not exist (404, "no such document"); an admin (a real sign-in, not an
 // impersonation) may delete forever another user's TRASHED document and nothing else here.
 import type { Identity } from "../middleware/identity.ts";
-import { DocError, documentFiles, moveTo, owned, ownedPath, removeTrashed, type DocDeps } from "./repo.ts";
+import { DocError, documentFiles, moveTo, owned, ownedPath, ownerOfDirectory, removeTrashed, type DocDeps } from "./repo.ts";
 import { listingRow } from "./listing.ts";
 import { DOCUMENTS_ROOT, docRel, isArchived, isTrashed, liveRel, rootOf } from "./paths.ts";
 import { vaultExists } from "../util/vault.ts";
@@ -29,7 +29,9 @@ export async function deleteForever(deps: DocDeps, path: string, who: Identity) 
     // only a real admin sign-in (not an impersonation, which acts AS the user) reaches another user's trash
     if (!who.admin || who.impersonating) throw new DocError("no such document", 404);
     if (!(await vaultExists(rel))) throw new DocError("no such document", 404);
-    owner = (await listingRow(deps.db, rel))?.owner_sub ?? "system:unowned";
+    // whose it is: the listing row's owner, else the user whose directory key it sits under (the same
+    // resolution the nightly makes) - the audit subject and the owner's trail line both name that user (R2)
+    owner = (await listingRow(deps.db, rel))?.owner_sub ?? (await ownerOfDirectory(deps.db, rel));
     if (!isTrashed(rel)) throw new DocError("only a document in the trash can be deleted forever; trash it first", 400);
     // recorded BEFORE it runs, as every admin act on someone else's data is (admin_audit): a request that
     // cannot be recorded does not run
