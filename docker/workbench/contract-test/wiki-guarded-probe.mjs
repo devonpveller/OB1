@@ -84,19 +84,29 @@ if (MODE === "writer") {
     const h1 = await rowsHave([sl("w-refused"), sl("w-clean")]);
     out.flush = { exit, cleanRow: h1.has(sl("w-clean")), refusedRow: h1.has(sl("w-refused")), refusedFile: fs.existsSync(fl("w-refused")),
       unsynced: wp.unsyncedWikiPages().length, recorded: rec().includes(hash(sl("w-refused"))) };
-    // b. the next cycle's retry: a refused note (380 idea) and a clean one, recorded as left by an outage
-    fs.writeFileSync(fl("r-refused"), page("R refused", bodyOf("idea")));
+    // b. the next cycle's retry: a refused notebook HUB (380 idea; regenerable compile output), a clean note, and a refused
+    //    AI note (round 2, review B2: not compile output - its file must stay), recorded as left by an outage
+    const hubDir = path.join(vault, "content", "notebooks", `lab-r-${tag}`);
+    fs.mkdirSync(hubDir, { recursive: true });
+    const hubSl = `content/notebooks/lab-r-${tag}/lab-r-${tag}`;
+    const hubFl = path.join(hubDir, `lab-r-${tag}.md`);
+    fs.writeFileSync(hubFl, page("R refused hub", bodyOf("idea")));
     fs.writeFileSync(fl("r-clean"), page("R clean", "Another note with shared text only."));
+    fs.writeFileSync(fl("r-ai-refused"), page("R AI refused", bodyOf("idea")));
+    const aiHash = crypto.createHash("sha256").update(fs.readFileSync(fl("r-ai-refused"))).digest("hex");
     const at = new Date().toISOString();
     const uf = path.join(vault, "content", ".unsynced-rows.json");
-    fs.writeFileSync(uf, JSON.stringify({ rows: { [sl("r-refused")]: { error: "The operation was aborted due to timeout", tag: "lab", at },
-      [sl("r-clean")]: { error: "The operation was aborted due to timeout", tag: "lab", at } } }));
+    fs.writeFileSync(uf, JSON.stringify({ rows: { [hubSl]: { error: "The operation was aborted due to timeout", tag: "lab", at },
+      [sl("r-clean")]: { error: "The operation was aborted due to timeout", tag: "lab", at },
+      [sl("r-ai-refused")]: { error: "The operation was aborted due to timeout", tag: "lab", at } } }));
     const r1 = await wp.retryUnsyncedRows({ outDir: path.join(vault, "content"), vaultDir: vault, log: () => {} });
     const r2 = await wp.retryUnsyncedRows({ outDir: path.join(vault, "content"), vaultDir: vault, log: () => {} });
     const left = Object.keys(JSON.parse(fs.readFileSync(uf, "utf8")).rows || {});
     const h2 = await rowsHave([sl("r-clean")]);
     out.retry = { firstLanded: r1.landed, secondRetried: r2.retried, recordLeft: left.length, cleanRow: h2.has(sl("r-clean")),
-      refusedFile: fs.existsSync(fl("r-refused")), recorded: rec().includes(hash(sl("r-refused"))) };
+      refusedFile: fs.existsSync(hubFl), recorded: rec().includes(hash(hubSl)),
+      aiFileKept: fs.existsSync(fl("r-ai-refused")) && crypto.createHash("sha256").update(fs.readFileSync(fl("r-ai-refused"))).digest("hex") === aiHash,
+      aiRecorded: rec().includes(hash(sl("r-ai-refused"))) };
     // c. the viewer-style repair in a fresh process state: a refused note (440 text) with no row, and a clean one
     wp._resetWikiPagesForTests();
     fs.writeFileSync(fl("v-refused"), page("V refused", bodyOf("text")));
@@ -112,9 +122,9 @@ if (MODE === "writer") {
     out.flush390 = { exit: await wp.finishWikiPages(`guarded-x-${tag}`, { outDir: path.join(vault, "content") }), refusedFile: fs.existsSync(fl("x-refused")), unsynced: wp.unsyncedWikiPages().length };
   } finally { console.log = l0; console.error = e0; }
   const rtext = rec();
-  out.recordClean = !rtext || (!rtext.includes(MARK) && !rtext.includes(`lab-${tag}`) && !/refused/.test(rtext));
+  out.recordClean = !rtext || (!rtext.includes(MARK) && !rtext.includes(`lab-${tag}`) && !rtext.includes(`lab-r-${tag}`) && !/refused/.test(rtext));
   out.logsClean = !logs.join("\n").includes(MARK);
-  out.logsNameRefused = /w-refused|r-refused|v-refused|x-refused/.test(logs.join("\n"));
+  out.logsNameRefused = /w-refused|r-refused|r-ai-refused|lab-r-|v-refused|x-refused/.test(logs.join("\n"));
 }
 
 if (MODE === "routes") {

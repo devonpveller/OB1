@@ -37,7 +37,7 @@ import crypto from "node:crypto";
 import nodePath from "node:path";
 import { withLedgerLock } from "./structural-ledger.mjs";
 import { extractLinks } from "./links.mjs";
-import { classify } from "./page-classes.mjs";
+import { classify, isRegenerable } from "./page-classes.mjs";
 import { sluggifySegment, toPosixPath } from "./quartz-slug.mjs";
 export { extractLinks };
 
@@ -230,6 +230,8 @@ export async function upsertWikiPagesReport(rows) {
 // Only the guards' ONE message counts (slot 430 R3: it names no guard and no reason); any other 42501 - a missing grant,
 // "permission denied for table wiki_pages" - stays a structural failure of the run (D13 item 6).
 export const GUARD_REFUSAL_MESSAGE = "wiki_pages: this page cannot be saved";
+// (the negative cases - another 42501, a PGRST code, a network error, an echo in another error's details, a longer
+// message - are pinned by wiki-pages.refused.test.mjs, round 2)
 export function isGuardRefusal(e) {
   const m = String(e?.message ?? e ?? "");
   return /"code"\s*:\s*"42501"/.test(m) && m.includes(`"message":"${GUARD_REFUSAL_MESSAGE}"`);
@@ -341,6 +343,8 @@ export function forgetWithheldPages(slugs, { file = withheldFileFor() } = {}) {
 // this run CREATED is removed (it holds the withheld content); an older file whose slug has no row any more (a page
 // withheld before this run, its file not yet moved out) is removed too - a file with no row is reconcile drift and
 // shows what the database refused. A file whose slug still has a row is left (it is that row's page).
+// Round 2 (review B2): the older file goes only when it is regenerable compile output (page-classes.mjs isRegenerable); an
+// owner's or an AI note keeps its file (recorded withheld: the viewer neither serves nor counts it).
 async function leaveOutWithheld(slugs) {
   const paths = new Map();
   for (const s of slugs) {
@@ -364,9 +368,10 @@ async function leaveOutWithheld(slugs) {
   for (const [s, p] of paths) {
     const created = _created.has(p);
     _created.delete(p);
-    if (created || (hasRow && !hasRow.has(s))) { try { fs.unlinkSync(p); } catch { /* gone */ } }
+    if (created || (hasRow && !hasRow.has(s) && regenerableFile(p))) { try { fs.unlinkSync(p); } catch { /* gone */ } }
   }
 }
+function regenerableFile(abs) { const rel = abs && vaultRel(abs); return !!rel && isRegenerable(rel); }
 // rw-wiki-guarded-pages: every withheld or refused slug of a flush is RECORDED (hashes only), so another process's
 // reconcile (the viewer's) counts it as expected
 function recordHeld(slugs) {
@@ -774,10 +779,12 @@ export async function retryUnsyncedRows({ outDir, vaultDir = process.env.WIKI_GI
   if (heldSlugs.length) {
     const cls = new Map(batch.map((r) => [r.slug, r.page_class]));
     recordWithheldPages(heldSlugs, { file: wfile, pageClassOf: (s) => cls.get(s) || null });
+    // round 2 (review B2): only regenerable compile output leaves; an owner's or an AI note keeps its file, recorded only
     for (const slug of heldSlugs) {
       for (const r of [`${slug}.md`, `${slug}/index.md`]) {
         const abs = nodePath.resolve(root, r);
-        if (abs.startsWith(root + nodePath.sep)) { try { fs.unlinkSync(abs); break; } catch { /* next */ } }
+        if (!abs.startsWith(root + nodePath.sep) || !isRegenerable(r)) continue;
+        try { fs.unlinkSync(abs); break; } catch { /* next */ }
       }
     }
   }

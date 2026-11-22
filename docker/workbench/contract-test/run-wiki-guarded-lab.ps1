@@ -1,4 +1,4 @@
-# run-wiki-guarded-lab.ps1 - the disposable lab for research-workbench rw-wiki-guarded-pages: a page a privacy guard
+# run-wiki-guarded-lab.ps1 - the disposable lab for research-workbench rw-wiki-guarded-pages (+ round 2, -r2): a page a privacy guard
 # REFUSES (slots 380 / 390 / 430 / 440 raise 42501 for a note) is withheld cleanly - by the real writer, the next cycle's
 # retry and the viewer's reconcile repair - and the viewer stays green; no guard is loosened.
 #
@@ -27,7 +27,11 @@
 #   5. [writer] the real writer: compile flush, retry, viewer-style repair (and 390 through the writer)
 #   6. [viewer] /__health green with a withheld page's file present; two identities: no route shows the marker
 #   7. [regression] a genuinely missing page turns the viewer red; removed, green again
-#   8. [cleanup] (run as the wiki service runs it: OPEN_BRAIN_REST_TOKEN = the WIKI token) an old refused file (left by the old writer) moved to a backup folder, the viewer green; the revert puts it back
+#   8. [cleanup] (run as the wiki service runs it: OPEN_BRAIN_REST_TOKEN = the WIKI token; round 2) four old refused files -
+#      a notebook hub and a source leaf (compile output) beside an OWNER note and an AI note - in a git vault:
+#      8a [M1] an apply stopped after one move (--fail-after-moves 1) has its manifest; --revert restores it byte for byte
+#      8b [B2] the full apply moves ONLY the two compile pages; the owner and AI notes stay byte for byte, git shows no
+#         deletion for them; the viewer green; two identities see no marker; the revert puts the moved pages back byte for byte
 #   9. the owner's private rows are byte-identical (md5) from the plant to the end
 param(
   [string]$Id = 'wt-rw-wiki-guarded-pages',
@@ -261,7 +265,8 @@ COMMIT;
       '-e', 'NODE_OPTIONS=--max-old-space-size=1024', '-e', "WIKI_VIEWER_ALLOWED_HOSTS=$P-viewer", '-v', "${vault}:/wiki:ro", $viewerTag)
   $wr = Probe-Json (Node-Run 'writer' ($penv + @('MODE=writer')) $sharedDir '/ct/wiki-guarded-probe.mjs')
   Fix 'flush' ($wr -and $wr.flush.exit -eq 0 -and $wr.flush.cleanRow -and -not $wr.flush.refusedRow -and -not $wr.flush.refusedFile -and $wr.flush.unsynced -eq 0 -and $wr.flush.recorded) 'compile flush: the refused note is withheld (no row, no file, not unsynced, recorded), the clean note of the same batch lands, exit 0'
-  Fix 'retry' ($wr -and $wr.retry.firstLanded -eq 1 -and $wr.retry.cleanRow -and $wr.retry.recordLeft -eq 0 -and $wr.retry.secondRetried -eq 0 -and -not $wr.retry.refusedFile -and $wr.retry.recorded) 'retry: the clean row lands beside the refused one; the refused one leaves the retry record (never retried: the next cycle retries 0), its file out, recorded withheld'
+  Fix 'retry' ($wr -and $wr.retry.firstLanded -eq 1 -and $wr.retry.cleanRow -and $wr.retry.recordLeft -eq 0 -and $wr.retry.secondRetried -eq 0 -and -not $wr.retry.refusedFile -and $wr.retry.recorded) 'retry: the clean row lands beside the refused ones; the refused ones leave the retry record (never retried: the next cycle retries 0); the refused hub (compile output) is out of the vault and recorded withheld'
+  Check ($wr -and $wr.retry.aiFileKept) 'retry (round 2, B2): a refused AI note (not compile output) keeps its file byte for byte - the retry never deletes it'
   Fix 'repair' ($wr -and $wr.repair.cleanRow -and $wr.repair.drift -eq 0 -and $wr.repair.withheld -ge 1) 'viewer-style repair (fresh process): the clean missing row is written, the refused one counted withheld, drift 0'
   Fix 'flush390' ($wr -and $wr.flush390.exit -eq 0 -and -not $wr.flush390.refusedFile -and $wr.flush390.unsynced -eq 0) 'the report guard (390) refusal through the writer: withheld, exit 0'
   Check ($wr -and $wr.recordClean -and $wr.logsClean) 'the withheld record and the writer''s log carry no marker and no slug (hashes and counts only)'
@@ -272,7 +277,7 @@ COMMIT;
   $h = Fresh-Health $afterWriter
   Write-Host "    health: $($h | ConvertTo-Json -Compress)"
   Fix 'viewer-green' ($h -and $h.s -eq 'ok' -and $h.d -eq 0) 'the viewer is GREEN (status ok, drift 0) with a refused page''s file in the vault and its slug in the withheld record'
-  $slugs = "content/notebooks/lab-$rand/w-refused,content/notebooks/lab-$rand/r-refused,content/notebooks/lab-$rand/v-refused,content/notebooks/lab-$rand/x-refused"
+  $slugs = "content/notebooks/lab-$rand/w-refused,content/notebooks/lab-r-$rand/lab-r-$rand,content/notebooks/lab-$rand/r-ai-refused,content/notebooks/lab-$rand/v-refused,content/notebooks/lab-$rand/x-refused"
   $rt = Probe-Json (Node-Run 'routes' ($penv + @('MODE=routes', "PROBE_VIEWER=http://$P-viewer:8080", "ROUTE_SLUGS=$slugs")) $sharedDir '/ct/wiki-guarded-probe.mjs')
   Check ($rt -and $rt.routes.checked -ge 20 -and $rt.routes.showMark -eq 0 -and $rt.routes.renderedDb -eq 0) "two identities (owner A, user B), $($rt.routes.checked) route requests: no response shows the marker, no refused page is rendered from a row"
   Fix 'health-names-none' ($rt -and -not $rt.health.namesLab) '/__health names no refused page (the base lists them as missing drift)'
@@ -288,20 +293,67 @@ COMMIT;
   $h3 = Fresh-Health (Now-Iso)
   Fix 'viewer-green-again' ($h3 -and $h3.s -eq 'ok' -and $h3.d -eq 0) 'the missing page gone, the viewer is green again (the withheld page still present)'
 
-  Write-Host '[8] [cleanup] an old refused file left by the old writer: moved to a backup folder, the revert puts it back'
-  $old = Join-Path $vault "content\notebooks\lab-$rand\c-refused.md"
-  [System.IO.File]::WriteAllText($old, "---`ntitle: C refused`n---`n$text`n", (New-Object System.Text.UTF8Encoding $false))
-  $cl = Node-Run 'cleanup-apply' @("OPEN_BRAIN_REST_TOKEN=$($script:tokWiki)") $sharedDir '/shared/withheld-pages-cleanup.mjs --apply --vault /vault --backup /vault/.withheld-backup-lab' 600
+  Write-Host '[8] [cleanup] old refused files: two compile pages (a notebook hub, a source leaf) beside an OWNER note and an AI note'
+  # round 2 (review B2): only the compile pages may move; the owner's note (notes/notebooks/**) and the AI note
+  # (content/notebooks/<nb>/<file>, not the hub) stay byte for byte, and git shows no deletion for them. The vault is a git
+  # repo here as live (the wiki service commits with git add -A), with the state files ignored as live.
+  $C = [ordered]@{
+    hub   = "content\notebooks\lab-c-$rand\lab-c-$rand.md"
+    src   = "content\source\lab-c-$rand.md"
+    owner = "notes\notebooks\lab-$rand\o-refused.md"
+    ai    = "content\notebooks\lab-$rand\a-refused.md"
+  }
+  foreach ($k in $C.Keys) {
+    $f = Join-Path $vault $C[$k]
+    New-Item -ItemType Directory -Force (Split-Path $f) | Out-Null
+    [System.IO.File]::WriteAllText($f, "---`ntitle: C $k refused`n---`n$text`n", (New-Object System.Text.UTF8Encoding $false))
+  }
+  function Hash-Of([string]$k) { $f = Join-Path $vault $C[$k]; if (Test-Path $f) { (Get-FileHash -Algorithm SHA256 $f).Hash } else { '' } }
+  function In-Vault([string]$k) { Test-Path (Join-Path $vault $C[$k]) }
+  function VGit { $o = & git -c safe.directory=* -C $vault @args 2>&1; return (($o | Out-String) -replace "`r", '').TrimEnd() }
+  [System.IO.File]::WriteAllText((Join-Path $vault '.gitignore'), ".withheld-backup-*/`n.withheld-pages.json`n.withheld-pages.json.tmp-*`n.unsynced-rows.json`n.unsynced-rows.json.tmp-*`n*.lock`n", (New-Object System.Text.UTF8Encoding $false))
+  $null = VGit init -q; $null = VGit config core.autocrlf false; $null = VGit config user.email 'lab@invalid'; $null = VGit config user.name 'lab'
+  $null = VGit add -A; $null = VGit commit -q -m 'lab vault'
+  $hashBefore = @{}; foreach ($k in $C.Keys) { $hashBefore[$k] = Hash-Of $k }
+  $tracked = @((VGit ls-files -- ($C.owner -replace '\\', '/') ($C.ai -replace '\\', '/')) -split "`n" | Where-Object { $_ })
+  Check ($tracked.Count -eq 2) 'the owner note and the AI note are committed in the lab vault (as the workbench commits them)'
+  $sameAll = { param($keys) @($keys | Where-Object { (Hash-Of $_) -ne $hashBefore[$_] }).Count -eq 0 }
+  $tokEnv = @("OPEN_BRAIN_REST_TOKEN=$($script:tokWiki)")
+
+  Write-Host '[8a] [M1] an apply stopped after one move: the manifest is already there, and --revert recovers it'
+  $ci = Node-Run 'cleanup-apply-interrupted' $tokEnv $sharedDir '/shared/withheld-pages-cleanup.mjs --apply --vault /vault --backup /vault/.withheld-backup-int --fail-after-moves 1' 600
+  $ciRc = $script:rc
+  $movedPart = @('hub', 'src' | Where-Object { -not (In-Vault $_) }).Count
+  $manPart = Test-Path (Join-Path $vault '.withheld-backup-int\manifest.json')
+  Write-Host "    interrupted apply: exit $ciRc, $movedPart of 2 compile pages moved, manifest $manPart"
+  $ri = Node-Run 'cleanup-revert-interrupted' $tokEnv $sharedDir '/shared/withheld-pages-cleanup.mjs --revert --vault /vault --backup /vault/.withheld-backup-int' 600
+  $riLines = (($ri -split "`n") | Where-Object { $_ -match '^\[withheld-cleanup\]' }) -join ' | '
+  Write-Host "    $riLines"
+  Fix 'm1-interrupt-revert' ($ciRc -eq 2 -and $movedPart -eq 1 -and $manPart -and $riLines -match 'revert: 1 file\(s\) put back' -and $riLines -match '1 never moved' -and (& $sameAll $C.Keys)) 'M1: the apply stopped after 1 move (exit 2) with its manifest written; --revert put the moved page back and counted the one never moved; every planted file is byte-identical'
+
+  Write-Host '[8b] [B2] the full apply: only the compile pages move; the owner and AI notes stay byte for byte, no git deletion'
+  $cl = Node-Run 'cleanup-apply' $tokEnv $sharedDir '/shared/withheld-pages-cleanup.mjs --apply --vault /vault --backup /vault/.withheld-backup-lab' 600
   $clLines = (($cl -split "`n") | Where-Object { $_ -match '^\[withheld-cleanup\]' }) -join ' | '
   Write-Host "    $clLines"
-  $movedOk = -not (Test-Path $old) -and (Test-Path (Join-Path $vault ".withheld-backup-lab\files\content\notebooks\lab-$rand\c-refused.md"))
-  Fix 'cleanup-apply' ($movedOk -and $clLines -match 'apply: (\d+) refused page file' -and [int]$Matches[1] -ge 1 -and $clLines -notmatch [regex]::Escape($MARK) -and $clLines -notmatch 'refused\.md|c-refused') 'the cleanup moved the old refused file(s) out of the served vault into the backup folder; its output is counts only'
+  $inBackup = @('hub', 'src' | Where-Object { Test-Path (Join-Path $vault ".withheld-backup-lab\files\$($C[$_])") }).Count
+  $movedOk = -not (In-Vault 'hub') -and -not (In-Vault 'src') -and $inBackup -eq 2
+  Fix 'cleanup-apply' ($movedOk -and $clLines -match 'apply: (\d+) refused page file' -and [int]$Matches[1] -ge 2 -and $clLines -notmatch [regex]::Escape($MARK) -and $clLines -notmatch 'refused\.md|-refused|lab-c-') 'the cleanup moved the refused compile pages (hub, source leaf) out of the served vault into the backup folder; its output is counts only'
+  $null = VGit add -A
+  $deleted = @((VGit diff --cached --name-only --diff-filter=D) -split "`n" | Where-Object { $_ })
+  $notesDeleted = @($deleted | Where-Object { $_ -eq ($C.owner -replace '\\', '/') -or $_ -eq ($C.ai -replace '\\', '/') -or $_ -like 'notes/*' }).Count
+  $notesInPlace = (In-Vault 'owner') -and (In-Vault 'ai') -and (& $sameAll @('owner', 'ai'))
+  $notesInBackup = (Test-Path (Join-Path $vault '.withheld-backup-lab\files\notes')) -or (Test-Path (Join-Path $vault ".withheld-backup-lab\files\content\notebooks\lab-$rand"))
+  Write-Host "    git add -A (as the wiki service commits): $($deleted.Count) deletion(s), $notesDeleted of them a note; owner + AI note in place and identical: $notesInPlace; a note in the backup: $notesInBackup"
+  Fix 'cleanup-b2-notes-kept' ($movedOk -and $notesInPlace -and -not $notesInBackup -and $notesDeleted -eq 0 -and $deleted.Count -eq 2) 'B2: the refused OWNER note and AI note are byte-identical and in place, not in the backup, and git shows no deletion for them; the only deletions are the two compile pages'
   $h4 = Fresh-Health (Now-Iso)
-  Fix 'viewer-green-after-cleanup' ($h4 -and $h4.s -eq 'ok' -and $h4.d -eq 0) "after the cleanup the viewer is green (drift $($h4.d))"
-  $rv = Node-Run 'cleanup-revert' @("OPEN_BRAIN_REST_TOKEN=$($script:tokWiki)") $sharedDir '/shared/withheld-pages-cleanup.mjs --revert --vault /vault --backup /vault/.withheld-backup-lab' 600
+  Fix 'viewer-green-after-cleanup' ($h4 -and $h4.s -eq 'ok' -and $h4.d -eq 0) "after the cleanup the viewer is green (drift $($h4.d)) with the refused owner and AI notes still in the vault"
+  $slugs8 = (@($C.Values) | ForEach-Object { ($_ -replace '\\', '/') -replace '\.md$', '' }) -join ','
+  $rt8 = Probe-Json (Node-Run 'routes-after-cleanup' ($penv + @('MODE=routes', "PROBE_VIEWER=http://$P-viewer:8080", "ROUTE_SLUGS=$slugs8")) $sharedDir '/ct/wiki-guarded-probe.mjs')
+  Check ($rt8 -and $rt8.routes.checked -ge 20 -and $rt8.routes.showMark -eq 0 -and $rt8.routes.renderedDb -eq 0) "two identities after the cleanup, $($rt8.routes.checked) route requests over the four planted pages (the owner and AI notes' files present): no response shows the marker, none is rendered from a row"
+  $rv = Node-Run 'cleanup-revert' $tokEnv $sharedDir '/shared/withheld-pages-cleanup.mjs --revert --vault /vault --backup /vault/.withheld-backup-lab' 600
   $rvLines = (($rv -split "`n") | Where-Object { $_ -match '^\[withheld-cleanup\]' }) -join ' | '
   Write-Host "    $rvLines"
-  Fix 'cleanup-revert' ((Test-Path $old) -and $rvLines -match 'revert: (\d+) file\(s\) put back' -and [int]$Matches[1] -ge 1) 'the revert put the moved file(s) back'
+  Fix 'cleanup-revert' ((In-Vault 'hub') -and (In-Vault 'src') -and (& $sameAll $C.Keys) -and $rvLines -match 'revert: (\d+) file\(s\) put back' -and [int]$Matches[1] -ge 2) 'the revert put the moved compile pages back byte for byte (every planted file identical to the plant)'
 
   Write-Host '[9] the owner''s private rows and the guards, from the plant to the end'
   Check ((Q1 $ownerSql) -eq $ownerBefore) "the owner's private rows (thought, idea thought, withheld text, report archive) are byte-identical (md5 $ownerBefore)"
