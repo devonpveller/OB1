@@ -2,11 +2,17 @@
 # REFUSES (slots 380 / 390 / 430 / 440 raise 42501 for a note) is withheld cleanly - by the real writer, the next cycle's
 # retry and the viewer's reconcile repair - and the viewer stays green; no guard is loosened.
 #
-#   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-wiki-guarded-lab.ps1 -Subnet <x.y.z.0/24> [-Evidence <dir>] [-Red] [-BaseSha 310b865]
+#   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-wiki-guarded-lab.ps1 -Subnet <x.y.z.0/24> [-Evidence <dir>] [-Red] [-BaseSha 58bbc30]
 #
 # -Red runs the SAME checks with the base's writer, reconcile and viewer (-BaseSha): the writer / viewer / cleanup checks must
 # FAIL there. The guard checks are the database's and must pass in BOTH runs; their own red is the loosened-guard mutants
 # (each guard trigger disabled in turn: the check must catch it).
+#
+# The REST door is the one the stack runs (rw-rest-door-auth, slot 450): rest-door-lab.ps1's Start-LabRestDoor mints lab
+# tokens with a lab-only secret (the real mint script; never the live .env) and each lab caller sends ONLY the token of the
+# real caller it stands in for: the writer (probe guards / writer modes) the WIKI token (role ob_rest_wiki); the viewer
+# container and the viewer-style reconcile repair the VIEWER token (role ob_rest_viewer). No superuser, no service_role.
+# -BaseSha defaults to OB1 58bbc30 (450 + 480 landed), so 450 / 480 SQL is not a diff of this item.
 #
 # Lab rules (as run-workspace-tests.ps1): one --internal network on the pinned subnet, :wt-<id> image tags only (the viewer,
 # built from this tree or the base), no published port, no :local image, no ai-stack_* / open-brain_* name, synthetic seed
@@ -31,7 +37,7 @@ param(
   [string]$PgrstImage = 'postgrest/postgrest:v12.2.3',
   [string]$CaddyImage = 'caddy:2-alpine',
   [string]$NodeImage = 'node:22-slim',
-  [string]$BaseSha = '310b865',
+  [string]$BaseSha = '58bbc30ee1f7893802fceb2c2ac9e4e463400c76',
   [switch]$Red
 )
 $ErrorActionPreference = 'Continue'
@@ -134,7 +140,8 @@ function Tree-At([string]$sha) {
 }
 function Node-Run([string]$what, [string[]]$envs, [string]$shared, [string]$script, [int]$t = 300) {
   $a = @('run', '--rm', '--label', $label, '--network', $net, '-v', "${shared}:/shared:ro", '-v', "${vault}:/vault", '-v', "${ct}:/ct:ro",
-    '-e', 'SHARED=/shared', '-e', 'WIKI_GIT_DIR=/vault', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', "MARK=$MARK", '-e', "TAG=$rand")
+    '-e', 'SHARED=/shared', '-e', 'WIKI_GIT_DIR=/vault', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', "MARK=$MARK", '-e', "TAG=$rand",
+    '-e', "REST_TOKEN_WIKI=$($script:tokWiki)", '-e', "REST_TOKEN_VIEWER=$($script:tokViewer)")
   foreach ($e in $envs) { $a += @('-e', $e) }
   $a += @('--entrypoint', 'node', $NodeImage) + @($script -split ' ')
   $o = Lab-Docker $t $a
@@ -192,9 +199,12 @@ try {
   Check ($logs -match 'PostgreSQL init process complete') 'the database ran the initdb chain'
   $errs = @(($logs -split "`n") | Where-Object { $_ -match 'ERROR:' })
   Check ($errs.Count -eq 0) "initdb logged no ERROR ($($errs.Count))"
-  $null = Run-Detached "$P-postgrest" @('--network-alias', 'openbrain-postgrest', '-e', "PGRST_DB_URI=postgres://postgres:$pw@openbrain-db:5432/openbrain",
-      '-e', 'PGRST_DB_SCHEMAS=public', '-e', 'PGRST_DB_ANON_ROLE=service_role', '-e', 'PGRST_DB_POOL=4', '-e', 'PGRST_SERVER_PORT=3000', $PgrstImage)
-  $null = Run-Detached "$P-rest" @('--network-alias', 'openbrain-rest', '-v', "$(Join-Path $dockerDir 'Caddyfile'):/etc/caddy/Caddyfile:ro", $CaddyImage)
+  # rw-rest-door-auth: the door as compose stands it up (per-caller tokens, no anonymous role), with lab-minted tokens
+  . (Join-Path $PSScriptRoot 'rest-door-lab.ps1')
+  $door = Start-LabRestDoor -Db $db -Pw $pw
+  Check ($door.Door -eq 'auth' -and $door.Tokens.ContainsKey('WIKI') -and $door.Tokens.ContainsKey('VIEWER')) 'the REST door is the authenticated one (slot 450) with lab-minted WIKI and VIEWER tokens'
+  if ($door.Door -ne 'auth') { throw 'rest door' }
+  $script:tokWiki = $door.Tokens['WIKI']; $script:tokViewer = $door.Tokens['VIEWER']
   $bo = Lab-Docker 1500 @('build', '--label', $label, '--build-arg', "OB1_SHA=$(if ($Red) { $BaseSha } else { $sha })", '--build-context', "recipes=$recCtx", '-t', $viewerTag, $viewerDir)
   Save 'build-viewer.log' (($bo -split "`n") | Select-Object -Last 80 | Out-String)
   Check ($script:rc -eq 0) "$viewerTag built from $(if ($Red) { "OB1 $BaseSha" } else { 'this tree' }) (its build gate runs the renderer's node tests)"
@@ -246,7 +256,7 @@ COMMIT;
 
   Write-Host '[5] [writer] the real writer meets the refusal: compile flush, retry, viewer-style repair'
   New-Item -ItemType Directory -Force (Join-Path $vault 'content') | Out-Null
-  $null = Run-Detached "$P-viewer" @('--network-alias', 'openbrain-wiki-viewer', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'WIKI_NAV_MIN_ROWS=0',
+  $null = Run-Detached "$P-viewer" @('--network-alias', 'openbrain-wiki-viewer', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', "OPEN_BRAIN_REST_TOKEN=$($script:tokViewer)", '-e', 'WIKI_NAV_MIN_ROWS=0',
       '-e', 'WIKI_BUILDER=0', '-e', 'WIKI_DB_TCP=openbrain-db:5432', '-e', 'WIKI_DB_PROBE_MS=1000', '-e', 'WIKI_RECONCILE_INTERVAL_MS=5000',
       '-e', 'NODE_OPTIONS=--max-old-space-size=1024', '-e', "WIKI_VIEWER_ALLOWED_HOSTS=$P-viewer", '-v', "${vault}:/wiki:ro", $viewerTag)
   $wr = Probe-Json (Node-Run 'writer' ($penv + @('MODE=writer')) $sharedDir '/ct/wiki-guarded-probe.mjs')

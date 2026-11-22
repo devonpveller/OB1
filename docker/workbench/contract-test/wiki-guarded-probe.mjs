@@ -27,7 +27,13 @@ const bodyOf = (kind) => ({
   text: TEXT,
 })[kind];
 const KINDS = ["idea", "report", "priv", "text"];
-const H = { "content-type": "application/json", apikey: "local-trust" };
+// rw-rest-door-auth (slot 450): every caller sends its OWN token. The writer (and this probe's direct note / row requests, which
+// stand in for it) is the wiki caller (role ob_rest_wiki); the viewer-style repair below is the viewer caller (ob_rest_viewer).
+// The tokens are lab-minted (rest-door-lab.ps1); wiki-pages.mjs and reconcile-wiki-pages.mjs read OPEN_BRAIN_REST_TOKEN per call.
+const TOK_WIKI = process.env.REST_TOKEN_WIKI || "";
+const TOK_VIEWER = process.env.REST_TOKEN_VIEWER || "";
+process.env.OPEN_BRAIN_REST_TOKEN = TOK_WIKI;
+const H = { "content-type": "application/json", authorization: `Bearer ${TOK_WIKI}` };
 async function rowsHave(slugs) {
   const list = slugs.map((s) => `"${s}"`).join(",");
   const r = await fetch(`${OB}/rest/v1/wiki_pages?select=slug&slug=in.(${encodeURIComponent(list)})`, { headers: H });
@@ -95,7 +101,9 @@ if (MODE === "writer") {
     wp._resetWikiPagesForTests();
     fs.writeFileSync(fl("v-refused"), page("V refused", bodyOf("text")));
     fs.writeFileSync(fl("v-clean"), page("V clean", "A third note with shared text only."));
-    const r = await rc.reconcile({ vault, repair: true, log: () => {} });
+    process.env.OPEN_BRAIN_REST_TOKEN = TOK_VIEWER;
+    let r;
+    try { r = await rc.reconcile({ vault, repair: true, log: () => {} }); } finally { process.env.OPEN_BRAIN_REST_TOKEN = TOK_WIKI; }
     const a = r.after || r;
     const h3 = await rowsHave([sl("v-clean")]);
     out.repair = { cleanRow: h3.has(sl("v-clean")), drift: a.drift, missing: a.missing.length, stale: a.stale.length, orphan: a.orphan.length, withheld: a.withheld || 0 };
