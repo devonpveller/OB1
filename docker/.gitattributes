@@ -2,3 +2,5 @@
 init-pantry.sql text eol=lf
 init-ui-state.sql text eol=lf
 revert-ui-state.sql text eol=lf
+init-settings-tags.sql text eol=lf
+revert-settings-tags.sql text eol=lf

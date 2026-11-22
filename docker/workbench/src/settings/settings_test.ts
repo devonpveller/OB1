@@ -10,7 +10,7 @@ import { identityConfig, type Identity } from "../middleware/identity.ts";
 import { settingsAdmin } from "../contracts/routes/system.ts";
 
 const KEYS: Record<string, Record<string, unknown>> = {
-  "refinery.dormancy_days": { key: "refinery.dormancy_days", tier: "user", type: "integer", editable: true, store: "settings", default_value: 14, validation: { min: 1, max: 365 } },
+  "refinery.dormancy_days": { key: "refinery.dormancy_days", tier: "user", type: "integer", editable: true, store: "settings", tag: "on_server", default_value: 14, validation: { min: 1, max: 365 } },
   "digest.send_time": { key: "digest.send_time", tier: "user", type: "time", editable: false, store: "settings", default_value: "05:00", validation: {} },
   "research.max_fetch": { key: "research.max_fetch", tier: "admin", type: "integer", editable: false, store: "settings", default_value: 24, validation: {} },
   "test.shared_flag": { key: "test.shared_flag", tier: "admin", type: "boolean", editable: true, store: "settings", default_value: false, validation: {} },
@@ -110,9 +110,18 @@ Deno.test("S-U2: a non-admin's PUT of an admin key is refused (both doors) and n
   const a = app(db);
   const h = { "x-who": "bob", "x-kind": "header" }; // a header user that is not the default subject: not an admin
   assertEquals((await put(a, "/s/admin/test.shared_flag", { value: true }, h)).status, 403);
-  assertEquals((await put(a, "/s/test.shared_flag", { value: true }, h)).status, 403);
   assertEquals((await a.request("/s/admin", { headers: h })).status, 403);
   assertEquals((await a.request("/s/admin/test.shared_flag", { method: "DELETE", headers: h })).status, 403);
+  // rwr-settings-shell: through the USER door an admin key is a key that does not exist (404, the same words), so a
+  // non-admin cannot learn which admin keys exist; the admin is still told where to go (403)
+  const real = await put(a, "/s/test.shared_flag", { value: true }, h);
+  const none = await put(a, "/s/test.no_such_key", { value: true }, h);
+  assertEquals(real.status, 404);
+  assertEquals((await real.json()).error, "test.shared_flag is not a setting");
+  assertEquals(none.status, 404);
+  assertEquals((await none.json()).error, "test.no_such_key is not a setting");
+  assertEquals((await a.request("/s/test.shared_flag", { method: "DELETE", headers: h })).status, 404);
+  assertEquals((await put(a, "/s/test.shared_flag", { value: true }, { "x-who": "root", "x-kind": "user", "x-admin": "1" })).status, 403);
   assertEquals(seen.some((x) => /contract_settings|user_setting_set/.test(x.sql) && /INSERT|DELETE|user_setting_set/.test(x.sql)), false);
   // the GET says so: no Admin section for this user
   assertEquals((await (await a.request("/s", { headers: h })).json()).admin, false);

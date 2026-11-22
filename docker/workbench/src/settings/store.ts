@@ -22,6 +22,8 @@ export interface KeyRow {
   validation: Record<string, unknown>;
   editable: boolean;
   store: "settings" | "contract";
+  // who can see the value (rwr-settings-shell, slot 550): only_you | on_server | admin_all; null = the row has no tag (a catalog-test failure)
+  tag: "only_you" | "on_server" | "admin_all" | null;
 }
 
 interface Stored {
@@ -39,12 +41,12 @@ interface Stored {
 export function keyOut(k: KeyRow, s: Stored | undefined, gone = 0) {
   return {
     key: k.key, tier: k.tier, type: k.type, section: k.section, position: k.position, label: k.label, help: k.help,
-    default: k.default_value ?? null, env: k.env_name, read_by: k.read_by, validation: k.validation ?? {}, editable: k.editable,
+    default: k.default_value ?? null, env: k.env_name, read_by: k.read_by, validation: k.validation ?? {}, editable: k.editable, tag: k.tag ?? null,
     value: s ? s.value : null, is_default: !s, version: s?.version ?? gone, updated_at: s?.updated_at ?? null,
   };
 }
 
-const KEY_COLS = `key, tier, type, section, position, label, help, default_value, env_name, read_by, validation, editable, store`;
+const KEY_COLS = `key, tier, type, section, position, label, help, default_value, env_name, read_by, validation, editable, store, tag`;
 
 export async function keyRow(db: Db, key: string): Promise<KeyRow | null> {
   return (await db.query<KeyRow>(`SELECT ${KEY_COLS} FROM public.settings_keys WHERE key = $1`, [key]))[0] ?? null;

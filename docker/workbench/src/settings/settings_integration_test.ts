@@ -126,7 +126,6 @@ t("I2: a non-admin's PUT of an admin key is refused (403) on every door and chan
   const before = await sql(`SELECT key, value, version FROM public.contract_settings ORDER BY key`);
   for (const [m, p, b] of [
     ["PUT", `${S}/admin/podcast.archive_destination`, { value: { mount: "podcast-archive" } }],
-    ["PUT", `${S}/podcast.archive_destination`, { value: { mount: "podcast-archive" } }],
     ["DELETE", `${S}/admin/podcast.archive_destination`, undefined],
     ["PUT", `${S}/admin/research.max_fetch`, { value: 99 }],
     ["GET", `${S}/admin`, undefined],
@@ -135,6 +134,13 @@ t("I2: a non-admin's PUT of an admin key is refused (403) on every door and chan
     const r = await call(m, p, b, A);
     assertEquals(r.status, 403, `${m} ${p}: ${r.text}`);
   }
+  // rwr-settings-shell: the user door answers an admin key exactly as it answers a key that is not there
+  const viaUser = await call("PUT", `${S}/podcast.archive_destination`, { value: { mount: "podcast-archive" } }, A);
+  const nothing = await call("PUT", `${S}/podcast.no_such_key`, { value: 1 }, A);
+  assertEquals(viaUser.status, 404, viaUser.text);
+  assertEquals(nothing.status, 404, nothing.text);
+  assertEquals(viaUser.text.replace(/podcast\.\w+/, "K"), nothing.text.replace(/podcast\.\w+/, "K"));
+  assertEquals((await call("DELETE", `${S}/research.max_fetch`, undefined, A)).status, 404);
   assertEquals(await sql(`SELECT key, value, version FROM public.contract_settings ORDER BY key`), before, "the admin tier is unchanged");
   assertEquals((await call("GET", S, undefined, A)).json.admin, false, "the panel shows no Admin section");
 });
