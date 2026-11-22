@@ -283,9 +283,10 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const bDraft = await wb("PUT", `/workbench/ideas/${bRefinery}/draft`, { text: `${room.draft} ${ideaMk.draft}` }, B);
   assertEquals(bDraft.status, 200, bDraft.text);
   // rw-report-isolation: B's idea's research - a job on B's refinery whose result holds the report (as the research
-  // service stores it), the report itself (private, slot 390) and the claim drawn from it (SHARED: the claim and its
-  // text are not markers). A must reach no text, title, key or id of the report, through the claim or anywhere else.
-  const privMk = { text: `PrivReportSecret${rnd()}`, title: `PrivReportTitle${rnd()}`, key: `rk-sweep-${rnd()}` };
+  // service stores it), the report itself (private, slot 390) and the claim drawn from it. rw-private-report-claims
+  // (slot 570, operator 2026-11-21): the claim is PRIVATE to B too - filed into B's store the way the curator files it,
+  // its text and id are markers. A must reach no text, title, key or id of the report or its claim, anywhere.
+  const privMk = { text: `PrivReportSecret${rnd()}`, title: `PrivReportTitle${rnd()}`, key: `rk-sweep-${rnd()}`, claim: `PrivReportClaim${rnd()}` };
   const bIdeaJob = (await sql<{ id: string }>(
     `INSERT INTO public.research_jobs (status, origin, query, refinery_id, finished_at, result)
      VALUES ('done', 'manual', 'research for B''s idea', $1, now(), jsonb_build_object('synthesis', $2::text, 'claims', '[]'::jsonb, 'cited_sources', '[]'::jsonb))
@@ -294,11 +295,21 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     `INSERT INTO public.research_private_reports (research_key, owner_sub, idea_id, job_id, title, content, metadata)
      VALUES ($1, $2, $3, $4, $5, $6, jsonb_build_object('prose_synthesis', $6::text)) RETURNING id::text AS id`,
     [privMk.key, bSub, bRefinery, bIdeaJob, privMk.title, privMk.text]))[0].id;
-  const bReportClaim = (await sql<{ id: string }>(
-    `SELECT f.id::text AS id FROM public.find_or_create_claim($1, NULL, NULL, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb) f`,
-    [`The sweep report claim ${rnd()} held in 12 trials.`]))[0].id;
-  await sql(`SELECT public.link_claim_to_source($1::uuid, $2::uuid, 'states', 1.0)`, [bReportClaim, FX_ACTIVE]);
-  await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2)`, [bReport, bReportClaim]);
+  const has570 = (await sql<{ ok: boolean }>(`SELECT to_regprocedure('public.private_report_claim_file(text,uuid,text,uuid,text,text,integer,vector,jsonb)') IS NOT NULL AS ok`))[0].ok;
+  let bReportClaim = "";
+  if (has570) {
+    bReportClaim = (await sql<{ id: string }>(
+      `SELECT f.id::text AS id FROM public.private_report_claim_file($1, $2::uuid, $3, NULL, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb) f`,
+      [privMk.key, bIdeaJob, `The sweep report claim ${privMk.claim} held in 12 trials.`]))[0].id;
+    await sql(`SELECT public.private_report_claim_edge($1::uuid, $2::uuid, 'states', 1.0)`, [bReportClaim, FX_ACTIVE]);
+  } else {
+    // the base (no slot 570): the 390 model - a shared claim linked back
+    bReportClaim = (await sql<{ id: string }>(
+      `SELECT f.id::text AS id FROM public.find_or_create_claim($1, NULL, NULL, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb) f`,
+      [`The sweep report claim ${privMk.claim} held in 12 trials.`]))[0].id;
+    await sql(`SELECT public.link_claim_to_source($1::uuid, $2::uuid, 'states', 1.0)`, [bReportClaim, FX_ACTIVE]);
+    await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2)`, [bReport, bReportClaim]);
+  }
   // rw-boundary-core (plan 09 PD0a; slot 420): B's private hand-back (the inlet id, the delivery target and the owner's
   // review of a refused question, each a marker) - no route may read it; a service:shared-key prompt on an unclassified
   // job (the 88 live ones' shape: hidden from every non-admin, D5) - A must not read it; and a DERIVED job, whose
@@ -415,7 +426,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id,
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
     exportSecret, leadSecret, ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])),
-    privReport: privMk.text, privTitle: privMk.title, privKey: privMk.key, privReportId: bReport,
+    privReport: privMk.text, privTitle: privMk.title, privKey: privMk.key, privReportId: bReport, privClaim: privMk.claim, privClaimId: bReportClaim,
     ...(bHandback ? { handbackInlet: bnd.inlet, handbackIdeaTitle: bnd.ideaTitle, handbackDeliver: bnd.deliver, handbackView: bnd.view, handbackId: bHandback } : {}),
     ...(!aIsAdmin ? { svcPrompt: bnd.svc } : {}),
     roomEntry: room.entry, roomDraft: room.draft, roomId: bRoom, ideaEdit: ideaMk.edit, ideaDossier: ideaMk.dossier, ideaDraft: ideaMk.draft, sessionRoomId: bSessRoom, ...(bChat.status === 201 ? { roomChat: room.chat } : {}) };
