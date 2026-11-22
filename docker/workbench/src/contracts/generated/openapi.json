@@ -6949,6 +6949,187 @@
           "private",
           "job"
         ]
+      },
+      "ResearchStartPreview": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string",
+            "nullable": true,
+            "description": "the de-personalised question that would leave (null when the boundary refused)"
+          },
+          "topic": {
+            "type": "string",
+            "nullable": true
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "the public links the research service will fetch itself"
+          },
+          "depth": {
+            "$ref": "#/components/schemas/ResearchStartDepth"
+          },
+          "refusal": {
+            "type": "string",
+            "nullable": true,
+            "example": null,
+            "description": "why the boundary refused to form a public question, or null; a refusal starts nothing"
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "true when a request was formed; the preview created no job and no row"
+          }
+        },
+        "required": [
+          "question",
+          "topic",
+          "links",
+          "depth",
+          "refusal",
+          "ok"
+        ]
+      },
+      "ResearchStartDepth": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "name": {
+            "type": "string",
+            "example": "standard"
+          },
+          "rounds": {
+            "type": "integer"
+          },
+          "max_fetch": {
+            "type": "integer"
+          },
+          "wall_ms": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "rounds",
+          "max_fetch",
+          "wall_ms"
+        ],
+        "description": "the limits the run will use: min(preset, admin ceiling) per limit"
+      },
+      "ResearchStartRequest": {
+        "type": "object",
+        "properties": {
+          "attach": {
+            "$ref": "#/components/schemas/ResearchStartAttach"
+          },
+          "question": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "example": "Should I buy a heat pump?",
+            "description": "what the person wants to know - private; only the boundary's de-personalised question leaves"
+          },
+          "depth": {
+            "type": "string",
+            "example": "standard",
+            "description": "quick, standard (default) or deep: a preset of today's research limits, never above the admin ceilings"
+          },
+          "passages": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 4000
+            },
+            "maxItems": 20,
+            "description": "selected passages of the attached document - private, like the question"
+          },
+          "approved_question": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "start only: the question the preview showed; the start refuses (409) rather than send a different one"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "additionalProperties": false
+      },
+      "ResearchStartAttach": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "example": "document",
+            "description": "none (attach to nothing) or document. idea is refused (400, the same answer for every idea, nothing read): an idea is researched from the idea itself (POST /workbench/ideas/{id}/research-now), its owner's request path"
+          },
+          "path": {
+            "type": "string",
+            "example": "documents/lab-user/notes.md",
+            "description": "kind document: the caller's own document"
+          },
+          "id": {
+            "type": "string",
+            "example": "8b0c4f5e-1d2a-4b3c-9e8f-7a6b5c4d3e2f",
+            "description": "not accepted: it named an idea, and kind idea is refused (400)"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "additionalProperties": false,
+        "description": "what the run is about; omitted = attach to nothing"
+      },
+      "ResearchStarted": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string",
+            "nullable": true,
+            "description": "the de-personalised question that would leave (null when the boundary refused)"
+          },
+          "topic": {
+            "type": "string",
+            "nullable": true
+          },
+          "links": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "the public links the research service will fetch itself"
+          },
+          "depth": {
+            "$ref": "#/components/schemas/ResearchStartDepth"
+          },
+          "refusal": {
+            "type": "string",
+            "nullable": true,
+            "example": null,
+            "description": "why the boundary refused to form a public question, or null; a refusal starts nothing"
+          },
+          "started": {
+            "type": "boolean",
+            "description": "true when a run was queued; false (200) when the boundary refused"
+          },
+          "job_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "d0d0d0d0-0000-4000-8000-000000000001",
+            "description": "the queued run"
+          }
+        },
+        "required": [
+          "question",
+          "topic",
+          "links",
+          "depth",
+          "refusal",
+          "started",
+          "job_id"
+        ]
       }
     },
     "parameters": {}
@@ -15646,6 +15827,258 @@
           },
           "500": {
             "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/research/preview": {
+      "post": {
+        "operationId": "researchStartPreview",
+        "tags": [
+          "research start"
+        ],
+        "summary": "what would leave the workbench if this research were started - and nothing else happens",
+        "description": "Runs the request boundary in preview: the question, topic and public links it forms from the caller's question and attached document. Creates no job and no row; the start call forms the same request by the same function. The personal text itself is never in the answer.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "attach": {
+                  "kind": "document",
+                  "path": "documents/lab-user/notes.md"
+                },
+                "question": "Should I buy a heat pump?",
+                "depth": "standard",
+                "passages": []
+              },
+              "schema": {
+                "$ref": "#/components/schemas/ResearchStartRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "what would leave (or the boundary's refusal)",
+            "content": {
+              "application/json": {
+                "example": {
+                  "ok": true,
+                  "question": "What is known about heat pumps and winter heating bills?",
+                  "topic": "heat pumps winter bills",
+                  "links": [
+                    "https://news.example.org/heat-pumps"
+                  ],
+                  "depth": {
+                    "name": "standard",
+                    "rounds": 2,
+                    "max_fetch": 40,
+                    "wall_ms": 600000
+                  },
+                  "refusal": null
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchStartPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the research service is not configured or did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/research": {
+      "post": {
+        "operationId": "researchStart",
+        "tags": [
+          "research start"
+        ],
+        "summary": "start research: attached to nothing or a document, at a chosen depth",
+        "description": "The same boundary function as the preview forms the question; a refusal starts nothing (200, started false). With approved_question, a start that would send a different question answers 409 and starts nothing. Depth quick | standard | deep is a preset of today's research limits, never above the admin ceilings. Attach to an idea is refused (400) as in the preview: an idea is researched from the idea itself.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "attach": {
+                  "kind": "document",
+                  "path": "documents/lab-user/notes.md"
+                },
+                "question": "Should I buy a heat pump?",
+                "depth": "standard",
+                "passages": []
+              },
+              "schema": {
+                "$ref": "#/components/schemas/ResearchStartRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the boundary refused: nothing was started",
+            "content": {
+              "application/json": {
+                "example": {
+                  "started": false,
+                  "job_id": null,
+                  "question": null,
+                  "topic": "heat pumps winter bills",
+                  "links": [],
+                  "depth": null,
+                  "refusal": "no_candidate_passed"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchStarted"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "queued",
+            "content": {
+              "application/json": {
+                "example": {
+                  "started": true,
+                  "job_id": "d0d0d0d0-0000-4000-8000-000000000001",
+                  "question": "What is known about heat pumps and winter heating bills?",
+                  "topic": "heat pumps winter bills",
+                  "links": [
+                    "https://news.example.org/heat-pumps"
+                  ],
+                  "depth": {
+                    "name": "standard",
+                    "rounds": 2,
+                    "max_fetch": 40,
+                    "wall_ms": 600000
+                  },
+                  "refusal": null
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchStarted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the research service is not configured or did not answer",
             "content": {
               "application/json": {
                 "schema": {

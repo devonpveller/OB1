@@ -29,6 +29,15 @@ const FLAG_BY_ID = /\/flags\/\{id\}/;
 // 6. rw-inlet-stamp (slot 470): the podcast model's fixtures belong to a real-shaped lab subject, lab-podcaster-0001 (an
 //    owner is never the literal 'operator'); its operations are called as that subject through the seam's test
 //    identity header (the lab workbench runs with WORKSPACE_IDENTITY_HEADER=X-Test-Sub).
+// 7. rwr-research-start-api: POST /workbench/research and /research/preview act through the research service's request
+//    boundary (the Dredd lab runs none); src/contracts/research_start_test.ts (fakes) and the research service's
+//    start.e2e.test.ts (the real door over a lab database) exercise them.
+// round 2 (tester attempt 1): exactly these two operations - POST of the two paths, matched on the request itself,
+// never a future /workbench/research/... route (run-contract-tests.ps1 counts the same two in $hookSkipped)
+const RESEARCH_START_URI = /^\/workbench\/research(\/preview)?(\?|$)/;
+const isResearchStart = (t) => !!(t && t.request && String(t.request.method || '').toUpperCase() === 'POST' &&
+  RESEARCH_START_URI.test(String(t.request.uri || '')));
+
 const PODCAST_MODEL = /\/(podcasts|presenters|teams)(\/|$| )/;
 
 // 7. rw-owner-private-view (slot 480): the owner's private views answer the signed-in owner only (or the configured
@@ -43,7 +52,7 @@ hooks.beforeEach((transaction, done) => {
     transaction.request.headers['X-Test-Sub'] = 'lab-podcaster-0001';
   }
   const code = String(transaction.expected && transaction.expected.statusCode);
-  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || FLAG_BY_ID.test(String(transaction.name || '')) || PRIVATE_BY_ID.test(String(transaction.name || ''));
+  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || FLAG_BY_ID.test(String(transaction.name || '')) || PRIVATE_BY_ID.test(String(transaction.name || '')) || isResearchStart(transaction);
   done();
 });
 

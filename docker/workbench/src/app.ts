@@ -67,6 +67,8 @@ import { settingsRouter } from "./settings/routes.ts";
 import { refetchClient, researchClient } from "./documents/clients.ts";
 import { createContractApp, openApiDocument } from "./contracts/app.ts";
 import { contractDeps } from "./contracts/wiring.ts";
+import { DocError, readDocument } from "./documents/repo.ts";
+import type { Identity } from "./middleware/identity.ts";
 import { privateViewsMode } from "./identity/private_view.ts";
 
 // deno-postgres returns BIGINT columns (e.g. entities.id, thoughts.id) as JS
@@ -88,7 +90,21 @@ app.route("/workbench/health", health);
 // The retrieval contract's OpenAPI document. Bare path unauthenticated like /health (internal
 // only: the service is never host-published except the loopback debug port); the
 // prefix-inclusive path is what the viewer forwards, behind the key gate below.
-const cdeps = contractDeps();
+// rwr-research-start-api: the start's owner-checked document read is injected here (documents/repo.ts stays out of
+// the contract's module graph: it pulls config.ts, which reads DB_* at import time)
+const cbase = contractDeps();
+const cdeps = {
+  ...cbase,
+  readOwnDocument: async (path: string, who: Identity) => {
+    try {
+      const d = await readDocument({ db: cbase.db, reg: cbase.registry }, path, who);
+      return { path: d.path, content: d.content };
+    } catch (e) {
+      if (e instanceof DocError) return null; // another user's or a missing one: the same 404 upstream
+      throw e;
+    }
+  },
+};
 const contract = createContractApp(cdeps);
 // research-workbench P2b: the documents API shares the contract's database seam and registry reader.
 export const docDeps = { db: cdeps.db, reg: cdeps.registry, embed: cdeps.embed, chunk: cdeps.chunk, research: researchClient(), refetch: refetchClient() };

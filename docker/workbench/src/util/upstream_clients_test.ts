@@ -8,6 +8,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { researchActions } from "../sessions/client.ts";
 import { researchClient } from "../documents/clients.ts";
+import { doorClient } from "../contracts/repo/research_start.ts";
 import { gateClient } from "../fetch-gate/client.ts";
 import { httpScorer } from "../contracts/logic/reopen.ts";
 import { createResolver } from "../export/resolver.ts";
@@ -63,6 +64,13 @@ export const CLIENTS: Record<string, { sites: number; drive: { name: string; run
       { name: "research steer, then the route's answer", run: async () => steerFailure(await researchActions(RS)!.steer("j", { step_id: "s", text: "t" }, WHO)) },
       { name: "research steer (raw)", run: () => researchActions(RS)!.steer("j", { step_id: "s", text: "t" }, WHO) },
       { name: "research cancel", run: () => researchActions(RS)!.cancel("j", null, WHO) },
+    ],
+  },
+  // rwr-research-start-api: the request boundary's preview and start doors (one fetch site, two calls)
+  "contracts/repo/research_start.ts": {
+    sites: 1, drive: [
+      { name: "research derived preview", run: () => doorClient(RS)!.preview({ purpose: "user-start" }) },
+      { name: "research derived start", run: () => doorClient(RS)!.start({ purpose: "user-start" }) },
     ],
   },
   "documents/clients.ts": { sites: 1, drive: [{ name: "research enqueue", run: () => researchClient(RS)!({ query: "q" }) }] },

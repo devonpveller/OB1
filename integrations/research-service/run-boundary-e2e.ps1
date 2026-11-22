@@ -174,6 +174,24 @@ try {
   $sum = Summary $o
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 6) "boundary e2e: $($sum.Value)"
 
+  # rwr-research-start-api (slot 540 is in the chain above: initdb mounts it by name): the start door, its preview and the depth presets over HTTP
+  Check ($logs -match '540-init-research-start\.sql') 'initdb ran 540-init-research-start.sql'
+  # the 420 re-run above (the grants) put 420's allow-list body back, as slot 540's header says it does: re-run 540 after it
+  $null = Dk cp (Join-Path $dockerDir 'init-research-start.sql') "${db}:/tmp/s540.sql"
+  $o = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -q -f /tmp/s540.sql
+  Check ($script:rc -eq 0) "540 re-run after 420's re-run (idempotent: the allow-list again)$(if ($script:rc) { ': ' + $o })"
+  $o = Dk exec $db psql -U postgres -d openbrain -X -tA -c "SELECT public.request_boundary_options_ok(jsonb_build_object('contract', jsonb_build_object('budget', jsonb_build_object('rounds', 1))), true), public.request_boundary_options_ok(jsonb_build_object('contract', jsonb_build_object('sources', jsonb_build_object())), true)"
+  Check (($o.Trim()) -eq 't|f') "540's allow-list answers: a budget-only contract t, a source list f ($($o.Trim()))"
+  $o = Dk run --rm --label $label --network $net `
+    -e "BND_E2E_DB_HOST=$db" -e BND_E2E_PAGES_PORT=8080 -e "BND_E2E_DB_PASSWORD=$pw" -e "BND_E2E_APP_PASSWORD=$appPw" -e NO_COLOR=1 `
+    $testTag deno test --unstable-net --allow-net --allow-env --allow-read --allow-run start.e2e.test.ts
+  $o = $o -replace [regex]::Escape($pw), '***' -replace [regex]::Escape($appPw), '***'
+  Save 'start-e2e.log' $o
+  foreach ($l in ($o -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(slot 540|preview|start|approved_question|attach to nothing|the jobs ran|sweep|search egress|two identities|idea|slot 580|user-start with):' }) { Write-Host "    $l" }
+  $sum = Summary $o
+  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 4) "start e2e (round 2: S8, an idea is not a start): $($sum.Value)"
+
+
   Write-Host '[4b] round 2: the tester''s COPY probes; TF2 through a real PostgREST (anon = service_role, no token)'
   $copy = "COPY public.research_jobs (status, origin, caller, query, anchor, options, request_kind, boundary, refinery_id) FROM STDIN WITH (FORMAT csv);`nqueued,manual,boundary,q one two,q one two,{},derived,`"{`"`"version`"`":`"`"pd0a-2`"`",`"`"lexicon`"`":`"`"$('a' * 64)`"`",`"`"verdict_id`"`":`"`"$('b' * 64)`"`"}`",22222222-2222-4222-8222-222222222222`n\.`n"
   $copyFile = Join-Path $Evidence 'copy-probe.sql'
@@ -260,6 +278,7 @@ try {
   Write-Host '[6] static: who names research_handbacks'
   $allowed = @('docker/init-request-boundary.sql', 'docker/revert-request-boundary.sql', 'integrations/research-service/boundary.ts',
     'integrations/research-service/boundary.e2e.test.ts', 'integrations/research-service/fixtures/boundary-sweep.ts',
+    'docker/init-research-start.sql', 'docker/revert-research-start.sql', 'integrations/research-service/start.e2e.test.ts',
     'integrations/research-service/fixtures/boundary-drill-check.sql', 'integrations/research-service/run-boundary-e2e.ps1', 'integrations/research-service/README.md', 'docker/docker-compose.yml',
     'docker/workbench/src/documents/isolation_sweep_test.ts', 'integrations/research-service/fixtures/boundary-pgrst-probe.ts',
     # rw-boundary-digest (slot 460): the migration that adds handback_deliver, and the digest lab's tests
