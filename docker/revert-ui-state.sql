@@ -4,8 +4,11 @@
 -- user's stored value of them, drops user_setting_clear() and the tombstone table (every key's version numbers
 -- then count from its stored row again), narrows the section and type CHECKs back to slot 400's and restores
 -- slot 400's setting_problem() and user_setting_set() text. After it the catalog is as it was after slot 400
--- alone. Run it BEFORE revert-settings.sql, and after the revert of any later migration that added 'ui' keys
--- (the narrowed CHECK would refuse their rows). Take a pg_dump of public.user_settings first if any of it matters.
+-- alone. ORDER: put the PREVIOUS workbench image back FIRST (the new image reads the tombstone table and calls
+-- user_setting_clear() on every settings request, so with this file applied under it GET /workbench/settings and
+-- every DELETE fail for every user), THEN run this file, THEN, if ever, revert-settings.sql. Also after the revert of
+-- any later migration that added 'ui' keys (the narrowed CHECK would refuse their rows). Forward order: slot 400, a
+-- fresh DB backup, init-ui-state.sql, then the new workbench image; re-run init-ui-state.sql after any re-run of 400. Take a pg_dump of public.user_settings first if any of it matters.
 -- Idempotent: a second run changes nothing.
 \set ON_ERROR_STOP on
 BEGIN;

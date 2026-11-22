@@ -684,7 +684,7 @@ listed read-only.
 |---|---|
 | `GET /workbench/settings` | my settings (the user tier, the seam's subject only) and `admin` (whether I see the Admin section) |
 | `PUT /workbench/settings/:key` `{value, version?}` | set one of mine; an admin key is 403, a read-only key 409, a value the registry refuses 400, a stale `version` 409 |
-| `DELETE /workbench/settings/:key` | mine back to the default |
+| `DELETE /workbench/settings/:key[?version=N]` | mine back to the default. With `?version=N` it is a versioned delete: a stale N is 409, a malformed one 400. A delete is itself a version (a tombstone keeps the key's version number, so versions never go back and the next `PUT` sends that version) |
 | `GET /workbench/settings/admin` | admins only: the shared settings, research tuning among them (read-only) |
 | `PUT` / `DELETE /workbench/settings/admin/:key` | admins only: an editable shared setting |
 
@@ -694,6 +694,19 @@ configured - the single-user mode as shipped - the default subject `WORKSPACE_DE
 or another header user). Settings is a user front end: a service key gets 403 (`USER_ONLY`). Lab:
 `run-workspace-tests.ps1 -Subnet <x.y.z.0/24>` [5j]-[5m] (+ the e2e's ST1 and B's settings in the sweep), or
 `-SettingsOnly` for those and the sweep; `-Red -SettingsOnly -BaseSha <sha>` stages the base's chain too.
+
+### The per-user UI state keys (rwr-ui-state-keys, slot 490)
+
+`init-ui-state.sql` (slot 490; revert `revert-ui-state.sql`) keeps four things with the account instead of the browser, as user-tier keys
+of the store above: `ui.locked_document`, `ui.last_document` (a `documents/` path), `ui.start_screen` (an enum) and `library.recent` (the
+Recently viewed list: the new `ref_list` type, at most 24 `{kind, id[, locked]}` items). They go in a new settings section `ui` and hold identifiers
+and a screen name, never document text; they are read and written only through `/workbench/settings/:key` for the seam's subject. The slot also adds
+`public.user_setting_tombstones` and `user_setting_clear()` (the versioned DELETE above), serialises `user_setting_set()` per (owner, key) with an advisory
+lock, and REPLACES slot 400's `setting_problem` and `user_setting_set`. Order: forward = slot 400, a fresh DB backup, `init-ui-state.sql`, then the new
+workbench image; re-run it after ANY re-run of slot 400 (400's text puts the old functions back: ref_list refused, and a versioned write of a once-deleted
+key is a 409 until 490 runs). Rollback = the previous workbench image FIRST (the new one reads the tombstone table), then `revert-ui-state.sql`, then, if ever,
+`revert-settings.sql`. Lab: `run-workspace-tests.ps1` step `[5j2]` (the integration test over the real workbench and database: two identities, stale
+version, validation, the database guard, a trashed document) and `[5m2]` (the slot's init / revert cycle); both run under `-SettingsOnly`.
 
 ## My private material (rw-owner-private-view, plan 08 PD-PV, slot 480)
 

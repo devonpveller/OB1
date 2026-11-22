@@ -16,10 +16,15 @@
 --     send version 0 cannot both win; user_setting_clear() is the versioned DELETE (a delete is a new version).
 --   * four rows: ui.locked_document, ui.last_document (string, doc_path), ui.start_screen (enum),
 --     library.recent (ref_list, capped at 24, kinds source/claim/topic/gap/document/idea/run).
--- Additive and idempotent (a re-run restores exactly what is written here). Fresh-volume slot 490; live:
--- psql -f BEFORE the new workbench image, after a fresh DB backup. Revert: revert-ui-state.sql (discards the
--- four keys' stored values and every tombstone; it runs BEFORE revert-settings.sql, and after the revert of any
--- later migration that added 'ui' keys).
+-- Additive and idempotent (a re-run restores exactly what is written here). Fresh-volume slot 490; live: after
+-- slot 400 and a fresh DB backup, psql -f BEFORE the new workbench image.
+-- RE-RUN IT AFTER ANY RE-RUN OF SLOT 400: this file replaces two of 400's functions (setting_problem and
+-- user_setting_set), and a re-run of 400 puts 400's text back (ref_list refused, no doc_path rule, no advisory
+-- lock, no tombstone check, so every versioned write of a key that was ever deleted is a 409 until this file runs).
+-- Revert, in this order: put the PREVIOUS workbench image back FIRST (the new one reads the tombstone table and
+-- calls user_setting_clear on every settings request), then revert-ui-state.sql (discards the four keys' stored
+-- values and every tombstone; after the revert of any later migration that added 'ui' keys), then, if ever,
+-- revert-settings.sql.
 -- ============================================================
 \set ON_ERROR_STOP on
 BEGIN;

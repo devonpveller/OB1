@@ -1378,6 +1378,8 @@ try {
     Write-Host '[5m2] init-ui-state.sql x2, revert-ui-state.sql x2 (the catalog is as after slot 400 alone), init again'
     $fp = { & $q "SELECT md5(coalesce((SELECT string_agg(conname || ':' || pg_get_constraintdef(oid), '|' ORDER BY conname) FROM pg_constraint WHERE conrelid = 'public.settings_keys'::regclass), '') || (SELECT string_agg(replace(pg_get_functiondef(p.oid), chr(13), '') || coalesce(p.proacl::text, '') || pg_get_userbyid(p.proowner), '#' ORDER BY p.proname) FROM pg_proc p WHERE p.proname IN ('setting_problem', 'user_setting_set', 'user_setting_clear')) || (SELECT count(*)::text FROM public.settings_keys) || (to_regclass('public.user_setting_tombstones') IS NOT NULL)::text)" }
     $null = & $q "INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('ui-revert-$rand', 'refinery.dormancy_days', '9') ON CONFLICT DO NOTHING"
+    # 400's cycle above ends on slot 400's own text, so the baseline is 'slot 400 alone'; this section's last init is the
+    # re-run of 490 after that 400 re-run (init-ui-state.sql's header: re-run it after any re-run of 400), checked below
     $f400 = & $fp
     $uiRows = { & $q "SELECT count(*) FROM public.settings_keys WHERE key IN ('ui.locked_document','ui.last_document','ui.start_screen','library.recent')" }
     $rv5 = @("after slot 400 alone: $f400 | ui keys $(& $uiRows)")
@@ -1398,6 +1400,7 @@ try {
     Check ($rv5[1] -match "-> $f490 \| ui keys 4" -and $rv5[2] -match "-> $f490 \| ui keys 4" -and $rv5[5] -match "-> $f490 \| ui keys 4") '[5m2] slot 490: a second init changes nothing, init again restores the same catalog and four keys'
     Check ($rv5[3] -match 'ui values 0$' -and $rv5[4] -match 'ui values 0$') '[5m2] slot 490: the revert discarded the stored ui values (documented)'
     Check ((& $q "SELECT count(*) FROM public.user_settings WHERE key = 'refinery.dormancy_days' AND owner_sub = 'ui-revert-$rand'") -eq '1') '[5m2] slot 490: the revert touched no other key''s stored value'
+    Check ((& $q "SELECT (to_regprocedure('public.user_setting_clear(text,text,integer)') IS NOT NULL)::text || ' ' || (SELECT count(*) FROM public.settings_keys WHERE key IN ('ui.locked_document','ui.last_document','ui.start_screen','library.recent'))::text") -eq 'true 4') '[5m2] slot 490 is back in force after the 400 re-runs above (user_setting_clear and the four keys; 490 is re-run after any 400 re-run)'
     $null = & $q "DELETE FROM public.user_settings WHERE owner_sub = 'ui-revert-$rand'"
   }
   if (-not $Red) {

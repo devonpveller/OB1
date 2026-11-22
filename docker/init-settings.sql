@@ -1,7 +1,9 @@
 -- ============================================================
 -- The settings store (research-workbench rw-settings-store, plan 08 PD3). Slot 400.
 -- The workspace Settings panel is the one place a user changes their own settings and an admin the
--- shared ones. Later items only ADD KEYS (a row in settings_keys); nothing else changes.
+-- shared ones. Later items mostly ADD KEYS (a row in settings_keys). Exception: slot 490 (init-ui-state.sql)
+-- also widens the section and type CHECKs and REPLACES two functions of this file (setting_problem and
+-- user_setting_set); re-running THIS file puts the slot-400 text back, so run 490 again after any re-run here.
 --   * settings_keys: the registry. One row per key: its tier (user = per owner_sub; admin = shared,
 --     changed by an admin only), its type, the code default and the env variable the reading service
 --     falls back to, which service reads it and when, its validation, and whether it is editable here
