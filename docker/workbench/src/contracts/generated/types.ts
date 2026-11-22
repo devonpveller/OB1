@@ -1144,6 +1144,46 @@ export type ReportCredibility = {
   statement: string;
 };
 
+export type ResearchStartAttach = {
+  kind: string;
+  path?: string;
+  id?: string;
+};
+
+export type ResearchStartDepth = {
+  name: string;
+  rounds: number;
+  max_fetch: number;
+  wall_ms: number;
+} | null;
+
+export type ResearchStartPreview = {
+  question: string | null;
+  topic: string | null;
+  links: Array<string>;
+  depth: ResearchStartDepth;
+  refusal: string | null;
+  ok: boolean;
+};
+
+export type ResearchStartRequest = {
+  attach?: ResearchStartAttach;
+  question: string;
+  depth?: string;
+  passages?: Array<string>;
+  approved_question?: string;
+};
+
+export type ResearchStarted = {
+  question: string | null;
+  topic: string | null;
+  links: Array<string>;
+  depth: ResearchStartDepth;
+  refusal: string | null;
+  started: boolean;
+  job_id: string | null;
+};
+
 export type RollupWeight = {
   family: string; /** registry: source_families */
   weight: number;

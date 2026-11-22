@@ -32,9 +32,11 @@ import { resolveContract } from "./contract.ts";
 import { createChat, isModelDownError, ModelDownError, ModelHealth, type ChatOpts } from "./llm.ts";
 import { cancelQueued, DeadlineError, Dispatcher, JobCancelled, jobStatus, markCancelled, parseDeadline, pauseForModelDown, SlotGate, type ClaimedJob } from "./jobs.ts";
 import { type Caller, callerFor, inletRef, MismatchLog, onBehalfOf, parseCallers, parseServiceCallers, promptOwner, requestKindOf, resolveOrigin } from "./origin.ts";
-import { formDerivedRequest, insertDerivedJob, openHandback, parseDeliveries, parseDoorBody, recordDelivery, parseProposals, PROPOSER_SYSTEM, proposerUser, publicAddress, sha256Hex } from "./boundary.ts";
+import { type BoundaryDeps, insertDerivedJob, openHandback, parseDeliveries, parseDoorBody, recordDelivery, parseProposals, PROPOSER_SYSTEM, proposerUser, publicAddress, sha256Hex } from "./boundary.ts";
 import { canonicalLink } from "./boundary-gate.ts";
 import { approveIdeaQuestion, drainIdeaHandbacks } from "./boundary-ideas.ts";
+import { runCeilings } from "./depth.ts";
+import { formForDoor, previewBody, startChanged } from "./start.ts";
 import { actorOf, FOREIGN_PROMPTS_SQL, HIDDEN_STEER_TEXTS_SQL, nonActorView, LISTED_FOR, MAY_ACT_SQL, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
 import { assess } from "./admission.ts";
@@ -1134,20 +1136,20 @@ const dispatcher = new Dispatcher({
 });
 function wake(): void { dispatcher.wake(); }
 
-// rw-boundary-core / rw-boundary-ideas: what the boundary may use - the local model (proposals only, D9), the anonymous
+// rw-boundary-core / rw-boundary-ideas / rwr-research-start-api (the preview): what the boundary may use - the local model (proposals only, D9), the anonymous
 // public-page fetch, the owner's identity tokens (the workbench's identity seam records them) and the resolver (TF6)
-const boundaryDeps = {
-  propose: async (it: Parameters<typeof proposerUser>[0], ev: Parameters<typeof proposerUser>[1]) =>
+const boundaryDeps: BoundaryDeps = {
+  propose: async (it, ev) =>
     parseProposals(await chat(PROPOSER_SYSTEM, proposerUser(it, ev),
       { json: true, nothink: true, tags: ["request-boundary"], signal: AbortSignal.timeout(BOUNDARY_PROPOSE_TIMEOUT_MS) })),
-  fetchPublic: async (u: string) => {
+  fetchPublic: async (u) => {
     const r = await fetchPage(u);
     if (!r.page) return null;
     // a redirect onto a private host or a token path is not a public page
     if (r.finalUrl && !("url" in canonicalLink(r.finalUrl))) return null;
     return { title: r.page.title, text: r.page.content };
   },
-  identity: async (sub: string) => {
+  identity: async (sub) => {
     const c = await pool.connect();
     try {
       const r = await c.queryObject<{ name: string; email: string }>(`SELECT name, email FROM public.workspace_users WHERE sub = $1`, [sub]);
@@ -1380,6 +1382,23 @@ Deno.serve({ port: PORT }, async (req) => {
     }
   }
 
+  // rwr-research-start-api: the PREVIEW of the door - the same parse and the same formForDoor (formDerivedRequest) as
+  // the start below, and no write of any kind: no job, no hand-back, no queue wake (it takes no transaction at all).
+  // -> 200 {ok:true, question, topic, links, depth} | {ok:false, refusal}
+  if (req.method === "POST" && url.pathname === "/research/derived/preview") {
+    if (!authed(req, url)) return Response.json({ error: "unauthorized" }, { status: 401 });
+    let raw: unknown;
+    try { raw = await req.json(); } catch { return Response.json({ error: "bad json" }, { status: 400 }); }
+    const parsed = parseDoorBody(raw);
+    if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
+    try {
+      return Response.json(previewBody(await formForDoor(parsed, boundaryDeps), parsed.run, runCeilings()), { status: 200 });
+    } catch (e) {
+      console.error(`[boundary] previewing the request failed (${(e as Error).name})`);
+      return Response.json({ error: "boundary_failed" }, { status: 422 });
+    }
+  }
+
   // rw-boundary-core (plan 09 2.2-2.5, PD0a): THE DOOR for research formed from personal data. The caller sends the
   // personal item (transient: never stored here), the purpose and where the result goes; the boundary forms a public
   // question (the local model proposes, the pure gate decides, the title template is the fallback) and writes ONE
@@ -1402,18 +1421,23 @@ Deno.serve({ port: PORT }, async (req) => {
     // only that caller can record its delivery (POST /research/derived/delivered)
     const deliver = { ...parsed.deliver, caller: callerOf(req, url)?.name ?? "unknown" };
     // round 2 (TF5): whatever the item holds, the door answers a fixed code - never an unhandled 500
-    let verdict: Awaited<ReturnType<typeof formDerivedRequest>>;
+    let verdict: Awaited<ReturnType<typeof formForDoor>>;
     try {
-      verdict = await formDerivedRequest(item, purpose, boundaryDeps);
+      verdict = await formForDoor(parsed, boundaryDeps);
     } catch (e) {
       console.error(`[boundary] forming the request failed (${(e as Error).name})`);
       return Response.json({ error: "boundary_failed" }, { status: 422 });
+    }
+    // rwr-research-start-api: the owner approved a preview; what would leave is not that question any more -> nothing
+    // is created, and the answer carries the new one for a fresh preview
+    if (startChanged(verdict, parsed.approved) && verdict.ok) {
+      return Response.json({ changed: true, ...previewBody(verdict, run, runCeilings()) }, { status: 409 });
     }
     if (!verdict.ok && verdict.refusal === "no_owner") return Response.json({ refused: "no_owner", handback_id: null }, { status: 200 });
     const c = await pool.connect();
     try {
       await c.queryObject("BEGIN");
-      const jobId = verdict.ok ? await insertDerivedJob(c, verdict.request, run) : null;
+      const jobId = verdict.ok ? await insertDerivedJob(c, verdict.request, run, runCeilings()) : null;
       // rw-boundary-ideas: an idea never comes through this door (refused above), so a refusal here is final
       const state = verdict.ok ? "queued" as const : "refused" as const;
       const handbackId = await openHandback(c, {
@@ -1423,7 +1447,7 @@ Deno.serve({ port: PORT }, async (req) => {
       await c.queryObject("COMMIT");
       if (jobId) {
         wake();
-        return Response.json({ job_id: jobId, status: "queued" }, { status: 202 });
+        return Response.json({ job_id: jobId, status: "queued", ...(purpose === "user-start" ? previewBody(verdict, run, runCeilings()) : {}) }, { status: 202 });
       }
       return Response.json({ refused: (verdict as { refusal: string }).refusal, handback_id: handbackId }, { status: 200 });
     } catch (e) {
