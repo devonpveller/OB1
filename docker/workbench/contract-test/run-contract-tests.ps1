@@ -421,11 +421,21 @@ try {
   # cleanup_integration_test.ts exercises them in run-workspace-tests.ps1) - the same five paths, counted here
   # rwr-research-start-api: POST /workbench/research and /workbench/research/preview (one operation each; dredd-hooks.js
   # isResearchStart skips exactly these two - they act through the research service, which this lab does not run)
-  $hookSkipped = @($docJson.paths.PSObject.Properties | Where-Object { $_.Name -match '/sessions/\{id\}/(steer|cancel)$' -or
-    $_.Name -match '/cleanup/(sources/\{id\}/(sever|erase)|process-all|tombstones/\{id\}/lift|actions/\{id\})$' -or
-    $_.Name -match '/private/(claims|jobs)/\{id\}$' -or
-    $_.Name -match '^/workbench/research(/preview)?$' }).Count + 2  # rw-owner-private-view: the owner-only by-id reads (PRIVATE_BY_ID); rwr-flags-api: +2 = GET and PATCH /flags/{id} (FLAG_BY_ID; one path, two operations)
-  Check ($dm.Success -and $dm.Groups[2].Value -eq '0' -and $dm.Groups[3].Value -eq '0' -and [int]$dm.Groups[1].Value -eq ($ops - $hookSkipped)) "Dredd: $($dm.Value) (operations in the document: $ops; skipped by the hooks: $hookSkipped)"
+  # Expected passing transactions = every 2xx or typed-501 response of every operation the hooks do not skip (Dredd
+  # makes one transaction per response example, so an operation with a 200 and a 206 - rwr-podcast-audio-api - is two).
+  # Counted from the document, never a hard-coded +1: a skipped or missing transaction still fails this check.
+  $skipPath = @('/sessions/\{id\}/(steer|cancel)$', '/cleanup/(sources/\{id\}/(sever|erase)|process-all|tombstones/\{id\}/lift|actions/\{id\})$',
+    '/private/(claims|jobs)/\{id\}$', '^/workbench/research(/preview)?$', '/flags/\{id\}$')  # flags: GET and PATCH (FLAG_BY_ID)
+  $expected = 0; $hookSkipped = 0
+  foreach ($p in $docJson.paths.PSObject.Properties) {
+    $skip = $false
+    foreach ($re in $skipPath) { if ($p.Name -match $re) { $skip = $true } }
+    foreach ($op in $p.Value.PSObject.Properties) {
+      if ($skip) { $hookSkipped++; continue }
+      $expected += @($op.Value.responses.PSObject.Properties | Where-Object { $_.Name -match '^2\d\d$' -or $_.Name -eq '501' }).Count
+    }
+  }
+  Check ($dm.Success -and $dm.Groups[2].Value -eq '0' -and $dm.Groups[3].Value -eq '0' -and [int]$dm.Groups[1].Value -eq $expected) "Dredd: $($dm.Value) (expected passing 2xx/501 transactions: $expected; operations in the document: $ops, skipped by the hooks: $hookSkipped)"
 
   # ---------------------------------------------------------------- 6. eleven-router smoke
   Write-Host '[6] the eleven-router smoke against the :wt workbench (capture twice, compare)'
