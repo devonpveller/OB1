@@ -51,16 +51,19 @@ const VOICE_COLS = `v.id, v.route, v.voice, v.speed::float8 AS speed, v.created_
   COALESCE((SELECT json_agg(json_build_object('id', p.id, 'name', p.name) ORDER BY p.name, p.id)
               FROM public.podcast_presenters p WHERE p.voice_link_id = v.id AND p.owner_sub = v.owner_sub), '[]'::json) AS used_by`;
 
+// deno-postgres hands float8 back as a string: the wire carries a number (as repo/private.ts)
+const voiceRow = (r: Row | undefined) => (r ? { ...r, speed: Number(r.speed) } : null);
+
 export async function listVoices(db: Db, sub: string, limit: number) {
-  const voices = await db.query<Row>(
+  const voices = (await db.query<Row>(
     `SELECT ${VOICE_COLS} FROM public.podcast_voice_links v WHERE v.owner_sub = $1 ORDER BY v.voice, v.id LIMIT $2`, [sub, limit],
-  );
+  )).map(voiceRow);
   const total = (await db.query<{ n: number }>(`SELECT count(*)::int AS n FROM public.podcast_voice_links WHERE owner_sub = $1`, [sub]))[0].n;
   return { voices, total };
 }
 
 export async function getVoice(db: Db, sub: string, id: string) {
-  return (await db.query<Row>(`SELECT ${VOICE_COLS} FROM public.podcast_voice_links v WHERE v.id = $1 AND v.owner_sub = $2`, [id, sub]))[0] ?? null;
+  return voiceRow((await db.query<Row>(`SELECT ${VOICE_COLS} FROM public.podcast_voice_links v WHERE v.id = $1 AND v.owner_sub = $2`, [id, sub]))[0]);
 }
 
 export async function createVoice(db: Db, sub: string, b: { route: string; voice: string; speed?: number }) {
