@@ -69,8 +69,9 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION public.user_document_trail_no_edit() FROM PUBLIC;
 DROP TRIGGER IF EXISTS trg_user_document_trail_no_update ON public.user_document_trail;
+-- statement-level, so the refusal does not depend on row-level security showing the caller a row
 CREATE TRIGGER trg_user_document_trail_no_update BEFORE UPDATE ON public.user_document_trail
-    FOR EACH ROW EXECUTE FUNCTION public.user_document_trail_no_edit();
+    FOR EACH STATEMENT EXECUTE FUNCTION public.user_document_trail_no_edit();
 DROP TRIGGER IF EXISTS trg_user_document_trail_no_truncate ON public.user_document_trail;
 CREATE TRIGGER trg_user_document_trail_no_truncate BEFORE TRUNCATE ON public.user_document_trail
     FOR EACH STATEMENT EXECUTE FUNCTION public.user_document_trail_no_edit();
