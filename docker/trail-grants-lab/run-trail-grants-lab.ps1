@@ -104,7 +104,8 @@ try {
   $bad = Join-Path $work 'bad-510.sql'
   [IO.File]::WriteAllText($bad, ($newText -replace '(?m)^COMMIT;', "SELECT 1/0;`nCOMMIT;"), (New-Object Text.UTF8Encoding $false))
   $r = PsqlFile $bad
-  Check ($r.rc -ne 0 -and $r.out -match 'division by zero') '510 with a failing last statement exits non-zero'
+  Save '510-failing-copy.log' $r.out
+  Check ($r.rc -ne 0 -and $r.out -match 'division by zero') "510 with a failing last statement exits non-zero (rc $($r.rc): $((($r.out -split "`n") | Select-Object -First 2) -join ' / '))"
   Check ((Catalog) -eq $before) 'and it changed nothing: the catalog is still the starting point (one transaction)'
   $r = PsqlFile $new; Save '510-rerun-1.log' $r.out
   Check ($r.rc -eq 0) 'new 510 runs cleanly on a database that already ran the previous one'
