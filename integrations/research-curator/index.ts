@@ -38,6 +38,7 @@ import { Client, Pool } from "postgres";
 import { FILING_LOCK_WAIT_MS_DEFAULT, FilingInProgress, FilingLock, type LockClient, lockWaitMsFromEnv } from "./filing-lock.ts";
 import { claimMetadataFor, writeClaims, detectConflicts, parseSynthesisClaims, META_JUDGE_SYS, type WriteClaimsResult, type ConflictVerdict } from "./claims.ts";
 import { ResilientPool } from "./pool.ts";
+import { restatesPrivateClaim, threadTextFor } from "./private-claims.ts";
 
 // --- Config -----------------------------------------------------------------
 const DB_HOST = Deno.env.get("DB_HOST") || "openbrain-db";
@@ -254,6 +255,11 @@ async function decideThread(pkg: Pkg, shortlist: Candidate[]): Promise<Decision>
 
 // --- Thread creation / maintenance ------------------------------------------
 
+// a pooled client as private-claims.ts's query shape
+// deno-lint-ignore no-explicit-any
+const dbBool = (c: any) => async (sql: string, args: unknown[]) =>
+  (await c.queryObject(sql, args)).rows as Array<{ shows: boolean | null }>;
+
 /** Create a thread. slug is left NULL — the wiki compiler pins the canonical
  *  slug (G5: never slugify outside the shared module). */
 async function createThread(name: string, description: string): Promise<string> {
@@ -279,6 +285,10 @@ const REFRESH_SYS = `You maintain the scope DESCRIPTION of an Open Brain researc
 async function refreshThread(threadId: string, pkg: Pkg): Promise<void> {
   const client = await pool.connect();
   try {
+    // rw-private-report-claims-fix round 2: a synthesis that restates a private-report claim never re-describes a
+    // shared thread (slot 570 decides; fail closed)
+    if (await restatesPrivateClaim(dbBool(client), `${pkg.claim || ""}
+${pkg.synthesis || ""}`)) return;
     const cur = await client.queryObject<{ name: string; description: string | null }>(
       `SELECT name, description FROM threads WHERE id = $1`,
       [threadId],
@@ -372,8 +382,15 @@ async function resolve(pkg: Pkg, claimEmb: number[], mayCreate = true): Promise<
   }
 
   if (!mayCreate) return unthreaded(decision.confidence, shortlist);
-  const name = (decision.new_thread_name || hint).slice(0, 200);
-  const desc = (decision.new_thread_description || (pkg.claim || "").slice(0, 400)).slice(0, 2000);
+  // rw-private-report-claims-fix round 2: a report that restates a private-report claim mints no description from
+  // itself (and no name that carries it) - threads are shared
+  const c0 = await pool.connect();
+  let name: string, desc: string;
+  try {
+    ({ name, description: desc } = await threadTextFor(dbBool(c0), (decision.new_thread_name || hint).slice(0, 200),
+      (decision.new_thread_description || (pkg.claim || "").slice(0, 400)).slice(0, 2000), `${pkg.claim || ""}
+${pkg.synthesis || ""}`));
+  } finally { c0.release(); }
   const id = await createThread(name, desc);
   return { thread_id: id, decision: "new", confidence: decision.confidence, name, shortlist };
 }

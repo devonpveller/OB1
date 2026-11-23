@@ -6,6 +6,7 @@ import type { Context } from "hono";
 import * as repo from "../repositories/notes.ts";
 import { publicError } from "../util/public-error.ts";
 import { changeAuthor } from "../identity/author.ts";
+import { identityOf } from "../middleware/identity.ts";
 
 export const notes = new Hono();
 
@@ -195,7 +196,8 @@ notes.put("/:notePath{.+}", async (c) => {
   // it's a working-draft write (autosave) — committed later at the next compile.
   const commit = c.req.query("commit") === "1";
   try {
-    const res = await repo.writeNote(notePath, content, ifMatch, { commit, author: authorOf(c) });
+    // rw-private-report-claims-fix round 2 (A1): the writer's subject, for slot 570's note guard (own claims only)
+    const res = await repo.writeNote(notePath, content, ifMatch, { commit, author: authorOf(c), authorSub: (await identityOf(c)).sub });
     if ("conflict" in res) {
       return c.json({ error: "conflict", current_hash: res.current }, 409);
     }

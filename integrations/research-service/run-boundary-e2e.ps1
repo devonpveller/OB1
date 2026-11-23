@@ -189,7 +189,7 @@ try {
   Save 'start-e2e.log' $o
   foreach ($l in ($o -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(slot 540|preview|start|approved_question|attach to nothing|the jobs ran|sweep|search egress|two identities|idea|slot 580|user-start with):' }) { Write-Host "    $l" }
   $sum = Summary $o
-  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 4) "start e2e (round 2: S8, an idea is not a start): $($sum.Value)"
+  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 5) "start e2e (round 2: S8, an idea is not a start; rw-private-report-claims-fix: S9, no private-claim oracle): $($sum.Value)"
 
 
   Write-Host '[4b] round 2: the tester''s COPY probes; TF2 through a real PostgREST (anon = service_role, no token)'
@@ -290,7 +290,14 @@ try {
     'integrations/research-service/boundary-ideas.e2e.test.ts', 'integrations/research-service/run-boundary-ideas-lab.ps1',
     'integrations/research-service/fixtures/boundary-ideas-drill-check.sql', 'integrations/openbrain-idea-refinery/index.ts',
     'integrations/openbrain-idea-refinery/deliver.ts', 'integrations/openbrain-idea-refinery/deliver.test.ts',
-    'integrations/research-service/boundary-ideas.test.ts', 'docker/workbench/src/ideas/review_test.ts')
+    'integrations/research-service/boundary-ideas.test.ts', 'docker/workbench/src/ideas/review_test.ts',
+    # rw-private-report-claims-fix (slot 570, A1): the derived-question guard is a trigger ON research_handbacks (it reads
+    # the row's owner and job only); its revert drops it, its check script counts it, its lab test calls handback_open
+    'docker/init-private-report-claims.sql', 'docker/revert-private-report-claims.sql', 'docker/check-private-report-claims.sql',
+    'docker/workbench/src/inlet/private_report_claims_integration_test.ts',
+    # rwr-idea-capture-api (landed on development with OB1 b81eedd): the ideas integration test reads the hand-back
+    # through slot 580's owner-scoped idea_handback_* functions and asserts one row as the lab's superuser
+    'docker/workbench/src/ideas/ideas_integration_test.ts')
   $names = @(Get-ChildItem -Path $ob1 -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\(node_modules|\.git|archive)\\' -and $_.Length -lt 5MB } |
     Where-Object { Select-String -Path $_.FullName -Pattern 'research_handbacks|handback_(open|pending|claim|deliverables|delivered|owned|deliver)' -Quiet } |
     ForEach-Object { $_.FullName.Substring($ob1.Length + 1).Replace('\', '/') })

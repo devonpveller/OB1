@@ -3,15 +3,19 @@
 --   psql -X -A -t -q -f count-private-report-claim-reuse.sql
 -- Works before slot 570 (the claims are still in public.claims) and after it (in the owner's store).
 -- The question: how many SHARED outputs carry the text of a claim drawn from a PRIVATE report (a "generated series" in
--- the operator's words)? Slot 570 leaves all of these as they are (the developer default "mixed stays shared"):
---   mixed claims        - a private-report claim a shared synthesis ALSO filed (claims.synthesis_id set; 570 keeps it
---                         shared, in public.claims, readable by everyone);
+-- the operator's words)? Operator decision P2 (2026-11-22, fix item rw-private-report-claims-fix): slot 570 moves every
+-- one of these private to the claim's owner, or withholds it when it restated claims of several owners (or of nobody),
+-- so after 570 lines 2-5 read 0 (run it BEFORE 570 for the live figures - the deploy window's first step):
+--   mixed claims        - a private-report claim a shared synthesis ALSO filed (claims.synthesis_id set; 570 moves it
+--                         like every other private-report claim);
 --   shared syntheses    - a shared research_synthesis source whose content carries a private-report claim's sentence
 --                         (the claim was recalled and restated, or the same sentence came out of a shared run);
 --   shared job reports  - a shared research job (no private report owns its tree) whose result synthesis / prose / the
---                         line credibility carries one (the job reused it: 570 strips the reuse LIST, not the report);
+--                         line credibility carries one (the job reused it);
 --   gap-branch reports  - of those, the ones that are a gap branch asking to verify such a claim (its own research
---                         about the private sentence).
+--                         about the private sentence);
+--   threads             - (round 2) a thread whose name or description carries one (minted / refreshed from a report);
+--   other shared claims - (round 2) a shared claim, not a private report's own, carrying one (a synthesis filed it).
 -- A sentence counts after 570's normalisation (case, whitespace, citation markers, emphasis); sentences under 24
 -- characters are not matched.
 CREATE OR REPLACE FUNCTION pg_temp.prc_norm(p_text TEXT) RETURNS TEXT
@@ -78,15 +82,37 @@ shared_jobs AS (
      WHERE jsonb_typeof(j.result) = 'object'
        AND NOT EXISTS (SELECT 1 FROM public.research_job_report_owner(coalesce(j.root_job_id, j.id)))),
 jobs AS (SELECT DISTINCT j.id, j.gap_ref FROM shared_jobs j, texts t WHERE position(t.n IN j.body) > 0),
+-- fix item round 2: threads whose name / description carries one, and other shared claims (not a private report's
+-- own) carrying one (a synthesis filed its sentence into another thread)
+threads AS (
+    SELECT DISTINCT th.id FROM public.threads th, texts t
+     WHERE position(t.n IN pg_temp.prc_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, '') || ' ' || coalesce(th.slug, ''))) > 0),
+-- round 3: notebook labels (a thread's name on each filed source) and the thread names in job curator answers
+notebooks AS (
+    SELECT DISTINCT s.id FROM public.sources s, texts t
+     WHERE coalesce(s.notebook, '') <> '' AND position(t.n IN pg_temp.prc_norm(s.notebook)) > 0),
+curator AS (
+    SELECT DISTINCT j.id FROM public.research_jobs j, texts t
+     WHERE jsonb_typeof(j.result -> 'curator') = 'object'
+       AND position(t.n IN pg_temp.prc_norm(coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((
+               SELECT string_agg(x ->> 'name', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'shortlist') = 'array'
+                                                                                  THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), ''))) > 0),
+dup_claims AS (
+    SELECT DISTINCT c.id FROM public.claims c, texts t
+     WHERE c.id NOT IN (SELECT id FROM linked) AND position(t.n IN pg_temp.prc_norm(c.text)) > 0),
 claims_reused AS (
     SELECT DISTINCT t.n FROM texts t
      WHERE EXISTS (SELECT 1 FROM syn s JOIN public.sources x ON x.id = s.id WHERE position(t.n IN pg_temp.prc_norm(coalesce(x.title, '') || ' ' || coalesce(x.content, ''))) > 0)
         OR EXISTS (SELECT 1 FROM jobs j JOIN shared_jobs b ON b.id = j.id WHERE position(t.n IN b.body) > 0))
 SELECT line FROM (
     SELECT 1 AS o, 'reuse: private-report claims (any store)=' || (SELECT count(*) FROM linked) AS line
-    UNION ALL SELECT 2, 'reuse: mixed claims (a shared synthesis also filed them; shared)=' || (SELECT count(*) FROM mixed)
+    UNION ALL SELECT 2, 'reuse: mixed claims (a shared synthesis also filed them, still in the shared table)=' || (SELECT count(*) FROM mixed)
     UNION ALL SELECT 3, 'reuse: shared syntheses carrying a private-report claim''s sentence=' || (SELECT count(*) FROM syn)
     UNION ALL SELECT 4, 'reuse: shared job reports carrying one=' || (SELECT count(*) FROM jobs)
     UNION ALL SELECT 5, 'reuse: of those, gap branches verifying a claim=' || (SELECT count(*) FROM jobs WHERE gap_ref LIKE 'claim:%')
     UNION ALL SELECT 6, 'reuse: distinct private-report sentences restated in a shared output=' || (SELECT count(*) FROM claims_reused)
+    UNION ALL SELECT 7, 'reuse: threads whose name, description or slug carries one=' || (SELECT count(*) FROM threads)
+    UNION ALL SELECT 8, 'reuse: other shared claims carrying one (another thread, or a superseded synthesis)=' || (SELECT count(*) FROM dup_claims)
+    UNION ALL SELECT 9, 'reuse: shared sources whose notebook label carries one=' || (SELECT count(*) FROM notebooks)
+    UNION ALL SELECT 10, 'reuse: job curator answers naming a thread by one=' || (SELECT count(*) FROM curator)
 ) x ORDER BY o;

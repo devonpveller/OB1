@@ -326,4 +326,68 @@ Deno.test({ name: "S8. an idea is not a start: preview and start refuse it alike
   }
 }});
 
+// ── 9. rw-private-report-claims-fix (A1, operator 2026-11-22): no private-claim existence oracle at the start door ──
+// Another subject (BEE) holds a private-report claim; the owner's start whose approved question is that claim's text
+// (or embeds it) gets the same answer as a control text nobody holds - status, body keys and the question echoed, one
+// timing class. Only the owner's OWN private claim in their shared question is refused. (Tester probe of
+// rwr-research-start-api attempt 1: before the fix the claim text answered 500 and the control 202.)
+Deno.test({ name: "S9. two identities: a start carrying another user's private claim answers like a control; the owner's own claim is refused", ...opts, fn: async () => {
+  await q(su, `INSERT INTO public.workspace_users (sub, name, email) VALUES ($1, $2, $3) ON CONFLICT (sub) DO NOTHING`, [OWNER.sub, OWNER.name, OWNER.email]);
+  const CLAIM = "Does the community garden reduce food costs for families in the town";       // BEE's private claim
+  const OWN = "Does the community garden increase noise for houses near the river";          // the owner's own
+  const CONTROL = "Does the new road plan increase noise for houses near the river";         // nobody's
+  const file = async (owner: string, key: string, text: string) => {
+    const job = (await q<{ id: string }>(su, `INSERT INTO public.research_jobs (status, origin, query, finished_at) VALUES ('done', 'manual', 'a private run', now()) RETURNING id::text AS id`))[0].id;
+    await q(su, `INSERT INTO public.research_private_reports (research_key, owner_sub, job_id, title, content) VALUES ($1, $2, $3::uuid, 'a report', 'a private report body')`, [key, owner, job]);
+    await q(su, `SELECT public.private_report_claim_file($1, $2::uuid, $3, NULL, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb)`, [key, job, text]);
+  };
+  await file(BEE, "s9-bee-key", CLAIM);
+  await file(OWNER.sub, "s9-owner-key", OWN);
+  const st = stubs();
+  const svc = await startService(st.base);
+  const out: string[] = [];
+  try {
+    const body = (approved: string) => ({
+      purpose: "user-start", item: { kind: "chat", id: `start:s9-${crypto.randomUUID()}`, owner_sub: OWNER.sub, fields: { question: "tell me something" }, links: [] },
+      run: { depth: "quick" }, deliver: { attach: "none" }, approved_question: approved,
+    });
+    const shape = async (r: Response) => {
+      const t = await r.text();
+      // deno-lint-ignore no-explicit-any
+      let j: any = {}; try { j = JSON.parse(t); } catch { /* not json */ }
+      return { status: r.status, keys: Object.keys(j).sort().join(","), question: j.question ?? null, text: t };
+    };
+    const call = async (path: string, q: string) => { const t0 = performance.now(); const r = await shape(await post(svc.base, path, body(q))); return { ...r, ms: performance.now() - t0 }; };
+    // every text previews alike first (the gate passes all three)
+    for (const x of [CLAIM, OWN, CONTROL]) {
+      const pv = await call("/research/derived/preview", x);
+      assertEquals([pv.status, JSON.parse(pv.text).ok], [200, true], `preview: ${pv.text.slice(0, 200)}`);
+    }
+    const claim = [], control = [], embedded = [];
+    for (let i = 0; i < 3; i++) {
+      claim.push(await call("/research/derived", CLAIM));
+      control.push(await call("/research/derived", CONTROL));
+      embedded.push(await call("/research/derived", `Is it true that ${CLAIM.toLowerCase()}`));
+    }
+    for (const [name, rs] of [["claim", claim], ["control", control], ["embedded", embedded]] as const) {
+      assert(rs.every((r) => r.status === 202), `${name}: ${rs.map((r) => `${r.status} ${r.text.slice(0, 120)}`).join(" | ")}`);
+    }
+    assertEquals(claim[0].keys, control[0].keys, "the same body keys");
+    assertEquals(embedded[0].keys, control[0].keys, "the same body keys (embedded)");
+    assertEquals(claim.map((r) => r.question), [CLAIM, CLAIM, CLAIM], "the question echoed, as for any start");
+    const med = (rs: { ms: number }[]) => rs.map((r) => r.ms).sort((a, b) => a - b)[1];
+    out.push(`another user's claim: 3 x ${claim[0].status}, embedded 3 x ${embedded[0].status}, control 3 x ${control[0].status}; keys ${claim[0].keys}; median ms claim ${med(claim).toFixed(0)} / control ${med(control).toFixed(0)}`);
+    assert(med(claim) < 3 * med(control) + 50 && med(control) < 3 * med(claim) + 50, "one timing class");
+    // the owner's own private claim in the owner's shared question: refused (the database, 23514 -> the door's fixed 500)
+    const own = await call("/research/derived", OWN);
+    assertEquals([own.status, own.text], [500, JSON.stringify({ error: "boundary_failed" })], `own: ${own.text.slice(0, 200)}`);
+    out.push(`the owner's own claim: ${own.status} ${own.text}`);
+    assert(svc.log.includes("(23514)"), "the door logged the guard's code");
+  } finally {
+    await svc.stop();
+    await st.close();
+    console.log(out.join("\n"));
+  }
+}});
+
 Deno.test({ name: "teardown", ...opts, fn: async () => { await su?.end(); await app?.end(); } });
