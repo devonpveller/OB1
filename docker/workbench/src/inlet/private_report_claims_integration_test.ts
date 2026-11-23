@@ -701,13 +701,13 @@ t(BOTH, "[fix] F2 a NEW human steer / its branch / its event on a shared tree is
     await c.queryObject(`INSERT INTO public.research_steers (root_job_id, parent_job_id, child_job_id, steer_kind, step_id, text, topic_estimate, anchor, actor_sub)
         VALUES ($1, $1, $2, 'human', 'synth', $3, $3, 'a human-steered shared question', $4)`, [p.hjob, ch[0].id, text, A]);
     await c.queryObject(`INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload) VALUES ($1, $1, 'human_steer', 'steering', $2::jsonb)`,
-      [p.hjob, JSON.stringify({ child_job_id: ch[0].id, text, topic_estimate: text, anchor: "a" })]);
+      [p.hjob, JSON.stringify({ child_job_id: ch[0].id, step_id: "synth", text, topic_estimate: text, anchor: "a" })]);
     await c.queryObject(`INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload) VALUES ($1, $1, 'topic', 'steering', $2::jsonb)`,
       [p.hjob, JSON.stringify({ from: "a steered topic", to: text, at_branch: ch[0].id })]);
     await c.queryObject(`UPDATE public.research_jobs SET topic_estimate = $2, tree_report = $3::jsonb WHERE id = $1`, [p.hjob, text, JSON.stringify({ markdown: `# t\n${text}` })]);
     const r = (await c.queryObject<{ q: string; s: string; e: string; tp: string; te: string; tr: string }>(
-      `SELECT (SELECT query FROM public.research_jobs WHERE id = $1::uuid) AS q,
-              (SELECT text || '|' || topic_estimate FROM public.research_steers WHERE child_job_id = $1::uuid) AS s,
+      `SELECT (SELECT query FROM public.research_jobs WHERE id::text = $1) AS q,
+              (SELECT text || '|' || topic_estimate FROM public.research_steers WHERE child_job_id::text = $1) AS s,
               (SELECT payload ->> 'text' FROM public.research_job_events WHERE type = 'human_steer' AND payload ->> 'child_job_id' = $1) AS e,
               (SELECT payload ->> 'to' FROM public.research_job_events WHERE type = 'topic' AND payload ->> 'at_branch' = $1) AS tp,
               (SELECT topic_estimate FROM public.research_jobs WHERE id = $2::uuid) AS te,

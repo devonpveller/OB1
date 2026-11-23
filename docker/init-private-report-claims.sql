@@ -414,8 +414,23 @@ BEGIN
             IF NEW.branch_kind IN ('gap', 'interhub') THEN RETURN NULL; END IF;
         END IF;
     ELSIF TG_TABLE_NAME = 'research_job_events' THEN
-        -- a gap event naming the claim keeps the id (the per-tree dedup) but never its text
+        -- a gap event naming the claim keeps the id (the per-tree dedup) but never its text; an inter-hub event's hub
+        -- that names a private claim (its label or a member) loses its sample (a claim's text, tree.ts interHubGaps)
         IF NEW.payload ? 'text' THEN NEW.payload := NEW.payload || jsonb_build_object('text', c_n); END IF;
+        IF NEW.type = 'interhub_gap' THEN
+            FOR r IN SELECT k.key FROM (VALUES ('a'), ('b')) k(key)
+                      WHERE jsonb_typeof(NEW.payload -> k.key) = 'object'
+                        AND EXISTS (SELECT 1 FROM public.inlet_private_claims c
+                                     WHERE (c.inlet_owner_sub IS DISTINCT FROM v_tree)
+                                       AND EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+                                       AND position(c.id::text IN lower((NEW.payload -> k.key)::text)) > 0
+                                    UNION ALL
+                                    SELECT 1 FROM public.private_report_claims_archive a
+                                     WHERE a.action = 'x' AND a.restored_at IS NULL
+                                       AND position(a.ref IN lower((NEW.payload -> k.key)::text)) > 0) LOOP
+                NEW.payload := jsonb_set(NEW.payload, ARRAY[r.key, 'sample'], to_jsonb(c_n));
+            END LOOP;
+        END IF;
     ELSE
         -- a machine steer only (a human steer returned at the top)
         NEW.text := c_n;
