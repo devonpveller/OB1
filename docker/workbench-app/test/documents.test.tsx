@@ -74,22 +74,22 @@ afterEach(() => { vi.restoreAllMocks(); });
 
 describe("the route table's screen field (the shared seam later screens plug into)", () => {
   it("App renders a route's `screen` when it has one, else its placeholder", () => {
-    for (const r of ROUTES) expect(r.path === "/" || r.path.startsWith("/documents") ? !!r.screen : !r.screen, r.path).toBe(true);
+    for (const r of ROUTES) expect(r.path === "/" || r.path.startsWith("/documents") || r.path === "/research/start" ? !!r.screen : !r.screen, r.path).toBe(true);
   });
   it("giving an entry a `screen` is the whole change: App renders it with the route's params", () => {
-    const def = ROUTES.find((r) => r.path === "/research/start")!;
+    const def = ROUTES.find((r) => r.path === "/podcasts")!; // a route with no screen yet
     const seen: ScreenProps[] = [];
     const Probe = (p: ScreenProps) => { seen.push(p); return <h1 data-testid="probe">probe</h1>; };
     def.screen = Probe;
     try {
-      window.history.pushState({}, "", "/research/start");
+      window.history.pushState({}, "", "/podcasts");
       render(<App />);
       expect(screen.getByTestId("probe")).toBeTruthy();
       expect(screen.queryByTestId("placeholder")).toBeNull();
-      expect(seen[0].route.path).toBe("/research/start");
+      expect(seen[0].route.path).toBe("/podcasts");
     } finally { delete def.screen; }
     cleanup();
-    window.history.pushState({}, "", "/research/start");
+    window.history.pushState({}, "", "/podcasts");
     render(<App />);
     expect(screen.getByTestId("coming").textContent).toMatch(/phase 3/);
   });

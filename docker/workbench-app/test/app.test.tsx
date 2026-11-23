@@ -18,7 +18,7 @@ beforeEach(() => {
 
 describe("the frame", () => {
   it("renders the shell for the route it was opened at (see shell.test.tsx for the screens)", () => {
-    window.history.pushState({}, "", "/research/start");
+    window.history.pushState({}, "", "/podcasts");
     render(<App load={async () => ({ loaded: true, who: null, defaultSubject: false })} />);
     expect(screen.getByTestId("topbar")).toBeTruthy();
     expect(screen.getByTestId("rail")).toBeTruthy();

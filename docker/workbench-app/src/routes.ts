@@ -8,6 +8,7 @@ import type { Route } from "./lib/router";
 import { Home } from "./screens/home/Home";
 import { Documents } from "./screens/documents/Documents";
 import { DocumentScreen } from "./screens/documents/DocumentScreen";
+import { StartResearch } from "./screens/research-start/StartResearch";
 
 export type Group = "everywhere" | "housekeeping";
 // What every screen is given. `params` holds the route's `:name` segments, decoded (so /documents/:id with
@@ -38,7 +39,7 @@ export const ROUTES: RouteDef[] = [
   { path: "/settings", label: "Settings", group: "housekeeping", phase: 6, will: "Your account, privacy and preferences.", inMenu: true },
   // not in the menu
   { path: "/documents/:id", label: "Document", phase: 1, will: "The writing surface, with its references, topics and history.", inMenu: false, screen: DocumentScreen },
-  { path: "/research/start", label: "Start research", phase: 3, will: "Ask a question and choose how deep the run goes.", inMenu: false },
+  { path: "/research/start", label: "Start research", phase: 3, will: "Ask a question and choose how deep the run goes.", inMenu: false, screen: StartResearch },
 ];
 export const OVERVIEW_PATH = "/what-moved-where";
 
