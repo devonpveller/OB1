@@ -101,7 +101,7 @@ END $$;
 -- every table the run writes, at once, under the 10 s lock_timeout: SHARE ROW EXCLUSIVE blocks writers, lets readers through
 LOCK TABLE public.claims, public.claim_sources, public.research_private_report_claims, public.research_private_reports,
            public.research_jobs, public.wiki_pages, public.inlet_private_claims, public.inlet_private_claim_sources,
-           public.research_steers, public.research_job_events, public.sources
+           public.research_steers, public.research_job_events, public.sources, public.threads, public.thread_sources
     IN SHARE ROW EXCLUSIVE MODE;
 DO $$
 BEGIN
@@ -264,8 +264,30 @@ AS $$
 $$;
 REVOKE ALL ON FUNCTION public.private_report_claims_page_shows(TEXT, TEXT) FROM PUBLIC;
 
--- the wiki guard: a page carrying a private-report claim's text is withheld (marked, as 430's writer counts it); a
--- NOTE is refused with 430's one message (never which guard, never "a report")
+-- fix item round 2 (A1, tester attempt 1): does this text carry the private-report claim of ONE given subject? (the
+-- subject's own store only; nothing for a blank subject)
+CREATE OR REPLACE FUNCTION public.private_report_claims_own_text_shows(p_sub TEXT, p_title TEXT, p_body TEXT) RETURNS BOOLEAN
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+    WITH page AS (SELECT public.private_report_claim_norm(coalesce(p_title, '') || ' ' || coalesce(p_body, '')) AS t)
+    SELECT coalesce(btrim(p_sub), '') <> '' AND EXISTS (
+        SELECT 1 FROM public.inlet_private_claims c, page
+         WHERE c.inlet_owner_sub = p_sub
+           AND EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+           AND length(public.private_report_claim_norm(c.text)) >= 24
+           AND position(public.private_report_claim_norm(c.text) IN page.t) > 0)
+$$;
+REVOKE ALL ON FUNCTION public.private_report_claims_own_text_shows(TEXT, TEXT, TEXT) FROM PUBLIC;
+
+-- the wiki guard. A machine-written page (a compile, the viewer's reconcile, an AI note's index) carrying ANY
+-- private-report claim's text is withheld (marked, as 430's writer counts it): no user chose that text, so the
+-- withholding tells nobody anything about another user. A person's NOTE (page_class note) follows A1 (fix item round 2,
+-- tester attempt 1): it is refused with 430's one message ONLY for its AUTHOR's own private claims - the workbench's
+-- note write names the author for its one statement (ob.page_author, set_config local); another user's claim is never
+-- matched, so a note's save (and so its presence in search) never depends on whether someone else holds the sentence.
+-- A note written with no author named (a move, a restore, a re-sync) matches nothing.
 CREATE OR REPLACE FUNCTION public.trg_private_report_claims_wiki_guard()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -273,10 +295,13 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 BEGIN
-    IF public.private_report_claims_page_shows(NEW.title, NEW.body) THEN
-        IF NEW.page_class = 'note' THEN
+    IF NEW.page_class = 'note' THEN
+        IF public.private_report_claims_own_text_shows(nullif(current_setting('ob.page_author', true), ''), NEW.title, NEW.body) THEN
             RAISE EXCEPTION 'wiki_pages: this page cannot be saved' USING ERRCODE = '42501';
         END IF;
+        RETURN NEW;
+    END IF;
+    IF public.private_report_claims_page_shows(NEW.title, NEW.body) THEN
         PERFORM public.wiki_guard_mark_withheld();
         RETURN NULL;
     END IF;
@@ -284,6 +309,24 @@ BEGIN
 END;
 $$;
 REVOKE ALL ON FUNCTION public.trg_private_report_claims_wiki_guard() FROM PUBLIC;
+
+-- fix item round 2 (P2, tester attempt 1): the research curator asks this before it mints a thread's name / description
+-- from a report or refreshes one from a synthesis - a synthesis that restates ANY private-report claim never describes
+-- a shared thread. Machine text only (the curator's own package), never a person's input; callable by the services'
+-- login (or a superuser session) only, never through PostgREST.
+CREATE OR REPLACE FUNCTION public.private_report_claims_text_shows(p_text TEXT) RETURNS BOOLEAN
+LANGUAGE plpgsql STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF NOT public.private_report_claims_caller_ok() THEN
+        RAISE EXCEPTION 'private report claims: not for this caller' USING ERRCODE = '42501';
+    END IF;
+    RETURN public.private_report_claims_page_shows('', p_text);
+END;
+$$;
+REVOKE ALL ON FUNCTION public.private_report_claims_text_shows(TEXT) FROM PUBLIC;
 
 -- the link guard: no service links a SHARED claim to a private report - its claims are filed private
 -- (private_report_claim_file). A superuser session is let through: slot 390's own move links the claims of the reports
@@ -501,6 +544,9 @@ DECLARE
     n_job_own BIGINT := 0;
     n_job_held BIGINT := 0;
     n_dep     BIGINT := 0;
+    n_dup     BIGINT := 0;
+    n_thr     BIGINT := 0;
+    n_link    BIGINT := 0;
     v_sids    UUID[];
     d         RECORD;
 BEGIN
@@ -529,6 +575,119 @@ BEGIN
     UPDATE _prc SET owner = owners[1] WHERE cardinality(owners) = 1;
     SELECT count(*) INTO n_mixed FROM public.claims c WHERE c.synthesis_id IS NOT NULL AND c.id IN (SELECT id FROM _prc);
     SELECT count(*) FILTER (WHERE owner IS NOT NULL), count(*) FILTER (WHERE owner IS NULL) INTO n_own, n_held FROM _prc;
+
+    -- P2 (fix item, operator 2026-11-22): the SHARED outputs that restated one of these claims. Each claim's skeleton
+    -- (private_report_claim_norm, 24+ letters, as the wiki match).
+    CREATE TEMP TABLE _prc_n ON COMMIT DROP AS
+    SELECT x.id, x.owner, public.private_report_claim_norm(c.text) AS n
+      FROM _prc x JOIN public.claims c ON c.id = x.id
+     WHERE length(public.private_report_claim_norm(c.text)) >= 24;
+    -- a shared job report (no private report owns the job or its tree): its result names one (reuse_claims /
+    -- claims) or any text of its result carries one's sentence. owners: the claims' owners; nobody: a withheld one
+    CREATE TEMP TABLE _p2j ON COMMIT DROP AS
+    WITH jb AS (
+        SELECT j.id, j.result,
+               public.private_report_claim_norm((SELECT string_agg(v #>> '{}', ' ')
+                                                   FROM jsonb_path_query(j.result - 'reuse_claims' - 'claims', 'strict $.**') v
+                                                  WHERE jsonb_typeof(v) = 'string')) AS n
+          FROM public.research_jobs j
+         WHERE jsonb_typeof(j.result) = 'object'
+           AND NOT EXISTS (SELECT 1 FROM public.research_job_report_owner(j.id))),
+    hit AS (
+        SELECT jb.id, x.owner FROM jb
+          JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(jb.result -> 'claims') = 'array' THEN jb.result -> 'claims' ELSE '[]'::jsonb END
+                                            || CASE WHEN jsonb_typeof(jb.result -> 'reuse_claims') = 'array' THEN jb.result -> 'reuse_claims' ELSE '[]'::jsonb END) e ON true
+          JOIN _prc x ON x.id::text = (e ->> 'id')
+        UNION ALL
+        SELECT jb.id, t.owner FROM jb JOIN _prc_n t ON position(t.n IN jb.n) > 0)
+    SELECT h.id, array_agg(DISTINCT h.owner) FILTER (WHERE h.owner IS NOT NULL) AS owners, bool_or(h.owner IS NULL) AS nobody
+      FROM hit h GROUP BY h.id;
+    ALTER TABLE _p2j ADD COLUMN owner TEXT, ADD COLUMN copy BOOLEAN NOT NULL DEFAULT false;
+    UPDATE _p2j SET owner = owners[1] WHERE NOT nobody AND cardinality(owners) = 1;
+    -- the owner gets the report only when its question was nobody's private prompt but theirs: a derived root (its
+    -- question is public) or the owner's own prompt. Anyone else's prompt (or an ownerless job's, the default
+    -- subject's) would leave with the report text: then it is withheld.
+    UPDATE _p2j t SET copy = true
+     WHERE t.owner IS NOT NULL
+       AND EXISTS (SELECT 1 FROM public.research_jobs j JOIN public.research_jobs rt ON rt.id = coalesce(j.root_job_id, j.id)
+                    WHERE j.id = t.id
+                      AND (to_jsonb(rt) ->> 'request_kind' = 'derived'
+                           OR EXISTS (SELECT 1 FROM public.research_prompts rp WHERE rp.job_id = rt.id AND rp.owner_sub = t.owner)));
+    -- a shared synthesis (sources, research_synthesis): it filed one (the "mixed" claims), its title / content carries
+    -- one's sentence, or one of those jobs filed it (its curator answer, its typed 'filed' event)
+    CREATE TEMP TABLE _p2s ON COMMIT DROP AS
+    WITH sn AS (
+        SELECT s.id, public.private_report_claim_norm(coalesce(s.title, '') || ' ' || coalesce(s.content, '')) AS n
+          FROM public.sources s WHERE s.content_type = 'research_synthesis'),
+    filed AS (
+        SELECT t.id AS job_id, x.sid FROM _p2j t
+          JOIN LATERAL (SELECT j.result -> 'curator' -> 'persist' ->> 'synthesis_id' AS sid FROM public.research_jobs j WHERE j.id = t.id
+                        UNION SELECT e.payload ->> 'synthesis_id' FROM public.research_job_events e WHERE e.job_id = t.id AND e.type = 'filed') x ON true),
+    hit AS (
+        SELECT c.synthesis_id AS id, x.owner FROM _prc x JOIN public.claims c ON c.id = x.id WHERE c.synthesis_id IS NOT NULL
+        UNION ALL
+        SELECT sn.id, t.owner FROM sn JOIN _prc_n t ON position(t.n IN sn.n) > 0
+        UNION ALL
+        SELECT sn.id, o.owner FROM sn JOIN filed f ON f.sid = sn.id::text JOIN _p2j t ON t.id = f.job_id
+          JOIN LATERAL (SELECT unnest(t.owners) AS owner UNION ALL SELECT NULL WHERE t.nobody) o ON true)
+    SELECT h.id, array_agg(DISTINCT h.owner) FILTER (WHERE h.owner IS NOT NULL) AS owners, bool_or(h.owner IS NULL) AS nobody
+      FROM hit h JOIN public.sources s ON s.id = h.id AND s.content_type = 'research_synthesis'
+     GROUP BY h.id;
+    ALTER TABLE _p2s ADD COLUMN owner TEXT;
+    UPDATE _p2s SET owner = owners[1] WHERE NOT nobody AND cardinality(owners) = 1;
+    SELECT count(*) FILTER (WHERE owner IS NOT NULL), count(*) FILTER (WHERE owner IS NULL) INTO n_syn_own, n_syn_held FROM _p2s;
+    SELECT count(*) FILTER (WHERE copy), count(*) FILTER (WHERE NOT copy) INTO n_job_own, n_job_held FROM _p2j;
+    -- fix item round 2 (tester attempt 1, P2 #2): a SHARED claim filed by one of those syntheses that restates a moved
+    -- claim's sentence (the curator files the synthesis's sentences into ITS thread; when that thread is not the private
+    -- claim's, find_or_create_claim makes a separate shared row with the same text) follows the claim it restates: it
+    -- moves to the same single owner (linked to that owner's reports, so it is a private-report claim like the rest) or
+    -- is withheld with it. The links this adds are archived (l) and the revert removes them.
+    CREATE TEMP TABLE _prc_dup ON COMMIT DROP AS
+    SELECT c.id, array_agg(DISTINCT t.owner) FILTER (WHERE t.owner IS NOT NULL) AS owners, bool_or(t.owner IS NULL) AS nobody,
+           array_agg(DISTINCT t.id) AS restates
+      FROM public.claims c
+      JOIN _p2s s ON s.id = c.synthesis_id
+      JOIN _prc_n t ON length(public.private_report_claim_norm(c.text)) >= 24
+                   AND (position(t.n IN public.private_report_claim_norm(c.text)) > 0 OR position(public.private_report_claim_norm(c.text) IN t.n) > 0)
+     WHERE c.id NOT IN (SELECT id FROM _prc)
+     GROUP BY c.id;
+    INSERT INTO _prc (id, owners, owner)
+    SELECT d.id, d.owners, CASE WHEN NOT d.nobody AND cardinality(d.owners) = 1 THEN d.owners[1] END FROM _prc_dup d;
+    CREATE TEMP TABLE _prc_newlinks ON COMMIT DROP AS
+    SELECT DISTINCT d.id AS claim_id, pc.report_id
+      FROM _prc_dup d JOIN _prc x ON x.id = d.id AND x.owner IS NOT NULL
+      JOIN public.research_private_report_claims pc ON pc.claim_id = ANY(d.restates)
+      JOIN public.research_private_reports p ON p.id = pc.report_id AND p.owner_sub = x.owner;
+    INSERT INTO _prc_n (id, owner, n)
+    SELECT x.id, x.owner, public.private_report_claim_norm(c.text) FROM _prc_dup d JOIN _prc x ON x.id = d.id JOIN public.claims c ON c.id = d.id;
+    SELECT count(*) INTO n_dup FROM _prc_dup;
+    SELECT count(*) FILTER (WHERE owner IS NOT NULL), count(*) FILTER (WHERE owner IS NULL) INTO n_own, n_held FROM _prc;
+    -- fix item round 2 (P2 #4): a synthesis copy keeps its title / research_query only when the question was public (a
+    -- derived root filed it) or the owner's own prompt - the job-report rule; otherwise the copy carries neither (they
+    -- are the asking job's question, someone else's typed words)
+    ALTER TABLE _p2s ADD COLUMN keep_q BOOLEAN NOT NULL DEFAULT false;
+    UPDATE _p2s t SET keep_q = true
+     WHERE t.owner IS NOT NULL
+       AND EXISTS (SELECT 1 FROM public.research_jobs j JOIN public.research_jobs rt ON rt.id = coalesce(j.root_job_id, j.id)
+                    WHERE (j.result -> 'curator' -> 'persist' ->> 'synthesis_id' = t.id::text
+                           OR EXISTS (SELECT 1 FROM public.research_job_events e WHERE e.job_id = j.id AND e.type = 'filed' AND e.payload ->> 'synthesis_id' = t.id::text))
+                      AND (to_jsonb(rt) ->> 'request_kind' = 'derived'
+                           OR EXISTS (SELECT 1 FROM public.research_prompts rp WHERE rp.job_id = rt.id AND rp.owner_sub = t.owner)));
+    -- fix item round 2 (P2 #1): the THREADS a moved synthesis described. The curator mints a thread's description from
+    -- the report (index.ts: new_thread_description or the report's headline) and refreshThread rewrites an existing
+    -- one from every synthesis filed into it. Tied: a thread whose name or description carries a moved claim's
+    -- sentence, a thread a moved synthesis is linked into (thread_sources), and the thread a P2 job's curator answer or
+    -- 'filed' event names. Each is archived whole (t) and re-described from its remaining SHARED sources' titles (no
+    -- embedding: backfill-thread-embeddings re-makes it); a name carrying the sentence becomes neutral.
+    CREATE TEMP TABLE _prc_threads ON COMMIT DROP AS
+    SELECT DISTINCT th.id
+      FROM public.threads th
+     WHERE EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN public.private_report_claim_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, ''))) > 0)
+        OR th.id IN (SELECT ts.thread_id FROM public.thread_sources ts WHERE ts.source_id IN (SELECT id FROM _p2s))
+        OR th.id::text IN (SELECT j.result -> 'curator' ->> 'thread_id' FROM public.research_jobs j WHERE j.id IN (SELECT id FROM _p2j)
+                           UNION SELECT e.payload ->> 'thread_id' FROM public.research_job_events e WHERE e.type = 'filed' AND e.job_id IN (SELECT id FROM _p2j)
+                           UNION SELECT e.payload ->> 'thread_id' FROM public.research_job_events e WHERE e.type = 'filed' AND e.payload ->> 'synthesis_id' IN (SELECT id::text FROM _p2s));
+
 
     -- a dependent this move cannot archive stops it, nothing changed: any other foreign key onto claims with a row on a
     -- moved claim (claim_sources is archived below; the link's key is gone)
@@ -582,68 +741,6 @@ BEGIN
           FROM public.claim_sources cs JOIN _prc x ON x.id = cs.claim_id
          WHERE x.owner IS NOT NULL;
         GET DIAGNOSTICS n_kept_e = ROW_COUNT;
-
-        -- P2 (fix item, operator 2026-11-22): the SHARED outputs that restated one of these claims. Each claim's skeleton
-        -- (private_report_claim_norm, 24+ letters, as the wiki match).
-        CREATE TEMP TABLE _prc_n ON COMMIT DROP AS
-        SELECT x.id, x.owner, public.private_report_claim_norm(c.text) AS n
-          FROM _prc x JOIN public.claims c ON c.id = x.id
-         WHERE length(public.private_report_claim_norm(c.text)) >= 24;
-        -- a shared job report (no private report owns the job or its tree): its result names one (reuse_claims /
-        -- claims) or any text of its result carries one's sentence. owners: the claims' owners; nobody: a withheld one
-        CREATE TEMP TABLE _p2j ON COMMIT DROP AS
-        WITH jb AS (
-            SELECT j.id, j.result,
-                   public.private_report_claim_norm((SELECT string_agg(v #>> '{}', ' ')
-                                                       FROM jsonb_path_query(j.result - 'reuse_claims' - 'claims', 'strict $.**') v
-                                                      WHERE jsonb_typeof(v) = 'string')) AS n
-              FROM public.research_jobs j
-             WHERE jsonb_typeof(j.result) = 'object'
-               AND NOT EXISTS (SELECT 1 FROM public.research_job_report_owner(j.id))),
-        hit AS (
-            SELECT jb.id, x.owner FROM jb
-              JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(jb.result -> 'claims') = 'array' THEN jb.result -> 'claims' ELSE '[]'::jsonb END
-                                                || CASE WHEN jsonb_typeof(jb.result -> 'reuse_claims') = 'array' THEN jb.result -> 'reuse_claims' ELSE '[]'::jsonb END) e ON true
-              JOIN _prc x ON x.id::text = (e ->> 'id')
-            UNION ALL
-            SELECT jb.id, t.owner FROM jb JOIN _prc_n t ON position(t.n IN jb.n) > 0)
-        SELECT h.id, array_agg(DISTINCT h.owner) FILTER (WHERE h.owner IS NOT NULL) AS owners, bool_or(h.owner IS NULL) AS nobody
-          FROM hit h GROUP BY h.id;
-        ALTER TABLE _p2j ADD COLUMN owner TEXT, ADD COLUMN copy BOOLEAN NOT NULL DEFAULT false;
-        UPDATE _p2j SET owner = owners[1] WHERE NOT nobody AND cardinality(owners) = 1;
-        -- the owner gets the report only when its question was nobody's private prompt but theirs: a derived root (its
-        -- question is public) or the owner's own prompt. Anyone else's prompt (or an ownerless job's, the default
-        -- subject's) would leave with the report text: then it is withheld.
-        UPDATE _p2j t SET copy = true
-         WHERE t.owner IS NOT NULL
-           AND EXISTS (SELECT 1 FROM public.research_jobs j JOIN public.research_jobs rt ON rt.id = coalesce(j.root_job_id, j.id)
-                        WHERE j.id = t.id
-                          AND (to_jsonb(rt) ->> 'request_kind' = 'derived'
-                               OR EXISTS (SELECT 1 FROM public.research_prompts rp WHERE rp.job_id = rt.id AND rp.owner_sub = t.owner)));
-        -- a shared synthesis (sources, research_synthesis): it filed one (the "mixed" claims), its title / content carries
-        -- one's sentence, or one of those jobs filed it (its curator answer, its typed 'filed' event)
-        CREATE TEMP TABLE _p2s ON COMMIT DROP AS
-        WITH sn AS (
-            SELECT s.id, public.private_report_claim_norm(coalesce(s.title, '') || ' ' || coalesce(s.content, '')) AS n
-              FROM public.sources s WHERE s.content_type = 'research_synthesis'),
-        filed AS (
-            SELECT t.id AS job_id, x.sid FROM _p2j t
-              JOIN LATERAL (SELECT j.result -> 'curator' -> 'persist' ->> 'synthesis_id' AS sid FROM public.research_jobs j WHERE j.id = t.id
-                            UNION SELECT e.payload ->> 'synthesis_id' FROM public.research_job_events e WHERE e.job_id = t.id AND e.type = 'filed') x ON true),
-        hit AS (
-            SELECT c.synthesis_id AS id, x.owner FROM _prc x JOIN public.claims c ON c.id = x.id WHERE c.synthesis_id IS NOT NULL
-            UNION ALL
-            SELECT sn.id, t.owner FROM sn JOIN _prc_n t ON position(t.n IN sn.n) > 0
-            UNION ALL
-            SELECT sn.id, o.owner FROM sn JOIN filed f ON f.sid = sn.id::text JOIN _p2j t ON t.id = f.job_id
-              JOIN LATERAL (SELECT unnest(t.owners) AS owner UNION ALL SELECT NULL WHERE t.nobody) o ON true)
-        SELECT h.id, array_agg(DISTINCT h.owner) FILTER (WHERE h.owner IS NOT NULL) AS owners, bool_or(h.owner IS NULL) AS nobody
-          FROM hit h JOIN public.sources s ON s.id = h.id AND s.content_type = 'research_synthesis'
-         GROUP BY h.id;
-        ALTER TABLE _p2s ADD COLUMN owner TEXT;
-        UPDATE _p2s SET owner = owners[1] WHERE NOT nobody AND cardinality(owners) = 1;
-        SELECT count(*) FILTER (WHERE owner IS NOT NULL), count(*) FILTER (WHERE owner IS NULL) INTO n_syn_own, n_syn_held FROM _p2s;
-        SELECT count(*) FILTER (WHERE copy), count(*) FILTER (WHERE NOT copy) INTO n_job_own, n_job_held FROM _p2j;
 
         -- the jobs: a result element naming a moved claim leaves every job whose report owner is not the claim's owner
         -- (the P2 jobs above are handled whole below, not here)
@@ -738,6 +835,14 @@ BEGIN
         -- byte-identical); the edge deletes recompute the shared claims archived whole above
         DELETE FROM public.claim_sources cs WHERE cs.claim_id IN (SELECT id FROM _prc) OR cs.parent_claim_id IN (SELECT id FROM _prc);
         DELETE FROM public.claims c WHERE c.id IN (SELECT id FROM _prc);
+        -- fix item round 2: a moved duplicate is linked to its owner's reports (a private-report claim like the rest);
+        -- the links are archived (l) so the revert removes them
+        INSERT INTO public.research_private_report_claims (report_id, claim_id)
+        SELECT l.report_id, l.claim_id FROM _prc_newlinks l ON CONFLICT DO NOTHING;
+        INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
+        SELECT v_batch, 'public.research_private_report_claims', 'l', l.claim_id::text, jsonb_build_object('report_id', l.report_id, 'claim_id', l.claim_id)
+          FROM _prc_newlinks l;
+        GET DIAGNOSTICS n_link = ROW_COUNT;
         PERFORM set_config('session_replication_role', 'replica', true);
         IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.research_jobs'::regclass AND attname = 'metrics' AND NOT attisdropped) THEN
             UPDATE public.research_jobs j SET result = t.new_result, metrics = t.new_metrics FROM _prc_jobs t WHERE t.id = j.id;
@@ -842,9 +947,13 @@ BEGIN
                 INSERT INTO public.research_private_reports
                     (research_key, owner_sub, idea_id, job_id, title, content, claim, research_query, run_kind, volatility,
                      revalidate_days, researched_on, metadata, created_at, updated_at)
-                SELECT 'prc570-syn:' || s.id::text, t.owner, NULL, NULL, coalesce(s.title, ''), coalesce(s.content, ''), s.metadata ->> 'claim',
-                       s.research_query, s.run_kind, s.volatility, s.revalidate_days, s.researched_on,
-                       coalesce(s.metadata, '{}'::jsonb) || jsonb_build_object('moved_by', 'slot 570 P2'), s.created_at, now()
+                SELECT 'prc570-syn:' || s.id::text, t.owner, NULL, NULL,
+                       CASE WHEN t.keep_q THEN coalesce(s.title, '') ELSE 'A shared report that restated your private claim' END,
+                       coalesce(s.content, ''), s.metadata ->> 'claim',
+                       CASE WHEN t.keep_q THEN s.research_query END, s.run_kind, s.volatility, s.revalidate_days, s.researched_on,
+                       CASE WHEN t.keep_q THEN coalesce(s.metadata, '{}'::jsonb)
+                            ELSE coalesce(s.metadata, '{}'::jsonb) - 'query' - 'research_query' - 'question' - 'prompt' - 'title' END
+                       || jsonb_build_object('moved_by', 'slot 570 P2'), s.created_at, now()
                   FROM public.sources s JOIN _p2s t ON t.id = s.id
                  WHERE t.owner IS NOT NULL
                 ON CONFLICT DO NOTHING
@@ -899,6 +1008,30 @@ BEGIN
             GET DIAGNOSTICS v_n = ROW_COUNT; n_touched := n_touched + v_n;
             DELETE FROM public.sources s WHERE s.id = ANY(v_sids);
         END IF;
+        -- fix item round 2 (P2 #1): the tied threads (above), archived whole (t) and re-described from what is still
+        -- shared, with triggers off (their touch timestamps do not move; the revert restores the whole row)
+        INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
+        SELECT v_batch, 'public.threads', 't', th.id::text, to_jsonb(th) FROM public.threads th WHERE th.id IN (SELECT id FROM _prc_threads);
+        GET DIAGNOSTICS n_thr = ROW_COUNT;
+        IF n_thr > 0 THEN
+            PERFORM set_config('session_replication_role', 'replica', true);
+            UPDATE public.threads th
+               SET description = (SELECT 'Shared sources: ' || string_agg(x.title, '; ' ORDER BY x.title)
+                                    FROM (SELECT DISTINCT s.title FROM public.thread_sources ts JOIN public.sources s ON s.id = ts.source_id
+                                           WHERE ts.thread_id = th.id AND coalesce(s.title, '') <> ''
+                                             AND NOT EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN public.private_report_claim_norm(s.title)) > 0)
+                                           ORDER BY s.title LIMIT 8) x),
+                   embedding = NULL,
+                   name = CASE WHEN EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN public.private_report_claim_norm(th.name)) > 0)
+                               THEN 'Research thread ' || left(th.id::text, 8) ELSE th.name END
+             WHERE th.id IN (SELECT id FROM _prc_threads);
+            PERFORM set_config('session_replication_role', 'origin', true);
+        END IF;
+        IF EXISTS (SELECT 1 FROM public.threads th, _prc_n t
+                    WHERE position(t.n IN public.private_report_claim_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, ''))) > 0)
+           OR EXISTS (SELECT 1 FROM public.claims c WHERE c.id IN (SELECT id FROM _prc_dup)) THEN
+            RAISE EXCEPTION 'private report claims: refused, nothing changed - a thread or a shared claim still restates a moved claim' USING ERRCODE = '55000';
+        END IF;
         IF EXISTS (SELECT 1 FROM public.sources s WHERE s.id = ANY(coalesce(v_sids, '{}')))
            OR EXISTS (SELECT 1 FROM public.sources s, _prc_n t
                        WHERE s.content_type = 'research_synthesis'
@@ -913,7 +1046,8 @@ BEGIN
     -- archived and withheld - whatever this run moved, a later page included
     INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
     SELECT v_batch, 'public.wiki_pages', 'w', w.slug, to_jsonb(w)
-      FROM public.wiki_pages w WHERE public.private_report_claims_page_shows(w.title, w.body);
+      FROM public.wiki_pages w WHERE w.page_class IS DISTINCT FROM 'note' AND public.private_report_claims_page_shows(w.title, w.body);
+    -- (fix item round 2, A1: a person's note is never withheld for another user's claim - see the wiki guard)
     GET DIAGNOSTICS n_pages = ROW_COUNT;
     DELETE FROM public.wiki_pages w USING public.private_report_claims_archive a
      WHERE a.batch = v_batch AND a.action = 'w' AND a.ref = w.slug;
@@ -921,7 +1055,7 @@ BEGIN
     -- fail closed: nothing of what moved is left on a shared surface
     IF EXISTS (SELECT 1 FROM public.claims c WHERE c.id IN (SELECT id FROM _prc))
        OR EXISTS (SELECT 1 FROM public.claim_sources cs WHERE cs.claim_id IN (SELECT id FROM _prc) OR cs.parent_claim_id IN (SELECT id FROM _prc))
-       OR EXISTS (SELECT 1 FROM public.wiki_pages w WHERE public.private_report_claims_page_shows(w.title, w.body)) THEN
+       OR EXISTS (SELECT 1 FROM public.wiki_pages w WHERE w.page_class IS DISTINCT FROM 'note' AND public.private_report_claims_page_shows(w.title, w.body)) THEN
         RAISE EXCEPTION 'private report claims: refused, nothing changed - a moved claim is still on a shared surface after the move' USING ERRCODE = '55000';
     END IF;
 
@@ -934,6 +1068,8 @@ BEGIN
             n_edges, n_touched, n_jobs, n_pages, n_gap;
         RAISE NOTICE 'private report claims (P2): % shared synthesis(es) moved private to their claim''s owner, % withheld (several owners or none); % shared job report(s) moved private to their claim''s owner, % withheld; % row(s) that referenced a moved synthesis archived',
             n_syn_own, n_syn_held, n_job_own, n_job_held, n_dep;
+        RAISE NOTICE 'private report claims (P2): % shared claim(s) a moved synthesis filed with a moved claim''s sentence moved or withheld with it (% link(s) added), % thread(s) re-described',
+            n_dup, n_link, n_thr;
     END IF;
 END $$;
 
@@ -1207,7 +1343,8 @@ BEGIN
                              'public.private_report_claims_job_private(uuid)', 'public.private_report_claims_neutral_line(uuid,uuid,text)',
                              'public.private_report_claims_caller_ok()', 'public.private_report_claims_reader_ok()', 'public.private_report_claims_private_owner(uuid)',
                              'public.private_report_claims_tree_owner(uuid)', 'public.trg_private_report_claims_gap_guard()',
-                             'public.trg_private_report_claims_derived_guard()'] LOOP
+                             'public.trg_private_report_claims_derived_guard()', 'public.private_report_claims_text_shows(text)',
+                             'public.private_report_claims_own_text_shows(text,text,text)'] LOOP
         FOR r IN SELECT DISTINCT ro.rolname AS grantee
                    FROM pg_proc p, aclexplode(p.proacl) a JOIN pg_roles ro ON ro.oid = a.grantee
                   WHERE p.oid = f::regprocedure AND NOT ro.rolsuper AND ro.oid <> p.proowner LOOP
@@ -1217,10 +1354,12 @@ BEGIN
     GRANT EXECUTE ON FUNCTION public.private_report_claim_file(TEXT, UUID, TEXT, UUID, TEXT, TEXT, INT, VECTOR, JSONB) TO service_role;
     GRANT EXECUTE ON FUNCTION public.private_report_claim_edge(UUID, UUID, TEXT, REAL) TO service_role;
     GRANT EXECUTE ON FUNCTION public.private_report_claims_of_idea(UUID, TEXT) TO service_role;
+    GRANT EXECUTE ON FUNCTION public.private_report_claims_text_shows(TEXT) TO service_role;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') THEN
         GRANT EXECUTE ON FUNCTION public.private_report_claim_file(TEXT, UUID, TEXT, UUID, TEXT, TEXT, INT, VECTOR, JSONB) TO ob_app_memory;
         GRANT EXECUTE ON FUNCTION public.private_report_claim_edge(UUID, UUID, TEXT, REAL) TO ob_app_memory;
         GRANT EXECUTE ON FUNCTION public.private_report_claims_of_idea(UUID, TEXT) TO ob_app_memory;
+        GRANT EXECUTE ON FUNCTION public.private_report_claims_text_shows(TEXT) TO ob_app_memory;
     END IF;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_workbench') THEN
         GRANT EXECUTE ON FUNCTION public.private_report_claims_of_idea(UUID, TEXT) TO ob_workbench;

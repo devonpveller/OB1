@@ -104,7 +104,8 @@ jobs AS (
 page_texts AS (SELECT n FROM texts UNION SELECT pg_temp.prc_norm(w.text) FROM pg_temp.prc_withheld() w WHERE length(pg_temp.prc_norm(w.text)) >= 24),
 pages AS (
     SELECT DISTINCT w.slug FROM public.wiki_pages w, page_texts t
-     WHERE position(t.n IN pg_temp.prc_norm(coalesce(w.title, '') || ' ' || coalesce(w.body, ''))) > 0),
+     WHERE w.page_class IS DISTINCT FROM 'note'   -- A1: a person's note is judged by its author only (the guard)
+       AND position(t.n IN pg_temp.prc_norm(coalesce(w.title, '') || ' ' || coalesce(w.body, ''))) > 0),
 -- the gap work of a tree that is not the claim owner's: a branch's question, a gap / inter-hub steer, a gap / inter-hub
 -- / branch / topic event, the root's tree report
 gap_rows AS (
@@ -134,6 +135,15 @@ p2_jobs AS (
        AND NOT EXISTS (SELECT 1 FROM public.research_job_report_owner(j.id))
        AND position(t.n IN pg_temp.prc_norm((SELECT string_agg(v #>> '{}', ' ') FROM jsonb_path_query(j.result - 'reuse_claims' - 'claims', 'strict $.**') v
                                               WHERE jsonb_typeof(v) = 'string'))) > 0),
+-- fix item round 2 (tester attempt 1): a THREAD whose name / description carries one's sentence (the curator mints and
+-- refreshes descriptions from reports; threads are shared), and a SHARED claim that is not a private report's own but
+-- carries one's sentence (a synthesis filed it into another thread)
+p2_threads AS (
+    SELECT DISTINCT th.id FROM public.threads th, p2_texts t
+     WHERE position(t.n IN pg_temp.prc_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, ''))) > 0),
+p2_claims AS (
+    SELECT DISTINCT c.id FROM public.claims c, p2_texts t
+     WHERE c.id NOT IN (SELECT id FROM linked) AND position(t.n IN pg_temp.prc_norm(c.text)) > 0),
 corr AS (
     SELECT sc.id FROM public.source_corroborations sc
      WHERE sc.claim_text NOT LIKE 'private-text:%'
@@ -177,6 +187,8 @@ counts AS (
            (SELECT count(*) FROM corr) AS corr_lines,
            (SELECT count(*) FROM p2_syn) AS p2_syn,
            (SELECT count(*) FROM p2_jobs) AS p2_jobs,
+           (SELECT count(*) FROM p2_threads) AS p2_threads,
+           (SELECT count(*) FROM p2_claims) AS p2_claims,
            (SELECT n FROM want_guards) AS want_guards,
            (SELECT n FROM fk) AS link_fk,
            (SELECT n FROM guards) AS guards,
@@ -197,6 +209,8 @@ SELECT line FROM (
     UNION ALL SELECT 7, 'check: corroboration lines of a private report''s run in the clear=' || corr_lines FROM counts
     UNION ALL SELECT 7, 'check: shared syntheses carrying one''s text=' || p2_syn FROM counts
     UNION ALL SELECT 7, 'check: shared job reports carrying one''s text=' || p2_jobs FROM counts
+    UNION ALL SELECT 7, 'check: threads whose name or description carries one''s text=' || p2_threads FROM counts
+    UNION ALL SELECT 7, 'check: other shared claims carrying one''s text=' || p2_claims FROM counts
     UNION ALL SELECT 8, 'check: the link''s foreign key onto claims=' || link_fk || ' (0 once applied)' FROM counts
     UNION ALL SELECT 9, 'check: guards on=' || guards || ' (' || want_guards || ' once applied)' FROM counts
     UNION ALL SELECT 10, 'check: ob_app_memory may execute the slot''s functions=' || app_exec || ' of 3 (role present=' || (app_role > 0) || ')' FROM counts
@@ -204,7 +218,7 @@ SELECT line FROM (
     UNION ALL SELECT 10, 'check: stray EXECUTE grants=' || stray_grants FROM counts
     UNION ALL SELECT 11, 'check: stray grant ' || g FROM grants
     UNION ALL SELECT 12, CASE WHEN shared_linked = 0 AND shared_edges = 0 AND wrong_owner = 0 AND job_results = 0 AND wiki_pages = 0 AND gap_rows = 0
-                               AND corr_lines = 0 AND p2_syn = 0 AND p2_jobs = 0
+                               AND corr_lines = 0 AND p2_syn = 0 AND p2_jobs = 0 AND p2_threads = 0 AND p2_claims = 0
                                AND link_fk = 0 AND guards = want_guards AND app_exec = 3 AND gated = 3 AND stray_grants = 0
                                AND (SELECT applied FROM slot)
                               THEN 'check: OK' ELSE 'check: FAIL' END FROM counts

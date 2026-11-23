@@ -68,15 +68,21 @@ async function resolveLinks(rawLinks: string[]): Promise<string[]> {
   return raws.map((r) => map.get(r) ?? r);
 }
 
-async function syncNoteRow(rel: string, content: string): Promise<void> {
+// rw-private-report-claims-fix round 2 (A1): `authorSub` is the subject who wrote the note (the PUT's verified
+// identity). It is named to the database for this ONE statement (ob.page_author, set_config local): slot 570's wiki
+// guard refuses a note only when it carries its AUTHOR's own private-report claim, never another user's - so a note's
+// save (and its presence in search) never depends on whether someone else holds a sentence. Re-syncs with no author
+// (move, trash, restore, recover, an AI note) name nobody and match nothing.
+async function syncNoteRow(rel: string, content: string, authorSub?: string | null): Promise<void> {
   try {
     const { slug, title, body, tags, rawLinks } = parseNoteRow(rel, content);
     const links = await resolveLinks(rawLinks);
     await query(
-      `INSERT INTO wiki_pages (slug, page_class, title, body, tags, links, updated_at)
-       VALUES ($1, 'note', $2, $3, $4, $5, now())
+      `WITH who AS (SELECT set_config('ob.page_author', $6, true) AS a)
+       INSERT INTO wiki_pages (slug, page_class, title, body, tags, links, updated_at)
+       SELECT $1, 'note', $2, $3, $4, $5, now() FROM who
        ON CONFLICT (slug) DO UPDATE SET title = $2, body = $3, tags = $4, links = $5, updated_at = now()`,
-      [slug, title, body, JSON.stringify(tags), JSON.stringify(links)],
+      [slug, title, body, JSON.stringify(tags), JSON.stringify(links), authorSub ?? ""],
     );
   } catch (e) {
     console.error("[wiki-pages] note row sync failed (non-fatal):", (e as Error).message);
@@ -120,7 +126,7 @@ export async function writeNote(
   notePath: string,
   content: string,
   ifMatch?: string | null,
-  opts?: { commit?: boolean; author?: string },
+  opts?: { commit?: boolean; author?: string; authorSub?: string | null },
 ): Promise<{ hash: string } | { conflict: true; current: string }> {
   const rel = notesRel(notePath);
   if (ifMatch != null && (await vaultExists(rel))) {
@@ -128,7 +134,7 @@ export async function writeNote(
     if (current !== ifMatch) return { conflict: true, current };
   }
   await vaultWrite(rel, content);
-  await syncNoteRow(rel, content);
+  await syncNoteRow(rel, content, opts?.authorSub);
   // Working-draft model (P4.7): autosave writes WITHOUT committing; only an
   // explicit commit (Done / "commit now") records a git revision — authored by
   // the Authelia user. The compile catches any still-uncommitted notes.

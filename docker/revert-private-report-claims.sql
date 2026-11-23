@@ -18,6 +18,7 @@
 --     referenced it - re-inserted where the foreign key cascaded, re-pointed where it set NULL / its default), the shared
 --     job reports get their (result, metrics) back, and the private copies it made (research_private_reports) go;
 --   * fix item (A1): the derived-question guard on research_handbacks goes;
+--   * fix item round 2: the links it added for a moved duplicate claim go; the threads it re-described come back whole;
 --   * the functions go; the archive and salt tables stay (restored rows carry restored_at).
 -- Counts only (NOTICE). A second run has nothing to restore. Run it BEFORE the 480 / 470 / 440 / 390 reverts.
 -- ============================================================
@@ -50,6 +51,9 @@ DECLARE
     n_r     BIGINT := 0;
     v_scols TEXT;
     v_pk    TEXT;
+    v_tcols TEXT;
+    n_l     BIGINT := 0;
+    n_t     BIGINT := 0;
 BEGIN
     IF to_regclass('public.private_report_claims_archive') IS NULL THEN
         RAISE NOTICE 'private report claims revert: slot 570 was never applied - nothing to restore';
@@ -57,7 +61,7 @@ BEGIN
     END IF;
     LOCK TABLE public.claims, public.claim_sources, public.research_private_report_claims, public.research_jobs, public.wiki_pages,
                public.inlet_private_claims, public.inlet_private_claim_sources, public.research_steers, public.research_job_events,
-               public.sources, public.research_private_reports
+               public.sources, public.research_private_reports, public.threads
         IN SHARE ROW EXCLUSIVE MODE;
     IF to_regclass('public.research_handbacks') IS NOT NULL THEN
         DROP TRIGGER IF EXISTS trg_private_report_claims_derived_guard ON public.research_handbacks;
@@ -175,6 +179,17 @@ BEGIN
         DELETE FROM public.research_private_reports p USING public.private_report_claims_archive a
          WHERE a.batch = v_batch AND a.action = 'r' AND a.restored_at IS NULL AND p.id::text = a.ref;
         GET DIAGNOSTICS v_n = ROW_COUNT; n_r := n_r + v_n;
+        -- fix item round 2: the links slot 570 added for a moved duplicate go; the threads it re-described come back whole
+        DELETE FROM public.research_private_report_claims pc USING public.private_report_claims_archive a
+         WHERE a.batch = v_batch AND a.action = 'l' AND a.restored_at IS NULL
+           AND pc.claim_id::text = a.row_data ->> 'claim_id' AND pc.report_id::text = a.row_data ->> 'report_id';
+        GET DIAGNOSTICS v_n = ROW_COUNT; n_l := n_l + v_n;
+        SELECT string_agg(format('%1$I = x.%1$I', at.attname), ', ' ORDER BY at.attnum) INTO v_tcols
+          FROM pg_attribute at WHERE at.attrelid = 'public.threads'::regclass AND at.attnum > 0 AND NOT at.attisdropped AND at.attgenerated = '' AND at.attname <> 'id';
+        EXECUTE format('UPDATE public.threads t SET %s FROM public.private_report_claims_archive a, jsonb_populate_record(NULL::public.threads, a.row_data) x
+                         WHERE a.batch = $1 AND a.action = ''t'' AND a.restored_at IS NULL AND t.id::text = a.ref', v_tcols)
+            USING v_batch;
+        GET DIAGNOSTICS v_n = ROW_COUNT; n_t := n_t + v_n;
         EXECUTE format('INSERT INTO public.claims (%s) SELECT %s FROM public.private_report_claims_archive a, jsonb_populate_record(NULL::public.claims, a.row_data) r
                          WHERE a.batch = $1 AND a.action IN (''k'', ''x'') AND a.restored_at IS NULL', v_cols,
                        (SELECT string_agg('r.' || quote_ident(attname), ', ' ORDER BY attnum) FROM pg_attribute WHERE attrelid = 'public.claims'::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = ''))
@@ -252,13 +267,13 @@ BEGIN
         UPDATE public.private_report_claims_archive SET restored_at = now() WHERE action = 'f' AND restored_at IS NULL;
     END LOOP;
 
-    IF n_filed + n_point + n_k + n_e + n_m + n_j + n_w + n_fk + n_c + n_g + n_s + n_d + n_p + n_r = 0 THEN
+    IF n_filed + n_point + n_k + n_e + n_m + n_j + n_w + n_fk + n_c + n_g + n_s + n_d + n_p + n_r + n_l + n_t = 0 THEN
         RAISE NOTICE 'private report claims revert: nothing to restore';
     ELSE
         RAISE NOTICE 'private report claims revert: % claim(s) restored (% edge(s), % shared claim image(s)), % job result(s), % wiki page(s), % corroboration line(s), % gap-work row(s), foreign key %; % curator filing(s) made shared again, % re-pointed at a shared claim',
             n_k, n_e, n_m, n_j, n_w, n_c, n_g, CASE WHEN n_fk = 1 THEN 'restored' ELSE 'already there' END, n_filed, n_point;
-        RAISE NOTICE 'private report claims revert (P2): % shared synthesis(es) restored (% referencing row(s)), % shared job report(s) restored, % private copy(ies) removed',
-            n_s, n_d, n_p, n_r;
+        RAISE NOTICE 'private report claims revert (P2): % shared synthesis(es) restored (% referencing row(s)), % shared job report(s) restored, % private copy(ies) removed, % added link(s) removed, % thread(s) restored',
+            n_s, n_d, n_p, n_r, n_l, n_t;
     END IF;
 END $$;
 
@@ -276,6 +291,8 @@ DROP FUNCTION IF EXISTS public.private_report_claims_neutral_line(UUID, UUID, TE
 DROP FUNCTION IF EXISTS public.private_report_claims_job_private(UUID);
 DROP FUNCTION IF EXISTS public.trg_private_report_claims_gap_guard();
 DROP FUNCTION IF EXISTS public.trg_private_report_claims_derived_guard();
+DROP FUNCTION IF EXISTS public.private_report_claims_text_shows(TEXT);
+DROP FUNCTION IF EXISTS public.private_report_claims_own_text_shows(TEXT, TEXT, TEXT);
 DROP FUNCTION IF EXISTS public.private_report_claims_private_owner(UUID);
 DROP FUNCTION IF EXISTS public.private_report_claims_tree_owner(UUID);
 DROP FUNCTION IF EXISTS public.private_report_claims_reader_ok();

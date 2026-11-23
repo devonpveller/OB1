@@ -167,9 +167,9 @@ async function plant(): Promise<Record<string, any>> {
 // gap row is in its table or the archive; the shared job and the gap branch exist.
 // deno-lint-ignore no-explicit-any
 async function landed(p: Record<string, any>): Promise<void> {
-  const ids = [p.b1, p.b2, p.b3, p.a1, p.multi, p.orph, p.ctl, p.mix, p.bh];
+  const ids = [p.b1, p.b2, p.b3, p.a1, p.multi, p.orph, p.ctl, p.mix, p.bh, p.dupB3];
   // fix item (P2): each planted shared synthesis is in sources or 570's archive (moved / withheld); each P2 job exists
-  const syns = [p.syn, p.p2syn, p.p2multi, p.synCtl];
+  const syns = [p.syn, p.p2syn, p.p2multi, p.synCtl, p.p2synB];
   const p2 = (await sql<{ s: number; j: number }>(
     `SELECT (SELECT count(DISTINCT x)::int FROM unnest($1::uuid[]) x
               WHERE EXISTS (SELECT 1 FROM public.sources s WHERE s.id = x)
@@ -254,11 +254,21 @@ t(["plant"], "plant two users' private reports and their claims in the shape slo
   const b3text = `The ${w.b3} theta result was restated in a shared report later on.`;
   const b3 = await claim(b3text, null, null);
   await link(bReport, b3);
-  const p2syn = await one(`INSERT INTO public.sources (title, content, content_type, research_key) VALUES ($1, $2, 'research_synthesis', $3) RETURNING id::text AS id`,
-    [`Shared report two ${R}`, `A shared run. ${b3text} Nothing else.`, `rk-prc-shared2-${R}`]);
+  // (round 2, P2 #4: its title / research_query are A's typed question - B's copy must not carry them)
+  const p2syn = await one(`INSERT INTO public.sources (title, content, content_type, research_key, research_query) VALUES ($1, $2, 'research_synthesis', $3, $4) RETURNING id::text AS id`,
+    [`A typed question ${w.a}q ${R}`, `A shared run. ${b3text} Nothing else.`, `rk-prc-shared2-${R}`, `A typed question ${w.a}q ${R}`]);
+  // round 2 (P2 #4): the synthesis B's OWN question filed (p2job's curator answer): B's copy keeps its title
+  const p2synB = await one(`INSERT INTO public.sources (title, content, content_type, research_key, research_query) VALUES ($1, $2, 'research_synthesis', $3, 'another shared question') RETURNING id::text AS id`,
+    [`B question title ${R}`, `B's run. ${b3text}`, `rk-prc-sharedB-${R}`]);
+  // round 2 (P2 #1): a thread minted from the restating synthesis (its description is the report's headline) and linked to it
+  const p2thread = await one(`INSERT INTO public.threads (name, description, status) VALUES ($1, $2, 'active') RETURNING id::text AS id`,
+    [`Minted thread ${R}`, `Research on: ${b3text}`]);
+  await sql(`INSERT INTO public.thread_sources (thread_id, source_id) VALUES ($1, $2)`, [p2thread, p2syn]);
+  // round 2 (P2 #2): the curator filed the synthesis's sentence into ITS thread - a separate SHARED row with B's text
+  const dupB3 = await claim(b3text, p2thread, p2syn);
   // fix item (P2): B's own shared question (B's prompt) whose report restated B's claim - moves private to B, copied
   const p2job = await one(`INSERT INTO public.research_jobs (status, origin, query, finished_at, result) VALUES ('done', 'manual', 'another shared question', now(), $1::jsonb) RETURNING id::text AS id`,
-    [JSON.stringify({ outcome: "answered", synthesis: `Findings. ${b3text}`, prose: `In prose: ${b3text}`, claims: [] })]);
+    [JSON.stringify({ outcome: "answered", synthesis: `Findings. ${b3text}`, prose: `In prose: ${b3text}`, claims: [], curator: { persist: { synthesis_id: p2synB } } })]);
   await sql(`INSERT INTO public.research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES ($1, $2, $2, 'another shared question')`, [p2job, B]);
   // ... and A's shared question whose report restated B's claim: withheld (a copy would hand B A's prompt's words)
   const p2jobA = await one(`INSERT INTO public.research_jobs (status, origin, query, finished_at, result) VALUES ('done', 'manual', 'a question A asked', now(), $1::jsonb) RETURNING id::text AS id`,
@@ -336,7 +346,7 @@ t(["plant"], "plant two users' private reports and their claims in the shape slo
   await sql(`CREATE TABLE IF NOT EXISTS public.lab_prc_plant (k TEXT PRIMARY KEY, v JSONB NOT NULL)`);
   await sql(`INSERT INTO public.lab_prc_plant (k, v) VALUES ('plant', $1::jsonb) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v`,
     [JSON.stringify({ R, w, thread, s1, s2, syn, bIdea, aIdea, bReport, aReport, orphReport, b1, b2, b3, a1, multi, orph, ctl, mix, job, child, page, pageCite, pageBold, pageWiki, pageMid, pageSup, near, clean, p2syn, p2job,
-      p2jobA, p2multi, synCtl, bh, hjob, hchild, b3text, bhText, human: await humanImage(hjob, hchild) })]);
+      p2jobA, p2multi, synCtl, bh, hjob, hchild, b3text, bhText, human: await humanImage(hjob, hchild), p2synB, p2thread, dupB3 })]);
   await landed(await plant());
 });
 
@@ -554,7 +564,10 @@ t(BOTH, "[db] the wiki page carrying B's claim's text is withheld, and stays out
     `WITH w AS (INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'entity', 'again', $2)
                 ON CONFLICT (slug) DO UPDATE SET body = EXCLUDED.body RETURNING 1) SELECT count(*)::int AS n FROM w`, [p.page, body]);
   assertEquals(back[0].n, 0, "the rewrite is withheld");
-  assertEquals(await errCode(() => probe(null, `INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'note', 'n', $2)`, [`notes/prc-${p.R}`, body])), "42501", "a note is refused");
+  // fix item round 2 (A1): a NOTE is a person's text - with no author named it matches nothing (the [fix2] note case)
+  const noteN = await probe<{ n: number }>(null,
+    `WITH w AS (INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'note', 'n', $2) RETURNING 1) SELECT count(*)::int AS n FROM w`, [`notes/prc-${p.R}`, body]);
+  assertEquals(noteN[0].n, 1, "a note with no author named is saved");
   const clean = await probe<{ n: number }>(null,
     `WITH w AS (INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'entity', 'clean', 'still nothing private') RETURNING 1) SELECT count(*)::int AS n FROM w`,
     [`content/topic/prc-clean2-${p.R}`]);
@@ -771,6 +784,64 @@ t(BOTH, "[db] [fix] P2 shared job reports restating B's claim: B's own question'
   assertEquals(copies.map((c) => [c.research_key === `prc570-job:${p.p2job}`, c.owner_sub === B]), [[true, true]],
     "only B's own question's report is copied, to B (A's prompt / an ownerless job's would leave with it)");
   assert(copies[0].content.includes(p.w.b3), "B reads its text");
+});
+// fix item round 2 (tester attempt 1, A1): a person's NOTE is refused only for its AUTHOR's own private-report claim -
+// the workbench's note write names the author for its one statement (ob.page_author). Another user's claim never
+// changes whether a note is saved (and so whether search finds it): no existence oracle through note + search.
+t(BOTH, "[fix2] A1 a note by A carrying B's claim is saved exactly like one carrying a text nobody holds; A's own claim in A's note, and B's in B's, are refused", async () => {
+  const p = await plant();
+  const note = async (author: string, text: string) => {
+    try {
+      const r = await probe<{ n: number }>(null,
+        `WITH who AS (SELECT set_config('ob.page_author', $3, true) AS a),
+              w AS (INSERT INTO public.wiki_pages (slug, page_class, title, body) SELECT $1, 'note', 'my note', $2 FROM who RETURNING 1)
+         SELECT count(*)::int AS n FROM w`, [`notes/prc-a1-${crypto.randomUUID()}.md`, `Some notes. ${text} More notes.`, author]);
+      return r[0].n === 1 ? "saved" : "dropped";
+    } catch (e) {
+      return (e as { fields?: { code?: string } }).fields?.code ?? "error";
+    }
+  };
+  const bText = `The ${p.w.b} beta result held for 40 participants over six months.`;
+  const ctrl = `The ${p.w.b}x beta result held for 40 participants over six weeks.`;
+  const out = {
+    aWithB: await note(A, bText), aWithBUpper: await note(A, bText.toUpperCase()), aCtrl: await note(A, ctrl),
+    aOwn: await note(A, `The ${p.w.a} gamma result was confirmed by a second team in 2025.`), bOwn: await note(B, bText),
+  };
+  assertEquals(out, { aWithB: "saved", aWithBUpper: "saved", aCtrl: "saved", aOwn: "42501", bOwn: "42501" });
+  // a machine-written page (a compile) carrying B's claim is still withheld: no person chose that text
+  const page = await probe<{ n: number }>(null,
+    `WITH w AS (INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'entity', 'compiled', $2) RETURNING 1) SELECT count(*)::int AS n FROM w`,
+    [`content/topic/prc-a1-${p.R}`, `Compiled. ${bText}`]);
+  assertEquals(page[0].n, 0, "a compiled page carrying B's claim is withheld");
+});
+
+// fix item round 2 (tester attempt 1, P2): what a moved synthesis left on other shared surfaces
+t(BOTH, "[db] [fix2] P2 the thread minted from the restating synthesis no longer carries B's sentence; the shared claim it filed into that thread moved to B", async () => {
+  const p = await plant();
+  const th = (await sql<{ name: string; description: string | null; emb: boolean }>(
+    `SELECT name, description, embedding IS NOT NULL AS emb FROM public.threads WHERE id = $1`, [p.p2thread]))[0];
+  assert(!`${th.name} ${th.description ?? ""}`.includes(p.w.b3), "the thread's name / description carry no private word");
+  assertEquals(th.emb, false, "no embedding made from the old description");
+  const left = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.threads WHERE coalesce(description, '') || ' ' || name LIKE '%' || $1 || '%'`, [p.w.b3]))[0].n;
+  assertEquals(left, 0, "no thread carries B's theta sentence");
+  const dup = (await sql<{ shared: number; owner: string | null; linked: number }>(
+    `SELECT (SELECT count(*)::int FROM public.claims WHERE id = $1) AS shared,
+            (SELECT inlet_owner_sub FROM public.inlet_private_claims WHERE id = $1) AS owner,
+            (SELECT count(*)::int FROM public.research_private_report_claims WHERE claim_id = $1 AND report_id = $2) AS linked`, [p.dupB3, p.bReport]))[0];
+  assertEquals([dup.shared, dup.owner === B, dup.linked], [0, true, 1], "the duplicate is B's (in B's store, linked to B's report), not shared");
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.claims WHERE text LIKE '%' || $1 || '%'`, [p.w.b3]))[0].n, 0,
+    "no shared claim carries B's theta sentence");
+});
+t(BOTH, "[db] [fix2] P2 a synthesis copy keeps its title / question only when the question was B's own; A's typed question never reaches B", async () => {
+  const p = await plant();
+  const copy = async (id: string) => (await sql<{ title: string; research_query: string | null; m: string }>(
+    `SELECT title, research_query, metadata::text AS m FROM public.research_private_reports WHERE research_key = $1 AND owner_sub = $2`, [`prc570-syn:${id}`, B]))[0];
+  const a = await copy(p.p2syn);
+  assert(a, "the restating synthesis is copied to B");
+  assert(!a.title.includes(`${p.w.a}q`) && !(a.research_query ?? "").includes(`${p.w.a}q`) && !a.m.includes(`${p.w.a}q`), "A's typed question is not in B's copy");
+  const b = await copy(p.p2synB);
+  assert(b, "the synthesis of B's own question is copied to B");
+  assertEquals([b.title, b.research_query], [`B question title ${p.R}`, "another shared question"], "B's own question stays on B's copy");
 });
 // final round (tester attempt 2 F3): slot 480's workbench login reads the owner's claims, owner-scoped; it files nothing
 t([...BOTH, "p480"], "[db] slot 480's ob_workbench login reads only the verified subject's private-report claims, and files none", async () => {
