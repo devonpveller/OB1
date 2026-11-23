@@ -43,7 +43,10 @@ param(
   [string]$CaddyImage = 'caddy:2-alpine',
   [switch]$KeepImages,
   [string]$OldSql = '',
-  [string]$OldTag = 'fix'
+  [string]$OldTag = 'fix',
+  # -Prebuilt: use openbrain-workbench:wt-<id> and its -test tag already built under this run's tags (plain docker build,
+  # no timeout, when Docker Desktop stalls the lab's 40-minute build); removed at the end unless -KeepImages
+  [switch]$Prebuilt
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -207,6 +210,14 @@ try {
   $script:made.net = $true
   # ---------------------------------------------------------------- [2] images
   Write-Host '[2] images'
+  if ($Prebuilt) {
+    foreach ($t in @($wbTag, $wbTestTag)) {
+      $null = Dk image inspect $t
+      Check ($script:rc -eq 0) "prebuilt image $t is present"
+      if ($script:rc -ne 0) { throw "prebuilt $t" }
+      $script:made.images += $t
+    }
+  } else {
   $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" -t $wbTag $wb; Save 'build-workbench.log' ($o -split "`n" | Select-Object -Last 60 | Out-String)
   Check ($script:rc -eq 0) "$wbTag built (its test gate passed)"
   if ($script:rc -ne 0) { throw 'build workbench' }
@@ -215,6 +226,7 @@ try {
   Check ($script:rc -eq 0) "$wbTestTag (the test stage) built"
   if ($script:rc -ne 0) { throw 'build test' }
   $script:made.images += $wbTestTag
+  }
   # ---------------------------------------------------------------- [3] the lab
   Write-Host '[3] the lab'
   if (-not (Run-Detached $db @('--network-alias', 'openbrain-db', '-e', "POSTGRES_PASSWORD=$pw", '-e', 'POSTGRES_DB=openbrain', '-v', "${stage}:/docker-entrypoint-initdb.d:ro", $PgImage))) { throw 'db' }
