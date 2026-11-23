@@ -146,7 +146,7 @@ a.row:hover { background: var(--bg); }
 .folder:hover { background: var(--sunken); }
 .folder.fon { background: var(--sunken); font-weight: 600; }
 .folder-name { min-width: 0; overflow-wrap: anywhere; }
-.docs-table { flex: 1; padding: 0; gap: 0; }
+.docs-table { flex: 1; padding: 0; gap: 0; min-width: 0; max-width: 100%; }
 .docs-tabs { display: flex; gap: 4px; padding: 6px 10px 0; border-bottom: 1px solid var(--line); }
 .tab { height: 34px; padding: 0 14px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); }
 .tab:hover { background: transparent; color: var(--fg); }
@@ -178,4 +178,6 @@ a.row:hover { background: var(--bg); }
 .doc-head .btn { margin-left: auto; }
 .doc-note { border-color: var(--amber-line); background: var(--amber-soft); color: var(--amber-text); }
 .doc-body { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15px; line-height: 1.6; }
-@media (max-width: 760px) { .docs-body { flex-direction: column; } .docs-folders { width: 100%; } }
+/* narrow: the folders stack above the table, and the table card is the column's width (stretch, not its
+   content's width), so only .docs-scroll scrolls sideways and the actions, tabs and footer stay on screen */
+@media (max-width: 760px) { .docs-body { flex-direction: column; align-items: stretch; } .docs-folders { width: 100%; } .docs-table { width: 100%; } }

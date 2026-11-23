@@ -38,6 +38,10 @@ function DocumentFor({ path }: { path: string }) {
     try {
       const st = await readState(path);
       if (!live.current) return;
+      // a path in the person's own directory with no listing row (deleted forever, or never there) answers 200
+      // listed:false, not 404 (repo.ts documentState): it is gone, exactly like a missing or someone else's one.
+      // (A file whose listing write failed is also unlisted until the reconcile pass repairs it: gone till then.)
+      if (!st.listed) { setView({ state: "gone" }); return; }
       if (st.trashed) {
         // the trash date is the listing's (the trash move sets it); the text is NOT read: it does not open
         let title = "", goes = goesText("");
@@ -62,6 +66,7 @@ function DocumentFor({ path }: { path: string }) {
   const act = (f: () => Promise<string>, done: string, fallback: string) => {
     setBusy(true); setErr("");
     f().then((to) => {
+      if (!live.current) return; // the person changed meanwhile (this screen is keyed by the subject): show and move nothing
       const lk = getLockedDocument(), ls = getLastDocument();
       if (lk?.id === path) setLockedDocument({ id: to, title: lk.title });
       if (ls?.id === path) setLastDocument({ id: to, title: ls.title });

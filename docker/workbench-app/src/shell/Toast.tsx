@@ -1,7 +1,12 @@
 // A toast with Undo: a short message at the bottom that offers to take the action back. It is announced
 // politely to a screen reader, stays 8 seconds (hovering or focusing it holds it, so a keyboard user has
 // time), and Undo runs the caller's function once.
+//
+// A toast belongs to the person it was shown to: when the person on this page changes (shell-data calls
+// resetState(), which bumps the state epoch - the whoami refresh, without a reload), EVERY toast is dropped at
+// once, held or not, so no title of the previous person's stays on the next person's screen (rwr-docs-list r2).
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { stateEpoch, subscribeState } from "../lib/state";
 
 export type ToastSpec = { message: string; undoLabel?: string; onUndo?: () => void; ms?: number };
 type Item = ToastSpec & { id: number };
@@ -13,6 +18,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const seq = useRef(0);
   const dismiss = useCallback((id: number) => setItems((l) => l.filter((x) => x.id !== id)), []);
   const show = useCallback((t: ToastSpec) => setItems((l) => [...l, { ...t, id: ++seq.current }]), []);
+  useEffect(() => {
+    let epoch = stateEpoch();
+    return subscribeState(() => {
+      if (stateEpoch() !== epoch) { epoch = stateEpoch(); setItems([]); }
+    });
+  }, []);
   return (
     <Ctx.Provider value={show}>
       {children}

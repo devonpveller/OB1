@@ -101,7 +101,12 @@ export function createFake(opts = {}) {
     }
     if (p === "/workbench/documents/state" && method === "GET") {
       const path = rel(q("path"), who);
-      if (!mine(path, who)) return NO;
+      // as repo.ts documentState: someone else's (or outside the caller's directory) is a 404; a path in the
+      // caller's OWN directory that has no listing row (deleted forever, or never there) is 200 listed:false
+      if (!mine(path, who)) {
+        if (db.docs.has(path) || !path.startsWith(r + "/")) return NO;
+        return { status: 200, body: { path, listed: false, trashed: isTrashed(path), archived: isArchived(path), carries_idea: false, refinery: null, tags: [] } };
+      }
       return { status: 200, body: { path, listed: true, trashed: isTrashed(path), archived: isArchived(path), carries_idea: false, refinery: null, tags: [] } };
     }
     if (p === "/workbench/documents/file" && method === "GET") {

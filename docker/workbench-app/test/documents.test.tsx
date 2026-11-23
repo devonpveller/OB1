@@ -241,6 +241,19 @@ describe("acceptance 3: trashed documents do not open until restored and say whe
   });
 });
 
+describe("a deleted document's old URL (the real server: 200 listed:false for the caller's own path)", () => {
+  it("after Delete forever, the trashed URL says there is no such document: no 'in the trash', no Restore", async () => {
+    fake.db().docs.delete("documents/k-a/.trash/Hardware/dup.md"); // as Delete forever leaves it
+    const st = fake.handle("alice", "GET", "/workbench/documents/state?path=" + encodeURIComponent("documents/k-a/.trash/Hardware/dup.md"));
+    expect(st).toEqual({ status: 200, body: expect.objectContaining({ listed: false, trashed: true }) });
+    window.history.pushState({}, "", "/documents/" + encodeURIComponent("documents/k-a/.trash/Hardware/dup.md"));
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("doc-gone").textContent).toBe(NOT_FOUND));
+    expect(screen.queryByTestId("doc-trashed")).toBeNull();
+    expect(screen.queryByTestId("doc-restore")).toBeNull();
+  });
+});
+
 describe("acceptance 4: Delete forever needs the typed word and shows what is lost and what stays", () => {
   it("the button stays off until DELETE is typed exactly; nothing is sent before; the summary is there", async () => {
     await openDocs();
@@ -352,6 +365,35 @@ describe("acceptance 7: two identities - bob never sees alice's documents, folde
       expect(screen.getByTestId("main").textContent).not.toMatch(/ALPHA/);
     }
     expect(new Set(seen).size).toBe(1);
+  });
+  it("a switch of person through the whoami refresh (NO remount) drops alice's toast, even one held by hover or focus", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await openDocs();
+      fireEvent.click(within(row("ALPHA One gateway")).getByTestId("act-archive"));
+      await waitFor(() => expect(screen.getByTestId("toast").textContent).toMatch(/Archived "ALPHA One gateway"/));
+      fireEvent.mouseEnter(screen.getByTestId("toast")); // held: its 8 s timer stops
+      fireEvent.focus(screen.getByTestId("toast-undo"));
+      who = "bob"; // the same App, the same page: the shell's 30 s whoami refresh sees bob
+      await act(async () => { await vi.advanceTimersByTimeAsync(30500); });
+      await waitFor(() => expect(rows()).toEqual(["BRAVO plan"]));
+      expect(screen.queryAllByTestId("toast")).toEqual([]);
+      expect(document.body.innerHTML).not.toMatch(/ALPHA/);
+    } finally { vi.useRealTimers(); }
+  });
+  it("a switch of person with the Delete forever confirmation open closes it (no alice title, no typed word kept)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await openDocs();
+      await tab("trash");
+      fireEvent.click(within(row("ALPHA CPU duplicate")).getByTestId("act-delete"));
+      fireEvent.change(screen.getByTestId("typed-input"), { target: { value: "DELE" } });
+      who = "bob";
+      await act(async () => { await vi.advanceTimersByTimeAsync(30500); });
+      await waitFor(() => expect(screen.getByTestId("avatar").getAttribute("aria-label") ?? "").toMatch(/Bob/));
+      await waitFor(() => expect(screen.queryByTestId("delete-ask")).toBeNull());
+      expect(document.body.innerHTML).not.toMatch(/ALPHA/);
+    } finally { vi.useRealTimers(); }
   });
   it("a live switch from alice to bob on the Documents page drops alice's rows", async () => {
     await openDocs();

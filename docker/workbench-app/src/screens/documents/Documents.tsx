@@ -67,9 +67,12 @@ function DocumentsFor() {
   const [err, setErr] = useState("");
   const [ask, setAsk] = useState<Ask | null>(null);
   const [making, setMaking] = useState<"" | "folder" | "doc">("");
-  const toast = useToast();
+  const shout = useToast();
   const live = useRef(true);
   const seq = useRef(0);
+  // a toast only while this person's list is mounted: an answer that lands after the person changed (this
+  // component is keyed by the subject, so it has unmounted) shows nothing to the next person
+  const toast: typeof shout = useCallback((t) => { if (live.current) shout(t); }, [shout]);
 
   const reload = useCallback(() => {
     const my = ++seq.current;

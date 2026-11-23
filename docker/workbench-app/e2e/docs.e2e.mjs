@@ -187,6 +187,19 @@ ok(bobPosts.length === 0, "bob's visit made no change request");
 await scheme("dark"); await axe("dark Documents as bob"); await scheme("light");
 await setMode("alice");
 
+// ---- 8b. a change of person WITHOUT a reload (the shell's 30 s whoami refresh) with alice's toast up and held
+await stub("/__reset", "POST"); await setMode("alice"); await go("/documents");
+await inRow("ALPHA One gateway", "act-archive");
+await until(`/Archived "ALPHA One gateway"/.test(document.querySelector('[data-testid=toasts]')?.textContent||'')`);
+await ev(`document.querySelector('[data-testid=toast-undo]').focus()`); // focus holds the toast (its 8 s timer stops)
+await setMode("bob");
+const switched = await until(`/Bob/.test(document.querySelector('[data-testid=avatar]')?.getAttribute('aria-label')||'')`, 280);
+await until(`document.querySelectorAll('[data-testid=doc-row]').length===1`);
+const sw = JSON.parse(await ev(`JSON.stringify({toasts:document.querySelectorAll('[data-testid=toast]').length,alpha:/ALPHA/.test(document.documentElement.outerHTML),rows:[...document.querySelectorAll('[data-testid=doc-title]')].map(e=>e.textContent)})`));
+ok(switched && sw.toasts === 0 && !sw.alpha && JSON.stringify(sw.rows) === JSON.stringify(["BRAVO plan"]),
+  `live switch alice -> bob (no reload) with alice's toast held by focus: toast gone, no ALPHA in the page, bob's rows (${JSON.stringify(sw)})`);
+await setMode("alice");
+
 // ---- 9. acceptance 8: nothing kept in the browser; no cached /workbench read
 await go("/documents");
 const keep = JSON.parse(await ev(`(async()=>JSON.stringify({ls:Object.keys(localStorage).filter(k=>k!=='workbench.theme'),ss:sessionStorage.length,ck:document.cookie,caches:(typeof caches!=='undefined'?await caches.keys():[]).length,idb:(indexedDB.databases?await indexedDB.databases():[]).length,title:document.title}))()`));
@@ -214,10 +227,26 @@ for (let i = 0; i < 60; i++) {
 const main = stops.filter((s) => s.inMain);
 for (const need of ["new-folder", "new-doc", "folder-all", "tab-active", "tab-trash", "doc-title", "act-open", "act-archive", "act-trash"]) ok(main.some((s) => s.t === need), `Tab reaches ${need}`);
 ok(main.every((s) => s.fv && s.os !== "none" && s.ow >= 2), `all ${main.length} Tab stops on the screen show a focus ring of at least 2px`);
+// Reflow (WCAG 1.4.10): neither the page nor the screen's own scroll container (main) scrolls sideways, and NO
+// element inside main reaches past main's right edge - except inside the table's own scroll box (.docs-scroll,
+// which may scroll; the box itself must fit). Checked on every tab and with the confirmation open.
 for (const w of [800, 400]) {
-  await viewport(w, 900); await go("/documents");
-  const o = JSON.parse(await ev(`JSON.stringify({sw:document.documentElement.scrollWidth,cw:document.documentElement.clientWidth,wide:[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>document.documentElement.clientWidth+1&&!e.closest('.docs-scroll')).slice(0,6).map(e=>(e.dataset.testid||e.className||e.tagName)+':'+Math.round(e.getBoundingClientRect().right))})`));
-  ok(o.sw <= o.cw, `at ${w}px: no horizontal page scroll (${o.sw}/${o.cw}); the table scrolls in its own box` + (o.wide.length ? " " + JSON.stringify(o.wide) : ""));
+  await viewport(w, 900);
+  for (const step of ["active", "trash", "confirm"]) {
+    await go("/documents");
+    if (step !== "active") await tab("trash");
+    if (step === "confirm") await click("[data-testid=empty-trash]");
+    const o = JSON.parse(await ev(`(()=>{const m=document.querySelector('main');const mr=m.getBoundingClientRect().right;const de=document.documentElement;
+      const wide=[...m.querySelectorAll('*')].filter(e=>{const r=e.getBoundingClientRect();return r.width>0&&r.right>mr+1&&!(e.parentElement&&e.parentElement.closest('.docs-scroll'));})
+        .slice(0,6).map(e=>(e.dataset.testid||e.className||e.tagName)+':'+Math.round(e.getBoundingClientRect().right)+'>'+Math.round(mr));
+      return JSON.stringify({dsw:de.scrollWidth,dcw:de.clientWidth,msw:m.scrollWidth,mcw:m.clientWidth,wide});})()`));
+    ok(o.dsw <= o.dcw && o.msw <= o.mcw && o.wide.length === 0,
+      `at ${w}px (${step}): no sideways scroll of the page (${o.dsw}/${o.dcw}) or of main (${o.msw}/${o.mcw}); nothing in main past its edge ${JSON.stringify(o.wide)}`);
+    if (step === "trash") {
+      const vis = JSON.parse(await ev(`JSON.stringify(['empty-trash'].map(t=>{const e=document.querySelector('[data-testid='+t+']');const r=e.getBoundingClientRect();return r.left>=0&&r.right<=document.documentElement.clientWidth;}))`));
+      ok(vis.every(Boolean), `at ${w}px: Empty the trash is on screen without scrolling sideways`);
+    }
+  }
   await axe(`light Documents at ${w}px`);
 }
 await viewport(1440, 900);
