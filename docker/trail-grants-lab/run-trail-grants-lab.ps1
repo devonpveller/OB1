@@ -27,7 +27,12 @@ function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
 function Dk { $o = (& docker @args 2>&1 | ForEach-Object { "$_" }) -join "`n"; $script:rc = $LASTEXITCODE; return $o }
 function Save([string]$n, [string]$t) { [IO.File]::WriteAllText((Join-Path $Evidence $n), $t, (New-Object Text.UTF8Encoding $false)) }
-function Q([string]$sql) { $r = Dk exec $db psql -U postgres -d openbrain -X -A -t -c $sql; return "$r".Trim() }
+# a query that fails (non-zero exit, or any ERROR in the output) is a lab failure, never a value: a snapshot made of an error string compares equal to itself
+function Q([string]$sql) {
+  $r = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -A -t -c $sql
+  if ($script:rc -ne 0 -or "$r" -match '(?m)^(psql: )?ERROR:') { Fail "query failed (rc $($script:rc)): $("$r".Substring(0, [Math]::Min(300, "$r".Length)))"; throw "query failed" }
+  return "$r".Trim()
+}
 function PsqlFile([string]$local) {
   $name = '/tmp/' + [IO.Path]::GetFileName($local)
   $null = Dk cp $local "${db}:$name"
@@ -37,8 +42,9 @@ function PsqlFile([string]$local) {
 # the catalog of the table: ACL, policies, triggers, the trigger function, the sequence ACL, RLS flags, columns, indexes
 $catSql = @"
 SELECT 'acl|' || coalesce((SELECT string_agg(a, ',' ORDER BY a) FROM (SELECT unnest(relacl)::text a FROM pg_class WHERE oid='public.user_document_trail'::regclass) x), 'NULL')
+UNION ALL SELECT 'relacl|' || coalesce(relacl::text, 'NULL') FROM pg_class WHERE oid='public.user_document_trail'::regclass
 UNION ALL SELECT 'rls|' || relrowsecurity || relforcerowsecurity FROM pg_class WHERE oid='public.user_document_trail'::regclass
-UNION ALL SELECT 'policy|' || polname || '|' || polcmd || '|' || pg_get_expr(polqual, polrelid) FROM pg_policy WHERE polrelid='public.user_document_trail'::regclass
+UNION ALL SELECT 'policy|' || polname || '|' || polcmd::text || '|' || pg_get_expr(polqual, polrelid) FROM pg_policy WHERE polrelid='public.user_document_trail'::regclass
 UNION ALL SELECT 'trigger|' || tgname || '|' || pg_get_triggerdef(oid) FROM pg_trigger WHERE tgrelid='public.user_document_trail'::regclass AND NOT tgisinternal
 UNION ALL SELECT 'func|' || p.proname || '|' || coalesce(p.proacl::text,'NULL') FROM pg_proc p WHERE p.proname='user_document_trail_no_edit'
 UNION ALL SELECT 'seqacl|' || coalesce(relacl::text,'NULL') FROM pg_class WHERE oid='public.user_document_trail_id_seq'::regclass
@@ -47,7 +53,12 @@ UNION ALL SELECT 'check|' || conname || '|' || pg_get_constraintdef(oid) FROM pg
 UNION ALL SELECT 'idx|' || indexdef FROM pg_indexes WHERE tablename='user_document_trail'
 ORDER BY 1
 "@
-function Catalog { (Q $catSql) }
+# a snapshot that does not hold the ACL (the raw relacl text and the acl| line) is a lab failure: the compares below must be comparing something
+function Catalog {
+  $c = Q $catSql
+  if ($c -notmatch '(?m)^acl\|\S*=\S*/' -or $c -notmatch '(?m)^relacl\|\{.*=.*/.*\}\s*$' -or $c -notmatch '(?m)^policy\|') { Fail "catalog snapshot is missing its acl / relacl / policy lines: $("$c".Substring(0, [Math]::Min(300, "$c".Length)))"; throw 'empty catalog snapshot' }
+  return $c
+}
 $privList = "ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE','REFERENCES','TRIGGER']"
 
 Write-Host "== rwr-trail-grants-exact disposable run  owner=$Id  evidence=$Evidence"
@@ -88,7 +99,9 @@ try {
   Check ((Q "SELECT pg_has_role('ob_app_memory','service_role','USAGE')") -eq 't') 'ob_app_memory is a member of service_role'
 
   Write-Host '[3] the live starting point: the previous 510 on this database'
-  $null = Q "DROP TABLE public.user_document_trail"
+  # the live database never had this item's objects: take them off with the real revert (the table AND the trigger function), not a bare DROP TABLE
+  $r = PsqlFile (Join-Path $dockerDir 'revert-document-trail.sql')
+  Check ($r.rc -eq 0 -and (Q "SELECT count(*) FROM pg_proc WHERE proname = 'user_document_trail_no_edit'") -eq '0') 'the chain 510 taken off with revert-document-trail.sql (no table, no trigger function left)'
   $r = PsqlFile $oldFile
   Check ($r.rc -eq 0) 'previous 510 applied'
   $null = Q "INSERT INTO public.user_document_trail (owner_sub, actor_sub, kind, path) VALUES ('lab-a','lab-a','delete_forever','documents/x/.trash/a.md')"
@@ -115,6 +128,19 @@ try {
   Check ($r.rc -eq 0) 'second re-run exits 0'
   $after2 = Catalog; Save 'catalog-after-2.txt' $after2
   Check ($after1 -eq $after2) 'idempotent: the catalog after the second run is identical to after the first'
+  Check ($after1 -match 'acl\|' -and $after1 -match 'relacl\|\{postgres=arwdDxt/postgres,service_role=ar/postgres\}') "the snapshot holds the real ACL (service_role=ar: INSERT, SELECT only): $((($after1 -split "`n") | Where-Object { $_ -like 'relacl|*' }))"
+  # RED for the defect this guards against (review R1): the old snapshot SQL joined polcmd to text with ||, which PG16 refuses; with the old Q that error string became the "snapshot"
+  $o = Dk exec $db psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -X -A -t -c "SELECT 'policy|' || polname || '|' || polcmd || '|' FROM pg_policy WHERE polrelid='public.user_document_trail'::regclass"
+  Check ($script:rc -ne 0 -and $o -match 'operator is not unique' -and $o -match '(?m)^(psql: )?ERROR:') 'RED: the old snapshot expression (polcmd joined with ||) is refused by this PG, and the error text is what Q now treats as a failure'
+  # the compare is not vacuous: a deliberately different grant makes it differ, and taking it back makes it equal again
+  $null = Q "GRANT UPDATE ON public.user_document_trail TO service_role"
+  Check ((Catalog) -ne $after1) 'RED: a deliberately different grant (UPDATE to service_role) makes the catalog compare differ'
+  $null = Q "REVOKE UPDATE ON public.user_document_trail FROM service_role"
+  Check ((Catalog) -eq $after1) 'and revoking it makes the compare equal again'
+  $null = Q "CREATE POLICY lab_extra ON public.user_document_trail FOR SELECT TO service_role USING (true)"
+  Check ((Catalog) -ne $after1) 'RED: an extra policy makes the compare differ (the policy line is in the snapshot)'
+  $null = Q "DROP POLICY lab_extra ON public.user_document_trail"
+  Check ((Catalog) -eq $after1) 'and dropping it makes the compare equal again'
 
   Write-Host '[5] privileges: every non-superuser role, then service_role and its members'
   $matrix = Q "SELECT r.rolname || '|' || coalesce((SELECT string_agg(p, ',' ORDER BY p) FROM unnest($privList) p WHERE has_table_privilege(r.oid,'public.user_document_trail',p)),'') FROM pg_roles r WHERE NOT r.rolsuper AND r.rolname !~ '^pg_' ORDER BY 1"

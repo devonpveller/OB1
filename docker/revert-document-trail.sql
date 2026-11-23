@@ -5,7 +5,7 @@
 -- Redeploy the workbench image from before this item with this revert.
 \set ON_ERROR_STOP on
 BEGIN;
-DROP TABLE IF EXISTS public.user_document_trail;   -- its two triggers go with it
+DROP TABLE IF EXISTS public.user_document_trail;   -- its three triggers go with it
 DROP FUNCTION IF EXISTS public.user_document_trail_no_edit();
 COMMIT;
 NOTIFY pgrst, 'reload schema';
