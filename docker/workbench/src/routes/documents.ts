@@ -11,7 +11,7 @@ import type { Context } from "hono";
 import type { Db } from "../contracts/db.ts";
 import type { RegistryReader } from "../contracts/registry.ts";
 import { Conflict, NotFound } from "../contracts/repo/lifecycle.ts";
-import { placeReference, SelectorRefused } from "../contracts/repo/references.ts";
+import { getRecordFor, placeReference, SelectorRefused } from "../contracts/repo/references.ts";
 import { type Identity, identityConfig, identityOf, resolveIdentity } from "../middleware/identity.ts";
 import * as docs from "../documents/repo.ts";
 import * as refinery from "../documents/refinery.ts";
@@ -216,9 +216,8 @@ export function documentsRouter(rdeps: DocumentsDeps) {
   // replaces that transclusion's id. Chips already broken out of it keep the old record, frozen.
   r.post("/references/:id/repin", wrap(async (c, who) => {
     const rel = await docs.ownedPath(db, str(c.req.query("path")), who);
-    const old = (await db.query<{ source_id: string; exact: string }>(
-      `SELECT source_id::text, selectors #>> '{quote,exact}' AS exact FROM public.reference_records WHERE id = $1`, [str(c.req.param("id"))],
-    ))[0];
+    const rec = await getRecordFor(db, str(c.req.param("id")), who);
+    const old = rec ? { source_id: rec.source_id, exact: (rec.selectors as { quote?: { exact?: string } }).quote?.exact ?? "" } : null;
     if (!old) return c.json({ error: "no reference record with this id" }, 404);
     const placed = await placeReference(db, reg, {
       source_id: old.source_id, exact: old.exact, holder: { kind: HOLDER_KIND, ref: rel, origin: "cited" }, by: who.name, who,

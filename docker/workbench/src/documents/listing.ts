@@ -13,6 +13,7 @@ import type { RegistryReader } from "../contracts/registry.ts";
 import { placeReference, targetHead } from "../contracts/repo/references.ts";
 import { type ParsedDocument, parseDocument, referenceIdsOf } from "./grammar.ts";
 import { HOLDER_KIND } from "./paths.ts";
+import { FOREIGN_HELD_TARGET } from "./ownership.ts";
 
 export interface OutboundLink {
   kind: string;
@@ -69,7 +70,7 @@ export async function syncHolders(db: Db, reg: RegistryReader, rel: string, doc:
   for (const id of textRefs) {
     if (held.has(id)) continue;
     // a chip pasted from another document: the record exists - hold it here too
-    const rec = (await db.query<{ source_id: string }>(`SELECT source_id::text FROM public.reference_records WHERE id = $1`, [id]))[0];
+    const rec = (await db.query<{ source_id: string }>(`SELECT source_id::text FROM public.reference_records r WHERE r.id = $1 AND NOT ${FOREIGN_HELD_TARGET("r.source_id", "$2")}`, [id, who.sub]))[0];
     if (!rec) continue;
     await db.query(
       `INSERT INTO public.reference_holders (holder_kind, holder_ref, reference_id, cited_ref, origin, seq, number)

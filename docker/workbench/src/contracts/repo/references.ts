@@ -20,7 +20,7 @@ import {
   anchorText, deriveWholeSourceSelectors, frontmatterSources, noteRefsCited, planLegacyHolders,
   requiredSelectorKinds,
 } from "../logic/citations.ts";
-import { FOREIGN_DOC, FOREIGN_IDEA, type Viewer } from "../../documents/ownership.ts";
+import { FOREIGN_DOC, FOREIGN_HELD_TARGET, FOREIGN_IDEA, type Viewer } from "../../documents/ownership.ts";
 import { getHeld, getSource, omitted, reference, sourceReference, tombstoneBySource, tombstoneOut } from "./sources.ts";
 
 // The holder kind the legacy note routes use (a key of reference_holder_kinds).
@@ -49,11 +49,11 @@ export async function getRecord(db: Db, id: string): Promise<RecordRow | null> {
 
 // A record as a given user reads it (rw-p2b-workspace round 3): who placed it is withheld (null) when
 // the record is held by another user's document - selected so in SQL, never fetched and then hidden.
-async function getRecordFor(db: Db, id: string, who: Viewer): Promise<RecordRow | null> {
+export async function getRecordFor(db: Db, id: string, who: Viewer): Promise<RecordRow | null> {
   return (await db.query<RecordRow>(
     `SELECT ${RECORD_COLS.replace("r.created_by", `CASE WHEN EXISTS (SELECT 1 FROM public.reference_holders oh
         WHERE oh.reference_id = r.id AND ${FOREIGN_DOC("oh.holder_ref", "$2", "$3")}) THEN NULL ELSE r.created_by END AS created_by`)}
-       FROM public.reference_records r WHERE r.id = $1`,
+       FROM public.reference_records r WHERE r.id = $1 AND NOT ${FOREIGN_HELD_TARGET("r.source_id", "$2")}`,
     [id, who.sub, who.key],
   ))[0] ?? null;
 }
@@ -650,7 +650,7 @@ async function diffRecords(db: Db, ids: string[], who: Viewer) {
             ${TARGET_COLS("rr.source_id", "rr.chunk_idx")},
             mv.moved_idx
        FROM unnest($1::uuid[]) WITH ORDINALITY AS q(id, ord)
-       JOIN public.reference_records rr ON rr.id = q.id
+       JOIN public.reference_records rr ON rr.id = q.id AND NOT ${FOREIGN_HELD_TARGET("rr.source_id", "$2")}
        LEFT JOIN public.sources s ON s.id = rr.source_id
        LEFT JOIN public.held_sources h ON h.id = rr.source_id AND s.id IS NULL AND NOT ${FOREIGN_IDEA("h.refinery_id", "$2")}
        LEFT JOIN public.contract_registry_entries sc ON sc.registry = 'reference_scopes' AND sc.key = rr.scope
