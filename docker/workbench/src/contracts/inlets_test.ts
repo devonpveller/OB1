@@ -7,7 +7,7 @@ import { unavailableScorer } from "./logic/reopen.ts";
 import type { Db } from "./db.ts";
 import { connectionsOf } from "./repo/inlets.ts";
 import { USER_ONLY } from "../middleware/identity.ts";
-import { MAX_ATTEMPTS, RETRIED_ALREADY } from "../intake/repo.ts";
+import { MAX_ATTEMPTS, RETRIED_ALREADY, RETRY_MOVE_SQL } from "../intake/repo.ts";
 import type { Identity } from "../middleware/identity.ts";
 
 const WHO: Identity = { sub: "user-a", actor: "user-a", name: "A", key: "user-a" };
@@ -76,9 +76,10 @@ Deno.test("the retry cap: the route refuses a job already retried, for every cal
   assert(/already retried once/.test(RETRIED_ALREADY));
   const routes = src("../intake/routes.ts");
   assert(/attempts \?\? 1\) >= repo\.MAX_ATTEMPTS\) return c\.json\(\{ error: repo\.RETRIED_ALREADY \}, 409\)/.test(routes));
-  assert(/attempts < \$2/.test(routes) && /\[job\.id, repo\.MAX_ATTEMPTS\]/.test(routes), "the bound is in the UPDATE too (two retries together)");
+  assert(/attempts < \$2/.test(RETRY_MOVE_SQL) && /status IN \('failed', 'cancelled'\)/.test(RETRY_MOVE_SQL), "the bound is in the UPDATE too (two retries together)");
+  assert(/db\.query\(repo\.RETRY_MOVE_SQL, \[job\.id, repo\.MAX_ATTEMPTS\]\)/.test(routes), "the route sends that very statement with the cap");
   const pos = (s: string) => routes.indexOf(s);
-  assert(pos("repo.RETRIED_ALREADY") > pos("a ${job.status} ${job.kind} job cannot be retried") && pos("repo.RETRIED_ALREADY") < pos("UPDATE public.import_jobs SET status = 'queued'"), "the cap sits after the 404 / state checks and before the write");
+  assert(pos("repo.RETRIED_ALREADY") > pos("a ${job.status} ${job.kind} job cannot be retried") && pos("repo.RETRIED_ALREADY") < pos("repo.RETRY_MOVE_SQL"), "the cap sits after the 404 / state checks and before the write");
 });
 
 // The route itself, with the real seam and a recording Db (the database half is the lab's R1-R3): attempts 2 is refused

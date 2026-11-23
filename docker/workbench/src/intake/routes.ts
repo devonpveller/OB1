@@ -98,9 +98,7 @@ export function intakeRouter(deps: IntakeDeps) {
         // rwr-imports-server-api: one retry only. The check on the row read above gives the reason; the same bound sits in the
         // UPDATE so two retries sent together cannot both pass (the loser changes nothing and gets the "moved on" 409)
         if (Number(job.detail.attempts ?? 1) >= repo.MAX_ATTEMPTS) return c.json({ error: repo.RETRIED_ALREADY }, 409);
-        const moved = await db.query(
-          `UPDATE public.import_jobs SET status = 'queued', error = NULL, attempts = attempts + 1
-            WHERE id = $1 AND status IN ('failed', 'cancelled') AND attempts < $2 RETURNING id`, [job.id, repo.MAX_ATTEMPTS]);
+        const moved = await db.query(repo.RETRY_MOVE_SQL, [job.id, repo.MAX_ATTEMPTS]);
         if (!moved.length) return c.json({ error: "the job moved on before it could be retried" }, 409);
         if (job.kind === "add") runAdd({ db, rdeps: deps.rdeps, fetch: deps.fetch, extract: deps.extract }, job.id).catch(() => {});
         else deps.retryImport(job.id, who).catch(() => {});

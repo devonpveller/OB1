@@ -8,6 +8,7 @@
 // INLETS_TEST_SUB_HEADER (default X-Test-Sub), CONTRACT_TEST_DB_HOST/_PORT/_USER/_PASSWORD (superuser: plants, catalog).
 import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert@1";
 import { Pool } from "postgres";
+import { MAX_ATTEMPTS, RETRY_MOVE_SQL } from "../intake/repo.ts";
 
 const BASE = (Deno.env.get("INLETS_TEST_BASE") ?? "").replace(/\/+$/, "");
 const KEY = Deno.env.get("INLETS_TEST_KEY") ?? "";
@@ -197,6 +198,21 @@ t("R3 two retries sent together: one runs, the other is refused, attempts is 2",
   const [x, y] = await Promise.all([call(A, "POST", RETRY(id)), call(A, "POST", RETRY(id))]);
   assertEquals([x.status, y.status].sort(), [202, 409], `${x.text} | ${y.text}`);
   assertEquals((await state(id)).attempts, 2);
+});
+
+// R4 (reviewer F1): R3 alone passes on the base, because the state guard already serialises two simultaneous retries. This
+// case runs the route's own statement (repo.RETRY_MOVE_SQL) on the real table as a stale read would: a job that FAILED again
+// after its one retry passes the state guard, so only `attempts < $2` stops it. Dropping that bound turns this red.
+t("R4 the UPDATE's own bound: a failed job already at the cap is never moved, even past the route's read check", async () => {
+  const capped = await failedJob(A, MAX_ATTEMPTS);
+  const before = await state(capped);
+  assertEquals((await sql(RETRY_MOVE_SQL, [capped, MAX_ATTEMPTS])).length, 0, "the statement moved a job already at the cap");
+  assertEquals(await state(capped), before, "the capped row is exactly as it was");
+  // the control: the same statement moves a job at its first attempt (so the zero above is the bound, not a broken query)
+  const open = await failedJob(A, 1);
+  assertEquals((await sql(RETRY_MOVE_SQL, [open, MAX_ATTEMPTS])).length, 1);
+  const after = await state(open);
+  assertEquals([after.status, after.attempts], ["queued", 2]);
 });
 
 Deno.test({ name: "pool close", ignore, fn: async () => { await pool!.end(); }, sanitizeOps: false, sanitizeResources: false });
