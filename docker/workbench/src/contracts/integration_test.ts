@@ -519,7 +519,7 @@ t("a held add of a tombstoned URL is refused (held does not bypass the reopen pa
 t("user documents are never pages: the listing is four fields, search and page calls never return one", async () => {
   const r = await call("GET", `/documents`);
   assertEquals(r.status, 200);
-  for (const d of r.json.documents) assertEquals(Object.keys(d).sort(), ["outbound_links", "path", "title", "updated"]);
+  for (const d of r.json.documents) assertEquals(Object.keys(d).sort(), ["id", "outbound_links", "path", "title", "updated"]);
   const cols = (await sql<{ c: string }>(`SELECT column_name AS c FROM information_schema.columns
      WHERE table_schema = 'public' AND table_name = 'user_document_listings'`)).map((x) => x.c);
   assertEquals(cols.some((c) => /body|content|text/.test(c)), false, `listing record has a body-like column: ${cols}`);

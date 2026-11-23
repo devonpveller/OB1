@@ -22,7 +22,7 @@ import {
 } from "../../lib/state";
 import { createEditor } from "../../editor";
 import { protectedSpans, type ProtectedSpan } from "../../editor/protected";
-import { ago, docHref, NOT_FOUND } from "../documents/docs-data";
+import { ago, DOC_PREFIX, hrefOfPath, NOT_FOUND } from "../documents/docs-data";
 import {
   AUTOSAVE_MS, Conflict, crumbsOf, isSamePerson, loadDocument, problem, queueResearch, readRoot, readVersion, researchProblem, saveDocument,
   versionText, type Loaded, type Version,
@@ -34,7 +34,7 @@ type Load = { s: "loading" } | { s: "gone" } | { s: "failed" } | { s: "ready"; d
 type Save = "idle" | "dirty" | "saving" | "saved" | "error" | "conflict";
 const RESEARCH_CAP = 1000;
 
-export function DocEditor({ path, subject }: { path: string; subject: string }) {
+export function DocEditor({ path, docRef, subject }: { path: string; docRef: string; subject: string }) {
   const [load, setLoad] = useState<Load>({ s: "loading" });
   const live = useRef(true);
   const read = useCallback(async () => {
@@ -67,10 +67,10 @@ export function DocEditor({ path, subject }: { path: string; subject: string }) 
       </section>
     );
   }
-  return <Writing path={path} subject={subject} first={load.doc} />;
+  return <Writing path={path} docRef={docRef} subject={subject} first={load.doc} />;
 }
 
-function Writing({ path, subject, first }: { path: string; subject: string; first: Loaded }) {
+function Writing({ path, docRef, subject, first }: { path: string; docRef: string; subject: string; first: Loaded }) {
   const toast = useToast();
   const toastRef = useRef(toast);
   toastRef.current = toast;
@@ -166,7 +166,7 @@ function Writing({ path, subject, first }: { path: string; subject: string; firs
   // ── opening: the Last document, the version, the breadcrumb, back to the top ──
   useEffect(() => {
     alive.current = true;
-    if (getLastDocument()?.id !== path) void ifSamePerson(() => setLastDocument({ id: path, title: first.title }));
+    if (getLastDocument()?.id !== path || getLastDocument()?.ref !== docRef) void ifSamePerson(() => setLastDocument({ id: path, title: first.title, ref: docRef }));
     readVersion(path).then((v) => { if (alive.current) { setVersion(v); setSavedAt(v.at); } }, () => {});
     readRoot().then((root) => { if (alive.current) setCrumbs(crumbsOf(path, root)); });
     const main = document.getElementById("main");
@@ -189,7 +189,7 @@ function Writing({ path, subject, first }: { path: string; subject: string; firs
         });
       }
     };
-  }, [path, subject, first.title, save, ifSamePerson]);
+  }, [path, docRef, subject, first.title, save, ifSamePerson]);
 
   // a warning when the page itself is closed with text that was not written
   useEffect(() => {
@@ -234,7 +234,8 @@ function Writing({ path, subject, first }: { path: string; subject: string; firs
       candidates: async () => [],
       onSelectSpan: (s) => openSpan(s),
       onLinkOpen: (t) => {
-        if (t.kind === "document") navigate(docHref(t.id));
+        // [[doc:<path>]] names a path: its opaque id is read first, so the address never carries the path
+        if (t.kind === "document") void hrefOfPath(t.id).then((h) => { if (alive.current) navigate(h ?? DOC_PREFIX + "none"); });
         else if (t.kind === "source") setDrawer({ kind: "source", id: t.id, n: 0 });
       },
       onSelection: (t) => { selRef.current = t; setSelection(t); setResearchErr(""); },
@@ -305,7 +306,7 @@ function Writing({ path, subject, first }: { path: string; subject: string; firs
       } });
       return;
     }
-    const r = await ifSamePerson(() => setLockedDocumentSaved({ id: path, title }));
+    const r = await ifSamePerson(() => setLockedDocumentSaved({ id: path, title, ref: docRef }));
     if (!r.ran) { setLockErr(NOT_SAME); return; }
     if (!r.value) { setLockErr("The lock could not be saved."); return; }
     toast({ message: "Locked." });

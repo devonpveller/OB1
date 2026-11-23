@@ -1,5 +1,5 @@
 // The Start research dialog (rwr-start-research, screen 4): opened from every "+ Start research" and from "Research
-// this" on a document (/research/start, or /research/start?document=<path>). The person writes the question, chooses
+// this" on a document (/research/start, or /research/start?document=<opaque id>). The person writes the question, chooses
 // what it attaches to (nothing, or one of their own documents - never an idea) and how deep, and SEES what would leave
 // the workbench before pressing Start.
 //
@@ -8,11 +8,13 @@
 //  - Start is available only for a preview that matches what is on screen right now, and it sends the SAME body plus
 //    approved_question = the text the preview showed (the server refuses with 409 rather than send a different one);
 //  - it calls only the workbench's routes (lib/api.ts); nothing is stored (no storage, no URL beyond the document's
-//    path, no cache); a toast never carries a title; a different person on the page empties the dialog;
+//    opaque id, no cache); a toast never carries a title; a different person on the page empties the dialog;
 //  - a document that is not the person's own is the same one sentence as a missing one (the title is never learned).
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { navigate } from "../../lib/router";
+import { ApiError } from "../../lib/api";
 import { resolveDocument } from "../../lib/state";
+import { docHref, resolveRef } from "../documents/docs-data";
 import { ForDocumentBar } from "../../shell/ForDocumentBar";
 import { useToast } from "../../shell/Toast";
 import { Link } from "../../shell/Link";
@@ -52,11 +54,11 @@ type DocState = "none" | "checking" | "gone" | "error";
 function Dialog({ search, debounceMs }: { search: string; debounceMs: number }) {
   const toast = useToast();
   const uid = useId();
-  const fromPath = useMemo(() => documentFromSearch(search), [search]);
-  const asked = useRef(fromPath); // a document named in the address: the dialog was opened for it
-  const [attach, setAttach] = useState<"none" | "doc">(fromPath ? "doc" : "none");
+  const fromRef = useMemo(() => documentFromSearch(search), [search]); // the document's opaque id, never its path
+  const asked = useRef(fromRef); // a document named in the address: the dialog was opened for it
+  const [attach, setAttach] = useState<"none" | "doc">(fromRef ? "doc" : "none");
   const [doc, setDoc] = useState<DocChoice | null>(null);
-  const [docState, setDocState] = useState<DocState>(fromPath ? "checking" : "none");
+  const [docState, setDocState] = useState<DocState>(fromRef ? "checking" : "none");
   const [question, setQuestion] = useState("");
   const [depth, setDepth] = useState<Depth>("standard");
   const [prev, setPrev] = useState<Prev>(null);
@@ -71,14 +73,19 @@ function Dialog({ search, debounceMs }: { search: string; debounceMs: number }) 
   // the prefilled document: read through the owner-scoped state and file routes. Not the person's own, trashed
   // and missing are one answer; the title is shown only when it is theirs and live.
   useEffect(() => {
-    if (!fromPath) return;
+    if (!fromRef) return;
     let on = true;
-    resolveDocument(fromPath).then(
-      (d) => { if (!on) return; if (d) { setDoc({ path: d.id, title: d.title }); setDocState("none"); } else { setAttach("none"); setDocState("gone"); } },
+    // the id answers only for the person's own document (another person's, a deleted one and a made-up one are one 404)
+    const find = async () => {
+      try { return await resolveDocument((await resolveRef(fromRef)).path); }
+      catch (e) { if (e instanceof ApiError && (e.status === 404 || e.status === 410)) return null; throw e; }
+    };
+    find().then(
+      (d) => { if (!on) return; if (d) { setDoc({ path: d.id, title: d.title, ref: d.ref ?? fromRef }); setDocState("none"); } else { setAttach("none"); setDocState("gone"); } },
       () => { if (!on) return; setAttach("none"); setDocState("error"); },
     );
     return () => { on = false; };
-  }, [fromPath]);
+  }, [fromRef]);
 
   const body = useMemo<StartBody | null>(() => {
     if (question.trim() === "") return null;
@@ -106,7 +113,7 @@ function Dialog({ search, debounceMs }: { search: string; debounceMs: number }) 
 
   const current = prev && body && sameBody(prev.body, body) ? prev : null;
   const ready = !!current?.res?.ok;
-  const goBack = () => navigate(asked.current ? "/documents/" + encodeURIComponent(asked.current) : "/");
+  const goBack = () => navigate(asked.current ? docHref(asked.current) : "/");
 
   async function refresh(b: StartBody) {
     try { const res = await previewResearch(b); if (live.current) setPrev({ body: b, res, failed: false, gone: false }); }
@@ -142,7 +149,7 @@ function Dialog({ search, debounceMs }: { search: string; debounceMs: number }) 
         </div>
 
         {attach === "doc" && doc && (
-          <ForDocumentBar title={doc.title} backTo={"/documents/" + encodeURIComponent(doc.path)}>
+          <ForDocumentBar title={doc.title} backTo={docHref(doc.ref)}>
             <span className="fordoc-note">The report and its sources will be attached to it.</span>
           </ForDocumentBar>
         )}

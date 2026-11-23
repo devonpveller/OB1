@@ -4,6 +4,7 @@ import type { DocRef } from "../lib/state";
 import { countText, type ShellData } from "../lib/shell-data";
 import type { ThemeChoice } from "../lib/theme";
 import { Link } from "./Link";
+import { docHref } from "../screens/documents/docs-data";
 
 const dot: Record<Group, string> = { everywhere: "dot", housekeeping: "hdot" };
 
@@ -37,7 +38,7 @@ export function Rail({ path, d, locked, last, theme, onTheme }:
       {section("everywhere").map((r) => <Item key={r.path} path={r.path} label={r.label} group="everywhere" current={current} d={d} />)}
       <div className={"sec" + (locked ? " sec-doc" : "")} data-testid="doc-slot-title">{locked ? "Locked document" : "Last document"}</div>
       {slot
-        ? <Link to={"/documents/" + encodeURIComponent(slot.id)} className={"nav don" + (path === "/documents/" + slot.id.replace(/\//g, "%2F") ? " on" : "")} data-testid="doc-slot"><span className="ddot" aria-hidden="true" /><span className="nav-title" title={slot.title}>{slot.title}</span></Link>
+        ? <Link to={docHref(slot.ref ?? "")} className={"nav don" + (slot.ref && path === docHref(slot.ref) ? " on" : "")} data-testid="doc-slot"><span className="ddot" aria-hidden="true" /><span className="nav-title" title={slot.title}>{slot.title}</span></Link>
         : <div className="nav none" data-testid="doc-slot-empty">No document opened yet</div>}
       <div className="sec">Housekeeping</div>
       {section("housekeeping").map((r) => <Item key={r.path} path={r.path} label={r.label} group="housekeeping" current={current} d={d} />)}

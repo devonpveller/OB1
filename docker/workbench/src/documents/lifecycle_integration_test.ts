@@ -297,3 +297,38 @@ t("L10 (round 2, review R1): the JSON-only rule is this item's three routes only
   assertEquals(tr.status, 200, tr.text);
   assert(!(await exists(own)) && (await exists(tr.json.trashed)), "A's own text/plain trash moved it to the trash");
 });
+
+t("L-id: a document's opaque id is the listing row's, stable through archive/unarchive/trash/restore/move; resolve answers the owner only", async () => {
+  const p = await newDoc(A, `opq-${run}`, "OPAQUE-BODY");
+  const id = (await call("GET", `${D}/state?path=${encodeURIComponent(p)}`)).json.id as string;
+  assert(/^[0-9a-f-]{36}$/.test(id), `state carries the listing id: ${id}`);
+  const listed = (await call("GET", `/workbench/contract/documents?limit=500`)).json.documents.find((x: any) => x.path === p);
+  assertEquals(listed?.id, id, "the contract listing carries the same id");
+  const res = async (who: Record<string, string>, v: string) => await call("GET", `${D}/resolve?id=${encodeURIComponent(v)}`, undefined, who);
+  const own = await res(A, id);
+  assertEquals([own.status, own.json.path, own.json.id, own.json.listed], [200, p, id, true]);
+  // archive -> unarchive -> trash -> restore: the row, so the id, stays; resolve follows the path
+  const ar = await call("POST", `${D}/archive`, { path: p });
+  assertEquals(ar.status, 200, ar.text);
+  let r = await res(A, id);
+  assertEquals([r.status, r.json.path, r.json.archived], [200, ar.json.archived, true]);
+  const un = await call("POST", `${D}/unarchive`, { path: ar.json.archived });
+  assertEquals((await res(A, id)).json.path, un.json.unarchived);
+  const tr = await call("POST", `${D}/trash`, { path: un.json.unarchived });
+  r = await res(A, id);
+  assertEquals([r.status, r.json.path, r.json.trashed], [200, tr.json.trashed, true]);
+  const rs = await call("POST", `${D}/restore`, { path: tr.json.trashed });
+  assertEquals((await res(A, id)).json.path, rs.json.restored);
+  // another person's id, a missing id and a non-id answer exactly alike (status and body)
+  const foreign = await res(B, id);
+  const missing = await res(B, crypto.randomUUID());
+  const junk = await res(A, "documents/../etc/passwd");
+  const none = await call("GET", `${D}/resolve`);
+  assertEquals([foreign.status, foreign.text], [404, JSON.stringify({ error: "no such document" })]);
+  for (const x of [missing, junk, none]) assertEquals([x.status, x.text], [foreign.status, foreign.text]);
+  // delete forever: the id is gone like any missing one
+  const gone = await trashed(A, `opq-gone-${run}`);
+  const gid = (await call("GET", `${D}/state?path=${encodeURIComponent(gone)}`)).json.id as string;
+  assertEquals((await call("POST", `${D}/delete-forever`, { path: gone, confirm: true })).status, 200);
+  assertEquals((await res(A, gid)).text, foreign.text);
+});

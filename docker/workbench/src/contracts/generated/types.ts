@@ -313,6 +313,7 @@ export type DocumentLink = {
 };
 
 export type DocumentListing = {
+  id: string;
   title: string;
   path: string;
   updated: string;

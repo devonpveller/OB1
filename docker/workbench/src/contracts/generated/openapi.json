@@ -3552,6 +3552,12 @@
       "DocumentListing": {
         "type": "object",
         "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "e0000000-0000-4000-8000-0000000000e1",
+            "description": "the listing row's opaque id: stable while the row lives (a move, archive or restore keeps it); the app's document links carry it, never the path"
+          },
           "title": {
             "type": "string"
           },
@@ -3572,6 +3578,7 @@
           }
         },
         "required": [
+          "id",
           "title",
           "path",
           "updated",
@@ -11273,6 +11280,7 @@
                 "example": {
                   "documents": [
                     {
+                      "id": "e0000000-0000-4000-8000-0000000000e1",
                       "title": "Fixture refinery document",
                       "path": "documents/fixture-refinery.md",
                       "updated": "2026-10-17T12:00:00.000Z",
@@ -11298,6 +11306,7 @@
                       ]
                     },
                     {
+                      "id": "e0000000-0000-4000-8000-0000000000e2",
                       "title": "Document linking a suppressed source",
                       "path": "documents/links-suppressed.md",
                       "updated": "2026-10-17T12:00:00.000Z",

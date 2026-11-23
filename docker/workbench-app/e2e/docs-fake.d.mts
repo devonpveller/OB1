@@ -2,6 +2,7 @@
 export type Person = "alice" | "bob";
 export const PEOPLE: Record<Person, { sub: string; key: string; name: string }>;
 export type Doc = {
+  id: string;          // the opaque id (the listing row's): stable through a move
   owner: string; title: string; body: string; updated: string; links: { kind: string; id: string }[]; history: string[];
   raw?: string;        // the whole file once a save wrote it (else its front matter + body)
   committed?: string;  // the file as of the last commit
@@ -12,6 +13,7 @@ export type FakeDb = {
   docs: Map<string, Doc>; folders: Set<string>; trail: { owner: string; kind: string; path: string; at: string }[];
   research: { job_id: string; owner: string; path: string; query: string; kind: string }[]; refs: Map<string, Ref>;
 };
+export const uid: (text: string) => string;
 export const REF_A: string;
 export const REF_B: string;
 export const SRC_A: string;

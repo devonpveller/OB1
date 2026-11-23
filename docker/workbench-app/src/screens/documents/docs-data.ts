@@ -12,6 +12,7 @@ import { api, ApiError } from "../../lib/api";
 export type Tab = "active" | "archived" | "trash";
 export type Link = { kind: string; id: string };
 export type DocRow = {
+  ref: string;       // the listing row's opaque id: the only thing a document link carries (never the path or the title)
   title: string;
   path: string;      // the full vault path, as the server gives it (documents/<key>/[.trash|.archive/]folder/x.md)
   updated: string;
@@ -61,7 +62,7 @@ export async function readListing(): Promise<Listing> {
   const rows: DocRow[] = raw
     .filter((d) => d && typeof d.path === "string" && d.path !== "")
     .map((d) => ({
-      title: String(d.title ?? ""), path: d.path, updated: String(d.updated ?? ""),
+      ref: typeof d.id === "string" ? d.id : "", title: String(d.title ?? ""), path: d.path, updated: String(d.updated ?? ""),
       links: arr(d.outbound_links).map((l) => ({ kind: String(l?.kind ?? ""), id: String(l?.id ?? "") })),
       tab: tabOf(d.path), folder: folderOf(d.path, root),
     }))
@@ -143,14 +144,27 @@ export const emptyTrash = () => post<{ removed: number; failed: number }>("/work
 export const createDocument = (title: string, folder: string) =>
   post<{ path: string; listing?: { ok?: boolean } }>("/workbench/documents", { title, folder })
     .then((d) => ({ path: String(d.path), listed: d.listing?.ok !== false }));
+// the href of a document the person just made (a path is all the create answers with): its id is read back
+export async function hrefOfPath(path: string): Promise<string | null> {
+  try { const st = await readState(path); return st.id ? docHref(st.id) : null; } catch { return null; }
+}
 export const createFolder = (path: string) => post<{ path: string; created: boolean }>("/workbench/documents/folders", { path });
 
 // ── one document, for the document screen ──
-export type DocState = { path: string; listed: boolean; trashed: boolean; archived: boolean };
+export type DocState = { id: string; path: string; listed: boolean; trashed: boolean; archived: boolean };
+const stateOf = (data: any): DocState => {
+  if (!data || typeof data.path !== "string") throw new Error("unexpected answer");
+  return { id: typeof data.id === "string" ? data.id : "", path: data.path, listed: data.listed === true, trashed: data.trashed === true, archived: data.archived === true };
+};
 export async function readState(path: string): Promise<DocState> {
   const { data } = await api<any>("GET", `/workbench/documents/state?path=${encodeURIComponent(path)}`);
-  if (!data || typeof data.path !== "string") throw new Error("unexpected answer");
-  return { path: data.path, listed: data.listed === true, trashed: data.trashed === true, archived: data.archived === true };
+  return stateOf(data);
+}
+// An opaque id (a link's) to the person's own document: another person's id, a deleted one and a made-up one are all
+// the same 404 (the caller turns it into NOT_FOUND), so the path is only ever learned for one's own document.
+export async function resolveRef(ref: string): Promise<DocState> {
+  const { data } = await api<any>("GET", `/workbench/documents/resolve?id=${encodeURIComponent(ref)}`);
+  return stateOf(data);
 }
 export async function readFile(path: string): Promise<{ title: string; body: string }> {
   const { data } = await api<any>("GET", `/workbench/documents/file?path=${encodeURIComponent(path)}`);
@@ -171,5 +185,7 @@ export function splitFront(content: string, path: string): { title: string; body
   return { title, body: content.slice(m[0].length) };
 }
 
-// The href that opens a document: the path is ONE segment (its slashes encoded), so the router hands it back whole.
-export const docHref = (path: string) => "/documents/" + encodeURIComponent(path);
+// The href that opens a document: /documents/d/<opaque id>. It never carries a title, a slug or the owner's folder key.
+// (Before this, /documents/<encoded path>: such an address still works, and the screen swaps it for this one.)
+export const DOC_PREFIX = "/documents/d/";
+export const docHref = (ref: string) => (ref ? DOC_PREFIX + encodeURIComponent(ref) : "/documents");

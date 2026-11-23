@@ -74,7 +74,8 @@ for (const [path, label] of ALL.slice(1)) {
 }
 await go("/deep/unknown/path");
 ok((await ev(`document.querySelector('h1')?.textContent`)) === "No such screen", "an unknown path says so (not blank)");
-await go("/documents/abc");
+await go("/documents/abc"); // an old path-form address: resolved (a 404 here) and replaced by the id form of nothing
+ok((await ev(`location.pathname`)) === "/documents/d/none" || await (async () => { for (let i = 0; i < 20 && (await ev(`location.pathname`)) !== "/documents/d/none"; i++) await sleep(150); return (await ev(`location.pathname`)) === "/documents/d/none"; })(), "an old /documents/<path> address is replaced by /documents/d/none (the path is not kept in the address)");
 for (let i = 0; i < 20 && !(await ev(`!!document.querySelector('[data-testid=doc-gone]')`)); i++) await sleep(150);
 ok((await ev(`!!document.querySelector('[data-testid=document]') && !document.querySelector('[data-testid=not-found]')`)), "a deep link /documents/abc opens the document screen (which says there is no such document), not No such screen");
 
@@ -92,7 +93,7 @@ ok(["/workbench/settings", "/workbench/documents/file", "/workbench/documents/st
 // six and the account's three (settings, the locked document's file and state)
 const HOME_READS = ["/workbench/contract/documents", "/workbench/documents/folders", "/workbench/contract/ideas", "/workbench/contract/library/recent", "/workbench/contract/library/waiting-claims", "/workbench/contract/podcasts", "/workbench/contract/podcasts/requests", "/workbench/contract/search"];
 const shellReads = seenPaths.filter((p) => !HOME_READS.includes(p));
-ok(shellReads.join() === [...SIX, "/workbench/documents/file", "/workbench/documents/state", "/workbench/settings"].sort().join(), `exactly those: the shell and the account read only the six and the three: ${shellReads.join(", ")}`);
+ok(shellReads.join() === [...SIX, "/workbench/documents/file", "/workbench/documents/resolve", "/workbench/documents/state", "/workbench/settings"].sort().join(), `exactly those: the shell and the account read only the six and the four (the opaque id's resolve read is the deep link's): ${shellReads.join(", ")}`);
 
 // ---- 3. Ctrl+K opens, Esc closes, over every screen (real key events)
 for (const [path] of ALL) {

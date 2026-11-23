@@ -16,7 +16,7 @@ import { useToast } from "../../shell/Toast";
 import { navigate } from "../../lib/router";
 import { getLastDocument, getLockedDocument, setLastDocument, setLockedDocument, stateEpoch } from "../../lib/state";
 import {
-  ago, archive, createDocument, createFolder, deleteForever, docHref, emptyTrash, foldersFor, goesText, linkedText, LIST_LIMIT,
+  ago, archive, createDocument, createFolder, deleteForever, docHref, emptyTrash, foldersFor, goesText, hrefOfPath, linkedText, LIST_LIMIT,
   problem, readListing, restore, trash, unarchive, type DocRow, type Listing, type Tab,
 } from "./docs-data";
 
@@ -33,8 +33,8 @@ const folderLabel = (f: string) => (f === "" ? "Unfiled" : f);
 // that is gone. A document moved to the trash (or deleted) is "no document" there, as the account keys say.
 function retarget(from: string, to: string | null, title: string) {
   const lk = getLockedDocument(), ls = getLastDocument();
-  if (lk?.id === from) setLockedDocument(to ? { id: to, title: lk.title || title } : null);
-  if (ls?.id === from) setLastDocument(to ? { id: to, title: ls.title || title } : null);
+  if (lk?.id === from) setLockedDocument(to ? { id: to, title: lk.title || title, ref: lk.ref } : null);
+  if (ls?.id === from) setLastDocument(to ? { id: to, title: ls.title || title, ref: ls.ref } : null);
 }
 // what the slots pointed at before a move, so Undo can put them back
 function slotsBefore(path: string) {
@@ -186,7 +186,9 @@ function DocumentsFor() {
             setMaking("");
             // the file is saved but its listing row was not written (207, listing.ok false): until the reconcile pass
             // lists it, its page would say "no such document" - say so here instead of opening it (review R2)
-            if (made.listed) navigate(docHref(made.path));
+            // its address is its opaque id, read back from the state (the create answers with the path only)
+            const href = made.listed ? await hrefOfPath(made.path) : null;
+            if (href) navigate(href);
             else toast({ message: `Saved "${title}". It shows in your documents once the listing catches up (a minute or so).` });
           }, "The document could not be made.", true)} />
       )}
@@ -229,12 +231,12 @@ function DocumentsFor() {
                         <tr key={d.path} data-testid="doc-row" data-tab={d.tab}>
                           <td>{d.tab === "trash"
                             ? <span className="ttl-off" data-testid="doc-title">{d.title || "(untitled)"}</span>
-                            : <Link to={docHref(d.path)} className="ttl" data-testid="doc-title">{d.title || "(untitled)"}</Link>}</td>
+                            : <Link to={docHref(d.ref)} className="ttl" data-testid="doc-title">{d.title || "(untitled)"}</Link>}</td>
                           <td className="meta">{folderLabel(d.folder)}</td>
                           <td className="meta" data-testid="doc-when">{d.tab === "trash" ? [ago(d.updated), goesText(d.updated)].filter(Boolean).join(" · ") : ago(d.updated)}</td>
                           <td className="meta">{linkedText(d.links)}</td>
                           <td className="docs-acts">
-                            {d.tab !== "trash" && <Link to={docHref(d.path)} className="btn sm" data-testid="act-open">Open<span className="sr-only"> {d.title}</span></Link>}
+                            {d.tab !== "trash" && <Link to={docHref(d.ref)} className="btn sm" data-testid="act-open">Open<span className="sr-only"> {d.title}</span></Link>}
                             {d.tab === "active" && <>
                               <button type="button" className="btn sm" disabled={off} onClick={() => doArchive(d)} data-testid="act-archive">Archive<span className="sr-only"> {d.title}</span></button>
                               <button type="button" className="btn sm" disabled={off} onClick={() => doTrash(d)} data-testid="act-trash">Move to trash<span className="sr-only"> {d.title}</span></button>
@@ -266,8 +268,8 @@ function DocumentsFor() {
 
 // Undo of an archive or a trash move: the document is back at `back`; the slots that pointed at it before do again.
 function undoSlots(back: string, before: ReturnType<typeof slotsBefore>) {
-  if (before.locked) setLockedDocument({ id: back, title: before.locked.title });
-  if (before.last) setLastDocument({ id: back, title: before.last.title });
+  if (before.locked) setLockedDocument({ id: back, title: before.locked.title, ref: before.locked.ref });
+  if (before.last) setLastDocument({ id: back, title: before.last.title, ref: before.last.ref });
 }
 
 function emptyText(tab: Tab, folder: string | null, none: boolean): string {
