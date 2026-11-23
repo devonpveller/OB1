@@ -1009,3 +1009,82 @@ t("rw-held-owner-scope: another user's held source answers exactly like a missin
   assertEquals(again.json.source.source_id, hid, "the owner adding the same link again reuses the owner's own row");
   assert(again.json.deduped, "an own re-add is still deduped");
 });
+
+// ── rw-held-owner-scope round 2 (tester F1/F2): a reference RECORD that targets another user's held source ──
+// The record carries the source id and a quote of the held text, so it is part of the held source: for any
+// other user it is a MISSING record on every path (read, diff-check, re-pin), whether the owner placed it through
+// the routes (a) or it predates the fix and was written straight into the table (b). The owner reads it as before (c).
+t("rw-held-owner-scope round 2: a reference record on another user's held source answers exactly like a missing record", async () => {
+  const tok = () => uid().replace(/-/g, "");
+  const body = `RecHeldTok${tok()}`;
+  const content = `${body} is the first private sentence of A's held text. A second private sentence.`;
+  const A = { "X-Test-Sub": `rec-a-${uid()}` };
+  const Bh = { "X-Test-Sub": `rec-b-${uid()}` };
+  const mk = async (h: Record<string, string>, title: string) => {
+    const made = await call("POST", D, { title, body: "", idea: `rec scope idea ${uid()}` }, h);
+    assertEquals(made.status, 201, made.text);
+    const st = await call("POST", `${D}/refinery/start`, { path: made.json.path }, h);
+    assertEquals(st.status, 200, st.text);
+    return { path: made.json.path as string, rid: st.json.refinery_id as string };
+  };
+  const a = await mk(A, `Rec A ${uid()}`);
+  const b = await mk(Bh, `Rec B ${uid()}`);
+  const add = await call("POST", `${D}/user-sources`, { path: a.path, title: `RecHeldTitle${tok()}`, content }, A);
+  assertEquals(add.status, 201, add.text);
+  const hid = add.json.source.source_id as string;
+  const C = "/workbench/contract";
+  const reads = (id: string) => [
+    ["GET /references/{id}", () => call("GET", `${C}/references/${id}`, undefined, Bh)],
+    ["POST /diff-check {reference_id}", () => call("POST", `${C}/diff-check`, { references: [{ reference_id: id }] }, Bh)],
+    ["POST /documents/references/{id}/repin", () => call("POST", `${D}/references/${id}/repin?path=${encodeURIComponent(b.path)}`, undefined, Bh)],
+  ] as [string, () => Promise<{ status: number; text: string }>][];
+  const norm = (s: string, id: string) => s.split(id).join("<ID>");
+  const sameAsMissing = async (what: string, id: string) => {
+    const miss = crypto.randomUUID();
+    const real = reads(id), none = reads(miss);
+    for (let i = 0; i < real.length; i++) {
+      const [label, run] = real[i];
+      const x = await run(), y = await none[i][1]();
+      assertEquals(x.status, y.status, `${what} ${label}: status ${x.status} vs a missing record's ${y.status}: ${x.text}`);
+      assertEquals(norm(x.text, id), norm(y.text, miss), `${what} ${label}: body differs from a missing record's`);
+      assert(!x.text.includes(body) && !x.text.includes(hid), `${what} ${label}: carries A's text or held id: ${x.text}`);
+    }
+  };
+  // (a) A cites A's own held source: a real record R
+  const cite = await call("POST", `${D}/references`, { path: a.path, source_id: hid, exact: body, form: "chip" }, A);
+  assertEquals(cite.status, 201, cite.text);
+  const R = cite.json.record.id as string;
+  assertEquals((await sql<{ e: string }>(`SELECT selectors #>> '{quote,exact}' AS e FROM public.reference_records WHERE id = $1`, [R]))[0].e, body, "the record carries A's quote");
+  await sameAsMissing("(a) A's real record,", R);
+  // (b) a record that predates the fix: B's own document, A's held id, A's text in the selectors
+  const legacy = (await sql<{ id: string }>(
+    `INSERT INTO public.reference_records (source_id, scope, selectors, provenance, pinned_revision, chunk_idx, created_by)
+     VALUES ($1, 'span', $2::jsonb, 'user', 1, 0, 'legacy') RETURNING id::text AS id`,
+    [hid, JSON.stringify({ quote: { exact: body, prefix: "", suffix: " is the first" }, position: { start: 0, end: body.length } })],
+  ))[0].id;
+  await sql(`INSERT INTO public.reference_holders (holder_kind, holder_ref, reference_id, cited_ref, origin, seq, number)
+             VALUES ('user_document', $1, $2, $3, 'added', 0, 1)`, [b.path, legacy, hid]);
+  try {
+    await sameAsMissing("(b) a legacy record in B's document,", legacy);
+    const panel = await call("GET", `${D}/references?path=${encodeURIComponent(b.path)}`, undefined, Bh);
+    assertEquals(panel.status, 200, panel.text);
+    assert(!panel.text.includes(body), `B's panel carries A's text: ${panel.text}`);
+  } finally {
+    await sql(`DELETE FROM public.reference_holders WHERE reference_id = $1`, [legacy]);
+    await sql(`DELETE FROM public.reference_records WHERE id = $1`, [legacy]);
+  }
+  // a chip of A's record pasted into B's document is not held there (the record is missing for B)
+  const cur = await call("GET", `${D}/file?path=${encodeURIComponent(b.path)}`, undefined, Bh);
+  const pasted = await call("PUT", `${D}/file?path=${encodeURIComponent(b.path)}`,
+    { content: `${cur.json.content}\n[@ref:${R}]\n`, if_match: cur.json.hash }, Bh);
+  assert(pasted.status === 200 || pasted.status === 400 || pasted.status === 409, pasted.text);
+  assertEquals((await sql(`SELECT 1 FROM public.reference_holders WHERE reference_id = $1 AND holder_ref = $2`, [R, b.path])).length, 0, "B's document came to hold A's record");
+  // (c) the owner reads R as before
+  const own = await call("GET", `${C}/references/${R}`, undefined, A);
+  assertEquals(own.status, 200, own.text);
+  assertEquals(own.json.record.source_id, hid);
+  assertEquals(own.json.record.selectors.quote.exact, body);
+  assertEquals(own.json.held.refinery_id, a.rid);
+  const ownDiff = await call("POST", `${C}/diff-check`, { references: [{ reference_id: R }] }, A);
+  assertEquals([ownDiff.status, ownDiff.json.results[0].lifecycle], [200, "held"], ownDiff.text);
+});
