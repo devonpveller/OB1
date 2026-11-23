@@ -13650,7 +13650,7 @@
         "tags": [
           "cleanup view (D5)"
         ],
-        "summary": "every suppressed and unlinked source, with its status and dependence counts",
+        "summary": "every suppressed and unlinked source, with its status and dependence counts (the caller's own private connections only)",
         "parameters": [
           {
             "schema": {
@@ -13667,7 +13667,7 @@
         ],
         "responses": {
           "200": {
-            "description": "the listing (shared knowledge: the same for every user)",
+            "description": "the listing (the sources are shared; the counts cover shared connections and the caller's own work, never another user's)",
             "content": {
               "application/json": {
                 "example": {

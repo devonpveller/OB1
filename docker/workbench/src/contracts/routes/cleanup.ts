@@ -38,12 +38,12 @@ export function registerCleanup(app: ContractApp, deps: ContractDeps) {
   });
   op(app, createRoute({
     method: "get", path: `${P}/sources`, operationId: "cleanupSources", tags: T,
-    summary: "every suppressed and unlinked source, with its status and dependence counts",
+    summary: "every suppressed and unlinked source, with its status and dependence counts (the caller's own private connections only)",
     request: { query: z.object({ limit: limit(200, 500) }) },
-    responses: { 200: json(CleanupSources, CX.sources, "the listing (shared knowledge: the same for every user)"), ...errors },
+    responses: { 200: json(CleanupSources, CX.sources, "the listing (the sources are shared; the counts cover shared connections and the caller's own work, never another user's)"), ...errors },
   }), async (c) => {
     try {
-      return send(c, CleanupSources, await cl.listSources(deps.db, deps.registry, lim(c.req.valid("query").limit, 200, 500)));
+      return send(c, CleanupSources, await cl.listSources(deps.db, deps.registry, lim(c.req.valid("query").limit, 200, 500), await identityOf(c)));
     } catch (e) {
       return fail(c, e);
     }

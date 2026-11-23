@@ -19,6 +19,7 @@ import { ACTION_COLS, ACTION_REF, type ActionRow, OWNS_REF, recordAction } from 
 import { type RegistryReader, requireRegistered, REGISTRY } from "../registry.ts";
 import { Conflict, erase, liftTombstoneAs, NotFound, sever } from "./lifecycle.ts";
 import type { Identity } from "../../middleware/identity.ts";
+import { adminSeesOwnerless, FOREIGN_DOC, FOREIGN_JOB } from "../../documents/ownership.ts";
 
 interface ListedRow {
   id: string;
@@ -32,20 +33,40 @@ interface ListedRow {
 }
 
 // Every suppressed and unlinked source with its dependence counts (D5 item 5), newest first.
-export async function listSources(db: Db, reg: RegistryReader, limit: number) {
+// rwr-cleanup-counts-scoped: the sources are shared, but four kinds of connection are a person's own work - a
+// user document that links the source (document_link), a reference a document holds (reference_record), and the
+// research sessions / reports of a job another user owns (report_session, report_citation). A count of those is a
+// hint about someone's private work, so the listing counts only the CALLER'S own (and the shared kinds, and a
+// session or report no one owns); blocking / severable / total / erase_allowed follow from those counts, so
+// another user's rows change nothing in this answer. Same ownership rules as the dependence read and the leads
+// read (FOREIGN_DOC, FOREIGN_JOB). The erase WRITE still refuses on every user's connections (lifecycle.ts), so
+// erase_allowed can be true where the write then answers 409: it never reveals a count.
+const FOREIGN_SESSION = (sessionId: string, admin: boolean) =>
+  `EXISTS (SELECT 1 FROM public.research_jobs j WHERE j.session_id = (${sessionId})::uuid AND ${FOREIGN_JOB("j", "$2", "$3", admin)})`;
+const mineOnly = (admin: boolean) => `
+  NOT (
+       (d.kind = 'document_link' AND ${FOREIGN_DOC("d.ref", "$2", "$3")})
+    OR (d.kind = 'reference_record' AND ${FOREIGN_DOC("d.detail ->> 'holder_ref'", "$2", "$3")})
+    OR (d.kind = 'report_session' AND ${FOREIGN_SESSION("d.ref", admin)})
+    OR (d.kind = 'report_citation' AND EXISTS (SELECT 1 FROM public.session_sources rs WHERE rs.source_id = d.ref::uuid
+                                                 AND ${FOREIGN_SESSION("rs.session_id", admin)}))
+  )`;
+
+export async function listSources(db: Db, reg: RegistryReader, limit: number, who: Identity) {
   const defs = kindDefs(await reg.entries("dependence_kinds"));
   const rows = await db.query<ListedRow>(
     `SELECT s.id, s.title, s.url,
             public.source_lifecycle_state(s.retraction_committed_at, s.unlinked_at) AS lifecycle,
             s.suppression_reason AS reason, s.retraction_committed_at AS suppressed_at, s.unlinked_at,
             COALESCE((SELECT jsonb_object_agg(x.kind, x.n)
-                        FROM (SELECT d.kind, count(*)::int AS n FROM public.source_dependence(s.id) d GROUP BY d.kind) x),
+                        FROM (SELECT d.kind, count(*)::int AS n FROM public.source_dependence(s.id) d
+                               WHERE ${mineOnly(adminSeesOwnerless(who))} GROUP BY d.kind) x),
                      '{}'::jsonb) AS counts
        FROM public.sources s
       WHERE s.retraction_committed_at IS NOT NULL
       ORDER BY s.retraction_committed_at DESC, s.id
       LIMIT $1`,
-    [limit],
+    [limit, who.sub, who.key],
   );
   const total = (await db.query<{ n: number }>(
     `SELECT count(*)::int AS n FROM public.sources WHERE retraction_committed_at IS NOT NULL`,

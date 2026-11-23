@@ -685,6 +685,30 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const bActions = await wb("GET", "/workbench/contract/cleanup/actions?limit=200", undefined, B);
   assert(bCleanup.every((id) => bActions.text.includes(id)), `B lists its own cleanup actions: ${bActions.status}`);
   console.log(`sweep: B's cleanup actions ${bCleanup.length} (404 to A by id; B still lists its own)`);
+  // rwr-cleanup-counts-scoped: a shared suppressed source that only B's private work depends on (a document link
+  // and a session of B's job) reads as NO dependence to A on GET cleanup/sources, on both doors; B reads his own
+  {
+    const s2 = crypto.randomUUID(), sess = crypto.randomUUID(), job2 = crypto.randomUUID();
+    await sql(`INSERT INTO public.sources (id, url, title, content, retraction_committed_at, suppression_reason) VALUES ($1, $2, 'sweep scoped source', 'x', now(), 'sweep')`,
+      [s2, `https://example.org/sweep-scope/${s2}`]);
+    await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1, 'sweep scoped doc', $2::jsonb, $3)`,
+      [`documents/sweep-scope-${rnd()}/x.md`, JSON.stringify([{ kind: "source", id: s2 }]), bSub]);
+    await sql(`INSERT INTO public.sessions (id, origin_tool, query_text) VALUES ($1, 'manual', 'sweep scoped session')`, [sess]);
+    await sql(`INSERT INTO public.research_jobs (id, status, origin, query, caller, session_id) VALUES ($1, 'done', 'workspace', 'sweep scoped', 'workspace', $2)`, [job2, sess]);
+    await sql(`INSERT INTO public.research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES ($1, $2, $2, 'sweep scoped')`, [job2, bSub]);
+    await sql(`INSERT INTO public.session_sources (session_id, source_id) VALUES ($1, $2)`, [sess, s2]);
+    for (const door of [BASE, VIEWER]) {
+      calls++;
+      const row = (await call(door, "GET", "/workbench/contract/cleanup/sources?limit=500")).json.sources?.find((x: any) => x.id === s2);
+      if (!row) hits.push(`HIT cleanup-sources GET /workbench/contract/cleanup/sources (${doorName(door)}) does not list the planted shared source`);
+      else if (row.total !== 0 || row.blocking !== 0 || Object.values(row.counts).some((n) => n !== 0)) {
+        hits.push(`HIT cleanup-sources GET /workbench/contract/cleanup/sources (${doorName(door)}) counts B's private dependence: ${JSON.stringify(row.counts)}`);
+      }
+    }
+    const bRow = (await wb("GET", "/workbench/contract/cleanup/sources?limit=500", undefined, B)).json.sources?.find((x: any) => x.id === s2);
+    assertEquals([bRow?.counts.document_link, bRow?.counts.report_session], [1, 1], "B reads his own dependence on the shared source");
+    console.log(`sweep: GET cleanup/sources counts none of B's private dependence for A (both doors); B reads his own`);
+  }
   await Deno.remove(`${VAULT}/${bDir}/${attachName}`).catch(() => {});
   await Deno.remove(`${VAULT}/${bDir}/${attachPng}`).catch(() => {});
   if (OIDC) {
