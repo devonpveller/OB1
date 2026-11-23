@@ -200,23 +200,23 @@ async function moveToLocked(deps: DocDeps, from: string, to: string, message: st
   if (!(await vaultExists(from))) throw new DocError("no such document", 404);
   if (await vaultExists(to)) throw new DocError("a document with that name already exists there", 409);
   await withPathLock(VAULT_GIT, () => gitMv(from, to, message, who.name));
-  // A document put back (restore, unarchive) also writes its one trail line, in the same transaction as the listing
-  // move and only now that the file really moved: a refused or failed move (404, 409, a failing git mv) throws above
-  // and leaves no line. Should the transaction fail, the listing is left to the reconcile pass and the line is still
-  // written on its own: the move happened, so the line must exist.
+  // The listing follows the file first, in its own transaction. A document put back (restore, unarchive) then writes its
+  // one trail line AFTER that has committed, so a failing trail write (a table without the slot-510 re-run, a refused
+  // insert) can never roll the listing row back: the document id, its refinery link and its reference holders stay with
+  // the file. Only a move that really happened reaches here (404, 409 and a failing git mv throw above): no move, no line.
   const row = trailKind ? await listingRow(deps.db, from).catch(() => null) : null;
-  const line = trailKind
-    ? { owner_sub: row?.owner_sub ?? who.sub, actor_sub: who.sub, kind: trailKind, document_id: row?.id ?? null, path: to, trashed_at: null }
-    : null;
   try {
-    await deps.db.tx(async (tx) => {
-      await moveListing(tx, from, to);
-      if (line) await writeTrail(tx, line);
-    });
+    await moveListing(deps.db, from, to);
   } catch (e) {
     console.error(`[documents] listing move ${from} -> ${to} failed (the reconcile pass repairs it):`, (e as Error).message);
-    if (line) {
-      await writeTrail(deps.db, line).catch((e2) => console.error(`[documents] ${to} was put back but its trail line could not be written:`, (e2 as Error).message));
+  }
+  if (trailKind) {
+    try {
+      await writeTrail(deps.db, {
+        owner_sub: row?.owner_sub ?? who.sub, actor_sub: who.sub, kind: trailKind, document_id: row?.id ?? null, path: to, trashed_at: null,
+      });
+    } catch (e) {
+      console.error(`[documents] ${to} was put back (${trailKind}) but its trail line could not be written:`, (e as Error).message);
     }
   }
   return to;

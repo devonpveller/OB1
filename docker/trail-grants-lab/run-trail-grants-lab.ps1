@@ -98,6 +98,14 @@ try {
 
   Write-Host '[4] the new 510 re-run on the live-like database'
   $new = Join-Path $dockerDir 'init-document-trail.sql'
+  # F3: 510 is ONE transaction. A copy whose last statement before COMMIT fails must change nothing (REVOKE, GRANT, triggers all rolled back)
+  $newText = [IO.File]::ReadAllText($new)
+  Check ($newText -match '(?m)^BEGIN;' -and $newText -match '(?m)^COMMIT;') '510 opens with BEGIN and ends with COMMIT'
+  $bad = Join-Path $work 'bad-510.sql'
+  [IO.File]::WriteAllText($bad, ($newText -replace '(?m)^COMMIT;', "SELECT 1/0;`nCOMMIT;"), (New-Object Text.UTF8Encoding $false))
+  $r = PsqlFile $bad
+  Check ($r.rc -ne 0 -and $r.out -match 'division by zero') '510 with a failing last statement exits non-zero'
+  Check ((Catalog) -eq $before) 'and it changed nothing: the catalog is still the starting point (one transaction)'
   $r = PsqlFile $new; Save '510-rerun-1.log' $r.out
   Check ($r.rc -eq 0) 'new 510 runs cleanly on a database that already ran the previous one'
   $after1 = Catalog; Save 'catalog-after-1.txt' $after1
@@ -112,9 +120,9 @@ try {
   Save 'privileges-after.txt' $matrix
   foreach ($role in 'service_role', 'ob_app_memory', 'ob_workbench') {
     $line = (($matrix -split "`n") | Where-Object { $_ -like "$role|*" }) -join ''
-    Check ($line -eq "$role|DELETE,INSERT,SELECT") "$role holds exactly DELETE, INSERT, SELECT ($line)"
-    foreach ($p in 'UPDATE', 'TRUNCATE') { Check ((Q "SELECT has_table_privilege('$role','public.user_document_trail','$p')") -eq 'f') "has_table_privilege($role, $p) = false" }
-    foreach ($p in 'SELECT', 'INSERT', 'DELETE') { Check ((Q "SELECT has_table_privilege('$role','public.user_document_trail','$p')") -eq 't') "has_table_privilege($role, $p) = true" }
+    Check ($line -eq "$role|INSERT,SELECT") "$role holds exactly INSERT, SELECT ($line)"
+    foreach ($p in 'UPDATE', 'DELETE', 'TRUNCATE') { Check ((Q "SELECT has_table_privilege('$role','public.user_document_trail','$p')") -eq 'f') "has_table_privilege($role, $p) = false" }
+    foreach ($p in 'SELECT', 'INSERT') { Check ((Q "SELECT has_table_privilege('$role','public.user_document_trail','$p')") -eq 't') "has_table_privilege($role, $p) = true" }
   }
   Save 'service_role-members.txt' (Q "SELECT string_agg(rolname, ',') FROM pg_roles WHERE NOT rolsuper AND pg_has_role(oid,'service_role','USAGE') AND rolname <> 'service_role'")
   $nonMemberHolding = Q "SELECT string_agg(rolname, ',') FROM pg_roles r WHERE NOT rolsuper AND rolname !~ '^pg_' AND NOT pg_has_role(oid,'service_role','USAGE') AND EXISTS (SELECT 1 FROM unnest($privList) p WHERE has_table_privilege(r.oid,'public.user_document_trail',p))"
@@ -136,7 +144,12 @@ try {
     @('UPDATE as the superuser', "UPDATE public.user_document_trail SET path='x'"),
     @('TRUNCATE as the superuser', "TRUNCATE public.user_document_trail"),
     @('UPDATE as service_role', "SET ROLE service_role; UPDATE public.user_document_trail SET path='x'"),
-    @('TRUNCATE as ob_workbench', "SET ROLE ob_workbench; TRUNCATE public.user_document_trail"))
+    @('TRUNCATE as ob_workbench', "SET ROLE ob_workbench; TRUNCATE public.user_document_trail"),
+    @('DELETE (no WHERE) as lab_holder', "SET ROLE lab_holder; DELETE FROM public.user_document_trail"),
+    @('DELETE (no WHERE) as the superuser', "DELETE FROM public.user_document_trail"),
+    @('DELETE with WHERE as the superuser', "DELETE FROM public.user_document_trail WHERE owner_sub = 'lab-a'"),
+    @('DELETE (no WHERE) as ob_workbench', "SET ROLE ob_workbench; DELETE FROM public.user_document_trail"),
+    @('DELETE (no WHERE) as service_role', "SET ROLE service_role; DELETE FROM public.user_document_trail"))
   foreach ($c in $cases) {
     $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c $c[1]
     Check ($script:rc -ne 0 -and $o -match 'append-only|permission denied') "refused: $($c[0]) ($((($o -split "`n") | Where-Object { $_ -match 'ERROR' } | Select-Object -First 1)))"
@@ -144,10 +157,14 @@ try {
   }
   Check ((Q "SELECT count(*) FROM public.user_document_trail") -eq $rowsBefore) 'no row lost or changed by the refused statements'
   $null = Q "DROP OWNED BY lab_holder; DROP ROLE lab_holder"
-  $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "SET ROLE ob_workbench; INSERT INTO public.user_document_trail (owner_sub, actor_sub, kind, path) VALUES ('lab-a','lab-a','empty_trash','documents/x/.trash/b.md'); SELECT count(*) FROM public.user_document_trail; DELETE FROM public.user_document_trail WHERE path='documents/x/.trash/b.md'"
-  Check ($script:rc -eq 0) 'ob_workbench can INSERT, SELECT and DELETE a line'
+  $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "SET ROLE ob_workbench; INSERT INTO public.user_document_trail (owner_sub, actor_sub, kind, path) VALUES ('lab-a','lab-a','restored','documents/x/b.md'); SELECT count(*) FROM public.user_document_trail"
+  Check ($script:rc -eq 0) 'ob_workbench can INSERT and SELECT a line (the app still appends and reads)'
+  Check ((Q "SELECT count(*) FROM public.user_document_trail") -eq ([int]$rowsBefore + 1)) 'the appended line is there and nothing was deleted'
+  $null = Q "ALTER TABLE public.user_document_trail DISABLE TRIGGER trg_user_document_trail_no_delete; DELETE FROM public.user_document_trail WHERE kind = 'restored'; ALTER TABLE public.user_document_trail ENABLE TRIGGER trg_user_document_trail_no_delete"   # lab cleanup by the superuser, on purpose
+  Check ((Q "SELECT count(*) FROM public.user_document_trail") -eq $rowsBefore) 'lab cleanup (superuser disabled the trigger on purpose) restored the starting rows'
+  Check ((Q "SELECT tgenabled FROM pg_trigger WHERE tgname = 'trg_user_document_trail_no_delete'") -eq 'O') 'the no-delete trigger is enabled again'
 
-  Write-Host '[7] the grants-only revert restores the starting point'
+Write-Host '[7] the grants-only revert restores the starting point'
   $r = PsqlFile (Join-Path $dockerDir 'revert-document-trail-grants.sql'); Save 'revert-grants.log' $r.out
   Check ($r.rc -eq 0) 'revert-document-trail-grants.sql exits 0'
   $rev = Catalog; Save 'catalog-after-grants-revert.txt' $rev
