@@ -61,6 +61,17 @@ export function actionsOf(kind: IntakeKind, status: string): { actions: ("retry"
   return { actions: [], primary: "open" };
 }
 
+// rwr-imports-server-api: a failed or cancelled import / add is retried ONCE. `attempts` starts at 1 and a retry makes it 2
+// (init-intake-queue.sql); a job at MAX_ATTEMPTS is refused, for every caller. The queues (chunk / extract / entity) are not
+// import jobs and keep their own retry.
+export const MAX_ATTEMPTS = 2;
+export const RETRIED_ALREADY = "this job was already retried once, so it cannot be retried again: add the link or file again as a new item";
+// the one write a retry makes ($1 the job id, $2 MAX_ATTEMPTS): bounded on the state AND on attempts, so a retry acting on a
+// stale read (another retry ran and the job failed again in between) can never move a job past the cap. Exported so the
+// real-database test runs this very statement (inlets_integration_test.ts R4).
+export const RETRY_MOVE_SQL = `UPDATE public.import_jobs SET status = 'queued', error = NULL, attempts = attempts + 1
+  WHERE id = $1 AND status IN ('failed', 'cancelled') AND attempts < $2 RETURNING id`;
+
 const isActive = (kind: IntakeKind, status: string) =>
   kind === "import" || kind === "add" ? ACTIVE_IMPORT.has(status) : status === "pending" || status === "processing";
 

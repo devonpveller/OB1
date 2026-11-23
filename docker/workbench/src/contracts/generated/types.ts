@@ -577,6 +577,16 @@ export type Ideas = {
   ideas: Array<IdeaSummary>;
 };
 
+export type InletConnection = {
+  kind: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type InletConnections = {
+  connections: Array<InletConnection>;
+};
+
 export type Job = {
   kind: string; /** registry: job_kinds */
   id: string;
