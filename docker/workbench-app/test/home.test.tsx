@@ -117,6 +117,20 @@ describe("each card lists the same items as its source read (acceptance 1)", () 
     expect(within(card("docs")).getAllByTestId("row-doc")[0].textContent).toMatch(/edited 2 h ago · 2 references/);
     expect(within(card("docs")).getAllByTestId("row-doc")[0].getAttribute("href")).toBe("/documents/documents%2Falpha-new.md");
   });
+  it("Continue writing: a trashed or archived document is never listed, only the active one", async () => {
+    const keep = DB.alice.documents;
+    (DB.alice as any).documents = [
+      ...keep,
+      { title: "ALPHA trashed", path: "documents/.trash/alpha-trashed.md", updated: iso(H), outbound_links: [] },
+      { title: "ALPHA trashed in folder", path: "documents/notes/.trash/alpha-tf.md", updated: iso(H), outbound_links: [] },
+      { title: "ALPHA archived", path: "documents/.archive/alpha-archived.md", updated: iso(H), outbound_links: [] },
+      { title: "ALPHA archived in folder", path: "documents/notes/.archive/alpha-af.md", updated: iso(H), outbound_links: [] },
+    ];
+    try {
+      await renderHome();
+      expect(rowTitles("docs")).toEqual(["ALPHA newest draft", "ALPHA middle", "ALPHA older note"]);
+    } finally { (DB.alice as any).documents = keep; }
+  });
   it("Research: the subject's own sessions with their state", async () => {
     await renderHome();
     expect(rowTitles("research")).toEqual(["ALPHA which CPUs fit", "ALPHA finished question"]);
