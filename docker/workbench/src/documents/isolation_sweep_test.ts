@@ -692,7 +692,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     await sql(`INSERT INTO public.sources (id, url, title, content, retraction_committed_at, suppression_reason) VALUES ($1, $2, 'sweep scoped source', 'x', now(), 'sweep')`,
       [s2, `https://example.org/sweep-scope/${s2}`]);
     await sql(`INSERT INTO public.user_document_listings (path, title, outbound_links, owner_sub) VALUES ($1, 'sweep scoped doc', $2::jsonb, $3)`,
-      [`documents/sweep-scope-${rnd()}/x.md`, JSON.stringify([{ kind: "source", id: s2 }]), bSub]);
+      [`${bDir}/sweep-scope-${rnd()}.md`, JSON.stringify([{ kind: "source", id: s2 }]), bSub]);
     await sql(`INSERT INTO public.sessions (id, origin_tool, query_text) VALUES ($1, 'manual', 'sweep scoped session')`, [sess]);
     await sql(`INSERT INTO public.research_jobs (id, status, origin, query, caller, session_id) VALUES ($1, 'done', 'workspace', 'sweep scoped', 'workspace', $2)`, [job2, sess]);
     await sql(`INSERT INTO public.research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES ($1, $2, $2, 'sweep scoped')`, [job2, bSub]);

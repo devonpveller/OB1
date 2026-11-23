@@ -280,7 +280,7 @@ try {
   Save 'cleanup-scope.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|^error|AssertionError|Values are not equal|actual|expected|B private|\[Diff\]|^\s+[-+] ' } | Select-Object -First 140) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
-  $scopeLine = @(($clean -split "`n") | Where-Object { $_ -match '^S1-S3 .*\.\.\. (ok|FAILED)' })
+  $scopeLine = @(($clean -split "`n") | Where-Object { $_ -match '^\s*S1-S3.*\.\.\. (ok|FAILED)' })
   if ($Red) { Check ($scopeLine.Count -gt 0 -and $scopeLine[0] -match 'FAILED') "RED: the two-identity case fails on the base ($($scopeLine[0]))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[2].Value -eq 2 -and [int]$sum.Groups[3].Value -eq 0) "cleanup_scope_integration_test.ts ($($sum.Value))" }
   if (-not $sum.Success -or [int]$sum.Groups[3].Value -gt 0) { Save 'cleanup-scope-tail.log' (($clean -split "`n" | Select-Object -Last 80) -join "`n") }
