@@ -1,3 +1,6 @@
 node_modules
 dist
 e2e
+# the shared fake documents back end is used by the vitest suite too (test/documents.test.tsx)
+!e2e/docs-fake.mjs
+!e2e/docs-fake.d.mts

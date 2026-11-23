@@ -69,6 +69,9 @@ http.createServer((req, res) => {
       return json({ key: k, value: b.value, version: n });
     });
   }
+  // the Documents screen's two reads (rwr-docs-list; its own e2e is docs.e2e.mjs): nothing listed in this lab
+  if (p === "/workbench/contract/documents") return json({ documents: [] });
+  if (p === "/workbench/documents/folders") return json({ root: "documents/k-7f3a", folders: [""] });
   if (p === "/workbench/documents/state") {
     const path = new URL(req.url, "http://x").searchParams.get("path");
     return DOCS[path] && mode === "alice" ? json({ path, listed: true, trashed: false }) : json({ error: "no such document" }, 404);
