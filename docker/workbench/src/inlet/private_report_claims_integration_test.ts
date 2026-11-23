@@ -167,7 +167,17 @@ async function plant(): Promise<Record<string, any>> {
 // gap row is in its table or the archive; the shared job and the gap branch exist.
 // deno-lint-ignore no-explicit-any
 async function landed(p: Record<string, any>): Promise<void> {
-  const ids = [p.b1, p.b2, p.b3, p.a1, p.multi, p.orph, p.ctl, p.mix];
+  const ids = [p.b1, p.b2, p.b3, p.a1, p.multi, p.orph, p.ctl, p.mix, p.bh];
+  // fix item (P2): each planted shared synthesis is in sources or 570's archive (moved / withheld); each P2 job exists
+  const syns = [p.syn, p.p2syn, p.p2multi, p.synCtl];
+  const p2 = (await sql<{ s: number; j: number }>(
+    `SELECT (SELECT count(DISTINCT x)::int FROM unnest($1::uuid[]) x
+              WHERE EXISTS (SELECT 1 FROM public.sources s WHERE s.id = x)
+                 OR (to_regclass('public.private_report_claims_archive') IS NOT NULL
+                     AND EXISTS (SELECT 1 FROM public.private_report_claims_archive a WHERE a.action = 's' AND a.ref = x::text AND a.restored_at IS NULL))) AS s,
+            (SELECT count(*)::int FROM public.research_jobs WHERE id = ANY($2::uuid[])) AS j`,
+    [syns, [p.p2job, p.p2jobA, p.hjob, p.hchild]]))[0];
+  if (p2.s !== syns.length || p2.j !== 4) throw new Error(`plant did not land: P2 syntheses ${p2.s}/${syns.length}, jobs ${p2.j}/4`);
   const n = (await sql<{ c: number; j: number; g: number; s: number; e: number; w: number; syn: number }>(
     `SELECT (SELECT count(DISTINCT x)::int FROM unnest($1::uuid[]) x
               WHERE EXISTS (SELECT 1 FROM public.claims c WHERE c.id = x)
@@ -182,17 +192,29 @@ async function landed(p: Record<string, any>): Promise<void> {
               WHERE EXISTS (SELECT 1 FROM public.wiki_pages w WHERE w.slug = x)
                  OR (to_regclass('public.private_report_claims_archive') IS NOT NULL
                      AND EXISTS (SELECT 1 FROM public.private_report_claims_archive a WHERE a.action = 'w' AND a.ref = x))) AS w,
-            (SELECT count(*)::int FROM public.sources WHERE id = $6::uuid) AS syn`,
+            (SELECT count(*)::int FROM unnest(ARRAY[$6::uuid]) x
+              WHERE EXISTS (SELECT 1 FROM public.sources s WHERE s.id = x)
+                 OR (to_regclass('public.private_report_claims_archive') IS NOT NULL
+                     AND EXISTS (SELECT 1 FROM public.private_report_claims_archive a WHERE a.action = 's' AND a.ref = x::text AND a.restored_at IS NULL))) AS syn`,
     [ids, p.job, p.child, p.b1, [p.page, p.pageCite, p.pageBold, p.pageWiki, p.pageMid, p.pageSup, p.clean, p.near], p.p2syn]))[0];
   const want = { c: ids.length, j: 1, g: 1, s: 1, e: 1, w: 8, syn: 1 };
   const got = { c: n.c, j: n.j, g: n.g, s: n.s, e: n.e, w: n.w, syn: n.syn };
   if (JSON.stringify(got) !== JSON.stringify(want)) throw new Error(`plant did not land: ${JSON.stringify(got)} (want ${JSON.stringify(want)})`);
 }
 
+// fix item (F2): the human steer's three rows as a person wrote them (the steer's text, its branch's question, its event)
+async function humanImage(hjob: string, hchild: string): Promise<string> {
+  return (await sql<{ h: string }>(
+    `SELECT md5((SELECT text || '|' || topic_estimate || '|' || anchor FROM public.research_steers WHERE child_job_id = $2::uuid)
+                || '|' || (SELECT query || '|' || anchor FROM public.research_jobs WHERE id = $2::uuid)
+                || '|' || (SELECT string_agg(payload::text, '|' ORDER BY id) FROM public.research_job_events WHERE job_id = $1::uuid AND type = 'human_steer')) AS h`,
+    [hjob, hchild]))[0].h;
+}
+
 // ── plant: the 390 shape ───────────────────────────────────────────────────────────────────────────────────────────
 t(["plant"], "plant two users' private reports and their claims in the shape slot 390 left them", async () => {
   const R = rnd();
-  const w = { b: `prcb${R}`, a: `prca${R}`, multi: `prcmulti${R}`, orph: `prcorph${R}`, ctl: `prcctl${R}`, mix: `prcmix${R}`, bnew: `prcbnew${R}`, b3: `prcbthree${R}` };
+  const w = { b: `prcb${R}`, a: `prca${R}`, multi: `prcmulti${R}`, orph: `prcorph${R}`, ctl: `prcctl${R}`, mix: `prcmix${R}`, bnew: `prcbnew${R}`, b3: `prcbthree${R}`, bh: `prcbhuman${R}` };
   const one = async (q: string, args: unknown[] = []) => (await sql<{ id: string }>(q, args))[0].id;
   const thread = await one(`INSERT INTO public.threads (name, description, status) VALUES ($1, 'a shared thread', 'active') RETURNING id::text AS id`, [`Shared thread ${R}`]);
   const src = (title: string, ct = "web_article") => one(
@@ -234,16 +256,40 @@ t(["plant"], "plant two users' private reports and their claims in the shape slo
   await link(bReport, b3);
   const p2syn = await one(`INSERT INTO public.sources (title, content, content_type, research_key) VALUES ($1, $2, 'research_synthesis', $3) RETURNING id::text AS id`,
     [`Shared report two ${R}`, `A shared run. ${b3text} Nothing else.`, `rk-prc-shared2-${R}`]);
+  // fix item (P2): B's own shared question (B's prompt) whose report restated B's claim - moves private to B, copied
   const p2job = await one(`INSERT INTO public.research_jobs (status, origin, query, finished_at, result) VALUES ('done', 'manual', 'another shared question', now(), $1::jsonb) RETURNING id::text AS id`,
-    [JSON.stringify({ outcome: "answered", synthesis: `Findings. ${b3text}`, claims: [] })]);
+    [JSON.stringify({ outcome: "answered", synthesis: `Findings. ${b3text}`, prose: `In prose: ${b3text}`, claims: [] })]);
+  await sql(`INSERT INTO public.research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES ($1, $2, $2, 'another shared question')`, [p2job, B]);
+  // ... and A's shared question whose report restated B's claim: withheld (a copy would hand B A's prompt's words)
+  const p2jobA = await one(`INSERT INTO public.research_jobs (status, origin, query, finished_at, result) VALUES ('done', 'manual', 'a question A asked', now(), $1::jsonb) RETURNING id::text AS id`,
+    [JSON.stringify({ outcome: "answered", synthesis: `A's findings. ${b3text}`, claims: [] })]);
+  await sql(`INSERT INTO public.research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES ($1, $2, $2, 'a question A asked')`, [p2jobA, A]);
   const a1 = await claim(`The ${w.a} gamma result was confirmed by a second team in 2025.`, null, null);
   await link(aReport, a1);
+  // fix item (P2): a shared synthesis restating claims of TWO owners (B's beta, A's gamma): withheld from everyone
+  const p2multi = await one(`INSERT INTO public.sources (title, content, content_type, research_key) VALUES ($1, $2, 'research_synthesis', $3) RETURNING id::text AS id`,
+    [`Shared report three ${R}`, `A shared run. The ${w.b} beta result held for 40 participants over six months. Also: The ${w.a} gamma result was confirmed by a second team in 2025.`, `rk-prc-shared3-${R}`]);
+  // fix item (F2): a HUMAN steer on a shared tree that typed the text of one of B's claims (bh); never rewritten
+  const bhText = `The ${w.bh} kappa result was typed into a steer by a person.`;
+  const bh = await claim(bhText, null, null);
+  await link(bReport, bh);
+  const hjob = await one(`INSERT INTO public.research_jobs (status, origin, query, finished_at) VALUES ('done', 'manual', 'a human-steered shared question', now()) RETURNING id::text AS id`);
+  const hchild = await one(`INSERT INTO public.research_jobs (status, origin, query, parent_job_id, root_job_id, rooted_step_id, branch_kind, anchor)
+      VALUES ('queued', 'manual', $1, $2, $2, 'synth', 'steer', 'a human-steered shared question') RETURNING id::text AS id`, [`Check: ${bhText}`, hjob]);
+  await sql(`INSERT INTO public.research_steers (root_job_id, parent_job_id, child_job_id, steer_kind, step_id, text, topic_estimate, anchor, actor_sub)
+             VALUES ($1, $1, $2, 'human', 'synth', $3, 'a steered topic', 'a human-steered shared question', $4)`, [hjob, hchild, `Check: ${bhText}`, A]);
+  await sql(`INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload) VALUES ($1, $1, 'human_steer', 'steering', $2::jsonb)`,
+    [hjob, JSON.stringify({ child_job_id: hchild, step_id: "synth", text: `Check: ${bhText}`, topic_estimate: "a steered topic", anchor: "a human-steered shared question" })]);
+  // a shared control synthesis (the control claim's own; it restates nothing private and stays shared)
+  const synCtl = await one(`INSERT INTO public.sources (title, content, content_type, research_key) VALUES ($1, 'a shared control report', 'research_synthesis', $2) RETURNING id::text AS id`,
+    [`Shared control report ${R}`, `rk-prc-sharedctl-${R}`]);
   const multi = await claim(`The ${w.multi} delta result appeared in both private reports alike.`, thread, null);
   await link(bReport, multi); await link(aReport, multi);
   const orph = await claim(`The ${w.orph} epsilon result came from a report whose idea is gone.`, thread, null);
   await link(orphReport, orph);
-  // controls: a shared claim (shared synthesis), and a claim B's report shares with a shared synthesis (mixed: stays shared)
-  const ctl = await claim(`The ${w.ctl} control result is shared knowledge from a shared report.`, thread, syn);
+  // controls: a shared claim (its own shared synthesis); and a claim B's report shares with a shared synthesis ("mixed":
+  // fix item P2 - it moves to B like every private-report claim, and the synthesis that filed it moves private to B)
+  const ctl = await claim(`The ${w.ctl} control result is shared knowledge from a shared report.`, thread, synCtl);
   const mix = await claim(`The ${w.mix} mixed result came out of a shared report too.`, thread, syn);
   await link(bReport, mix);
   // the conflict detector's reciprocal contradicts edges between B's claim and the shared control
@@ -289,7 +335,8 @@ t(["plant"], "plant two users' private reports and their claims in the shape slo
     [s2, s1, `The ${w.b} alpha result reproduced in 12 trials across two labs.`, bIdea.job]);
   await sql(`CREATE TABLE IF NOT EXISTS public.lab_prc_plant (k TEXT PRIMARY KEY, v JSONB NOT NULL)`);
   await sql(`INSERT INTO public.lab_prc_plant (k, v) VALUES ('plant', $1::jsonb) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v`,
-    [JSON.stringify({ R, w, thread, s1, s2, syn, bIdea, aIdea, bReport, aReport, orphReport, b1, b2, b3, a1, multi, orph, ctl, mix, job, child, page, pageCite, pageBold, pageWiki, pageMid, pageSup, near, clean, p2syn, p2job })]);
+    [JSON.stringify({ R, w, thread, s1, s2, syn, bIdea, aIdea, bReport, aReport, orphReport, b1, b2, b3, a1, multi, orph, ctl, mix, job, child, page, pageCite, pageBold, pageWiki, pageMid, pageSup, near, clean, p2syn, p2job,
+      p2jobA, p2multi, synCtl, bh, hjob, hchild, b3text, bhText, human: await humanImage(hjob, hchild) })]);
   await landed(await plant());
 });
 
@@ -354,6 +401,12 @@ const READS: Array<[string, (p: Record<string, any>) => string]> = [
   ["contract/sessions/{the gap branch}", (p) => `/workbench/contract/sessions/${p.child}`],
   ["contract/sessions/{shared job}/coverage", (p) => `/workbench/contract/sessions/${p.job}/coverage`],
   ["contract/search kinds=page (the claim's word)", (p) => `/workbench/contract/search?q=${p.w.b}&kinds=page`],
+  // fix item (P2): the shared outputs that restated a private-report claim (B's theta claim; the mixed claim's synthesis)
+  ["contract/search (the restated claim's word: sources, claims, pages)", (p) => `/workbench/contract/search?q=${p.w.b3}&kinds=claim,page,source`],
+  ["contract/search (the mixed claim's word)", (p) => `/workbench/contract/search?q=${p.w.mix}&kinds=claim,page,source`],
+  ["contract/sessions/{A's shared job that restated B's claim}", (p) => `/workbench/contract/sessions/${p.p2jobA}`],
+  ["contract/sessions/{B's shared job that restated B's claim}", (p) => `/workbench/contract/sessions/${p.p2job}`],
+  ["contract/claims?q (the mixed claim's word)", (p) => `/workbench/contract/claims?q=${p.w.mix}&limit=200`],
   // already owner-only before slot 570 (rw-report-isolation / rw-p8a4-ideas): controls, green in both phases
   ["contract/ideas/{B's idea}", (p) => `/workbench/contract/ideas/${p.bIdea.id}`],
   ["contract/ideas", () => `/workbench/contract/ideas?limit=200`],
@@ -361,7 +414,8 @@ const READS: Array<[string, (p: Record<string, any>) => string]> = [
 ];
 // what of B's (and of nobody's) a non-owner must never read: the words, the ids
 // deno-lint-ignore no-explicit-any
-const secretsOf = (p: Record<string, any>) => [p.w.b, p.w.multi, p.w.orph, p.w.bnew, p.b1, p.b2, p.multi, p.orph, p.bnewId].filter(Boolean) as string[];
+// fix item (P2): the mixed claim and B's restated theta claim are B's too (their words and ids)
+const secretsOf = (p: Record<string, any>) => [p.w.b, p.w.multi, p.w.orph, p.w.bnew, p.w.b3, p.w.mix, p.b1, p.b2, p.b3, p.mix, p.multi, p.orph, p.bnewId].filter(Boolean) as string[];
 for (const [name, path] of READS) {
   t(BOTH, `[leak] ${name}: no non-owner reads B's private-report claims (text, id, nested fields)`, async () => {
     const p = await plant();
@@ -371,28 +425,29 @@ for (const [name, path] of READS) {
       const r = await get(v, path(p));
       // a search echoes its own query: judge the results only
       const body = path(p).includes("/search?") ? JSON.stringify((r.json as { results?: unknown }).results ?? []) : r.text;
-      for (const s of secrets) if (body.includes(s)) hits.push(`${v.name} -> ${r.status} carries a ${s === p.b1 || s === p.b2 || s === p.multi || s === p.orph || s === p.bnewId ? "claim id" : "claim word"}`);
+      for (const s of secrets) if (body.includes(s)) hits.push(`${v.name} -> ${r.status} carries a ${[p.b1, p.b2, p.b3, p.mix, p.multi, p.orph, p.bnewId].includes(s) ? "claim id" : "claim word"}`);
     }
     assertEquals(hits, [], `${name}`);
   });
 }
-t(BOTH, "[leak] contract/claims?thread_id: the count is the shared claims' only (the control and the mixed claim)", async () => {
+t(BOTH, "[leak] contract/claims?thread_id: the count is the shared claims' only (the control; the mixed claim is B's since the fix item)", async () => {
   const p = await plant();
   for (const v of VIEWERS_NOT_B) {
     const r = await get(v, `/workbench/contract/claims?thread_id=${p.thread}&limit=200`);
     assertEquals(r.status, 200, `${v.name}: ${r.text.slice(0, 200)}`);
     const ids = ((r.json.claims ?? []) as { id: string }[]).map((c) => c.id).sort();
-    assertEquals([r.json.count, ids], [2, [p.ctl, p.mix].sort()], `${v.name}: the thread's claims and count`);
+    assertEquals([r.json.count, ids], [1, [p.ctl]], `${v.name}: the thread's claims and count`);
   }
 });
 
 // ── controls and the owner ─────────────────────────────────────────────────────────────────────────────────────
-t(BOTH, "[control] a shared claim and a claim a shared synthesis also filed still answer every viewer, B included", async () => {
+t(BOTH, "[control] a shared claim (its own shared synthesis) still answers every viewer, B included; its synthesis stays shared", async () => {
   const p = await plant();
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.sources WHERE id = $1`, [p.synCtl]))[0].n, 1, "the control synthesis stays");
   for (const v of [...VIEWERS_NOT_B, ...B_VIEWERS]) {
-    for (const [word, id] of [[p.w.ctl, p.ctl], [p.w.mix, p.mix]]) {
+    for (const [word, id] of [[p.w.ctl, p.ctl]]) {
       const r = await get(v, `/workbench/contract/claims?q=${word}`);
-      assert(((r.json.claims ?? []) as { id: string }[]).some((c) => c.id === id), `${v.name}: the shared claim ${word === p.w.ctl ? "ctl" : "mix"} is listed (${r.status})`);
+      assert(((r.json.claims ?? []) as { id: string }[]).some((c) => c.id === id), `${v.name}: the shared claim ctl is listed (${r.status})`);
       const s = await get(v, `/workbench/contract/search?q=${word}&kinds=claim`);
       assert(((s.json.results ?? []) as { id: string }[]).some((h) => h.id === id), `${v.name}: search finds the shared claim`);
     }
@@ -565,34 +620,157 @@ t(BOTH, "[db] a NEW gap branch / steer / gap event for B's claim on a shared tre
     // final round (tester attempt 2 F2): every steering kind, UPDATEs, a braced id, an inter-hub branch
     const hub = JSON.stringify({ a: { label: p.b2, members: [p.b2], sample: text }, b: { label: p.ctl, members: [p.ctl], sample: "a shared sample" }, density: 0.1, links: 1 });
     await c.queryObject(`INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload) VALUES ($1, $1, 'interhub_gap', 'steering', $2::jsonb)`, [p.job, hub]);
-    await c.queryObject(`INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload) VALUES ($1, $1, 'topic', 'steering', $2::jsonb)`,
-      [p.job, JSON.stringify({ from: "a shared topic", to: text, at_branch: p.child })]);
-    const kinds = (await c.queryObject<{ t: string }>(`SELECT string_agg(payload::text, ' ') AS t FROM public.research_job_events WHERE job_id = $1 AND type IN ('interhub_gap', 'topic')`, [p.job])).rows;
-    assert(!(kinds[0].t ?? "").includes(p.w.b), "inter-hub and topic events carry no text");
+    const kinds = (await c.queryObject<{ t: string }>(`SELECT string_agg(payload::text, ' ') AS t FROM public.research_job_events WHERE job_id = $1 AND type = 'interhub_gap'`, [p.job])).rows;
+    assert(!(kinds[0].t ?? "").includes(p.w.b), "an inter-hub event naming the claim carries no text");
     const ih = (await c.queryObject<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, query, parent_job_id, root_job_id, rooted_step_id, branch_kind, anchor, gap_ref)
         VALUES ('queued', 'manual', $1, $2, $2, 'reuse', 'interhub', 'a shared question', $3) RETURNING id::text AS id`,
       [`How does "${text}" relate to "a shared sample"?`, p.job, `interhub:{${p.b2}}|x`])).rows;
     assertEquals(ih.length, 0, "no inter-hub branch is opened for a private claim on a shared tree (braced id)");
     await c.queryObject(`UPDATE public.research_jobs SET query = $2 WHERE id = $1`, [p.child, `Verify again: ${text}`]);
     await c.queryObject(`UPDATE public.research_steers SET text = $2 WHERE child_job_id = $1`, [p.child, `Steer: ${text}`]);
-    await c.queryObject(`UPDATE public.research_jobs SET tree_report = $2::jsonb WHERE id = $1`, [p.job, JSON.stringify({ markdown: `# t\n${text}` })]);
     const up = (await c.queryObject<{ t: string }>(
-      `SELECT (SELECT query FROM public.research_jobs WHERE id = $1) || ' ' || (SELECT text FROM public.research_steers WHERE child_job_id = $1)
-              || ' ' || (SELECT tree_report::text FROM public.research_jobs WHERE id = $2) AS t`, [p.child, p.job])).rows;
-    assert(!up[0].t.includes(p.w.b), "an UPDATE of a branch question, a steer or the tree report carries no text");
+      `SELECT (SELECT query FROM public.research_jobs WHERE id = $1) || ' ' || (SELECT text FROM public.research_steers WHERE child_job_id = $1) AS t`, [p.child])).rows;
+    assert(!up[0].t.includes(p.w.b), "an UPDATE of a machine gap branch's question or its steer carries no text");
+    // (fix item F2: a root's tree report / topic estimate and a topic event name no claim id - a text there is a
+    //  person's or a summary of one, and is never matched; see the [fix] F2 cases)
   } finally {
     try { await c.queryObject("ROLLBACK"); } catch { /* broken */ }
     c.release();
   }
 });
-// PD0b integration (slot 580): a DERIVED (shared) question never carries a private report's claim - PD0b's drain and the
-// owner's approval write those roots; the database refuses one (23514), a clean one is written
-t(BOTH, "[db] a derived (shared) question carrying B's claim is refused; a clean derived question is written (the services' REAL login)", async () => {
+// fix item (A1, operator 2026-11-22; the PD0b slot 580 integration before it): a DERIVED (shared) question carrying the
+// REQUESTER's OWN private-report claim is refused (23514); another user's claim is never matched, so the requester's
+// answer is the same whether or not that user holds a claim with the text. The requester is the hand-back's owner: the
+// boundary writes the job, then the hand-back naming it (handback_open), in one transaction - as here (a superuser
+// session: slot 420 grants handback_open to ob_app_memory only when the role exists at 420's run, which a lab's
+// late-created role is not; the guard is a trigger and runs for every role), each start rolled back. Two identities (A
+// and B) and a control text nobody holds; the HTTP door's two-identity case is start.e2e.test.ts S9.
+t(BOTH, "[fix] A1 two identities: A's derived question with B's claim text gets the same answer as with a text nobody holds; A's own claim, and B's own, are refused", async () => {
   const p = await plant();
-  const ins = (q: string) => asApp<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, caller, query, anchor, options, request_kind, boundary)
-      VALUES ('queued', 'manual', 'boundary', $1, $1, '{}'::jsonb, 'derived', $2::jsonb) RETURNING id::text AS id`, [q, JSON.stringify({ version: "lab-1", lexicon: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", verdict_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" })]);
-  assertEquals(await errCode(() => ins(`What is known about how the ${p.w.b} alpha result^1^ reproduced in 12 trials across two labs?`)), "23514", "refused");
-  assertEquals((await ins("What is known about community solar roofs in cold towns?")).length, 1, "a clean derived question is written");
+  const stamp = JSON.stringify({ version: "lab-1", lexicon: "a".repeat(64), verdict_id: "a".repeat(64) });
+  const start = async (owner: string, q: string): Promise<{ out: string; ms: number }> => {
+    const c = await pool!.connect();
+    const t0 = performance.now();
+    try {
+      await c.queryObject("BEGIN");
+      const j = (await c.queryObject<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, caller, query, anchor, options, request_kind, boundary)
+          VALUES ('queued', 'manual', 'boundary', $1, $1, '{}'::jsonb, 'derived', $2::jsonb) RETURNING id::text AS id`, [q, stamp])).rows[0].id;
+      await c.queryObject(`SELECT public.handback_open($1, 'chat', $2, NULL, 'user-start', $3::uuid, 'queued', '{}'::jsonb, NULL, '{}'::jsonb)`,
+        [owner, `start:prc-a1-${crypto.randomUUID()}`, j]);
+      return { out: "started", ms: performance.now() - t0 };
+    } catch (e) {
+      return { out: (e as { fields?: { code?: string } }).fields?.code ?? `error ${(e as Error).name}`, ms: performance.now() - t0 };
+    } finally {
+      try { await c.queryObject("ROLLBACK"); } catch { /* broken */ }
+      c.release();
+    }
+  };
+  const bText = `What is known about how the ${p.w.b} beta result held for 40 participants over six months?`;    // B's claim b2
+  const ctrl = `What is known about how the ${p.w.b}x beta result held for 40 participants over six weeks?`;  // nobody's
+  const aText = `What is known about how the ${p.w.a} gamma result was confirmed by a second team in 2025?`;   // A's own a1
+  const runs: Record<string, { out: string; ms: number }[]> = { bText: [], ctrl: [] };
+  for (let i = 0; i < 3; i++) { runs.bText.push(await start(A, bText)); runs.ctrl.push(await start(A, ctrl)); }
+  const outs = (k: string) => [...new Set(runs[k].map((r) => r.out))];
+  assertEquals([outs("bText"), outs("ctrl")], [["started"], ["started"]], "A's start: B's claim text and the control get the same answer");
+  // the timing class: both well under a second, the medians within 3x (+20 ms) of each other
+  const med = (k: string) => runs[k].map((r) => r.ms).sort((x, y) => x - y)[1];
+  console.log(`A1 timing (median ms): B's text ${med("bText").toFixed(1)}, control ${med("ctrl").toFixed(1)}`);
+  assert(med("bText") < 1000 && med("ctrl") < 1000, "both under a second");
+  assert(med("bText") < 3 * med("ctrl") + 20 && med("ctrl") < 3 * med("bText") + 20, "one timing class");
+  assertEquals((await start(A, aText)).out, "23514", "A's own private claim in A's shared question is refused");
+  assertEquals((await start(B, bText)).out, "23514", "B's own private claim in B's shared question is refused");
+  // a derived job that no hand-back names has no requester: it matches nothing
+  assertEquals((await asApp<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, caller, query, anchor, options, request_kind, boundary)
+      VALUES ('queued', 'manual', 'boundary', $1, $1, '{}'::jsonb, 'derived', $2::jsonb) RETURNING id::text AS id`, [ctrl, stamp])).length, 1,
+    "a clean derived question is written");
+});
+
+// fix item (F2): a human steer on a shared tree is never rewritten - at the migration (the planted one, byte for byte)
+// and on a new write (as typed, whether its text is B's claim or a text nobody holds); machine gap work still is
+t(BOTH, "[fix] F2 the human steer planted before 570 (its text, its branch's question, its event) is byte-identical after it", async () => {
+  const p = await plant();
+  assertEquals(await humanImage(p.hjob, p.hchild), p.human, "the human steer's rows as the person wrote them");
+});
+t(BOTH, "[fix] F2 a NEW human steer / its branch / its event on a shared tree is stored as typed, with or without B's matching claim; machine gap work is still neutral", async () => {
+  const p = await plant();
+  const c = await appPool!.connect();
+  const store = async (text: string) => {
+    const ch = (await c.queryObject<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, query, parent_job_id, root_job_id, rooted_step_id, branch_kind, anchor)
+        VALUES ('queued', 'manual', $1, $2, $2, 'synth', 'steer', 'a human-steered shared question') RETURNING id::text AS id`, [text, p.hjob])).rows;
+    assertEquals(ch.length, 1, "the human's branch is opened");
+    await c.queryObject(`INSERT INTO public.research_steers (root_job_id, parent_job_id, child_job_id, steer_kind, step_id, text, topic_estimate, anchor, actor_sub)
+        VALUES ($1, $1, $2, 'human', 'synth', $3, $3, 'a human-steered shared question', $4)`, [p.hjob, ch[0].id, text, A]);
+    await c.queryObject(`INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload) VALUES ($1, $1, 'human_steer', 'steering', $2::jsonb)`,
+      [p.hjob, JSON.stringify({ child_job_id: ch[0].id, step_id: "synth", text, topic_estimate: text, anchor: "a" })]);
+    await c.queryObject(`INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload) VALUES ($1, $1, 'topic', 'steering', $2::jsonb)`,
+      [p.hjob, JSON.stringify({ from: "a steered topic", to: text, at_branch: ch[0].id })]);
+    await c.queryObject(`UPDATE public.research_jobs SET topic_estimate = $2, tree_report = $3::jsonb WHERE id = $1`, [p.hjob, text, JSON.stringify({ markdown: `# t\n${text}` })]);
+    const r = (await c.queryObject<{ q: string; s: string; e: string; tp: string; te: string; tr: string }>(
+      `SELECT (SELECT query FROM public.research_jobs WHERE id::text = $1) AS q,
+              (SELECT text || '|' || topic_estimate FROM public.research_steers WHERE child_job_id::text = $1) AS s,
+              (SELECT payload ->> 'text' FROM public.research_job_events WHERE type = 'human_steer' AND payload ->> 'child_job_id' = $1) AS e,
+              (SELECT payload ->> 'to' FROM public.research_job_events WHERE type = 'topic' AND payload ->> 'at_branch' = $1) AS tp,
+              (SELECT topic_estimate FROM public.research_jobs WHERE id = $2::uuid) AS te,
+              (SELECT tree_report ->> 'markdown' FROM public.research_jobs WHERE id = $2::uuid) AS tr`, [ch[0].id, p.hjob])).rows[0];
+    return [r.q === text, r.s === `${text}|${text}`, r.e === text, r.tp === text, r.te === text, r.tr === `# t\n${text}`];
+  };
+  try {
+    await c.queryObject("BEGIN");
+    const withB = await store(`Check again: ${p.bhText}`);                                     // B's private claim bh
+    const ctrl = await store(`Check again: The ${p.w.bh}x kappa result was typed into a steer by a person.`); // nobody's
+    assertEquals(withB, [true, true, true, true, true, true], "B's claim text typed by a person is stored as typed (branch, steer, event, topic, root)");
+    assertEquals(withB, ctrl, "the same as a text nobody holds");
+    // machine gap work naming B's claim (by its id) is still neutral and a new gap branch for it is still not opened
+    const gap = JSON.stringify({ claim_id: p.bh, text: p.bhText, score: 0.1, threshold: 0.5, claim_kind: "descriptive" });
+    await c.queryObject(`INSERT INTO public.research_job_events (job_id, root_job_id, type, kind, payload) VALUES ($1, $1, 'gap', 'steering', $2::jsonb)`, [p.hjob, gap]);
+    const ev = (await c.queryObject<{ t: string }>(`SELECT payload ->> 'text' AS t FROM public.research_job_events WHERE job_id = $1 AND type = 'gap' AND payload ->> 'claim_id' = $2`, [p.hjob, p.bh])).rows;
+    assertEquals(ev.map((x) => x.t), ["(a private claim)"], "a machine gap event naming the claim is neutral");
+    const g = (await c.queryObject<{ id: string }>(`INSERT INTO public.research_jobs (status, origin, query, parent_job_id, root_job_id, rooted_step_id, branch_kind, anchor, gap_ref)
+        VALUES ('queued', 'manual', $1, $2, $2, 'reuse', 'gap', 'a', $3) RETURNING id::text AS id`, [`Verify: ${p.bhText}`, p.hjob, `claim:${p.bh}`])).rows;
+    assertEquals(g.length, 0, "no machine gap branch is opened for it");
+  } finally {
+    try { await c.queryObject("ROLLBACK"); } catch { /* broken */ }
+    c.release();
+  }
+});
+
+// fix item (P2, operator 2026-11-22): the SHARED outputs that restated a private-report claim
+t(BOTH, "[db] [fix] P2 a shared synthesis restating B's claim, and the one that filed B's mixed claim, are B's alone; one restating B's and A's is withheld; the control stays", async () => {
+  const p = await plant();
+  const inSources = async (id: string) => (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.sources WHERE id = $1`, [id]))[0].n;
+  const copy = async (key: string) => await sql<{ owner_sub: string | null; content: string; idea_id: string | null }>(
+    `SELECT owner_sub, content, idea_id::text AS idea_id FROM public.research_private_reports WHERE research_key = $1`, [key]);
+  assertEquals([await inSources(p.p2syn), await inSources(p.syn), await inSources(p.p2multi), await inSources(p.synCtl)], [0, 0, 0, 1],
+    "the restating, the mixed-filing and the two-owner syntheses left the shared table; the control stays");
+  const own = await copy(`prc570-syn:${p.p2syn}`);
+  assertEquals(own.map((r) => r.owner_sub === B), [true], "the restating synthesis is in B's private store");
+  assert(own[0].content.includes(p.w.b3), "with its text (B reads it)");
+  assertEquals((await copy(`prc570-syn:${p.syn}`)).map((r) => r.owner_sub === B), [true], "the synthesis that filed B's mixed claim is B's");
+  assertEquals((await copy(`prc570-syn:${p.p2multi}`)).length, 0, "the two-owner synthesis is nobody's (archived only)");
+  // the mixed claim follows the same rule: in B's store, not shared
+  const mix = (await sql<{ shared: number; owner: string | null }>(
+    `SELECT (SELECT count(*)::int FROM public.claims WHERE id = $1) AS shared, (SELECT inlet_owner_sub FROM public.inlet_private_claims WHERE id = $1) AS owner`, [p.mix]))[0];
+  assertEquals([mix.shared, mix.owner === B], [0, true], "the mixed claim moved to B");
+  // nothing shared still carries the restated sentences (the skeleton match, as 570's)
+  const left = (await sql<{ n: number }>(
+    `SELECT count(*)::int AS n FROM public.sources s WHERE s.content_type = 'research_synthesis' AND (s.content LIKE '%' || $1 || '%' OR s.content LIKE '%' || $2 || '%')`,
+    [p.w.b3, p.w.a]))[0].n;
+  assertEquals(left, 0, "no shared synthesis carries B's theta or A's gamma sentence");
+});
+t(BOTH, "[db] [fix] P2 shared job reports restating B's claim: B's own question's report is B's alone; A's question's and an ownerless one's are withheld; the jobs keep no report text", async () => {
+  const p = await plant();
+  const jobs = await sql<{ id: string; t: string }>(`SELECT id::text AS id, result::text AS t FROM public.research_jobs WHERE id = ANY($1::uuid[]) ORDER BY id`, [[p.p2job, p.p2jobA, p.job]]);
+  assertEquals(jobs.length, 3);
+  for (const j of jobs) {
+    assert(!j.t.includes(p.w.b3) && !j.t.includes(p.w.b), `job ${j.id === p.p2job ? "p2job" : j.id === p.p2jobA ? "p2jobA" : "job"}: no private sentence in its result`);
+    assertEquals(JSON.parse(j.t).synthesis, "", "its synthesis is empty");
+  }
+  const copies = await sql<{ research_key: string; owner_sub: string | null; content: string }>(
+    `SELECT research_key, owner_sub, content FROM public.research_private_reports WHERE research_key = ANY($1::text[])`,
+    [[`prc570-job:${p.p2job}`, `prc570-job:${p.p2jobA}`, `prc570-job:${p.job}`]]);
+  assertEquals(copies.map((c) => [c.research_key === `prc570-job:${p.p2job}`, c.owner_sub === B]), [[true, true]],
+    "only B's own question's report is copied, to B (A's prompt / an ownerless job's would leave with it)");
+  assert(copies[0].content.includes(p.w.b3), "B reads its text");
 });
 // final round (tester attempt 2 F3): slot 480's workbench login reads the owner's claims, owner-scoped; it files nothing
 t([...BOTH, "p480"], "[db] slot 480's ob_workbench login reads only the verified subject's private-report claims, and files none", async () => {

@@ -12,6 +12,10 @@
 -- else's); a research job result naming one on a job its owner does not own; a wiki page carrying one's text; a gap
 -- branch / steer / gap event / tree report of a shared tree carrying one's text; a private run's corroboration line in
 -- the clear; the guards and the dropped foreign key; who may execute the slot's functions.
+-- Fix item rw-private-report-claims-fix (2026-11-22): a claim a shared synthesis also filed ("mixed") is judged like
+-- every other (it moves too); the gap work counted is MACHINE rows only (a human steer, its branch and event are never
+-- rewritten, F2); P2 - a SHARED synthesis or a SHARED job report carrying a private-report claim's sentence is a surface;
+-- the derived-question guard sits on research_handbacks (A1).
 CREATE OR REPLACE FUNCTION pg_temp.prc_norm(p_text TEXT) RETURNS TEXT
 LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
 SET search_path = pg_catalog
@@ -76,8 +80,7 @@ priv AS (
     SELECT c.id, c.inlet_owner_sub AS owner, c.text FROM public.inlet_private_claims c
      WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)),
 shared_linked AS (
-    SELECT c.id, l.owner, c.text FROM public.claims c JOIN linked l ON l.id = c.id
-     WHERE c.synthesis_id IS NULL),
+    SELECT c.id, l.owner, c.text FROM public.claims c JOIN linked l ON l.id = c.id),
 -- a private-report claim wherever it is (the store after 570, the shared table before it)
 all_priv AS (SELECT id, owner, text FROM priv UNION ALL SELECT id, owner, text FROM shared_linked),
 texts AS (
@@ -106,18 +109,31 @@ pages AS (
 -- / branch / topic event, the root's tree report
 gap_rows AS (
     SELECT 'job:' || j.id::text AS k FROM public.research_jobs j JOIN texts t
-        ON (j.branch_kind NOT IN ('root', 'idea') AND position(t.text IN coalesce(j.query, '')) > 0)
-        OR position(t.jtext IN coalesce(j.tree_report::text, '')) > 0
+        ON (j.branch_kind IN ('gap', 'interhub') AND position(t.text IN coalesce(j.query, '')) > 0)
+        OR (j.branch_kind IN ('root', 'idea') AND position(t.jtext IN coalesce(j.tree_report::text, '')) > 0)
      WHERE t.owner IS NULL OR (SELECT o.owner_sub FROM public.research_job_report_owner(coalesce(j.root_job_id, j.id)) o LIMIT 1) IS DISTINCT FROM t.owner
     UNION
     SELECT 'steer:' || s.id::text FROM public.research_steers s JOIN texts t
         ON position(t.text IN s.text) > 0 OR position(t.jtext IN coalesce(s.gap::text, '')) > 0
-     WHERE s.steer_kind <> 'human'
+     WHERE s.steer_kind IN ('gap', 'interhub')
        AND (t.owner IS NULL OR (SELECT o.owner_sub FROM public.research_job_report_owner(s.root_job_id) o LIMIT 1) IS DISTINCT FROM t.owner)
     UNION
     SELECT 'event:' || e.id::text FROM public.research_job_events e JOIN texts t ON position(t.jtext IN e.payload::text) > 0
-     WHERE e.type IN ('gap', 'interhub_gap', 'branch_open', 'human_steer', 'topic')
+     WHERE (e.type IN ('gap', 'interhub_gap', 'topic')
+            OR (e.type = 'branch_open' AND coalesce(e.payload ->> 'steer_kind', '') IN ('gap', 'interhub')))
        AND (t.owner IS NULL OR (SELECT o.owner_sub FROM public.research_job_report_owner(e.root_job_id) o LIMIT 1) IS DISTINCT FROM t.owner)),
+-- P2: a SHARED synthesis, or a SHARED job report (no private report owns the job's tree), carrying one's sentence
+p2_texts AS (SELECT n FROM page_texts),
+p2_syn AS (
+    SELECT DISTINCT s.id FROM public.sources s, p2_texts t
+     WHERE s.content_type = 'research_synthesis'
+       AND position(t.n IN pg_temp.prc_norm(coalesce(s.title, '') || ' ' || coalesce(s.content, ''))) > 0),
+p2_jobs AS (
+    SELECT DISTINCT j.id FROM public.research_jobs j, p2_texts t
+     WHERE jsonb_typeof(j.result) = 'object'
+       AND NOT EXISTS (SELECT 1 FROM public.research_job_report_owner(j.id))
+       AND position(t.n IN pg_temp.prc_norm((SELECT string_agg(v #>> '{}', ' ') FROM jsonb_path_query(j.result - 'reuse_claims' - 'claims', 'strict $.**') v
+                                              WHERE jsonb_typeof(v) = 'string'))) > 0),
 corr AS (
     SELECT sc.id FROM public.source_corroborations sc
      WHERE sc.claim_text NOT LIKE 'private-text:%'
@@ -129,8 +145,10 @@ fk AS (
 guards AS (
     SELECT count(*) AS n FROM pg_trigger
      WHERE tgname IN ('trg_private_report_claims_wiki_guard', 'trg_private_report_claims_link_guard', 'trg_private_report_claims_corroboration_guard',
-                      'trg_private_report_claims_gap_guard')
+                      'trg_private_report_claims_gap_guard', 'trg_private_report_claims_derived_guard')
        AND NOT tgisinternal AND tgenabled <> 'D'),
+-- the guards a full apply installs: 6, and the derived-question guard where research_handbacks (slot 420) exists
+want_guards AS (SELECT 6 + CASE WHEN to_regclass('public.research_handbacks') IS NOT NULL THEN 1 ELSE 0 END AS n),
 fns AS (
     SELECT p.oid, p.proname, p.proacl, p.proowner, p.prosrc FROM pg_proc p
      WHERE p.pronamespace = 'public'::regnamespace
@@ -157,6 +175,9 @@ counts AS (
            (SELECT count(*) FROM pages) AS wiki_pages,
            (SELECT count(*) FROM gap_rows) AS gap_rows,
            (SELECT count(*) FROM corr) AS corr_lines,
+           (SELECT count(*) FROM p2_syn) AS p2_syn,
+           (SELECT count(*) FROM p2_jobs) AS p2_jobs,
+           (SELECT n FROM want_guards) AS want_guards,
            (SELECT n FROM fk) AS link_fk,
            (SELECT n FROM guards) AS guards,
            (SELECT exec_n FROM app) AS app_exec,
@@ -174,14 +195,17 @@ SELECT line FROM (
     UNION ALL SELECT 7, 'check: wiki pages carrying one''s text=' || wiki_pages FROM counts
     UNION ALL SELECT 7, 'check: gap-work rows of a shared tree carrying one''s text=' || gap_rows FROM counts
     UNION ALL SELECT 7, 'check: corroboration lines of a private report''s run in the clear=' || corr_lines FROM counts
+    UNION ALL SELECT 7, 'check: shared syntheses carrying one''s text=' || p2_syn FROM counts
+    UNION ALL SELECT 7, 'check: shared job reports carrying one''s text=' || p2_jobs FROM counts
     UNION ALL SELECT 8, 'check: the link''s foreign key onto claims=' || link_fk || ' (0 once applied)' FROM counts
-    UNION ALL SELECT 9, 'check: guards on=' || guards || ' (6 once applied)' FROM counts
+    UNION ALL SELECT 9, 'check: guards on=' || guards || ' (' || want_guards || ' once applied)' FROM counts
     UNION ALL SELECT 10, 'check: ob_app_memory may execute the slot''s functions=' || app_exec || ' of 3 (role present=' || (app_role > 0) || ')' FROM counts
     UNION ALL SELECT 10, 'check: functions with the caller gate=' || gated || ' of 3' FROM counts
     UNION ALL SELECT 10, 'check: stray EXECUTE grants=' || stray_grants FROM counts
     UNION ALL SELECT 11, 'check: stray grant ' || g FROM grants
     UNION ALL SELECT 12, CASE WHEN shared_linked = 0 AND shared_edges = 0 AND wrong_owner = 0 AND job_results = 0 AND wiki_pages = 0 AND gap_rows = 0
-                               AND corr_lines = 0 AND link_fk = 0 AND guards = 6 AND app_exec = 3 AND gated = 3 AND stray_grants = 0
+                               AND corr_lines = 0 AND p2_syn = 0 AND p2_jobs = 0
+                               AND link_fk = 0 AND guards = want_guards AND app_exec = 3 AND gated = 3 AND stray_grants = 0
                                AND (SELECT applied FROM slot)
                               THEN 'check: OK' ELSE 'check: FAIL' END FROM counts
 ) x ORDER BY o;

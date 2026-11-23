@@ -117,8 +117,10 @@ export async function drainIdeaHandbacks(
       } catch (e) {
         await c.queryObject("ROLLBACK").catch(() => {});
         const code = (e as { fields?: { code?: string } }).fields?.code;
-        // rw-private-report-claims (slot 570): a derived question that carries a private report's claim is refused by
-        // the database (23514); it is never queued - the hand-back waits for its owner instead of retrying every pass
+        // rw-private-report-claims (slot 570): a derived question that carries one of the hand-back OWNER's own private
+        // report claims is refused by the database (23514, when the hand-back is given the job; rw-private-report-claims-fix
+        // A1: another user's claim is never matched); it is never queued - the hand-back waits for its owner instead of
+        // retrying every pass
         if (v.ok && code === "23514") {
           try {
             const ok = (await c.queryObject<{ ok: boolean }>(`SELECT public.idea_handback_settle($1::uuid, $2, NULL, 'awaiting_owner', $3::jsonb, $4::jsonb) AS ok`,

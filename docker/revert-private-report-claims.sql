@@ -14,6 +14,10 @@
 --   * the corroboration lines slot 570 made neutral get their text back (its guard on source_corroborations goes);
 --   * the gap work of shared trees it made neutral (action g: research_jobs, research_steers, research_job_events) gets
 --     its text back; the gap guards on those three tables go;
+--   * fix item (P2): the shared syntheses it moved or withheld come back first (the sources row, every row that
+--     referenced it - re-inserted where the foreign key cascaded, re-pointed where it set NULL / its default), the shared
+--     job reports get their (result, metrics) back, and the private copies it made (research_private_reports) go;
+--   * fix item (A1): the derived-question guard on research_handbacks goes;
 --   * the functions go; the archive and salt tables stay (restored rows carry restored_at).
 -- Counts only (NOTICE). A second run has nothing to restore. Run it BEFORE the 480 / 470 / 440 / 390 reverts.
 -- ============================================================
@@ -40,14 +44,24 @@ DECLARE
     n_fk    BIGINT := 0;
     n_c     BIGINT := 0;
     n_g     BIGINT := 0;
+    n_s     BIGINT := 0;
+    n_d     BIGINT := 0;
+    n_p     BIGINT := 0;
+    n_r     BIGINT := 0;
+    v_scols TEXT;
+    v_pk    TEXT;
 BEGIN
     IF to_regclass('public.private_report_claims_archive') IS NULL THEN
         RAISE NOTICE 'private report claims revert: slot 570 was never applied - nothing to restore';
         RETURN;
     END IF;
     LOCK TABLE public.claims, public.claim_sources, public.research_private_report_claims, public.research_jobs, public.wiki_pages,
-               public.inlet_private_claims, public.inlet_private_claim_sources, public.research_steers, public.research_job_events
+               public.inlet_private_claims, public.inlet_private_claim_sources, public.research_steers, public.research_job_events,
+               public.sources, public.research_private_reports
         IN SHARE ROW EXCLUSIVE MODE;
+    IF to_regclass('public.research_handbacks') IS NOT NULL THEN
+        DROP TRIGGER IF EXISTS trg_private_report_claims_derived_guard ON public.research_handbacks;
+    END IF;
     DROP TRIGGER IF EXISTS trg_private_report_claims_wiki_guard ON public.wiki_pages;
     DROP TRIGGER IF EXISTS trg_private_report_claims_gap_guard ON public.research_jobs;
     DROP TRIGGER IF EXISTS trg_private_report_claims_gap_guard ON public.research_steers;
@@ -104,6 +118,63 @@ BEGIN
         IF v_n > 0 THEN
             RAISE EXCEPTION 'private report claims revert: refused, nothing changed - % shared claim(s) filed since carry a moved claim''s thread and text', v_n USING ERRCODE = '55000';
         END IF;
+        -- fix item (P2): the shared syntheses first (claims and edges point at them), then the rows that referenced them
+        -- (re-inserted where the foreign key cascaded, re-pointed where it set NULL / its default), the shared job
+        -- reports, and the private copies this slot made go
+        SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) INTO v_scols
+          FROM pg_attribute WHERE attrelid = 'public.sources'::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = '';
+        EXECUTE format('INSERT INTO public.sources (%s) SELECT %s FROM public.private_report_claims_archive a, jsonb_populate_record(NULL::public.sources, a.row_data) r
+                         WHERE a.batch = $1 AND a.action = ''s'' AND a.restored_at IS NULL', v_scols, regexp_replace(v_scols, '([^, ]+)', 'r.\1', 'g'))
+            USING v_batch;
+        GET DIAGNOSTICS v_n = ROW_COUNT; n_s := n_s + v_n;
+        FOR r IN SELECT z.tbl, z.col, z.act FROM (
+                    SELECT DISTINCT a.tbl, a.row_data ->> '_col' AS col, a.row_data ->> '_act' AS act FROM public.private_report_claims_archive a
+                     WHERE a.batch = v_batch AND a.action = 'd' AND a.restored_at IS NULL) z
+                  ORDER BY (z.act = 'c') DESC, z.tbl, z.col LOOP
+            IF to_regclass(r.tbl) IS NULL THEN
+                RAISE EXCEPTION 'private report claims revert: refused, nothing changed - table % is gone', r.tbl USING ERRCODE = '55000';
+            END IF;
+            IF r.act = 'c' THEN
+                SELECT string_agg(quote_ident(at.attname), ', ' ORDER BY at.attnum) INTO v_wcols
+                  FROM pg_attribute at WHERE at.attrelid = r.tbl::regclass AND at.attnum > 0 AND NOT at.attisdropped AND at.attgenerated = '';
+                EXECUTE format('INSERT INTO %s (%s) OVERRIDING SYSTEM VALUE
+                                SELECT %s FROM public.private_report_claims_archive a, jsonb_populate_record(NULL::%s, a.row_data) x
+                                 WHERE a.batch = $1 AND a.action = ''d'' AND a.tbl = $2 AND a.row_data ->> ''_col'' = $3 AND a.restored_at IS NULL
+                                ON CONFLICT DO NOTHING',
+                               r.tbl, v_wcols, regexp_replace(v_wcols, '([^, ]+)', 'x.\1', 'g'), r.tbl)
+                    USING v_batch, r.tbl, r.col;
+            ELSE
+                SELECT string_agg(format('t.%1$I = x.%1$I', at.attname), ' AND ') INTO v_pk
+                  FROM pg_index i JOIN pg_attribute at ON at.attrelid = i.indrelid AND at.attnum = ANY(i.indkey)
+                 WHERE i.indrelid = r.tbl::regclass AND i.indisprimary;
+                IF v_pk IS NULL THEN
+                    RAISE EXCEPTION 'private report claims revert: refused, nothing changed - % has no primary key to re-point %', r.tbl, r.col USING ERRCODE = '55000';
+                END IF;
+                EXECUTE format('UPDATE %s t SET %I = a.ref::uuid
+                                  FROM public.private_report_claims_archive a, jsonb_populate_record(NULL::%s, a.row_data) x
+                                 WHERE a.batch = $1 AND a.action = ''d'' AND a.tbl = $2 AND a.row_data ->> ''_col'' = $3 AND a.restored_at IS NULL AND %s
+                                   AND (t.%I IS NULL OR $4 = ''d'')',
+                               r.tbl, r.col, r.tbl, v_pk, r.col)
+                    USING v_batch, r.tbl, r.col, r.act;
+            END IF;
+            GET DIAGNOSTICS v_n = ROW_COUNT; n_d := n_d + v_n;
+        END LOOP;
+        -- (v_wcols is the wiki column list again below)
+        SELECT string_agg(quote_ident(attname), ', ' ORDER BY attnum) INTO v_wcols
+          FROM pg_attribute WHERE attrelid = 'public.wiki_pages'::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = '';
+        IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.research_jobs'::regclass AND attname = 'metrics' AND NOT attisdropped) THEN
+            UPDATE public.research_jobs j SET result = a.row_data -> 'result', metrics = a.row_data -> 'metrics'
+              FROM public.private_report_claims_archive a
+             WHERE a.batch = v_batch AND a.action = 'p' AND a.restored_at IS NULL AND j.id::text = a.ref;
+        ELSE
+            UPDATE public.research_jobs j SET result = a.row_data -> 'result'
+              FROM public.private_report_claims_archive a
+             WHERE a.batch = v_batch AND a.action = 'p' AND a.restored_at IS NULL AND j.id::text = a.ref;
+        END IF;
+        GET DIAGNOSTICS v_n = ROW_COUNT; n_p := n_p + v_n;
+        DELETE FROM public.research_private_reports p USING public.private_report_claims_archive a
+         WHERE a.batch = v_batch AND a.action = 'r' AND a.restored_at IS NULL AND p.id::text = a.ref;
+        GET DIAGNOSTICS v_n = ROW_COUNT; n_r := n_r + v_n;
         EXECUTE format('INSERT INTO public.claims (%s) SELECT %s FROM public.private_report_claims_archive a, jsonb_populate_record(NULL::public.claims, a.row_data) r
                          WHERE a.batch = $1 AND a.action IN (''k'', ''x'') AND a.restored_at IS NULL', v_cols,
                        (SELECT string_agg('r.' || quote_ident(attname), ', ' ORDER BY attnum) FROM pg_attribute WHERE attrelid = 'public.claims'::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = ''))
@@ -181,11 +252,13 @@ BEGIN
         UPDATE public.private_report_claims_archive SET restored_at = now() WHERE action = 'f' AND restored_at IS NULL;
     END LOOP;
 
-    IF n_filed + n_point + n_k + n_e + n_m + n_j + n_w + n_fk + n_c + n_g = 0 THEN
+    IF n_filed + n_point + n_k + n_e + n_m + n_j + n_w + n_fk + n_c + n_g + n_s + n_d + n_p + n_r = 0 THEN
         RAISE NOTICE 'private report claims revert: nothing to restore';
     ELSE
         RAISE NOTICE 'private report claims revert: % claim(s) restored (% edge(s), % shared claim image(s)), % job result(s), % wiki page(s), % corroboration line(s), % gap-work row(s), foreign key %; % curator filing(s) made shared again, % re-pointed at a shared claim',
             n_k, n_e, n_m, n_j, n_w, n_c, n_g, CASE WHEN n_fk = 1 THEN 'restored' ELSE 'already there' END, n_filed, n_point;
+        RAISE NOTICE 'private report claims revert (P2): % shared synthesis(es) restored (% referencing row(s)), % shared job report(s) restored, % private copy(ies) removed',
+            n_s, n_d, n_p, n_r;
     END IF;
 END $$;
 
@@ -202,6 +275,7 @@ DROP FUNCTION IF EXISTS public.trg_private_report_claims_corroboration_guard();
 DROP FUNCTION IF EXISTS public.private_report_claims_neutral_line(UUID, UUID, TEXT);
 DROP FUNCTION IF EXISTS public.private_report_claims_job_private(UUID);
 DROP FUNCTION IF EXISTS public.trg_private_report_claims_gap_guard();
+DROP FUNCTION IF EXISTS public.trg_private_report_claims_derived_guard();
 DROP FUNCTION IF EXISTS public.private_report_claims_private_owner(UUID);
 DROP FUNCTION IF EXISTS public.private_report_claims_tree_owner(UUID);
 DROP FUNCTION IF EXISTS public.private_report_claims_reader_ok();
