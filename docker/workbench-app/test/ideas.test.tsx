@@ -321,14 +321,16 @@ describe("two identities (acceptance 5)", () => {
     await pick("Plan the CPU upgrade");
     fireEvent.click(screen.getByTestId("act-archive"));
     await waitFor(() => expect(fake.ideas.get(ids.cpu).status).toBe("archived"));
-    const undo = await screen.findByTestId("toast-undo");
+    await screen.findByTestId("toast-undo");
     who = "bob"; resetState();
     view.rerender(<ToastProvider><Ideas subject="u-bob" whoAnswered /></ToastProvider>);
     await waitFor(() => expect(rowTitles()).toEqual(["Bob's idea"]));
-    clearRequestLog();
-    fireEvent.click(undo);
+    // the shell's toast drops every toast when the person changes: no Undo is left to click, and nothing was sent
+    // (the epoch check inside Ideas.tsx, the second line of defence, is tested in ideas-undo.test.tsx)
+    expect(screen.queryByTestId("toast-undo")).toBeNull();
+    expect(screen.getByTestId("toasts").textContent).toBe("");
     await new Promise((r) => setTimeout(r, 20));
-    expect(requestLog()).toEqual([]);
+    expect(requestLog().filter((r) => r.method !== "GET")).toEqual([`POST /workbench/ideas/${ids.cpu}/archive`].map((x) => ({ method: "POST", url: x.slice(5) })));
     expect(fake.ideas.get(ids.cpu).status).toBe("archived");
   });
 });

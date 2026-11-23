@@ -18,11 +18,11 @@ beforeEach(() => {
 
 describe("the frame", () => {
   it("renders the shell for the route it was opened at (see shell.test.tsx for the screens)", () => {
-    window.history.pushState({}, "", "/documents/x");
+    window.history.pushState({}, "", "/podcasts");
     render(<App load={async () => ({ loaded: true, who: null, defaultSubject: false })} />);
     expect(screen.getByTestId("topbar")).toBeTruthy();
     expect(screen.getByTestId("rail")).toBeTruthy();
-    expect(screen.getByTestId("coming").textContent).toMatch(/phase 1/);
+    expect(screen.getByTestId("coming").textContent).toMatch(/phase 3/);
   });
   it("follows navigation", () => {
     render(<App load={async () => ({ loaded: true, who: null, defaultSubject: false })} />);

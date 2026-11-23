@@ -195,23 +195,32 @@ export async function archiveIdea(db: Db, id: string, who: Identity): Promise<Ar
 }
 
 export async function reopenIdea(db: Db, id: string, who: Identity): Promise<ArchiveState> {
-  try {
-    return await db.tx(async (t) => {
-      const own = await t.query<{ status: string; archived_from: string | null }>(
-        `SELECT i.status, s.archived_from FROM public.ideas i
-           LEFT JOIN public.refinery_state s ON s.refinery_id = i.id
-          WHERE i.id = $1::uuid AND i.owner_sub = $2 FOR UPDATE OF i`, [id, who.sub]);
-      if (!own.length) throw new IdeaError(404, NOT_FOUND);
-      if (own[0].status !== "archived") throw new IdeaError(409, NOT_ARCHIVED, { code: "not-archived" });
-      // the state the idea was archived from; "engaged" (as reopenRefinery) for an archive that left no stamp
-      const was = own[0].archived_from && own[0].archived_from !== "archived" ? own[0].archived_from : "engaged";
-      await t.query(`UPDATE public.refinery_state SET archived_at = NULL, archived_from = NULL WHERE refinery_id = $1::uuid`, [id]);
+  return await db.tx(async (t) => {
+    // Lock the idea row ALONE. A statement that waited on a lock re-checks only the rows it locked (READ COMMITTED), so
+    // a join to refinery_state here would keep that table's pre-wait snapshot: a reopen queued behind an archive in
+    // flight would read archived_from as NULL and restore "engaged", a state the idea never had. The stamp is read in
+    // the NEXT statement, which sees what the archive committed.
+    const own = await t.query<{ status: string }>(
+      `SELECT status FROM public.ideas WHERE id = $1::uuid AND owner_sub = $2 FOR UPDATE`, [id, who.sub]);
+    if (!own.length) throw new IdeaError(404, NOT_FOUND);
+    if (own[0].status !== "archived") throw new IdeaError(409, NOT_ARCHIVED, { code: "not-archived" });
+    const stamp = await t.query<{ archived_from: string | null }>(
+      `SELECT archived_from FROM public.refinery_state WHERE refinery_id = $1::uuid`, [id]);
+    // the state the idea was archived from; "engaged" (as reopenRefinery) for an archive that left no stamp
+    const from = stamp[0]?.archived_from ?? null;
+    const was = from && from !== "archived" ? from : "engaged";
+    await t.query(`UPDATE public.refinery_state SET archived_at = NULL, archived_from = NULL WHERE refinery_id = $1::uuid`, [id]);
+    try {
       await t.query(`UPDATE public.ideas SET status = $2, updated_at = now() WHERE id = $1::uuid`, [id, was]);
-      return { idea_id: id, status: was, archived: false };
-    });
-  } catch (e) {
-    // the write guard lets a promoted idea come back only while its document is still the refinery's
-    if ((e as { fields?: { code?: string } })?.fields?.code === "42501") throw new IdeaError(409, CANNOT_REOPEN, { code: "cannot-reopen" });
-    throw e;
-  }
+    } catch (e) {
+      // the write guard lets a promoted idea come back only while its document is still the refinery's: that refusal
+      // (and only that one: this statement, SQLSTATE 42501, the guard's own sentence) is the caller's 409
+      const f = (e as { fields?: { code?: string; message?: string } })?.fields;
+      if (f?.code === "42501" && /idea_promote\(\)/.test(String(f.message ?? (e as Error).message))) {
+        throw new IdeaError(409, CANNOT_REOPEN, { code: "cannot-reopen" });
+      }
+      throw e;
+    }
+    return { idea_id: id, status: was, archived: false };
+  });
 }

@@ -73,15 +73,16 @@ for (const [t, path] of TITLES) {
   await go("/");
   await ev(`document.querySelector('[data-testid=title-${t}]').click()`);
   await sleep(150);
-  const o = JSON.parse(await ev(`JSON.stringify({p:location.pathname,coming:!!document.querySelector('[data-testid=coming]')})`));
-  ok(o.p === path && (o.coming || path === "/ideas"), `title "${t}" opens ${path} (${o.p}, coming-state ${o.coming})`); // Ideas is a real screen (ideas.e2e.mjs)
+  // Documents and Ideas are built screens (rwr-docs-list, rwr-ideas); the others still show their coming-in-phase state
+  const o = JSON.parse(await ev(`JSON.stringify({p:location.pathname,coming:!!document.querySelector('[data-testid=coming]'),docs:!!document.querySelector('[data-testid=documents]'),ideas:!!document.querySelector('[data-testid=ideas]')})`));
+  ok(o.p === path && (t === "docs" ? o.docs && !o.coming : t === "ideas" ? o.ideas && !o.coming : o.coming), `title "${t}" opens ${path} (${o.p}, coming-state ${o.coming}, documents ${o.docs})`);
 }
 await go("/");
 await ev(`document.querySelector('[data-testid=card-docs] [data-testid=row-doc]').click()`); await sleep(150);
 ok((await ev(`location.pathname`)) === "/documents/documents%2Falpha-new.md", "a document row opens /documents/<its path>");
-ok((await ev(`document.querySelector('h1')?.textContent`)) === "Document" && !!(await ev(`!!document.querySelector('[data-testid=coming]')`)), "...and lands on the document screen (not No such screen)");
+ok(!!(await ev(`!!document.querySelector('[data-testid=document]') && !document.querySelector('[data-testid=not-found]')`)), "...and lands on the document screen (not No such screen)");
 await send("Page.navigate", { url: origin + "/documents/documents%2Falpha-new.md" }); await sleep(1500);
-ok((await ev(`document.querySelector('h1')?.textContent`)) === "Document", "...also when that URL is loaded fresh");
+ok(!!(await ev(`!!document.querySelector('[data-testid=document]') && !document.querySelector('[data-testid=not-found]')`)), "...also when that URL is loaded fresh");
 await go("/");
 await ev(`[...document.querySelectorAll('[data-testid=ask] a')].find(a=>a.textContent==='Start research').click()`); await sleep(150);
 ok((await ev(`location.pathname`)) === "/research/start", "Start research opens /research/start");

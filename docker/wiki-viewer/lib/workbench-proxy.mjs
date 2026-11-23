@@ -42,7 +42,8 @@ const HOP = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-au
 // unsigned header from any door counts for nothing. WORKSPACE_IDENTITY_HEADER (and its name header)
 // stays dropped as before (cfg.strip).
 const FORGEABLE = /^(remote-|x-remote-|x-forwarded-|x-real-ip$|forwarded$|x-original-|x-auth-request-)/;
-const UPLOAD = /^\/workbench\/(import(\/|$|\?)|sources\/[^/]+\/replace-from-upload)/;
+// rwr-intake-upload-cap: intake/add (exactly) joins the upload paths; the intake route's own 25 MB check is the real limit
+const UPLOAD = /^\/workbench\/(import(\/|$|\?)|sources\/[^/]+\/replace-from-upload|intake\/add(\?|$))/;
 const MB = 1024 * 1024;
 
 const list = (v) => String(v || "").split(/[\s,]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);

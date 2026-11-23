@@ -104,6 +104,7 @@ http.createServer((req, res) => {
   if (p === "/workbench/contract/cleanup/sources") return json({ sources: [], total: 0 });
   if (p === "/workbench/contract/cleanup/reopen-candidates") return json({ candidates: [] });
   if (p === "/workbench/contract/documents") return json({ documents: f.documents });
+  if (p === "/workbench/documents/folders") return json({ root: "documents", folders: [""] }); // the Documents screen (rwr-docs-list)
   if (p === "/workbench/contract/ideas") return json({ ideas: f.ideas });
   if (p === "/workbench/contract/podcasts") return mode === "broken" ? json({ error: "boom" }, 500) : json({ podcasts: f.episodes });
   if (p === "/workbench/contract/podcasts/requests") return json({ requests: f.requests });

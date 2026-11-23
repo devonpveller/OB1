@@ -285,8 +285,8 @@ function ResearchLine({ rs, busy, onApprove, onPrivate }: { rs: ResearchState; b
         <label htmlFor={id}>The question</label>
         <textarea id={id} value={q} onChange={(e) => setQ(e.target.value)} rows={3} maxLength={2000} data-testid="review-question" />
         <div className="revise-actions">
-          <button type="button" disabled={busy || !t} onClick={() => onPrivate(t)} data-testid="review-private">Run it privately</button>
-          <button type="button" className="btn pri" disabled={busy || !t} onClick={() => onApprove(t)} data-testid="review-approve">Approve this question</button>
+          <button type="button" disabled={busy || !t} onClick={() => onApprove(t)} data-testid="review-approve">Approve this question</button>
+          <button type="button" className="btn pri" disabled={busy || !t} onClick={() => onPrivate(t)} data-testid="review-private">Run it privately</button>
         </div>
       </div>
     );

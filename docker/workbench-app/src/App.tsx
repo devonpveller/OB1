@@ -3,15 +3,13 @@ import { applyTheme, readTheme, type ThemeChoice } from "./lib/theme";
 import { useRoute } from "./lib/router";
 import { getLastDocument, getLockedDocument, loadAccountState, setLockedDocument, stateEpoch, subscribeState } from "./lib/state";
 import { loadShellData, useShellData, type Load } from "./lib/shell-data";
-import { matchRoute } from "./routes";
+import { matchRoute, routeParams } from "./routes";
 import { TopBar } from "./shell/TopBar";
 import { Rail } from "./shell/Rail";
 import { DefaultSubjectBanner } from "./shell/Banner";
 import { SearchOverlay } from "./shell/SearchOverlay";
 import { Placeholder, NotFound } from "./shell/Placeholder";
 import { Overview } from "./shell/Overview";
-import { Home } from "./screens/home/Home";
-import { Ideas } from "./screens/ideas/Ideas";
 import { ToastProvider, useToast } from "./shell/Toast";
 
 const NEXT: Record<ThemeChoice, ThemeChoice> = { system: "light", light: "dark", dark: "system" };
@@ -66,7 +64,9 @@ function Shell({ load }: { load: Load }) {
         <Rail path={route.path} d={d} locked={locked} last={last} theme={theme}
           onTheme={() => { const n = NEXT[theme]; applyTheme(n); setTheme(n); }} />
         <main className="main" id="main" tabIndex={-1} data-testid="main">
-          {def === "overview" ? <Overview /> : def?.path === "/" ? <Home subject={d.who?.subject ?? null} whoAnswered={d.whoDone === true} /> : def?.path === "/ideas" ? <Ideas subject={d.who?.subject ?? null} whoAnswered={d.whoDone === true} /> : def ? <Placeholder def={def} /> : <NotFound path={route.path} />}
+          {def === "overview" ? <Overview />
+            : def?.screen ? <def.screen route={route} params={routeParams(def, route)} subject={d.who?.subject ?? null} whoAnswered={d.whoDone === true} />
+            : def ? <Placeholder def={def} /> : <NotFound path={route.path} />}
         </main>
       </div>
       </div>
