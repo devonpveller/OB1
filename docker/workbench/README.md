@@ -733,7 +733,7 @@ jobs seeded with private material with the original question (through PD1's `inl
 ## Cast editing: presenters, voices, teams, formats (rwr-cast-edit-api, slot 560)
 
 A person's podcast cast, written through the contract: `GET|POST /workbench/contract/cast/{voices, presenters, teams, formats}`,
-`GET|PATCH|DELETE .../{kind}/{id}` and `POST .../{presenters, teams, formats}/{id}/copy` (src/contracts/routes/cast.ts; the
+`GET|PATCH|DELETE .../{kind}/{id}` and `POST .../{presenters, teams, formats}/{id}/copy`, `GET .../{presenters, teams, formats}/{id}/share-preview` (src/contracts/routes/cast.ts; the
 rules in repo/cast.ts). No `x-mcp-tool`; `USER_ONLY` (a service key gets 403; openbrain-podcast reads the model through its
 own REST door).
 
@@ -744,7 +744,7 @@ own REST door).
   registry (`podcast_format_kinds`, `podcast_format_uses`, `podcast_prompt_modes`, `podcast_grounding_kinds`).
 - Who: the identity seam's subject. Another user's unshared row is "no such ..." (the same 404 as a missing id, in every
   read, write and reference). Sharing (Q12): one shared pool every account sees (`scope=shared`); someone else's shared row
-  is read-only (403) and `.../copy` makes the caller's own copy (`copied_from`). A presenter that links a private source
+  is read-only (403) and `.../copy` makes the caller's own copy (`copied_from`). A row is made private; sharing is its own step (the operator's rule of 2026-11-22: a share first shows what it shares): `GET .../share-preview` lists what every account would see, what blocks it and what never is shared, and `PATCH {shared: true, share_digest}` (nothing else in the body) confirms exactly that; a missing or stale digest is 409. A presenter that links a private source
   cannot be shared until the link is removed (409 naming it); a team is shared only with every member shared, a format
   only with its team shared.
 - Deletes: a presenter in a team, a voice voicing a presenter, a team with formats, episodes or render requests are

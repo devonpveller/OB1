@@ -12,7 +12,7 @@ import { identityOf } from "../../middleware/identity.ts";
 import * as cast from "../repo/cast.ts";
 import {
   CastDeleted, CastFormat, CastFormatCreate, CastFormats, CastFormatUpdate, CastPresenter, CastPresenterCreate, CastPresenters,
-  CastPresenterUpdate, CastTeam, CastTeamCreate, CastTeams, CastTeamUpdate, CastVoice, CastVoiceCreate, CastVoices, CastVoiceUpdate, CASTX, CX,
+  CastPresenterUpdate, CastTeam, CastTeamCreate, CastTeams, CastTeamUpdate, CastSharePreview, CastVoice, CastVoiceCreate, CastVoices, CastVoiceUpdate, CASTX, CX,
 } from "../schemas/cast.ts";
 import { ErrorBody, limit, pathParam, queryParam } from "../schemas/common.ts";
 import { parseLimit } from "../logic/scope.ts";
@@ -322,4 +322,20 @@ export function registerCast(app: ContractApp, deps: ContractDeps) {
     request: { params: idParam(CX.sharedFormat) },
     responses: { 201: json(CastFormat, CASTX.formatCopy, "the caller's copy"), ...errs },
   }), (c) => guard(c, "format", async (id) => send(c, CastFormat, await cast.copyFormat(db, (await identityOf(c)).sub, id), 201)));
+  // ── the share step: what a share would show every account, before the owner confirms it ─────────────────────────────
+  const previews: [cast.ShareKind, "presenters" | "teams" | "formats", string, string][] = [
+    ["presenter", "presenters", "castPresenterSharePreview", CX.presenter],
+    ["team", "teams", "castTeamSharePreview", CX.team],
+    ["format", "formats", "castFormatSharePreview", CX.format],
+  ];
+  for (const [kind, plural, operationId, example] of previews) {
+    op(app, createRoute({
+      method: "get", path: `${P}/${plural}/{id}/share-preview`, operationId, tags: T,
+      summary: `what sharing the caller's ${kind} would show every account, what blocks it, and the share_digest that confirms exactly this`,
+      description: "The disclosure step (operator, 2026-11-22: a share first reveals what would be shared). PATCH {shared: true, share_digest} " +
+        "with the digest shares it; a missing or out-of-date digest is refused (409).",
+      request: { params: idParam(example) },
+      responses: { 200: json(CastSharePreview, { ...CASTX.sharePreview, id: example }, "the preview"), ...errs },
+    }), (c) => guard(c, kind, async (id) => send(c, CastSharePreview, await cast.sharePreview(db, (await identityOf(c)).sub, kind, id))));
+  }
 }

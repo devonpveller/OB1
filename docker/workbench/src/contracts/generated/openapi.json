@@ -7548,10 +7548,6 @@
             },
             "maxItems": 50,
             "description": "replaces the whole list, in order"
-          },
-          "shared": {
-            "type": "boolean",
-            "description": "share it to the one shared pool (Q12); refused while it links a private source"
           }
         },
         "required": [
@@ -7660,7 +7656,13 @@
           },
           "shared": {
             "type": "boolean",
-            "description": "share it to the one shared pool (Q12); refused while it links a private source"
+            "description": "true shares it to the one shared pool (Q12): only with share_digest, alone in the body; false unshares"
+          },
+          "share_digest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "the digest of GET .../share-preview, read just before (a stale one is refused)"
           }
         },
         "additionalProperties": false
@@ -7814,9 +7816,6 @@
             "minimum": 0,
             "maximum": 25,
             "description": "default: after the last presenter"
-          },
-          "shared": {
-            "type": "boolean"
           }
         },
         "required": [
@@ -7854,7 +7853,14 @@
             "maximum": 25
           },
           "shared": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "true shares it to the one shared pool (Q12): only with share_digest, alone in the body; false unshares"
+          },
+          "share_digest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "the digest of GET .../share-preview, read just before (a stale one is refused)"
           }
         },
         "additionalProperties": false
@@ -8032,9 +8038,6 @@
           },
           "is_default": {
             "type": "boolean"
-          },
-          "shared": {
-            "type": "boolean"
           }
         },
         "required": [
@@ -8101,10 +8104,95 @@
             "type": "boolean"
           },
           "shared": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "true shares it to the one shared pool (Q12): only with share_digest, alone in the body; false unshares"
+          },
+          "share_digest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "the digest of GET .../share-preview, read just before (a stale one is refused)"
           }
         },
         "additionalProperties": false
+      },
+      "CastSharePreview": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "cast-fx-presenter"
+          },
+          "already_shared": {
+            "type": "boolean"
+          },
+          "shareable": {
+            "type": "boolean",
+            "description": "false while blocked_by is not empty"
+          },
+          "would_share": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "detail": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "label",
+                "detail"
+              ]
+            },
+            "description": "everything every account would see"
+          },
+          "blocked_by": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "ref": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "detail": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "ref",
+                "label",
+                "detail"
+              ]
+            },
+            "description": "what must change first: a private source link (presenter), an unshared presenter (team), an unshared team (format)"
+          },
+          "never_shared": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "what stays the owner's even when shared"
+          },
+          "share_digest": {
+            "type": "string",
+            "description": "send it with shared: true to confirm exactly this"
+          }
+        },
+        "required": [
+          "id",
+          "already_shared",
+          "shareable",
+          "would_share",
+          "blocked_by",
+          "never_shared",
+          "share_digest"
+        ]
       }
     },
     "parameters": {}
@@ -19810,6 +19898,369 @@
                 },
                 "schema": {
                   "$ref": "#/components/schemas/CastFormat"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/presenters/{id}/share-preview": {
+      "get": {
+        "operationId": "castPresenterSharePreview",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "what sharing the caller's presenter would show every account, what blocks it, and the share_digest that confirms exactly this",
+        "description": "The disclosure step (operator, 2026-11-22: a share first reveals what would be shared). PATCH {shared: true, share_digest} with the digest shares it; a missing or out-of-date digest is refused (409).",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-presenter"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the preview",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-presenter",
+                  "already_shared": false,
+                  "shareable": true,
+                  "would_share": [
+                    {
+                      "label": "Fixture Morgan",
+                      "detail": "the presenter: name, personality, backstory, language, role, focus, stance, tone, speaking style, its voice"
+                    },
+                    {
+                      "label": "Active fixture source",
+                      "detail": "a grounded-in source (a shared source)"
+                    },
+                    {
+                      "label": "retrieval",
+                      "detail": "a grounded-in topic"
+                    }
+                  ],
+                  "blocked_by": [],
+                  "never_shared": [
+                    "notes",
+                    "which of your teams it sits in"
+                  ],
+                  "share_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastSharePreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/teams/{id}/share-preview": {
+      "get": {
+        "operationId": "castTeamSharePreview",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "what sharing the caller's team would show every account, what blocks it, and the share_digest that confirms exactly this",
+        "description": "The disclosure step (operator, 2026-11-22: a share first reveals what would be shared). PATCH {shared: true, share_digest} with the digest shares it; a missing or out-of-date digest is refused (409).",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-team"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the preview",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-team",
+                  "already_shared": false,
+                  "shareable": true,
+                  "would_share": [
+                    {
+                      "label": "Fixture Morgan",
+                      "detail": "the presenter: name, personality, backstory, language, role, focus, stance, tone, speaking style, its voice"
+                    },
+                    {
+                      "label": "Active fixture source",
+                      "detail": "a grounded-in source (a shared source)"
+                    },
+                    {
+                      "label": "retrieval",
+                      "detail": "a grounded-in topic"
+                    }
+                  ],
+                  "blocked_by": [],
+                  "never_shared": [
+                    "notes",
+                    "which of your teams it sits in"
+                  ],
+                  "share_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastSharePreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/formats/{id}/share-preview": {
+      "get": {
+        "operationId": "castFormatSharePreview",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "what sharing the caller's format would show every account, what blocks it, and the share_digest that confirms exactly this",
+        "description": "The disclosure step (operator, 2026-11-22: a share first reveals what would be shared). PATCH {shared: true, share_digest} with the digest shares it; a missing or out-of-date digest is refused (409).",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-format"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the preview",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-format",
+                  "already_shared": false,
+                  "shareable": true,
+                  "would_share": [
+                    {
+                      "label": "Fixture Morgan",
+                      "detail": "the presenter: name, personality, backstory, language, role, focus, stance, tone, speaking style, its voice"
+                    },
+                    {
+                      "label": "Active fixture source",
+                      "detail": "a grounded-in source (a shared source)"
+                    },
+                    {
+                      "label": "retrieval",
+                      "detail": "a grounded-in topic"
+                    }
+                  ],
+                  "blocked_by": [],
+                  "never_shared": [
+                    "notes",
+                    "which of your teams it sits in"
+                  ],
+                  "share_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastSharePreview"
                 }
               }
             }

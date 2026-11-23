@@ -130,7 +130,6 @@ export type CastFormatCreate = {
   kind?: string; /** registry: podcast_format_kinds */
   use_for?: Array<string>;
   is_default?: boolean;
-  shared?: boolean;
 };
 
 export type CastFormatUpdate = {
@@ -145,6 +144,7 @@ export type CastFormatUpdate = {
   use_for?: Array<string>;
   is_default?: boolean;
   shared?: boolean;
+  share_digest?: string;
 };
 
 export type CastFormats = {
@@ -212,7 +212,6 @@ export type CastPresenterCreate = {
   system_prompt_mode?: string; /** registry: podcast_prompt_modes */
   notes?: string;
   grounded_in?: Array<CastGroundingIn>;
-  shared?: boolean;
 };
 
 export type CastPresenterUpdate = {
@@ -231,11 +230,29 @@ export type CastPresenterUpdate = {
   notes?: string;
   grounded_in?: Array<CastGroundingIn>;
   shared?: boolean;
+  share_digest?: string;
 };
 
 export type CastPresenters = {
   presenters: Array<CastPresenter>;
   total: number;
+};
+
+export type CastSharePreview = {
+  id: string;
+  already_shared: boolean;
+  shareable: boolean;
+  would_share: Array<{
+    label: string;
+    detail: string;
+  }>;
+  blocked_by: Array<{
+    ref: string;
+    label: string;
+    detail: string;
+  }>;
+  never_shared: Array<string>;
+  share_digest: string;
 };
 
 export type CastTeam = {
@@ -266,7 +283,6 @@ export type CastTeamCreate = {
   description?: string;
   members: Array<string>;
   user_seat?: number;
-  shared?: boolean;
 };
 
 export type CastTeamUpdate = {
@@ -275,6 +291,7 @@ export type CastTeamUpdate = {
   members?: Array<string>;
   user_seat?: number;
   shared?: boolean;
+  share_digest?: string;
 };
 
 export type CastTeams = {

@@ -68,6 +68,12 @@ const noMarkers = (label: string, text: string) => {
   for (const [k, v] of Object.entries(M)) assert(!text.includes(v), `${label}: carries A's ${k} marker`);
 };
 const missing = (kind: string) => `${kind}-${crypto.randomUUID()}`;
+// the share step: read the preview, then PATCH {shared: true, share_digest} (the operator's rule: a share first shows what it shares)
+async function share(kind: string, id: string, sub = A): Promise<Res> {
+  const pv = await call("GET", `/${kind}/${id}/share-preview`, undefined, sub);
+  if (pv.status !== 200) return pv;
+  return await call("PATCH", `/${kind}/${id}`, { shared: true, share_digest: pv.json.share_digest }, sub);
+}
 
 // A's world, made through the routes once (C1 checks it; later cases use it)
 const W: Record<string, string> = {};
@@ -160,18 +166,37 @@ t("C1: A writes presenters (every new field), voices, teams and formats; B canno
 
 t("C2: Q12 - a profile linking a private source cannot be shared until the link is removed; B reads a shared one, cannot edit it, and a use is B's own copy", async () => {
   await setup();
-  const refused = await asA("PATCH", `/presenters/${W.presenter}`, { shared: true });
+  // the disclosure step: the preview lists what would be shared, what blocks it, what never is
+  const pv0 = await asA("GET", `/presenters/${W.presenter}/share-preview`);
+  assertEquals(pv0.status, 200, pv0.text);
+  assertEquals([pv0.json.shareable, pv0.json.already_shared, pv0.json.blocked_by.map((x: any) => [x.ref, x.label])], [false, false, [[PRIV, M.privTitle]]]);
+  assert(pv0.json.would_share.some((x: any) => x.label === M.topic) && pv0.json.would_share[0].detail.includes("stance"), "lists the topic and the fields set");
+  assertEquals(pv0.json.never_shared, ["notes", "which of your teams it sits in"]);
+  assert(!JSON.stringify(pv0.json.would_share).includes(M.notes), "notes are never in what would be shared");
+  // B: the preview of A's unshared row is the missing answer
+  const bpv = await asB("GET", `/presenters/${W.presenter}/share-preview`);
+  assertEquals([bpv.status, bpv.text], [404, JSON.stringify({ error: "no such presenter" })]);
+  const refused = await asA("PATCH", `/presenters/${W.presenter}`, { shared: true, share_digest: pv0.json.share_digest });
   assertEquals(refused.status, 409, refused.text);
   assert(refused.json.error.includes(M.privTitle), "the refusal names the link (to its owner)");
   assertEquals(refused.json.detail.private_links.map((l: any) => l.ref), [PRIV]);
   assertEquals((await sql(`SELECT shared FROM public.podcast_presenters WHERE id = $1`, [W.presenter]))[0].shared, false, "nothing changed");
-  // also at create, and adding a private link to a shared presenter
-  const cr = await asA("POST", "/presenters", { name: "x", voice_id: W.voice, shared: true, grounded_in: [{ kind: "source", ref: PRIV }] });
-  assertEquals(cr.status, 409, cr.text);
-  // remove the private link: now it shares
-  const ok = await asA("PATCH", `/presenters/${W.presenter}`, { grounded_in: [{ kind: "source", ref: SHARED_SOURCE }, { kind: "topic", ref: "markets" }], shared: true });
+  // a create can never share (made private); a share without a preview, with a stale digest, or with other changes is refused
+  const cr = await asA("POST", "/presenters", { name: "x", voice_id: W.voice, shared: true });
+  assertEquals(cr.status, 400, cr.text);
+  const fix = await asA("PATCH", `/presenters/${W.presenter}`, { grounded_in: [{ kind: "source", ref: SHARED_SOURCE }, { kind: "topic", ref: "markets" }] });
+  assertEquals(fix.status, 200, fix.text);
+  assertEquals((await asA("PATCH", `/presenters/${W.presenter}`, { shared: true })).status, 409, "no digest: no share");
+  assertEquals((await asA("PATCH", `/presenters/${W.presenter}`, { shared: true, share_digest: pv0.json.share_digest })).status, 409, "a stale digest: no share");
+  const pv1 = await asA("GET", `/presenters/${W.presenter}/share-preview`);
+  assertEquals([pv1.json.shareable, pv1.json.blocked_by], [true, []]);
+  assertEquals((await asA("PATCH", `/presenters/${W.presenter}`, { shared: true, share_digest: pv1.json.share_digest, stance: "x" })).status, 400, "a share is alone in its body");
+  assertEquals((await sql(`SELECT shared FROM public.podcast_presenters WHERE id = $1`, [W.presenter]))[0].shared, false, "no refused share changed anything");
+  const ok = await asA("PATCH", `/presenters/${W.presenter}`, { shared: true, share_digest: pv1.json.share_digest });
   assertEquals(ok.status, 200, ok.text);
   assertEquals(ok.json.shared, true);
+  // B may not preview someone else's shared row (read-only)
+  assertEquals((await asB("GET", `/presenters/${W.presenter}/share-preview`)).status, 403);
   const add = await asA("PATCH", `/presenters/${W.presenter}`, { grounded_in: [{ kind: "source", ref: PRIV }] });
   assertEquals(add.status, 409, "a shared presenter cannot take a private link");
   // B reads it: no notes, no teams, only the shared links; in the pool and by id
@@ -202,14 +227,16 @@ t("C2: Q12 - a profile linking a private source cannot be shared until the link 
   assertEquals(ed.status, 200);
   assertEquals((await sql(`SELECT stance FROM public.podcast_presenters WHERE id = $1`, [W.presenter]))[0].stance, M.stance, "the original is untouched");
   // a team is shared only with every member shared; a format only with its team shared
-  const ts = await asA("PATCH", `/teams/${W.team}`, { shared: true });
+  const tpv = await asA("GET", `/teams/${W.team}/share-preview`);
+  assertEquals(tpv.json.blocked_by.map((x: any) => x.label), ["Blair Cast"], "the preview names the unshared member");
+  const ts = await share("teams", W.team);
   assertEquals(ts.status, 409, ts.text);
   assert(ts.json.error.includes("Blair Cast"), "names the unshared member (to the owner)");
-  assertEquals((await asA("PATCH", `/presenters/${W.presenter2}`, { shared: true })).status, 200);
-  const fs = await asA("PATCH", `/formats/${W.format}`, { shared: true });
+  assertEquals((await share("presenters", W.presenter2)).status, 200);
+  const fs = await share("formats", W.format);
   assertEquals(fs.status, 409, "the format's team is not shared yet");
-  assertEquals((await asA("PATCH", `/teams/${W.team}`, { shared: true })).status, 200);
-  assertEquals((await asA("PATCH", `/formats/${W.format}`, { shared: true })).status, 200);
+  assertEquals((await share("teams", W.team)).status, 200);
+  assertEquals((await share("formats", W.format)).status, 200);
   // and the reverse: a member of a shared team stays shared; a shared format's team stays shared
   assertEquals((await asA("PATCH", `/presenters/${W.presenter2}`, { shared: false })).status, 409);
   assertEquals((await asA("PATCH", `/teams/${W.team}`, { shared: false })).status, 409);
@@ -378,8 +405,8 @@ t("C8: two identities - B's counts, totals and errors never move with A's data",
   const sharedN = (await sql(`SELECT count(*)::int AS n FROM public.podcast_presenters p JOIN public.podcast_voice_links v ON v.id = p.voice_link_id AND v.owner_sub = p.owner_sub WHERE p.shared`))[0].n;
   assertEquals((await asB("GET", "/presenters?scope=shared")).json.total, sharedN);
   // error bodies: the same for A's id and a missing one, on every kind (C1 covers by id; here the validation path)
-  const e1 = await asB("PATCH", `/presenters/${p.json.id}`, { shared: true });
-  const e2 = await asB("PATCH", `/presenters/${missing("presenter")}`, { shared: true });
+  const e1 = await asB("PATCH", `/presenters/${p.json.id}`, { shared: true, share_digest: "0" });
+  const e2 = await asB("PATCH", `/presenters/${missing("presenter")}`, { shared: true, share_digest: "0" });
   assertEquals([e1.status, e1.text], [e2.status, e2.text]);
   const bad = await asB("GET", `/presenters/${"x".repeat(300)}`);
   assertEquals([bad.status, bad.text], [404, JSON.stringify({ error: "no such presenter" })]);

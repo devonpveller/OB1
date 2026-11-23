@@ -122,10 +122,16 @@ const PRESENTER_WRITE = {
   system_prompt_mode: registryValue(REGISTRY.podcastPromptModes, "built").optional(),
   notes: text(4000).optional(),
   grounded_in: z.array(GroundingIn).max(50).optional().openapi({ description: "replaces the whole list, in order" }),
-  shared: z.boolean().optional().openapi({ description: "share it to the one shared pool (Q12); refused while it links a private source" }),
+};
+// Sharing (Q12 + the operator's standing rule of 2026-11-22: a share first shows what would be shared). A row is made
+// private; it is shared only by a PATCH carrying shared: true and the share_digest of its own GET .../share-preview,
+// and nothing else in that PATCH. Unsharing (shared: false) needs no preview.
+const SHARE = {
+  shared: z.boolean().optional().openapi({ description: "true shares it to the one shared pool (Q12): only with share_digest, alone in the body; false unshares" }),
+  share_digest: z.string().min(1).max(128).optional().openapi({ description: "the digest of GET .../share-preview, read just before (a stale one is refused)" }),
 };
 export const CastPresenterCreate = z.object({ name: NAME, voice_id: ID, ...PRESENTER_WRITE }).strict().openapi("CastPresenterCreate");
-export const CastPresenterUpdate = z.object({ name: NAME.optional(), voice_id: ID.optional(), ...PRESENTER_WRITE }).strict()
+export const CastPresenterUpdate = z.object({ name: NAME.optional(), voice_id: ID.optional(), ...PRESENTER_WRITE, ...SHARE }).strict()
   .openapi("CastPresenterUpdate");
 
 // ── teams ─────────────────────────────────────────────────────────────────────────────────────
@@ -150,10 +156,9 @@ const MEMBERS = z.array(ID).min(1).max(MAX_SEATS - 1).openapi({ description: "th
 const SEAT = z.number().int().min(0).max(MAX_SEATS - 1);
 export const CastTeamCreate = z.object({
   name: NAME, description: text(2000).optional(), members: MEMBERS, user_seat: SEAT.optional().openapi({ description: "default: after the last presenter" }),
-  shared: z.boolean().optional(),
 }).strict().openapi("CastTeamCreate");
 export const CastTeamUpdate = z.object({
-  name: NAME.optional(), description: text(2000).optional(), members: MEMBERS.optional(), user_seat: SEAT.optional(), shared: z.boolean().optional(),
+  name: NAME.optional(), description: text(2000).optional(), members: MEMBERS.optional(), user_seat: SEAT.optional(), ...SHARE,
 }).strict().openapi("CastTeamUpdate");
 
 // ── formats ───────────────────────────────────────────────────────────────────────────────────
@@ -187,10 +192,22 @@ const FORMAT_WRITE = {
   kind: registryValue(REGISTRY.podcastFormatKinds, "conversation").optional(),
   use_for: z.array(registryValue(REGISTRY.podcastFormatUses, "daily")).max(10).optional(),
   is_default: z.boolean().optional(),
-  shared: z.boolean().optional(),
 };
 export const CastFormatCreate = z.object({ name: NAME, team_id: ID, ...FORMAT_WRITE }).strict().openapi("CastFormatCreate");
-export const CastFormatUpdate = z.object({ name: NAME.optional(), team_id: ID.optional(), ...FORMAT_WRITE }).strict().openapi("CastFormatUpdate");
+export const CastFormatUpdate = z.object({ name: NAME.optional(), team_id: ID.optional(), ...FORMAT_WRITE, ...SHARE }).strict().openapi("CastFormatUpdate");
+
+// What a share would show to every account, before the owner confirms it (the disclosure step)
+export const CastSharePreview = z.object({
+  id: z.string().openapi({ example: CX.presenter }),
+  already_shared: z.boolean(),
+  shareable: z.boolean().openapi({ description: "false while blocked_by is not empty" }),
+  would_share: z.array(z.object({ label: z.string(), detail: z.string() })).openapi({ description: "everything every account would see" }),
+  blocked_by: z.array(z.object({ ref: z.string(), label: z.string(), detail: z.string() })).openapi({
+    description: "what must change first: a private source link (presenter), an unshared presenter (team), an unshared team (format)",
+  }),
+  never_shared: z.array(z.string()).openapi({ description: "what stays the owner's even when shared" }),
+  share_digest: z.string().openapi({ description: "send it with shared: true to confirm exactly this" }),
+}).openapi("CastSharePreview");
 
 export const CastDeleted = z.object({ id: z.string(), deleted: z.boolean() }).openapi("CastDeleted");
 
@@ -237,4 +254,12 @@ export const CASTX = {
   formatUpdate: { briefing: "Changed by the contract run.", kind: "debate" },
   formatCopy: { ...formatEx, id: "format-00000000-0000-4000-8000-000000000001", is_default: false, copied_from: CX.sharedFormat },
   deleted: { id: CX.presenterDel, deleted: true },
+  sharePreview: {
+    id: CX.presenter, already_shared: false, shareable: true,
+    would_share: [
+      { label: "Fixture Morgan", detail: "the presenter: name, personality, backstory, language, role, focus, stance, tone, speaking style, its voice" },
+      { label: "Active fixture source", detail: "a grounded-in source (a shared source)" }, { label: "retrieval", detail: "a grounded-in topic" },
+    ],
+    blocked_by: [] as unknown[], never_shared: ["notes", "which of your teams it sits in"], share_digest: "0".repeat(64),
+  },
 };

@@ -23,6 +23,9 @@ Deno.test("every cast route is in the document: voices, presenters, teams, forma
     ["/workbench/contract/cast/presenters", ["get", "post"]],
     ["/workbench/contract/cast/presenters/{id}", ["get", "patch", "delete"]],
     ["/workbench/contract/cast/presenters/{id}/copy", ["post"]],
+    ["/workbench/contract/cast/presenters/{id}/share-preview", ["get"]],
+    ["/workbench/contract/cast/teams/{id}/share-preview", ["get"]],
+    ["/workbench/contract/cast/formats/{id}/share-preview", ["get"]],
     ["/workbench/contract/cast/teams", ["get", "post"]],
     ["/workbench/contract/cast/teams/{id}", ["get", "patch", "delete"]],
     ["/workbench/contract/cast/teams/{id}/copy", ["post"]],
@@ -55,6 +58,14 @@ Deno.test("no body names a user, and an unknown field is refused", () => {
     assertEquals(CastTeamCreate.safeParse({ name: "t", members: ["p"], ...extra }).success, false);
     assertEquals(CastFormatCreate.safeParse({ name: "f", team_id: "t", ...extra }).success, false);
   }
+});
+
+Deno.test("a row is made private: no create body can share it (sharing is its own step, after the preview)", () => {
+  assertEquals(CastPresenterCreate.safeParse({ name: "a", voice_id: "v", shared: true }).success, false);
+  assertEquals(CastTeamCreate.safeParse({ name: "t", members: ["p"], shared: true }).success, false);
+  assertEquals(CastFormatCreate.safeParse({ name: "f", team_id: "t", shared: true }).success, false);
+  assert(CastPresenterUpdate.safeParse({ shared: true, share_digest: "abc" }).success);
+  assert(CastTeamUpdate.safeParse({ shared: false }).success);
 });
 
 Deno.test("a presenter has no model route field (phase J, operator-gated): naming one is refused", () => {

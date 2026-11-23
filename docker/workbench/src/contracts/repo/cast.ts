@@ -243,6 +243,7 @@ export interface PresenterIn {
   notes?: string;
   grounded_in?: GroundingIn[];
   shared?: boolean;
+  share_digest?: string;
 }
 const PRESENTER_TEXT = ["name", "personality", "backstory", "language", "role", "focus", "stance", "tone", "speaking_style", "system_prompt",
   "system_prompt_mode", "notes"] as const;
@@ -252,19 +253,14 @@ export async function createPresenter(db: Db, reg: RegistryReader, sub: string, 
   return await db.tx(async (t) => {
     await ownVoice(t, sub, b.voice_id);
     const links = b.grounded_in ?? [];
-    const priv = await checkGrounding(t, reg, sub, links);
-    if (b.shared && priv.length) {
-      const labels = [];
-      for (const g of priv) labels.push({ ref: g.ref, label: (await privateSourceTitle(t, sub, g.ref)) ?? "(a private source)" });
-      refusePrivateShare(labels);
-    }
-    const id = newId("presenter");
+    await checkGrounding(t, reg, sub, links);
+    const id = newId("presenter"); // made private: sharing is its own step (share-preview, then shared + share_digest)
     await t.query(
       `INSERT INTO public.podcast_presenters (id, owner_sub, name, personality, backstory, language, voice_link_id, role, focus, stance, tone,
                                               speaking_style, system_prompt, system_prompt_mode, notes, shared)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
       [id, sub, b.name, b.personality ?? "", b.backstory ?? "", b.language ?? "en-US", b.voice_id, b.role ?? "", b.focus ?? "", b.stance ?? "",
-        b.tone ?? "", b.speaking_style ?? "", b.system_prompt ?? "", b.system_prompt_mode ?? "built", b.notes ?? "", b.shared ?? false],
+        b.tone ?? "", b.speaking_style ?? "", b.system_prompt ?? "", b.system_prompt_mode ?? "built", b.notes ?? "", false],
     );
     await writeGrounding(t, sub, id, links);
     return await getPresenter(t, sub, id);
@@ -275,6 +271,7 @@ export async function updatePresenter(db: Db, reg: RegistryReader, sub: string, 
   if (b.system_prompt_mode !== undefined) await requireRegistered(reg, REGISTRY.podcastPromptModes, b.system_prompt_mode);
   return await db.tx(async (t) => {
     const cur = await writable(t, sub, "podcast_presenters", id, "presenter");
+    if (b.shared === true && !cur.shared) await shareStep(t, sub, "presenter", cur, b as Record<string, unknown>);
     if (b.voice_id !== undefined) await ownVoice(t, sub, b.voice_id);
     const willShare = b.shared ?? (cur.shared as boolean);
     if (b.grounded_in !== undefined) {
@@ -406,6 +403,7 @@ export interface TeamIn {
   members?: string[];
   user_seat?: number;
   shared?: boolean;
+  share_digest?: string;
 }
 
 // The members: the caller's own presenters (anything else is "no such presenter"), each once, at most 25 plus the
@@ -435,14 +433,10 @@ async function writeMembers(db: Db, teamId: string, members: string[]) {
 
 export async function createTeam(db: Db, sub: string, b: TeamIn & { name: string; members: string[] }) {
   return await db.tx(async (t) => {
-    const own = await checkMembers(t, sub, b.members, b.user_seat);
-    if (b.shared) {
-      const unshared = own.filter((p) => !p.shared);
-      if (unshared.length) refuseUnsharedMembers(unshared);
-    }
-    const id = newId("team");
+    await checkMembers(t, sub, b.members, b.user_seat);
+    const id = newId("team"); // made private: sharing is its own step
     await t.query(`INSERT INTO public.podcast_teams (id, owner_sub, name, description, user_seat, shared) VALUES ($1, $2, $3, $4, $5, $6)`,
-      [id, sub, b.name, b.description ?? "", b.user_seat ?? b.members.length, b.shared ?? false]);
+      [id, sub, b.name, b.description ?? "", b.user_seat ?? b.members.length, false]);
     await writeMembers(t, id, b.members);
     return await getTeam(t, sub, id);
   });
@@ -451,6 +445,7 @@ export async function createTeam(db: Db, sub: string, b: TeamIn & { name: string
 export async function updateTeam(db: Db, sub: string, id: string, b: TeamIn) {
   return await db.tx(async (t) => {
     const cur = await writable(t, sub, "podcast_teams", id, "team");
+    if (b.shared === true && !cur.shared) await shareStep(t, sub, "team", cur, b as Record<string, unknown>);
     const members = b.members ??
       (await t.query<{ presenter_id: string }>(`SELECT presenter_id FROM public.podcast_team_members WHERE team_id = $1 ORDER BY position`, [id]))
         .map((m) => m.presenter_id);
@@ -564,6 +559,7 @@ export interface FormatIn {
   use_for?: string[];
   is_default?: boolean;
   shared?: boolean;
+  share_digest?: string;
 }
 
 async function checkFormatRegistries(reg: RegistryReader, b: FormatIn) {
@@ -585,15 +581,14 @@ function refuseUnsharedTeam(team: { id: string; name: string }) {
 export async function createFormat(db: Db, reg: RegistryReader, sub: string, b: FormatIn & { name: string; team_id: string }) {
   await checkFormatRegistries(reg, b);
   return await db.tx(async (t) => {
-    const team = await ownTeam(t, sub, b.team_id);
-    if (b.shared && !team.shared) refuseUnsharedTeam(team);
+    await ownTeam(t, sub, b.team_id);
     if (b.is_default) await t.query(`UPDATE public.podcast_formats SET is_default = false, updated_at = now() WHERE owner_sub = $1 AND is_default`, [sub]);
     const id = newId("format");
     await t.query(
       `INSERT INTO public.podcast_formats (id, owner_sub, name, description, team_id, briefing, segments, language, script_route, kind, use_for, is_default, shared)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text[], $12, $13)`,
       [id, sub, b.name, b.description ?? "", b.team_id, b.briefing ?? "", b.segments ?? 5, b.language ?? "en-US", b.script_route ?? "local-large",
-        b.kind ?? "conversation", b.use_for ?? [], b.is_default ?? false, b.shared ?? false],
+        b.kind ?? "conversation", b.use_for ?? [], b.is_default ?? false, false], // made private: sharing is its own step
     );
     return await getFormat(t, sub, id);
   });
@@ -603,6 +598,7 @@ export async function updateFormat(db: Db, reg: RegistryReader, sub: string, id:
   await checkFormatRegistries(reg, b);
   return await db.tx(async (t) => {
     const cur = await writable(t, sub, "podcast_formats", id, "format");
+    if (b.shared === true && !cur.shared) await shareStep(t, sub, "format", cur, b as Record<string, unknown>);
     const team = await ownTeam(t, sub, b.team_id ?? String(cur.team_id));
     const willShare = b.shared ?? (cur.shared as boolean);
     if (willShare && !team.shared) refuseUnsharedTeam(team);
@@ -649,4 +645,84 @@ export async function copyFormat(db: Db, sub: string, id: string) {
     );
     return await getFormat(t, sub, nid);
   });
+}
+
+// ── the share step (Q12 + the operator's standing rule of 2026-11-22: a share first reveals what would be shared) ──────
+// GET .../share-preview lists everything every account would see, what blocks the share, what stays the owner's, and a
+// digest of exactly that. A share is a PATCH {shared: true, share_digest} and nothing else: a digest that is missing or
+// no longer matches (the row, its links or its members changed since) is refused, so no path shares a row without its
+// owner having been shown what it shares.
+export type ShareKind = "presenter" | "team" | "format";
+const TABLE: Record<ShareKind, string> = { presenter: "podcast_presenters", team: "podcast_teams", format: "podcast_formats" };
+const FIELD_LABELS: [string, string][] = [["personality", "personality"], ["backstory", "backstory"], ["role", "role"], ["focus", "focus"],
+  ["stance", "stance"], ["tone", "tone"], ["speaking_style", "speaking style"], ["system_prompt", "system prompt"]];
+
+async function sha256Hex(s: string): Promise<string> {
+  const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+async function previewOf(t: Db, sub: string, kind: ShareKind, row: Row) {
+  const would: { label: string; detail: string }[] = [];
+  const blocked: { ref: string; label: string; detail: string }[] = [];
+  let never: string[] = [];
+  if (kind === "presenter") {
+    const set = FIELD_LABELS.filter(([k]) => String(row[k] ?? "").trim() !== "").map(([, l]) => l);
+    would.push({ label: String(row.name), detail: `the presenter: name, ${[...set, "language", "its voice"].join(", ")}` });
+    const links = await t.query<{ kind: string; ref: string; title: string | null; is_shared: boolean }>(
+      `SELECT g.kind, g.ref, s.title, s.id IS NOT NULL AS is_shared FROM public.podcast_presenter_grounding g
+         LEFT JOIN public.sources s ON g.kind = 'source' AND s.id::text = g.ref
+        WHERE g.presenter_id = $1 AND g.owner_sub = $2 ORDER BY g.position`, [row.id, sub],
+    );
+    for (const g of links) {
+      if (g.kind !== "source") would.push({ label: g.ref, detail: `a grounded-in ${g.kind}` });
+      else if (g.is_shared) would.push({ label: g.title ?? "", detail: "a grounded-in source (a shared source)" });
+      else blocked.push({ ref: g.ref, label: (await privateSourceTitle(t, sub, g.ref)) ?? "(a private source)", detail: "a private source: remove the link first" });
+    }
+    never = ["notes", "which of your teams it sits in"];
+  } else if (kind === "team") {
+    would.push({ label: String(row.name), detail: "the team: name, description, speaking order, your seat" });
+    const members = await t.query<{ id: string; name: string; shared: boolean }>(
+      `SELECT p.id, p.name, p.shared FROM public.podcast_team_members m JOIN public.podcast_presenters p ON p.id = m.presenter_id AND p.owner_sub = $2
+        WHERE m.team_id = $1 ORDER BY m.position`, [row.id, sub],
+    );
+    for (const m of members) {
+      if (m.shared) would.push({ label: m.name, detail: "a presenter of the team (already shared)" });
+      else blocked.push({ ref: m.id, label: m.name, detail: "a presenter of the team that is not shared: share it first" });
+    }
+    never = ["which of your formats use it"];
+  } else {
+    would.push({ label: String(row.name), detail: "the format: name, description, briefing, segments, language, script route, kind, use-for" });
+    const team = (await t.query<{ id: string; name: string; shared: boolean }>(
+      `SELECT id, name, shared FROM public.podcast_teams WHERE id = $1 AND owner_sub = $2`, [row.team_id, sub],
+    ))[0];
+    if (team?.shared) would.push({ label: team.name, detail: "its team (already shared)" });
+    else if (team) blocked.push({ ref: team.id, label: team.name, detail: "its team is not shared: share it first" });
+    never = ["whether it is your default"];
+  }
+  const at = row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at);
+  const share_digest = await sha256Hex(JSON.stringify({ kind, id: row.id, at, would, blocked }));
+  return { id: String(row.id), already_shared: !!row.shared, shareable: blocked.length === 0, would_share: would, blocked_by: blocked, never_shared: never, share_digest };
+}
+
+// The owner's preview (someone else's shared row: read-only 403; anything else: not found)
+export async function sharePreview(db: Db, sub: string, kind: ShareKind, id: string) {
+  return await db.tx(async (t) => previewOf(t, sub, kind, await writable(t, sub, TABLE[kind], id, kind)));
+}
+
+async function shareStep(t: Db, sub: string, kind: ShareKind, cur: Row, b: Record<string, unknown>) {
+  const others = Object.keys(b).filter((k) => k !== "shared" && k !== "share_digest" && b[k] !== undefined);
+  if (others.length) throw new BadRequest("share on its own: read GET .../share-preview, then PATCH {shared: true, share_digest} with nothing else");
+  const pv = await previewOf(t, sub, kind, cur);
+  if (pv.blocked_by.length) {
+    if (kind === "presenter") refusePrivateShare(pv.blocked_by);
+    if (kind === "team") refuseUnsharedMembers(pv.blocked_by.map((x) => ({ id: x.ref, name: x.label })));
+    refuseUnsharedTeam({ id: pv.blocked_by[0].ref, name: pv.blocked_by[0].label });
+  }
+  if (b.share_digest !== pv.share_digest) {
+    throw new Conflict(
+      "review what would be shared first: GET .../share-preview, then send its share_digest (this one is missing or out of date)",
+      { needs: "share-preview" },
+    );
+  }
 }
