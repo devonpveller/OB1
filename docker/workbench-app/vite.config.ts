@@ -20,5 +20,8 @@ export default defineConfig({
     environment: "happy-dom",
     globals: true,
     include: ["test/**/*.test.{ts,tsx}"],
+    // the structural scans (test/picker-single.test.ts) read the whole of src/ for every case; with the editor in src/ and the
+    // image build running the suites in parallel a case can pass 5 s, so the limit is 20 s (a hang still fails)
+    testTimeout: 20000,
   },
 });
