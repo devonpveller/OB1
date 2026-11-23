@@ -850,6 +850,8 @@ t("C6 (acceptance 5, two identities): B never learns of A's captured idea - list
     ["POST", "/workbench/ideas/{}/research-now", {}],
     ["PUT", "/workbench/ideas/{}/draft", { text: "B was here" }],
     ["POST", "/workbench/idea-schedule/research-now/{}", {}],
+    ["POST", "/workbench/ideas/{}/archive", {}],
+    ["POST", "/workbench/ideas/{}/reopen", {}],
   ] as const) {
     const real = await call(m, p.replace("{}", id), b, B), none = await call(m, p.replace("{}", missing), b, B);
     assertEquals([real.status, real.text], [none.status, none.text.replaceAll(missing, id)], `${m} ${p}: A's idea reads like a missing one`);
@@ -860,4 +862,82 @@ t("C6 (acceptance 5, two identities): B never learns of A's captured idea - list
   assertEquals(rb.status, 201, rb.text);
   assert(!rb.text.includes(id) && !rb.text.includes(mk));
   assertEquals((await ideaRow(id)).current_revision, 1, "B's attempts changed nothing");
+});
+
+// -- rwr-idea-archive-api: archive / reopen an idea by its own id ------------------------------------------------
+const archivedFrom = async (id: string) =>
+  (await sql<{ a: Date | null; f: string | null }>(`SELECT archived_at AS a, archived_from AS f FROM public.refinery_state WHERE refinery_id = $1`, [id]))[0];
+
+t("AR1: a captured (doc-less) idea archives and reopens exactly as it was; its wording, revisions and runs are untouched", async () => {
+  const id = await captured(sub(A), `ar1 ${rnd()}`);
+  await sql(`UPDATE public.ideas SET status = 'dirty' WHERE id = $1`, [id]);
+  const revs = async () => JSON.stringify(await sql(`SELECT revision, summary, research_job_id FROM public.idea_revisions WHERE idea_id = $1 ORDER BY revision`, [id]));
+  const rev0 = await revs();
+  const row0 = await ideaRow(id);
+  const ar = await call("POST", `/workbench/ideas/${id}/archive`, {});
+  assertEquals([ar.status, ar.json], [200, { idea_id: id, status: "archived", archived: true }], ar.text);
+  assertEquals((await ideaRow(id)).status, "archived");
+  assertEquals((await archivedFrom(id))?.f, "dirty", "archived_from remembers the state");
+  assertEquals((await call("POST", `/workbench/ideas/${id}/archive`, {})).status, 409, "archive of an archived idea");
+  assertEquals((await call("POST", `/workbench/ideas/${id}/edit`, { summary: "x" })).status, 409, "an archived idea takes no edit");
+  const re = await call("POST", `/workbench/ideas/${id}/reopen`, {});
+  assertEquals([re.status, re.json], [200, { idea_id: id, status: "dirty", archived: false }], re.text);
+  const row1 = await ideaRow(id);
+  assertEquals([row1.status, row1.title, row1.summary, row1.current_revision], [row0.status, row0.title, row0.summary, row0.current_revision]);
+  assertEquals(await revs(), rev0);
+  assertEquals((await archivedFrom(id))?.a, null);
+  assertEquals((await call("POST", `/workbench/ideas/${id}/reopen`, {})).status, 409, "reopen of an open idea");
+});
+
+t("AR2: a document-tethered idea archives by id the same way the document route does, and the document route sees it", async () => {
+  const { path, id } = await docRefinery(A, `ar2 ${rnd()}`);
+  const before = (await ideaRow(id)).status;
+  assertEquals((await call("POST", `/workbench/ideas/${id}/archive`, {})).status, 200);
+  assertEquals((await call("POST", "/workbench/documents/refinery/archive", { path })).json.archived, true, "the document route agrees");
+  assertEquals((await call("POST", `/workbench/ideas/${id}/reopen`, {})).status, 200);
+  assertEquals((await ideaRow(id)).status, before);
+});
+
+t("AR3: scheduled research stops while the idea is archived; a reopened idea can be researched again", async () => {
+  const C = { "X-Test-Sub": `ideas-ar-${rnd()}` };
+  const at = new Date(Date.now() + 3 * 3600_000);
+  const hhmm = `${String(at.getUTCHours()).padStart(2, "0")}:${String(at.getUTCMinutes()).padStart(2, "0")}`;
+  assertEquals((await call("PUT", "/workbench/idea-schedule", { mode: "daily", at_time: hhmm, tz: "UTC" }, C)).status, 200);
+  const r = await call("POST", "/workbench/ideas", { summary: `ar3 ${rnd()}` }, C);
+  assertEquals(r.status, 201, r.text);
+  const id = r.json.idea_id as string;
+  assertEquals((await call("POST", `/workbench/ideas/${id}/archive`, {}, C)).status, 200);
+  await sql(`SELECT public.idea_schedule_drain($1::timestamptz + interval '1 minute')`, [r.json.research.next_start]);
+  assertEquals((await handbacks(id)).length, 0, "an archived idea is not queued by the scheduled drain");
+  assertEquals((await call("POST", `/workbench/ideas/${id}/research-now`, {}, C)).status, 409, "nor by research now");
+  assertEquals((await call("POST", `/workbench/ideas/${id}/reopen`, {}, C)).status, 200);
+  assertEquals((await call("POST", `/workbench/ideas/${id}/research-now`, {}, C)).status, 202, "reopened: research now works again");
+});
+
+t("AR4 (two identities): B's archive and reopen of A's idea answer like a missing idea and change nothing", async () => {
+  const id = await captured(sub(A), `ar4 ${rnd()}`);
+  assertEquals((await call("POST", `/workbench/ideas/${id}/archive`, {})).status, 200);
+  const snap = async () => JSON.stringify([await ideaRow(id), await archivedFrom(id)]);
+  const before = await snap();
+  const missing = crypto.randomUUID();
+  for (const verb of ["archive", "reopen"]) {
+    const real = await call("POST", `/workbench/ideas/${id}/${verb}`, {}, B), none = await call("POST", `/workbench/ideas/${missing}/${verb}`, {}, B);
+    assertEquals([real.status, real.text], [none.status, none.text.replaceAll(missing, id)], verb);
+    assertEquals(real.status, 404);
+  }
+  assertEquals(await snap(), before, "B changed nothing");
+  const open = await captured(sub(A), `ar4b ${rnd()}`);
+  assertEquals((await call("POST", `/workbench/ideas/${open}/archive`, {}, B)).status, 404);
+  assertEquals((await ideaRow(open)).status !== "archived", true);
+});
+
+t("AR5: archive and reopen are user-only paths: a service key is 403 before the route runs", async () => {
+  const id = await captured(sub(A), `ar5 ${rnd()}`);
+  const svc = Deno.env.get("DOCS_TEST_SERVICE_KEY") ?? "";
+  if (!svc) { console.log("AR5: DOCS_TEST_SERVICE_KEY not set; the user-only path is pinned by the unit test"); return; }
+  for (const verb of ["archive", "reopen"]) {
+    const r = await fetch(`${BASE}/workbench/ideas/${id}/${verb}`, { method: "POST", headers: { "x-brain-key": svc, "content-type": "application/json" }, body: "{}" });
+    assertEquals(r.status, 403, verb);
+  }
+  assertEquals((await ideaRow(id)).status !== "archived", true);
 });

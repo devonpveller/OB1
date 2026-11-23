@@ -543,6 +543,12 @@ export type IdeaDraft = {
   updated_at: string | null;
 };
 
+export type IdeaRest = {
+  idea_id: string;
+  status: string;
+  archived: boolean;
+};
+
 export type IdeaRevision = {
   revision: number;
   summary: string;
