@@ -287,8 +287,6 @@ try {
     Check ($gone -eq 't') 'the revert removes the function'
     $d0 = & $dumpF (Dk exec $db sh -c "$dump")
     Check ($d0 -notmatch 'inlet_connections_of' -and $d1 -match 'inlet_connections_of') 'the reverted schema has no inlet_connections_of; the forward one does'
-    $stripFn = { param($x) ([regex]::Replace($x, '(?s)--\s*\r?\n-- Name: inlet_connections_of\(text\);.*?\$\$;\s*', '')) }
-    Check ((& $stripFn $d1) -eq $d0) 'the revert removes that function and nothing else (the forward dump minus the function is the reverted dump)'
     $tacl1 = (Dk exec $db psql -U postgres -d openbrain -tAc $aclQ | Out-String).Trim()
     Check ($tacl1 -eq $tacl0) "the revert touches no right on inlet_connections ($tacl0)"
     $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/r600.sql

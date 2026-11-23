@@ -80,3 +80,50 @@ Deno.test("the retry cap: the route refuses a job already retried, for every cal
   const pos = (s: string) => routes.indexOf(s);
   assert(pos("repo.RETRIED_ALREADY") > pos("a ${job.status} ${job.kind} job cannot be retried") && pos("repo.RETRIED_ALREADY") < pos("UPDATE public.import_jobs SET status = 'queued'"), "the cap sits after the 404 / state checks and before the write");
 });
+
+// The route itself, with the real seam and a recording Db (the database half is the lab's R1-R3): attempts 2 is refused
+// with the shared reason and NO write; attempts 1 is retried through an UPDATE that carries the same bound.
+import { Hono } from "hono";
+import { identityOf, identitySeam, seamDeps } from "../middleware/identity.ts";
+import { intakeRouter } from "../intake/routes.ts";
+
+function retryApp(attempts: number) {
+  const writes: { sql: string; args: unknown[] }[] = [];
+  const db: Db = {
+    query: <T>(sql: string, args: unknown[] = []) => {
+      const q = sql.replace(/\s+/g, " ").trim();
+      if (/^UPDATE public\.import_jobs/.test(q)) {
+        writes.push({ sql: q, args });
+        return Promise.resolve((attempts < Number(args[1]) ? [{ id: "x" }] : []) as T[]);
+      }
+      if (/FROM public\.import_jobs j/.test(q)) {
+        return Promise.resolve([{
+          id: "99999999-9999-4999-8999-99999999999a", status: "failed", created_at: "t", updated_at: "t",
+          detail: { attempts, url: "https://a.example/x", error: "boom" },
+        }] as T[]);
+      }
+      return Promise.resolve([] as T[]);
+    },
+    tx: (fn) => fn(db),
+  };
+  const env = (k: string) => ({ WORKBENCH_KEY: "door-and-internal-key-0123456789" } as Record<string, string>)[k];
+  const app = new Hono();
+  app.use("/workbench/*", identitySeam(seamDeps(null, env)));
+  app.route("/workbench/intake", intakeRouter({ db, rdeps: {} as never, fetch: null, extract: () => Promise.reject(new Error("no")), retryImport: () => Promise.resolve() }));
+  void identityOf;
+  return { app, writes };
+}
+const retry = (app: Hono) => app.request("http://wb/workbench/intake/jobs/import/99999999-9999-4999-8999-99999999999a/retry", { method: "POST", headers: { "x-brain-key": "door-and-internal-key-0123456789" } });
+
+Deno.test("retry route: a job at its second attempt is refused 409 with the reason and nothing is written; at its first it is retried under the bound", async () => {
+  const second = retryApp(2);
+  const r2 = await retry(second.app);
+  assertEquals([r2.status, (await r2.json()).error], [409, RETRIED_ALREADY]);
+  assertEquals(second.writes.length, 0, "no UPDATE was issued");
+  const first = retryApp(1);
+  const r1 = await retry(first.app);
+  assertEquals(r1.status, 202);
+  assertEquals(first.writes.length, 1);
+  assert(/attempts = attempts \+ 1/.test(first.writes[0].sql) && /attempts < \$2/.test(first.writes[0].sql));
+  assertEquals(first.writes[0].args[1], MAX_ATTEMPTS);
+});

@@ -144,7 +144,7 @@ t("N5 the catalog: ob_workbench alone may run the function, and no role gains an
 async function failedJob(owner: string, attempts = 1, status = "failed"): Promise<string> {
   const r = await sql<{ id: string }>(
     `INSERT INTO public.import_jobs (status, mode, origin, owner_sub, actor_sub, actor_name, url, error, attempts)
-     VALUES ($1, 'add', 'workspace', $2, $2, 'lab', $3, 'the page answered with an error', $4) RETURNING id::text AS id`,
+     VALUES ($1, 'import', 'workspace', $2, $2, 'lab', $3, 'the page answered with an error', $4) RETURNING id::text AS id`,
     [status, owner, `https://alpha.example/${rnd()}`, attempts]);
   return r[0].id;
 }
@@ -157,7 +157,7 @@ async function settle(id: string) {
   }
   return await state(id);
 }
-const RETRY = (id: string) => `/workbench/intake/jobs/add/${id}/retry`;
+const RETRY = (id: string) => `/workbench/intake/jobs/import/${id}/retry`; // an import job (an add needs a refinery or a document; the cap is the same for both)
 const REASON = "this job was already retried once, so it cannot be retried again: add the link or file again as a new item";
 
 t("R1 a failed job is retried once; the second retry answers 409 with a reason and changes nothing", async () => {
