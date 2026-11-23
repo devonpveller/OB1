@@ -68,6 +68,24 @@ test("caps a request body like the front door did: 1 MB, 100 MB on the upload pa
   }
 });
 
+test("rwr-intake-upload-cap: POST /workbench/intake/add takes 5 MB and 20 MB; every other path keeps 1 MB", async () => {
+  const l = await lab();
+  try {
+    const post = (path, mb) => fetch(`${l.front.url}${path}`, { method: "POST", body: Buffer.alloc(mb * 1024 * 1024 + 10, 120), headers: { origin: l.origin } });
+    assert.equal((await post("/workbench/intake/add", 5)).status, 201);
+    assert.equal((await post("/workbench/intake/add", 20)).status, 201);
+    assert.equal((await post("/workbench/intake/add?x=1", 2)).status, 201);
+    assert.equal((await post("/workbench/notes/other", 2)).status, 413, "another POST path with 2 MB is still refused");
+    for (const p of ["/workbench/intake/other", "/workbench/intake/added", "/workbench/intake/add/x", "/workbench/intake", "/workbench/intake/"]) {
+      assert.equal((await post(p, 2)).status, 413, `${p} is not widened`);
+    }
+    const sizes = l.seen.map((x) => x.url);
+    assert.ok(sizes.includes("/workbench/intake/add"));
+  } finally {
+    l.close();
+  }
+});
+
 test("off unless both WORKBENCH_URL and WORKBENCH_KEY are set", () => {
   assert.equal(proxyConfig({}), null);
   assert.equal(proxyConfig({ WORKBENCH_URL: "http://wb:8000" }), null);
