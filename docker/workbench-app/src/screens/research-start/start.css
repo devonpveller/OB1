@@ -1,0 +1,32 @@
+/* The Start research dialog (rwr-start-research). Tokens only; one column that never pushes the page sideways
+   (min-width: 0 and wrapping everywhere a person's text or an address can be long). */
+.startres { display: flex; justify-content: center; }
+.startres .dlg { width: 100%; max-width: 720px; box-sizing: border-box; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 16px; min-width: 0; box-shadow: 0 12px 36px rgba(0, 0, 0, 0.18); }
+.startres .dlg-head { display: flex; align-items: center; gap: 12px; }
+.startres h1 { margin: 0; font-size: 20px; font-weight: 600; flex: 1; }
+.startres .dlg-x { border: 0; background: transparent; color: var(--muted); font-size: 24px; line-height: 1; min-width: 44px; min-height: 44px; cursor: pointer; border-radius: 8px; }
+.startres .fld { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.startres .lab { font-weight: 600; font-size: 13px; }
+.startres textarea { font: inherit; font-size: 15px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; resize: vertical; background: var(--panel); color: var(--fg); width: 100%; box-sizing: border-box; }
+.startres .seg { display: flex; gap: 8px; flex-wrap: wrap; }
+.startres .opt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; flex: 1 1 150px; min-width: 0; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel); font: inherit; text-align: left; cursor: pointer; color: var(--fg); }
+.startres .opt:hover { background: var(--sunken); }
+.startres .opt.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); background: var(--accent-soft); }
+.startres .fordoc { flex-wrap: wrap; }
+.startres .fordoc-title { white-space: normal; overflow-wrap: anywhere; flex: 1 1 8em; }
+.startres .fordoc-note { flex: 1 1 14em; min-width: 0; }
+.startres .leaves { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border-radius: 8px; background: var(--sunken); border: 1px solid var(--line); min-width: 0; overflow-wrap: anywhere; }
+.startres .leaves-body { display: flex; flex-direction: column; gap: 4px; }
+.startres .leaves-q { font-size: 15px; }
+.startres .leaves-link { display: block; font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+.startres .note { display: block; color: var(--danger); background: var(--danger-soft); border-radius: 6px; padding: 6px 10px; margin: 0; overflow-wrap: anywhere; }
+.startres .dlg-foot { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.startres .dlg-actions { margin-left: auto; display: flex; gap: 8px; }
+.startres .dlg-foot .meta { flex: 1 1 16em; min-width: 0; }
+.startres .btn { cursor: pointer; height: 40px; }
+.startres .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.startres .docpick { list-style: none; margin: 0; padding: 4px; border: 1px solid var(--line); border-radius: 8px; max-height: 220px; overflow: auto; display: flex; flex-direction: column; gap: 2px; }
+.startres .docpick-row { width: 100%; text-align: left; padding: 8px 10px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--fg); font: inherit; cursor: pointer; overflow-wrap: anywhere; }
+.startres .docpick-row:hover { background: var(--sunken); }
+.startres .docpick-row.sel { border-color: var(--accent); background: var(--accent-soft); }
+.startres textarea:focus-visible, .startres button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }

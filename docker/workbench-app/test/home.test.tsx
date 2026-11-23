@@ -7,7 +7,7 @@ import { setFetcher, requestLog, clearRequestLog } from "../src/lib/api";
 import { resetState } from "../src/lib/state";
 import { ago } from "../src/screens/home/home-data";
 import { parseRoute } from "../src/lib/router";
-import { matchRoute } from "../src/routes";
+import { matchRoute, type RouteDef } from "../src/routes";
 
 type Id = "alice" | "bob" | "nobody" | "admin";
 const NOW = Date.now();
@@ -117,6 +117,20 @@ describe("each card lists the same items as its source read (acceptance 1)", () 
     expect(within(card("docs")).getAllByTestId("row-doc")[0].textContent).toMatch(/edited 2 h ago · 2 references/);
     expect(within(card("docs")).getAllByTestId("row-doc")[0].getAttribute("href")).toBe("/documents/documents%2Falpha-new.md");
   });
+  it("Continue writing: a trashed or archived document is never listed, only the active one", async () => {
+    const keep = DB.alice.documents;
+    (DB.alice as any).documents = [
+      ...keep,
+      { title: "ALPHA trashed", path: "documents/.trash/alpha-trashed.md", updated: iso(H), outbound_links: [] },
+      { title: "ALPHA trashed in folder", path: "documents/notes/.trash/alpha-tf.md", updated: iso(H), outbound_links: [] },
+      { title: "ALPHA archived", path: "documents/.archive/alpha-archived.md", updated: iso(H), outbound_links: [] },
+      { title: "ALPHA archived in folder", path: "documents/notes/.archive/alpha-af.md", updated: iso(H), outbound_links: [] },
+    ];
+    try {
+      await renderHome();
+      expect(rowTitles("docs")).toEqual(["ALPHA newest draft", "ALPHA middle", "ALPHA older note"]);
+    } finally { (DB.alice as any).documents = keep; }
+  });
   it("Research: the subject's own sessions with their state", async () => {
     await renderHome();
     expect(rowTitles("research")).toEqual(["ALPHA which CPUs fit", "ALPHA finished question"]);
@@ -197,7 +211,9 @@ describe("every card title opens the right screen (acceptance 4)", () => {
       await renderHome();
       fireEvent.click(screen.getByTestId(t));
       expect(window.location.pathname).toBe(path);
-      expect(screen.getByTestId("coming")).toBeTruthy();
+      // a built screen (its route has a `screen`) shows itself, never the placeholder; the others their phase
+      if ((matchRoute(path) as RouteDef).screen) expect(screen.queryByTestId("placeholder")).toBeNull();
+      else expect(screen.getByTestId("coming")).toBeTruthy();
     });
   }
   it("Start research, and a row, open their screens", async () => {
@@ -373,8 +389,7 @@ describe("round 3 (tester attempt 1)", () => {
     await renderHome();
     fireEvent.click(within(card("docs")).getAllByTestId("row-doc")[0]);
     expect(screen.queryByTestId("not-found")).toBeNull();
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Document");
-    expect(screen.getByTestId("coming").textContent).toMatch(/phase 1/);
+    expect(screen.getByTestId("document")).toBeTruthy();
     // and on a reload of that URL
     cleanup(); await renderHome();
     expect(screen.queryByTestId("not-found")).toBeNull();

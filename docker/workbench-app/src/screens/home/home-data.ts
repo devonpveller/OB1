@@ -28,10 +28,17 @@ const listOf = (data: any, key: string): any[] => {
 };
 const time = (s: unknown) => { const t = Date.parse(String(s ?? "")); return Number.isFinite(t) ? t : 0; };
 
+// A document you can still write in: no `.trash` or `.archive` directory anywhere in its path
+// (documents/.trash/x.md, documents/<folder>/.archive/x.md). contract/documents lists every state.
+// TODO(rwr-docs-list merge): replace this with tabOf(path) === "active" from screens/documents/docs-data.ts.
+export const isActiveDocPath = (path: string): boolean =>
+  !path.split("/").slice(0, -1).some((seg) => seg === ".trash" || seg === ".archive");
+
 // contract/documents lists the signed-in subject's own documents (title, path, updated, outbound links).
 export async function readDocuments(): Promise<DocRow[]> {
   const { data } = await api("GET", "/workbench/contract/documents?limit=100");
   return listOf(data, "documents")
+    .filter((d) => isActiveDocPath(String(d.path ?? "")))
     // the row link is built HERE: a path that cannot be encoded fails this read (the card says so), never the render
     .map((d) => ({ title: String(d.title ?? ""), path: String(d.path ?? ""), href: "/documents/" + encodeURIComponent(String(d.path ?? "")), updated: String(d.updated ?? ""), refs: arr(d.outbound_links).length }))
     .sort((a, b) => time(b.updated) - time(a.updated));

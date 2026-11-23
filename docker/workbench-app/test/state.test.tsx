@@ -396,7 +396,9 @@ describe("the shell wiring (rwr-shell-nav's App over this module)", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(30500); });
       await waitFor(() => expect(screen.getByTestId("avatar").textContent).toBe("B"));
       const writes = srv.seen.length;
-      fireEvent.click(screen.getByTestId("toast-undo"));
+      // rwr-docs-list r2: a change of person drops every toast (held or not), so the previous person's Undo is gone
+      // from the page altogether; nothing can be clicked, and nothing is restored or written
+      expect(screen.queryByTestId("toast-undo")).toBeNull();
       await act(async () => { await vi.advanceTimersByTimeAsync(500); });
       expect(getLockedDocument()).toBeNull();
       expect(screen.queryByTestId("lock-chip")).toBeNull();
