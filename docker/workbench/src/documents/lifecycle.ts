@@ -14,7 +14,7 @@ import { audit } from "../identity/store.ts";
 export async function unarchiveDocument(deps: DocDeps, path: string, who: Identity) {
   const from = await ownedPath(deps.db, path, who);
   if (!isArchived(from)) throw new DocError("not in the archive", 400);
-  return { unarchived: await moveTo(deps, from, liveRel(from), `documents: unarchive ${from}`, who) };
+  return { unarchived: await moveTo(deps, from, liveRel(from), `documents: unarchive ${from}`, who, { trail: "unarchived" }) };
 }
 
 // One trashed document, gone for good. Owner or admin; refused for a document that is not in the trash

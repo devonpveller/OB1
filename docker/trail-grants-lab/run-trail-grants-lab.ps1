@@ -43,6 +43,7 @@ UNION ALL SELECT 'trigger|' || tgname || '|' || pg_get_triggerdef(oid) FROM pg_t
 UNION ALL SELECT 'func|' || p.proname || '|' || coalesce(p.proacl::text,'NULL') FROM pg_proc p WHERE p.proname='user_document_trail_no_edit'
 UNION ALL SELECT 'seqacl|' || coalesce(relacl::text,'NULL') FROM pg_class WHERE oid='public.user_document_trail_id_seq'::regclass
 UNION ALL SELECT 'col|' || attname || '|' || format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid='public.user_document_trail'::regclass AND attnum>0 AND NOT attisdropped
+UNION ALL SELECT 'check|' || conname || '|' || pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid='public.user_document_trail'::regclass AND contype='c'
 UNION ALL SELECT 'idx|' || indexdef FROM pg_indexes WHERE tablename='user_document_trail'
 ORDER BY 1
 "@

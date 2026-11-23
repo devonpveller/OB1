@@ -297,3 +297,55 @@ t("L10 (round 2, review R1): the JSON-only rule is this item's three routes only
   assertEquals(tr.status, 200, tr.text);
   assert(!(await exists(own)) && (await exists(tr.json.trashed)), "A's own text/plain trash moved it to the trash");
 });
+
+t("L10: putting a document back (restore, unarchive) writes exactly one trail line for the owner, never for a failed move, never visible to another user", async () => {
+  const lines = (path: string) => sql(`SELECT owner_sub, actor_sub, kind, document_id::text, path, trashed_at::text FROM public.user_document_trail WHERE path = $1 ORDER BY id`, [path]);
+  const marker = `TRAIL-BODY-${run}`;
+  // restore from the trash
+  const tp = await trashed(A, `lc-back-${run}`, marker);
+  const live = tp.replace("/.trash/", "/");
+  const rs = await call("POST", `${D}/restore`, { path: tp });
+  assertEquals(rs.status, 200, rs.text);
+  assertEquals(rs.json.restored, live);
+  const rl = await lines(live);
+  assertEquals(rl.length, 1, "exactly one line for the restore");
+  assertEquals([rl[0].kind, rl[0].owner_sub], ["restored", (await sql(`SELECT owner_sub FROM public.user_document_listings WHERE path = $1`, [live]))[0].owner_sub]);
+  assertEquals((await lines(tp)).length, 0, "no line under the trash path");
+  // unarchive
+  const ap = (await call("POST", `${D}/archive`, { path: live })).json.archived as string;
+  assertEquals((await lines(live)).length, 1, "archiving writes no line");
+  const un = await call("POST", `${D}/unarchive`, { path: ap });
+  assertEquals(un.status, 200, un.text);
+  const ul = await lines(live);
+  assertEquals(ul.map((r) => r.kind), ["restored", "unarchived"], "one more line, for the unarchive");
+  // the owner reads both in the trail API; no body or title anywhere
+  const own = await call("GET", `${D}/trail`);
+  const mine = (own.json.lines as { path: string; kind: string }[]).filter((l) => l.path === live);
+  assertEquals(mine.map((l) => l.kind).sort(), ["restored", "unarchived"]);
+  assert(!own.text.includes(marker) && !JSON.stringify(ul).includes(marker) && !JSON.stringify(ul).includes(`lc-back-${run}`.replace(/-/g, " ")), "no body or title in the lines");
+  assertEquals(Object.keys(own.json.lines[0]).sort(), ["actor_sub", "created_at", "id", "kind", "path", "trashed_at"]);
+  // another user never sees them, and cannot cause one
+  const theirs = await call("GET", `${D}/trail`, undefined, B);
+  assert(!theirs.text.toLowerCase().includes(live.toLowerCase()), "B never sees A's restore lines");
+  const tp2 = (await call("POST", `${D}/trash`, { path: live })).json.trashed as string;
+  const bt = await call("POST", `${D}/restore`, { path: tp2 }, B);
+  assertEquals(bt.status, 404, "B cannot restore A's document");
+  assertEquals((await lines(live)).length, 2, "B's refused restore wrote no line");
+
+  // a failing move leaves no line: restoring onto a name that is taken is refused (409)
+  await Deno.writeTextFile(`${VAULT}/${live}`, `---
+title: "squatter"
+---
+`);
+  const bad = await call("POST", `${D}/restore`, { path: tp2 });
+  assertEquals(bad.status, 409, bad.text);
+  assertEquals((await lines(live)).length, 2, "a refused move wrote no line");
+  assertEquals((await lines(tp2)).length, 0);
+  assert(await exists(tp2), "the trashed document is where it was");
+  // the same for a missing document
+  assertEquals((await call("POST", `${D}/unarchive`, { path: `documents/none/.archive/x-${run}.md` })).status, 404);
+  assertEquals((await sql(`SELECT count(*)::int AS n FROM public.user_document_trail WHERE path LIKE $1`, [`%x-${run}.md`]))[0].n, 0);
+  // the trail is still append-only through the app role: no UPDATE / TRUNCATE for the workbench's own login
+  const ob = await sql(`SELECT has_table_privilege('ob_app_memory','public.user_document_trail','UPDATE') AS u, has_table_privilege('ob_app_memory','public.user_document_trail','TRUNCATE') AS tr`);
+  assertEquals([ob[0].u, ob[0].tr], [false, false]);
+});

@@ -425,3 +425,29 @@ addEventListener("unload", () => {
     Deno.removeSync(vault, { recursive: true });
   } catch { /* best effort */ }
 });
+
+Deno.test("rwr-trail-grants-exact: restore and unarchive each write one line for the owner; a refused move and archive/trash write none", async () => {
+  const rel = await plant(A, "", "BACK-BODY-1");
+  const start = trailRows.length;
+  const trashedTo = (await docs.trashDocument(deps, rel, A)).trashed;
+  assertEquals(trailRows.length, start, "trash writes no line");
+  // a refused restore (the name is taken) leaves no line and the file where it was
+  await Deno.writeTextFile(`${vault}/${rel}`, "squatter");
+  const e = await assertRejects(() => docs.restoreDocument(deps, trashedTo, A), docs.DocError);
+  assertEquals((e as DocErr).status, 409);
+  assertEquals(trailRows.length, start, "a refused move wrote no line");
+  await Deno.remove(`${vault}/${rel}`);
+  const back = (await docs.restoreDocument(deps, trashedTo, A)).restored;
+  assertEquals(back, rel);
+  assertEquals(trailRows.length, start + 1);
+  const last = trailRows[trailRows.length - 1];
+  assertEquals([last.kind, last.owner_sub, last.actor_sub, last.path, last.trashed_at], ["restored", "alice", "alice", rel, null]);
+  const arch = (await docs.archiveDocument(deps, rel, A)).archived;
+  assertEquals(trailRows.length, start + 1, "archive writes no line");
+  await life.unarchiveDocument(deps, arch, A);
+  assertEquals(trailRows.length, start + 2);
+  assertEquals(trailRows[trailRows.length - 1].kind, "unarchived");
+  assert(!JSON.stringify(trailRows.slice(start)).includes("BACK-BODY-1"), "no body in the lines");
+  assert((await trail.readTrail(deps.db, A)).lines.some((l) => l.kind === "unarchived" && l.path === rel), "A reads it");
+  assert(!(await trail.readTrail(deps.db, B)).lines.some((l) => l.path === rel), "B never does");
+});
