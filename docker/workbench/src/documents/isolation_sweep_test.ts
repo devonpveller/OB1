@@ -624,12 +624,21 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   for (const h of [...new Set(hits)]) console.log(`  ${h}`);
   // shared knowledge answers both users alike
   // (the fixture source may have been changed by A's mutating calls - shared, so alike for both)
+  // (rw-private-report-claims-fix round 2: a difference is RECORDED and judged at the end of the case, with which result
+  //  rows differ, so the isolation checks below it still run - a base red here used to hide every one of them)
+  const sharedDiffs: string[] = [];
   for (const p of [`/workbench/contract/sources/${FX_ACTIVE}`, `/workbench/contract/search?q=fixture`, `/workbench/contract/sources?limit=50`]) {
     const a = await wb("GET", p);
     const b = await wb("GET", p, undefined, B);
-    assertEquals(a.status, b.status, `${p}: ${a.status} ${b.status}`);
-    assertEquals(a.text, b.text, `${p}: shared knowledge reads the same for both users`);
+    if (a.status !== b.status) sharedDiffs.push(`${p}: status ${a.status} vs ${b.status}`);
+    else if (a.text !== b.text) {
+      // deno-lint-ignore no-explicit-any
+      const rows = (t: any) => (Array.isArray(t?.results) ? t.results : Array.isArray(t?.sources) ? t.sources : []).map((r: any) => `${r.kind ?? ""}:${r.id ?? r.slug ?? ""}`);
+      const ra = rows(a.json), rb = rows(b.json);
+      sharedDiffs.push(`${p}: shared knowledge reads differently for the two users (A only: ${ra.filter((x: string) => !rb.includes(x)).join(",") || "-"}; B only: ${rb.filter((x: string) => !ra.includes(x)).join(",") || "-"}; same rows, other fields: ${ra.length === rb.length && ra.every((x: string) => rb.includes(x))})`);
+    }
   }
+  for (const d of sharedDiffs) console.log(`sweep: ${d}`);
   assertEquals((await wb("GET", `/workbench/contract/search?q=fixture`)).status, 200, "shared search answers");
   // rw-boundary-core: a derived job's question is public - A reads it on its session (the positive control of the
   // reader rule: the zero above is not the reader hiding every question)
@@ -694,4 +703,5 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     console.log(`sweep: real sessions (forward-auth tokens; A=${OIDC_A}${me.json.admin ? ", an admin not impersonating" : ""}, B=${OIDC_B}); every call of A's also sent ${SUB_HEADER} and X-authentik-uid: <B's subject>`);
   }
   assertEquals([...new Set(hits)], [], "no response to user A carries anything of user B's private context");
+  assertEquals(sharedDiffs, [], "shared knowledge reads the same for both users");
 } });
