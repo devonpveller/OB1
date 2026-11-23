@@ -84,6 +84,7 @@ private body` }) : json({ error: "no such document" }, 404);
   if (p === "/workbench/workspace/whoami") return json(f.whoami);
   if (p === "/workbench/auth/me") return json(f.me);
   if (p === "/workbench/contract/sessions") return json({ sessions: [...Array.from({ length: f.sessions }, (_, i) => ({ id: "s" + i, mine: true, can_act: true })), ...Array.from({ length: f.foreign }, (_, i) => ({ id: "f" + i, mine: false, can_act: false }))] });
+  if (p === "/workbench/contract/ideas") return json({ ideas: [] }); // the Ideas screen (rwr-ideas): this lab has no ideas
   if (p === "/workbench/intake/jobs") return json({ jobs: f.jobs.map((a, i) => ({ id: "j" + i, detail: { actions: a } })) });
   if (p === "/workbench/contract/cleanup/sources") return json({ sources: [], total: f.total });
   if (p === "/workbench/contract/cleanup/reopen-candidates") return json({ candidates: f.candidates.map((e) => ({ evidence: e ? [{}] : [] })) });

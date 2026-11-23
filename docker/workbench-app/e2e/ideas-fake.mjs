@@ -14,6 +14,9 @@
 // The shell's own reads (whoami, auth/me, settings, the menu counts) answer here too, for the e2e lab.
 // Test hooks (never reachable on the real server): see hook().
 
+// ideas/review.ts NOT_WAITING and UNCONFIGURED, word for word
+export const NOT_WAITING = "this idea's research question is not waiting for you (it was decided, or the idea changed since)";
+export const UNCONFIGURED = "the research service is not configured for the workspace (RESEARCH_URL, RESEARCH_WORKSPACE_KEY)";
 export const ARCHIVED_MSG = "this idea's refinery is archived: reopen it from its document first";
 const H = 3600 * 1000, D = 24 * H;
 
@@ -30,7 +33,8 @@ export function createFake({ now = () => Date.now() } = {}) {
   const sessions = new Map();
   const research = new Map(); // idea id -> { state, candidate, failing }
   const log = [];
-  const state = { mode: "alice", failList: false, hang: false };
+  // researchConfigured: the workspace's approval door to the research service (review.ts approveClient); the default install has none
+  const state = { mode: "alice", failList: false, hang: false, researchConfigured: false };
 
   function addIdea(owner, o) {
     const id = o.id ?? uid("a1");
@@ -98,7 +102,13 @@ export function createFake({ now = () => Date.now() } = {}) {
     if (method === "GET" && m) { const i = own(decodeURIComponent(m[1]), who); return i ? { status: 200, body: detail(i) } : NOT_FOUND; }
     m = p.match(/^\/workbench\/ideas\/([^/]+)\/(edit|research-now|research|research\/approve|research\/private|archive|reopen)$/);
     if (m) {
-      const i = own(decodeURIComponent(m[1]), who), verb = m[2];
+      const rawId = decodeURIComponent(m[1]), verb = m[2];
+      if (!ID.test(rawId)) return NOT_FOUND; // ideaId(): an id that cannot exist reads like one that does not
+      // the routes parse the body BEFORE any ownership check (parseEdit / parseQuestion), and approve answers 502 when unconfigured first
+      if (method === "POST" && verb === "edit" && !(typeof body?.summary === "string" && body.summary.trim())) return { status: 400, body: { error: "summary is the idea's new text" } };
+      if (method === "POST" && (verb === "research/approve" || verb === "research/private") && !(typeof body?.question === "string" && body.question.trim())) return { status: 400, body: { error: "question is the text to research" } };
+      if (method === "POST" && verb === "research/approve" && !state.researchConfigured) return { status: 502, body: { error: UNCONFIGURED, code: "research-unconfigured" } };
+      const i = own(rawId, who);
       if (!i) return NOT_FOUND;
       if (verb === "research" && method === "GET") {
         const r = research.get(i.id);
@@ -107,8 +117,7 @@ export function createFake({ now = () => Date.now() } = {}) {
       }
       if (method !== "POST") return { status: 404, body: { error: "not found" } };
       if (verb === "edit") {
-        const text = typeof body?.summary === "string" ? body.summary.trim() : "";
-        if (!text) return { status: 400, body: { error: "summary is the idea's new text" } };
+        const text = body.summary.trim();
         if (i.status === "archived") return { status: 409, body: { error: ARCHIVED_MSG, code: "refinery-archived" } };
         if (text.toLowerCase() === i.summary.toLowerCase()) return { status: 200, body: { outcome: "unchanged", revision: i.revisions.length, title: i.title } };
         i.revisions.push({ revision: i.revisions.length + 1, summary: text, research_job_id: null, created_at: iso() });
@@ -133,9 +142,7 @@ export function createFake({ now = () => Date.now() } = {}) {
       }
       // research/approve and research/private: only while the owner's review waits
       const r = research.get(i.id);
-      if (!r || r.state !== "awaiting_owner") return { status: 409, body: { error: "no research request of this idea is waiting for its owner", code: "not-awaiting-owner" } };
-      const q = typeof body?.question === "string" ? body.question.trim() : "";
-      if (!q) return { status: 400, body: { error: "question is the text to research" } };
+      if (!r || r.state !== "awaiting_owner") return { status: 409, body: { error: NOT_WAITING, code: "not-awaiting-owner" } };
       research.set(i.id, { state: "queued", job: uid("b3") });
       return { status: verb === "research/approve" ? 202 : 202, body: { outcome: "queued", run: verb === "research/approve" ? "derived" : "private", job_id: research.get(i.id).job } };
     }
@@ -161,6 +168,8 @@ export function createFake({ now = () => Date.now() } = {}) {
       return { job: jid };
     }
     if (name === "await-owner") { research.set(arg.id, { state: "awaiting_owner", candidate: arg.candidate ?? "a question", failing: arg.failing ?? ["a name"] }); return {}; }
+    if (name === "research-state") { research.set(arg.id, { state: arg.state }); return {}; } // refused | delivered | failed | queued ...
+    if (name === "configure-research") { state.researchConfigured = !!arg.on; return {}; }
     if (name === "mode") { state.mode = arg.mode; return {}; }
     if (name === "fail-list") { state.failList = !!arg.on; return {}; }
     return { error: "no such hook" };

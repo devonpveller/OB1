@@ -1,4 +1,6 @@
 export const ARCHIVED_MSG: string;
+export const NOT_WAITING: string;
+export const UNCONFIGURED: string;
 export type Who = "alice" | "bob" | "nobody";
 export type Answer = { status: number; body: any };
 export function createFake(o?: { now?: () => number }): {
@@ -9,7 +11,7 @@ export function createFake(o?: { now?: () => number }): {
   sessions: Map<string, any>;
   log: { method: string; url: string; who: string }[];
   people: Record<Who, { sub: string; name: string }>;
-  state: { mode: Who; failList: boolean; hang: boolean };
+  state: { mode: Who; failList: boolean; hang: boolean; researchConfigured: boolean };
   iso(msAgo?: number): string;
   H: number;
   D: number;

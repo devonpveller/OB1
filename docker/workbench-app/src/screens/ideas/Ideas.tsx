@@ -131,15 +131,18 @@ function IdeaView({ row, onChanged }: { row: IdeaRow; onChanged: () => void }) {
     return () => clearInterval(t);
   }, [waitingOn, id]);
 
-  const after = () => { load(); onChanged(); };
+  // A write is answered whenever it is answered: the list is ALWAYS read again (the idea may have moved group even if the
+  // person has opened another idea meanwhile). Only what belongs to this view (busy, error, the form, this idea's detail)
+  // waits for it to still be on screen, and the toast (with its Undo) is dropped when a different person is on the page.
   const run = async (f: () => Promise<Result>, onOk?: (r: Result) => void) => {
+    const epoch = stateEpoch();
     setBusy(true); setError("");
     const r = await f();
-    if (!live.current) return;
-    setBusy(false);
-    if (!r.ok) { setError(r.message); return; }
-    onOk?.(r);
-    after();
+    if (live.current) setBusy(false);
+    if (!r.ok) { if (live.current) setError(r.message); return; }
+    if (stateEpoch() === epoch) onOk?.(r);
+    onChanged();
+    if (live.current) load();
   };
 
   const archived = isArchived(d.state === "ok" ? d.data.status : row.status);
@@ -289,6 +292,10 @@ function ResearchLine({ rs, busy, onApprove, onPrivate }: { rs: ResearchState; b
     );
   }
   const text = rs.state === "pending" ? "Research was requested: the question is being prepared."
-    : rs.state === "queued" ? "Research on this idea is queued or running." : "Research: " + rs.state;
+    : rs.state === "queued" ? "Research on this idea is queued or running."
+    : rs.state === "delivered" ? "Research on this idea finished."
+    : rs.state === "refused" ? "The last research request for this idea was not sent: its question could not be made safe to send. Revise the idea and ask again."
+    : rs.state === "failed" ? "The last research request for this idea failed. Ask again."
+    : "Research on this idea is in a state this screen does not know yet.";
   return <p className="meta research-line" data-testid="research-state" data-state={rs.state} role="status">{text}{rs.state === "queued" && <> <Link to="/research">See Research</Link></>}</p>;
 }

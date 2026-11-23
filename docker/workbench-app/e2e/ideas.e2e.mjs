@@ -198,6 +198,12 @@ await scheme("light");
 
 // ---- 11. live switch: alice has a half-typed revision open, the identity changes, the shell's refresh shows bob
 await setMode("alice"); await go("/ideas");
+// alice archives an idea (its Undo toast is held by focus, as a keyboard user would), then types an unsent revision on another
+await click("[data-testid=act-archive]");
+ok(await waitFor(`!!document.querySelector('[data-testid=toast-undo]')`), "live switch: alice's archive toast with its Undo is up");
+await ev(`document.querySelector('[data-testid=toast-undo]').focus()`);
+const wikiId = ids.wiki, logBefore = (await stub("/__log")).length;
+await clickRow("ALPHA Plan the CPU upgrade");
 await click("[data-testid=act-revise]");
 await send("Input.insertText", { text: " ALPHA-UNSENT-DRAFT" });
 ok(/ALPHA-UNSENT-DRAFT/.test(await ev(`document.querySelector('[data-testid=revise-text]')?.value||''`)), "live switch: alice has an unsent revision typed");
@@ -207,6 +213,13 @@ for (let i = 0; i < 80 && !sw; i++) { await sleep(500); sw = await ev(`/Bob/.tes
 ok(sw, "live switch: the top bar now says bob (the shell's refresh)");
 await waitFor(`!document.querySelector('[data-testid=ideas-loading]')`, 10000);
 ok(!/ALPHA|alice|UNSENT/i.test(await ev(`document.documentElement.outerHTML`)) && JSON.stringify(await rowTitles()) === JSON.stringify(["BRAVO Bob's idea"]) && !(await ev(`!!document.querySelector('[data-testid=revise-form]')`)), "live switch: the list, the open idea and the unsent draft are gone; bob's own idea is shown, no ALPHA anywhere");
+// the Undo toast of alice's archive, still on screen after the switch, does nothing for bob
+const undoLeft = await ev(`!!document.querySelector('[data-testid=toast-undo]')`);
+if (undoLeft) await click("[data-testid=toast-undo]");
+await sleep(600);
+const afterSwitch = (await stub("/__log")).slice(logBefore).filter((x) => x.who === "bob");
+ok(!afterSwitch.some((x) => x.method === "POST"), `live switch: the Undo of alice's archive made no write for bob (${undoLeft ? "clicked" : "toast already gone"})`);
+ok((await idState(wikiId)).status === "archived", "live switch: alice's idea stays archived");
 await scheme("dark"); await axe("dark Ideas after a live switch"); await scheme("light");
 await setMode("alice");
 

@@ -10,7 +10,7 @@ import { Ideas, RESEARCH_POLL_MS } from "../src/screens/ideas/Ideas";
 import { ToastProvider } from "../src/shell/Toast";
 import { setFetcher, requestLog, clearRequestLog } from "../src/lib/api";
 import { resetState } from "../src/lib/state";
-import { createFake, type Who } from "../e2e/ideas-fake.mjs";
+import { createFake, NOT_WAITING, UNCONFIGURED, type Who } from "../e2e/ideas-fake.mjs";
 
 let fake = createFake();
 let who: Who = "alice";
@@ -31,8 +31,10 @@ function seed() {
   ids.bob = fake.addIdea(B, { title: "Bob's idea", summary: `${MARK_B} something of bob's`, status: "engaged", created: fake.iso(3 * fake.D) });
 }
 
+let gate: Promise<void> | null = null; // holds an archive write until the test lets it through
 function stub() {
   setFetcher(async (u, init) => {
+    if (gate && /\/archive$/.test(u)) await gate;
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     const a = fake.handle((init?.method ?? "GET").toUpperCase(), u, body, who);
     return new Response(JSON.stringify(a.body), { status: a.status });
@@ -54,7 +56,7 @@ const pick = async (title: string) => {
 const posts = () => requestLog().filter((r) => r.method !== "GET").map((r) => r.method + " " + r.url);
 
 beforeEach(() => {
-  cleanup(); clearRequestLog(); resetState(); who = "alice"; seed(); stub();
+  cleanup(); clearRequestLog(); resetState(); who = "alice"; gate = null; seed(); stub();
   document.documentElement.removeAttribute("data-theme");
   window.localStorage.clear(); window.sessionStorage.clear();
 });
@@ -349,5 +351,105 @@ describe("nothing private is kept", () => {
   it("no select or datalist: list pickers belong to ItemPicker", () => {
     const dir = "src/screens/ideas";
     for (const f of readdirSync(dir)) expect(readFileSync(dir + "/" + f, "utf8")).not.toMatch(/<select|<datalist/);
+  });
+});
+
+// every toast the screen shows is one of these sentences, exactly: none carries an idea's title or wording
+const TOAST_OK = [
+  /^Research on this idea was requested\.$/,
+  /^Saved as revision \d+\. The next research uses it; earlier runs stay with their wording\.$/,
+  /^That is already the idea's wording\. Nothing changed\.$/,
+  /^Idea archived\. Scheduled research for it has stopped\.$/,
+  /^Idea reopened, as it was\.$/,
+  /^Running privately\. The report will be yours alone\.$/,
+  /^Approved\. The question is queued as shared research\.$/,
+];
+const toastTexts = () => [...screen.getByTestId("toasts").querySelectorAll('[data-testid="toast"] > span')].map((e) => e.textContent!);
+
+describe("every toast is a fixed sentence (no idea words)", () => {
+  it("research, revise, archive, reopen, run privately and approve", async () => {
+    await renderApp();
+    await pick("Plan the CPU upgrade");
+    fireEvent.click(screen.getByTestId("act-research"));
+    await waitFor(() => expect(toastTexts().length).toBe(1));
+    fireEvent.click(screen.getByTestId("act-revise"));
+    fireEvent.change(screen.getByTestId("revise-text"), { target: { value: `${MARK_A} yet another wording about coolers` } });
+    fireEvent.click(screen.getByTestId("revise-save"));
+    await waitFor(() => expect(toastTexts().length).toBe(2));
+    fireEvent.click(screen.getByTestId("act-archive"));
+    await waitFor(() => expect(toastTexts().length).toBe(3));
+    fireEvent.click(screen.getByTestId("act-reopen"));
+    await waitFor(() => expect(toastTexts().length).toBe(4));
+    fake.hook("await-owner", { id: ids.cpu, candidate: "a question", failing: ["x"] });
+    await pick("Move the wiki to the cluster"); await pick("Plan the CPU upgrade");
+    fireEvent.click(await screen.findByTestId("review-private"));
+    await waitFor(() => expect(toastTexts().length).toBe(5));
+    fake.hook("configure-research", { on: true });
+    fake.hook("await-owner", { id: ids.cpu, candidate: "a question", failing: ["x"] });
+    await pick("Move the wiki to the cluster"); await pick("Plan the CPU upgrade");
+    fireEvent.click(await screen.findByTestId("review-approve"));
+    await waitFor(() => expect(toastTexts().length).toBe(6));
+    for (const t of toastTexts()) expect(TOAST_OK.some((re) => re.test(t)), `unexpected toast: ${t}`).toBe(true);
+    expect(screen.getByTestId("toasts").textContent).not.toMatch(/ALPHA|CPU|coolers|power stages/);
+  });
+  it("an unchanged revise says so with a fixed sentence", async () => {
+    await renderApp();
+    await pick("Move the wiki to the cluster");
+    fireEvent.click(screen.getByTestId("act-revise"));
+    fireEvent.change(screen.getByTestId("revise-text"), { target: { value: fake.ideas.get(ids.wiki).summary.toUpperCase() } });
+    fireEvent.click(screen.getByTestId("revise-save"));
+    await waitFor(() => expect(toastTexts()).toEqual(["That is already the idea's wording. Nothing changed."]));
+  });
+});
+
+describe("a write answered after the person opened another idea (F3)", () => {
+  it("still reads the list again, and still says what happened", async () => {
+    await renderApp();
+    await pick("Plan the CPU upgrade");
+    let release: () => void = () => {};
+    gate = new Promise<void>((r) => { release = r; });
+    fireEvent.click(screen.getByTestId("act-archive"));
+    await pick("Move the wiki to the cluster"); // another idea is open while the write is in flight
+    release();
+    await waitFor(() => expect(fake.ideas.get(ids.cpu).status).toBe("archived"));
+    await waitFor(() => expect(within(screen.getByTestId("group-archived")).getAllByTestId("idea-row").length).toBe(2));
+    expect(toastTexts()).toEqual(["Idea archived. Scheduled research for it has stopped."]);
+  });
+});
+
+describe("the owner's review, as the server answers it (F5)", () => {
+  it("approve on a default install (no research service) says so and offers the private run; configured, it queues", async () => {
+    await renderApp();
+    await pick("Plan the CPU upgrade");
+    fake.hook("await-owner", { id: ids.cpu, candidate: "Which CPUs?", failing: [] });
+    await pick("Move the wiki to the cluster"); await pick("Plan the CPU upgrade");
+    fireEvent.click(await screen.findByTestId("review-approve"));
+    expect((await screen.findByTestId("idea-error")).textContent).toMatch(/research service, which is not set up here\. Run it privately instead/);
+    expect(screen.getByTestId("review-private")).toBeTruthy();
+    fake.hook("configure-research", { on: true });
+    fireEvent.click(screen.getByTestId("review-approve"));
+    await waitFor(() => expect(screen.getByTestId("research-state").getAttribute("data-state")).toBe("queued"));
+  });
+  it("refused, delivered and failed are said in words, never as a raw state", async () => {
+    await renderApp();
+    await pick("Plan the CPU upgrade");
+    for (const [state, re] of [["refused", /was not sent/], ["delivered", /finished/], ["failed", /failed/]] as const) {
+      fake.hook("research-state", { id: ids.cpu, state });
+      await pick("Move the wiki to the cluster"); await pick("Plan the CPU upgrade");
+      await waitFor(() => expect(screen.getByTestId("research-state").getAttribute("data-state")).toBe(state));
+      expect(screen.getByTestId("research-state").textContent).toMatch(re);
+      expect(screen.getByTestId("research-state").textContent).not.toMatch(/Research: /);
+    }
+  });
+  it("the fake answers as the server does: the body is judged before ownership, the 409 and 502 sentences are the server's", () => {
+    const id = ids.bob; // not alice's
+    for (const [verb, body] of [["edit", {}], ["research/approve", {}], ["research/private", { question: " " }]] as const) {
+      expect(fake.handle("POST", `/workbench/ideas/${id}/${verb}`, body, "alice").status, verb).toBe(400);
+    }
+    expect(fake.handle("POST", `/workbench/ideas/${id}/research/private`, { question: "q" }, "alice").status).toBe(404);
+    const a = fake.handle("POST", `/workbench/ideas/${ids.cpu}/research/approve`, { question: "q" }, "alice");
+    expect([a.status, a.body.error]).toEqual([502, UNCONFIGURED]);
+    const p = fake.handle("POST", `/workbench/ideas/${ids.cpu}/research/private`, { question: "q" }, "alice");
+    expect([p.status, p.body.error]).toEqual([409, NOT_WAITING]);
   });
 });

@@ -142,7 +142,11 @@ export async function approveQuestion(id: string, question: string): Promise<Res
     return (data as any)?.outcome === "refused"
       ? { ok: false, message: "That question still carries wording that cannot go out. Edit it, or run it privately." }
       : { ok: true, message: "Approved. The question is queued as shared research." };
-  } catch (e) { return refusal(e, "Could not approve the question. Try again."); }
+  } catch (e) {
+    // shipped inert: without a research service the workspace cannot approve (the default install); a private run still works
+    if (e instanceof ApiError && e.status === 502) return { ok: false, message: "Approving needs the research service, which is not set up here. Run it privately instead." };
+    return refusal(e, "Could not approve the question. Try again.");
+  }
 }
 export async function runPrivately(id: string, question: string): Promise<Result> {
   try {
