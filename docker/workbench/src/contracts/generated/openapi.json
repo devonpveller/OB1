@@ -6607,6 +6607,47 @@
         },
         "additionalProperties": false
       },
+      "InletConnections": {
+        "type": "object",
+        "properties": {
+          "connections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InletConnection"
+            },
+            "description": "the caller's own connections, oldest first; none when they have none"
+          }
+        },
+        "required": [
+          "connections"
+        ]
+      },
+      "InletConnection": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "minLength": 1,
+            "example": "gmail",
+            "description": "what the inlet is (gmail, vault, ...): an open string, never a closed list here"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "updated_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "kind",
+          "created_at",
+          "updated_at"
+        ]
+      },
       "PrivateClaims": {
         "type": "object",
         "properties": {
@@ -15218,6 +15259,87 @@
                 },
                 "schema": {
                   "$ref": "#/components/schemas/Flag"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/inlets/connections": {
+      "get": {
+        "operationId": "inletConnections",
+        "tags": [
+          "inlets"
+        ],
+        "summary": "the caller's own connected inlets: kind and stamps only, never anyone else's",
+        "description": "Read through the database function inlet_connections_of(sub) (slot 600). Another person's connections are not returned, counted or hinted at; a person with none gets an empty list.",
+        "responses": {
+          "200": {
+            "description": "the caller's connections",
+            "content": {
+              "application/json": {
+                "example": {
+                  "connections": [
+                    {
+                      "kind": "gmail",
+                      "created_at": "2026-10-17T12:00:00.000Z",
+                      "updated_at": "2026-10-17T12:00:00.000Z"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/InletConnections"
                 }
               }
             }

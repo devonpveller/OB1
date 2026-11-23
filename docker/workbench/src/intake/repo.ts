@@ -61,6 +61,12 @@ export function actionsOf(kind: IntakeKind, status: string): { actions: ("retry"
   return { actions: [], primary: "open" };
 }
 
+// rwr-imports-server-api: a failed or cancelled import / add is retried ONCE. `attempts` starts at 1 and a retry makes it 2
+// (init-intake-queue.sql); a job at MAX_ATTEMPTS is refused, for every caller. The queues (chunk / extract / entity) are not
+// import jobs and keep their own retry.
+export const MAX_ATTEMPTS = 2;
+export const RETRIED_ALREADY = "this job was already retried once, so it cannot be retried again: add the link or file again as a new item";
+
 const isActive = (kind: IntakeKind, status: string) =>
   kind === "import" || kind === "add" ? ACTIVE_IMPORT.has(status) : status === "pending" || status === "processing";
 
