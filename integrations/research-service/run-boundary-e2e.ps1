@@ -294,7 +294,10 @@ try {
     # rw-private-report-claims-fix (slot 570, A1): the derived-question guard is a trigger ON research_handbacks (it reads
     # the row's owner and job only); its revert drops it, its check script counts it, its lab test calls handback_open
     'docker/init-private-report-claims.sql', 'docker/revert-private-report-claims.sql', 'docker/check-private-report-claims.sql',
-    'docker/workbench/src/inlet/private_report_claims_integration_test.ts')
+    'docker/workbench/src/inlet/private_report_claims_integration_test.ts',
+    # rwr-idea-capture-api (landed on development with OB1 b81eedd): the ideas integration test reads the hand-back
+    # through slot 580's owner-scoped idea_handback_* functions and asserts one row as the lab's superuser
+    'docker/workbench/src/ideas/ideas_integration_test.ts')
   $names = @(Get-ChildItem -Path $ob1 -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\(node_modules|\.git|archive)\\' -and $_.Length -lt 5MB } |
     Where-Object { Select-String -Path $_.FullName -Pattern 'research_handbacks|handback_(open|pending|claim|deliverables|delivered|owned|deliver)' -Quiet } |
     ForEach-Object { $_.FullName.Substring($ob1.Length + 1).Replace('\', '/') })
