@@ -43,7 +43,7 @@ function slotsBefore(path: string) {
 }
 
 type Load = { state: "loading" } | { state: "failed" } | { state: "ok"; data: Listing };
-type Ask = { kind: "one"; doc: DocRow } | { kind: "all"; n: number };
+export type Ask = { kind: "one"; doc: DocRow } | { kind: "all"; n: number };
 
 export function Documents({ subject, whoAnswered }: ScreenProps) {
   if (!subject) {
@@ -82,11 +82,24 @@ function DocumentsFor() {
   useEffect(() => { live.current = true; reload(); return () => { live.current = false; }; }, [reload]);
 
   // one action at a time; the list is read again after it, whatever the answer
-  const run = useCallback(async (f: () => Promise<void>, fallback: string) => {
+  // The guards are REFS, set synchronously, not render state: two clicks handled before React re-renders (the
+  // tester's synthetic burst, F2) must not both act on stale props. One action at a time, and none while a
+  // destructive confirmation is open.
+  const busyRef = useRef(false);
+  const askRef = useRef<Ask | null>(null);
+  const openAsk = (a: Ask) => { if (busyRef.current || askRef.current) return; askRef.current = a; setAsk(a); };
+  const closeAsk = useCallback(() => { askRef.current = null; setAsk(null); }, []);
+  // `making` (+ Folder, + New document) is not destructive and may run beside an open confirmation
+  const run = useCallback(async (f: () => Promise<void>, fallback: string, making = false) => {
+    if (busyRef.current || (askRef.current && !making)) return;
+    busyRef.current = true;
     setBusy(true); setErr("");
     try { await f(); } catch (e) { if (live.current) setErr(problem(e, fallback)); }
-    finally { if (live.current) { setBusy(false); reload(); } }
+    finally { busyRef.current = false; if (live.current) { setBusy(false); reload(); } }
   }, [reload]);
+  // Undo changes the list under any open confirmation (F3): it closes the confirmation first, so a Delete
+  // forever typed for a document that Undo is taking back out of the trash can never be sent
+  const undo = (f: () => Promise<void>, fallback: string) => { closeAsk(); void run(f, fallback); };
 
   const doArchive = (d: DocRow) => run(async () => {
     const before = slotsBefore(d.path);
@@ -95,7 +108,7 @@ function DocumentsFor() {
     const epoch = stateEpoch();
     toast({
       message: `Archived "${d.title || "(untitled)"}".`,
-      onUndo: () => { if (stateEpoch() !== epoch) return; void run(async () => { const back = await unarchive(to); undoSlots(back, before); }, "The archive could not be undone."); },
+      onUndo: () => { if (stateEpoch() !== epoch) return; undo(async () => { const back = await unarchive(to); undoSlots(back, before); }, "The archive could not be undone."); },
     });
   }, "The document could not be archived.");
   const doTrash = (d: DocRow) => run(async () => {
@@ -105,7 +118,7 @@ function DocumentsFor() {
     const epoch = stateEpoch();
     toast({
       message: `Moved "${d.title || "(untitled)"}" to the trash. It goes by itself in 30 days.`,
-      onUndo: () => { if (stateEpoch() !== epoch) return; void run(async () => { const back = await restore(to); undoSlots(back, before); }, "The move to the trash could not be undone."); },
+      onUndo: () => { if (stateEpoch() !== epoch) return; undo(async () => { const back = await restore(to); undoSlots(back, before); }, "The move to the trash could not be undone."); },
     });
   }, "The document could not be moved to the trash.");
   const doUnarchive = (d: DocRow) => run(async () => {
@@ -119,9 +132,9 @@ function DocumentsFor() {
   }, "The document could not be restored.");
 
   const confirmDelete = () => {
-    const a = ask;
+    const a = askRef.current;
     if (!a) return;
-    setAsk(null);
+    closeAsk();
     void run(async () => {
       if (a.kind === "one") {
         await deleteForever(a.doc.path);
@@ -136,6 +149,11 @@ function DocumentsFor() {
   };
 
   const data = load.state === "ok" ? load.data : null;
+  // a one-document confirmation whose document is no longer in the trash (moved or removed meanwhile) closes
+  useEffect(() => {
+    const a = askRef.current;
+    if (a?.kind === "one" && data && !data.docs.some((d) => d.path === a.doc.path && d.tab === "trash")) closeAsk();
+  }, [data, closeAsk]);
   const off = busy || ask !== null; // one action at a time; nothing else while a destructive confirmation is open
   const inTab = data ? data.docs.filter((d) => d.tab === tab) : [];
   const shown = folder === null ? inTab : inTab.filter((d) => d.folder === folder);
@@ -159,7 +177,7 @@ function DocumentsFor() {
           const rel = root && r.path.startsWith(root + "/") ? r.path.slice(root.length + 1) : name;
           setMaking(""); setFolder(rel); setTab("active");
           toast({ message: r.created ? `Made the folder "${rel}".` : `The folder "${rel}" is already there.` });
-        }, "The folder could not be made.")} />
+        }, "The folder could not be made.", true)} />
       )}
       {making === "doc" && (
         <NewDocument folder={folder ?? ""} busy={busy} onCancel={() => setMaking("")}
@@ -170,7 +188,7 @@ function DocumentsFor() {
             // lists it, its page would say "no such document" - say so here instead of opening it (review R2)
             if (made.listed) navigate(docHref(made.path));
             else toast({ message: `Saved "${title}". It shows in your documents once the listing catches up (a minute or so).` });
-          }, "The document could not be made.")} />
+          }, "The document could not be made.", true)} />
       )}
       {err && <p className="docs-err" role="alert" data-testid="docs-error">{err}</p>}
 
@@ -194,11 +212,11 @@ function DocumentsFor() {
             <div className="docs-tabs" role="group" aria-label="Show">
               {TABS.map(([t, label]) => (
                 <button type="button" key={t} className={"tab" + (tab === t ? " tabon" : "")} aria-pressed={tab === t} data-testid={"tab-" + t}
-                  onClick={() => { setTab(t); setAsk(null); }}>{label}</button>
+                  onClick={() => { setTab(t); closeAsk(); }}>{label}</button>
               ))}
             </div>
             {/* keyed per confirmation: a word typed for one never carries over to another (review R1) */}
-            {ask && <DeleteAsk key={ask.kind === "one" ? "one " + ask.doc.path : "all"} ask={ask} onConfirm={confirmDelete} onCancel={() => setAsk(null)} />}
+            {ask && <KeyedDeleteAsk ask={ask} onConfirm={confirmDelete} onCancel={closeAsk} />}
             {shown.length === 0
               ? <p className="empty docs-empty" data-testid="docs-empty">{emptyText(tab, folder, data.docs.length === 0)}</p>
               : (
@@ -224,7 +242,7 @@ function DocumentsFor() {
                             {d.tab === "archived" && <button type="button" className="btn sm" disabled={off} onClick={() => doUnarchive(d)} data-testid="act-unarchive">Unarchive<span className="sr-only"> {d.title}</span></button>}
                             {d.tab === "trash" && <>
                               <button type="button" className="btn sm" disabled={off} onClick={() => doRestore(d)} data-testid="act-restore">Restore<span className="sr-only"> {d.title}</span></button>
-                              <button type="button" className="btn sm danger-line" disabled={off} onClick={() => setAsk({ kind: "one", doc: d })} data-testid="act-delete">Delete forever...<span className="sr-only"> {d.title}</span></button>
+                              <button type="button" className="btn sm danger-line" disabled={off} onClick={() => openAsk({ kind: "one", doc: d })} data-testid="act-delete">Delete forever...<span className="sr-only"> {d.title}</span></button>
                             </>}
                           </td>
                         </tr>
@@ -236,7 +254,7 @@ function DocumentsFor() {
             <div className="docs-foot">
               <span className="meta">{FOOT[tab]}{data.capped ? ` Showing your newest ${LIST_LIMIT} documents.` : ""}</span>
               {tab === "trash" && trashCount > 0 && (
-                <button type="button" className="btn sm danger-line" disabled={off} onClick={() => setAsk({ kind: "all", n: trashCount })} data-testid="empty-trash">Empty the trash...</button>
+                <button type="button" className="btn sm danger-line" disabled={off} onClick={() => openAsk({ kind: "all", n: trashCount })} data-testid="empty-trash">Empty the trash...</button>
               )}
             </div>
           </div>
@@ -256,6 +274,14 @@ function emptyText(tab: Tab, folder: string | null, none: boolean): string {
   if (none) return "You have no documents yet. + New document makes one.";
   const where = folder === null ? "" : ` in ${folderLabel(folder)}`;
   return tab === "active" ? `No active documents${where}.` : tab === "archived" ? `No archived documents${where}.` : `The trash is empty${where}.`;
+}
+
+// The confirmation, keyed by what it confirms: a different target is a NEW TypedConfirm, so a word typed for one
+// confirmation never arms another (review R1). Exported so a test can switch the target directly: the UI's own
+// guards make a switch unreachable, which is why the key needs its own test (tester F1).
+export const askKey = (a: Ask) => (a.kind === "one" ? "one\u0000" + a.doc.path : "all");
+export function KeyedDeleteAsk(p: { ask: Ask; onConfirm: () => void; onCancel: () => void }) {
+  return <DeleteAsk key={askKey(p.ask)} {...p} />;
 }
 
 // Delete forever (one) and Empty the trash (all): what goes and what stays, then the typed word.

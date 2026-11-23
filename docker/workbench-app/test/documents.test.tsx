@@ -10,6 +10,7 @@ import { setFetcher, requestLog, clearRequestLog } from "../src/lib/api";
 import { resetState, getLastDocument, setLastDocument } from "../src/lib/state";
 import { daysLeft, folderOf, goesText, linkedText, tabOf, NOT_FOUND } from "../src/screens/documents/docs-data";
 import { createFake, PEOPLE } from "../e2e/docs-fake.mjs";
+import { KeyedDeleteAsk, type Ask } from "../src/screens/documents/Documents";
 
 const NOW = Date.now();
 const fake = createFake({ now: () => NOW });
@@ -335,6 +336,51 @@ describe("r2 (review R1): a typed word never carries over to another confirmatio
     fireEvent.click(screen.getByTestId("empty-trash"));
     expect((screen.getByTestId("typed-input") as HTMLInputElement).value).toBe("");
     expect((screen.getByTestId("typed-ok") as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("r2 round 2 (tester F1, F2, F3): the key, synchronous guards, Undo during a confirmation", () => {
+  const doc = (path: string, title: string) => ({ title, path, updated: new Date(NOW).toISOString(), links: [], tab: "trash" as const, folder: "" });
+  it("F1: the confirmation is keyed by its target: switching A -> B, or A -> all, starts with an empty word", () => {
+    const A: Ask = { kind: "one", doc: doc("documents/k-a/.trash/a.md", "ALPHA A") };
+    const B: Ask = { kind: "one", doc: doc("documents/k-a/.trash/b.md", "ALPHA B") };
+    const ALL: Ask = { kind: "all", n: 2 };
+    const noop = () => {};
+    for (const next of [B, ALL]) {
+      cleanup();
+      const v = render(<KeyedDeleteAsk ask={A} onConfirm={noop} onCancel={noop} />);
+      fireEvent.change(screen.getByTestId("typed-input"), { target: { value: "DELETE" } });
+      expect((screen.getByTestId("typed-ok") as HTMLButtonElement).disabled).toBe(false);
+      v.rerender(<KeyedDeleteAsk ask={next} onConfirm={noop} onCancel={noop} />);
+      expect((screen.getByTestId("typed-input") as HTMLInputElement).value, next.kind).toBe("");
+      expect((screen.getByTestId("typed-ok") as HTMLButtonElement).disabled, next.kind).toBe(true);
+    }
+  });
+  it("F2: two clicks handled before a re-render (one task): opening a confirmation blocks the Restore after it", async () => {
+    await openDocs(); await tab("trash");
+    const del = within(row("ALPHA CPU duplicate")).getByTestId("act-delete");
+    const res = within(row("ALPHA CPU duplicate")).getByTestId("act-restore");
+    act(() => { del.click(); res.click(); }); // no render between the two: the second sees stale (enabled) props
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bodies.filter((b) => b.method === "POST").map((b) => b.url)).toEqual([]);
+    expect(fake.db().docs.has("documents/k-a/.trash/Hardware/dup.md")).toBe(true);
+    expect(screen.getByTestId("delete-ask")).toBeTruthy();
+  });
+  it("F3: Undo of a trash move while that document's Delete forever is open (DELETE typed) closes it; nothing is deleted", async () => {
+    await openDocs();
+    fireEvent.click(within(row("ALPHA One gateway")).getByTestId("act-trash"));
+    await waitFor(() => expect(screen.getByTestId("toast-undo")).toBeTruthy());
+    fireEvent.mouseEnter(screen.getByTestId("toast"));
+    await tab("trash");
+    await waitFor(() => expect(rows()).toContain("ALPHA One gateway"));
+    fireEvent.click(within(row("ALPHA One gateway")).getByTestId("act-delete"));
+    fireEvent.change(screen.getByTestId("typed-input"), { target: { value: "DELETE" } });
+    fireEvent.click(screen.getByTestId("toast-undo"));
+    await waitFor(() => expect(fake.db().docs.has("documents/k-a/Stack/gateway.md")).toBe(true));
+    await waitFor(() => expect(screen.queryByTestId("delete-ask")).toBeNull());
+    expect(bodies.filter((b) => /delete-forever/.test(b.url))).toEqual([]);
+    await tab("active");
+    expect(rows()).toContain("ALPHA One gateway");
   });
 });
 
