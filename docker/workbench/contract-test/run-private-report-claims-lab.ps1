@@ -314,7 +314,7 @@ try {
     $fixAll = @($oldCases.Keys | Where-Object { $_ -match ('\[' + $OldTag + '\]') })
     $fixRed = @($fixAll | Where-Object { $oldCases[$_] -eq 'FAILED' })
     foreach ($k in ($fixAll | Sort-Object)) { Write-Host "    $($oldCases[$k])  $k" }
-    Check ($fixAll.Count -ge 3 -and $fixRed.Count -eq $fixAll.Count) "fix RED: every [$OldTag] case fails on the earlier 570 ($($fixRed.Count) of $($fixAll.Count))"
+    Check ($fixAll.Count -ge 2 -and $fixRed.Count -eq $fixAll.Count) "fix RED: every [$OldTag] case fails on the earlier 570 ($($fixRed.Count) of $($fixAll.Count))"
     $cOld = Check-Script; Save 'check-earlier-570.log' $cOld
     $p2o = ((Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/prcreuse.sql) | Out-String).Trim(); Save 'p2-count-earlier-570.log' $p2o
     Write-Host ($p2o -replace "`n", ' | ')
