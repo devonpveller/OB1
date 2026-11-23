@@ -182,7 +182,7 @@ for (const p of [CPU, "documents/k-a/.trash/Hardware/dup.md", "documents/k-b/no-
   seen.push(await ev(`document.querySelector('main').innerText`));
 }
 ok(seen.length === 3 && new Set(seen).size === 1 && !/ALPHA/.test(seen[0]), `bob opening alice's document (live or trashed) sees exactly what a missing document shows: ${JSON.stringify(seen[0])}`);
-const bobPosts = (await stub("/__log")).filter((x) => x.mode === "bob" && /archive|trash|restore|delete|empty/.test(x.url));
+const bobPosts = (await stub("/__log")).filter((x) => x.mode === "bob" && x.method !== "GET" && !x.url.startsWith("/workbench/settings"));
 ok(bobPosts.length === 0, "bob's visit made no change request");
 await scheme("dark"); await axe("dark Documents as bob"); await scheme("light");
 await setMode("alice");
@@ -216,8 +216,8 @@ for (const need of ["new-folder", "new-doc", "folder-all", "tab-active", "tab-tr
 ok(main.every((s) => s.fv && s.os !== "none" && s.ow >= 2), `all ${main.length} Tab stops on the screen show a focus ring of at least 2px`);
 for (const w of [800, 400]) {
   await viewport(w, 900); await go("/documents");
-  const o = JSON.parse(await ev(`JSON.stringify({sw:document.documentElement.scrollWidth,cw:document.documentElement.clientWidth})`));
-  ok(o.sw <= o.cw, `at ${w}px: no horizontal page scroll (${o.sw}/${o.cw}); the table scrolls in its own box`);
+  const o = JSON.parse(await ev(`JSON.stringify({sw:document.documentElement.scrollWidth,cw:document.documentElement.clientWidth,wide:[...document.querySelectorAll('body *')].filter(e=>e.getBoundingClientRect().right>document.documentElement.clientWidth+1&&!e.closest('.docs-scroll')).slice(0,6).map(e=>(e.dataset.testid||e.className||e.tagName)+':'+Math.round(e.getBoundingClientRect().right))})`));
+  ok(o.sw <= o.cw, `at ${w}px: no horizontal page scroll (${o.sw}/${o.cw}); the table scrolls in its own box` + (o.wide.length ? " " + JSON.stringify(o.wide) : ""));
   await axe(`light Documents at ${w}px`);
 }
 await viewport(1440, 900);

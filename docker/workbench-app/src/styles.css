@@ -151,7 +151,7 @@ a.row:hover { background: var(--bg); }
 .tab { height: 34px; padding: 0 14px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); }
 .tab:hover { background: transparent; color: var(--fg); }
 .tab.tabon { border-bottom-color: var(--accent); color: var(--fg); font-weight: 600; }
-.docs-scroll { overflow-x: auto; }
+.docs-scroll { overflow-x: auto; position: relative; } /* holds the rows' sr-only labels: they must not widen the page */
 .docs-table td, .docs-table th { padding: 10px 16px; }
 .ttl { color: var(--fg); font-weight: 500; text-decoration: none; overflow-wrap: anywhere; }
 .ttl:hover { color: var(--accent-strong); text-decoration: underline; }
