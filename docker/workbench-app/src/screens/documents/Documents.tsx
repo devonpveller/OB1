@@ -202,7 +202,8 @@ function DocumentsFor() {
             {shown.length === 0
               ? <p className="empty docs-empty" data-testid="docs-empty">{emptyText(tab, folder, data.docs.length === 0)}</p>
               : (
-                <div className="docs-scroll">
+                // focusable so a keyboard user can scroll it sideways even when every button in it is disabled (a confirmation is open)
+                <div className="docs-scroll" tabIndex={0} role="region" aria-label="Documents table" data-testid="docs-scroll">
                   <table>
                     <thead><tr><th scope="col">Title</th><th scope="col">Folder</th><th scope="col">{tab === "trash" ? "Trashed" : "Edited"}</th><th scope="col">Linked to</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
                     <tbody>
