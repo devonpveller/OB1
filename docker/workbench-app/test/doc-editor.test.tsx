@@ -23,6 +23,10 @@ const fake = createFake({ now: () => NOW });
 let who: "alice" | "bob" = "alice";
 let bodies: { method: string; url: string; body: any; who: string }[] = [];
 let failPut = false;
+let flipAfterFile = false;
+// a slow ANSWER to the next PUT of the file (the server has applied it; the browser has not heard yet)
+let gate: Promise<void> | null = null;
+let release: () => void = () => {};
 const settings = new Map<string, { value: unknown; version: number }>();
 const CPU = "documents/k-a/Hardware/cpu.md";
 const href = (p: string) => "/documents/" + encodeURIComponent(p);
@@ -47,7 +51,17 @@ function stub() {
       settings.set(k, { value: body.value, version: n });
       return j({ key: k, value: body.value, version: n });
     }
+    if (flipAfterFile && method === "GET" && path === "/workbench/documents/file") {
+      const r = fake.handle(who, method, u, body ?? {})!;
+      flipAfterFile = false; who = "bob";
+      return j(r.body, r.status);
+    }
     if (failPut && method === "PUT" && path === "/workbench/documents/file") return j({ error: "internal" }, 500);
+    if (gate && method === "PUT" && path === "/workbench/documents/file") {
+      const r = fake.handle(who, method, u, body ?? {})!;
+      const g = gate; gate = null; await g;
+      return j(r.body, r.status);
+    }
     const r = fake.handle(who, method, u, body ?? {});
     if (r) return j(r.body, r.status);
     if (path === "/workbench/contract/sessions") return j({ sessions: [] });
@@ -73,7 +87,7 @@ const fileOf = (p = CPU) => fake.handle("alice", "GET", "/workbench/documents/fi
 const puts = () => bodies.filter((b) => b.method === "PUT" && b.url.startsWith("/workbench/documents/file"));
 
 beforeEach(() => {
-  cleanup(); clearRequestLog(); resetState(); fake.reset(); settings.clear(); who = "alice"; failPut = false;
+  cleanup(); clearRequestLog(); resetState(); fake.reset(); settings.clear(); who = "alice"; failPut = false; gate = null; flipAfterFile = false;
   window.localStorage.clear(); window.sessionStorage.clear();
   window.history.pushState({}, "", "/");
   stub();
@@ -523,6 +537,51 @@ describe("acceptance 7: two identities - bob never sees alice's text, titles, lo
       if (control === "close") expect(window.location.pathname).toBe(href(CPU));
     });
   }
+  it("F7: Unlock's Undo after a silent change of person says it sent nothing (a toast, which outlives the screen)", async () => {
+    await openDoc();
+    fireEvent.click(screen.getByTestId("doc-lock"));
+    await waitFor(() => expect(settings.get("ui.locked_document")?.value).toBe(CPU));
+    fireEvent.click(screen.getByTestId("doc-lock"));
+    await waitFor(() => expect(screen.getByTestId("toast-undo")).toBeTruthy());
+    who = "bob";
+    const n = bodies.length;
+    fireEvent.click(screen.getByTestId("toast-undo"));
+    await waitFor(() => expect(screen.getByTestId("toasts").textContent).toMatch(/Not sent: this page could not confirm/));
+    expect(writesAfter(n)).toEqual([]);
+  });
+  it("F10: the Last-document write on opening also re-reads who is signed in", async () => {
+    flipAfterFile = true; // the session becomes bob's right after the file is read, before the editor's first write
+    window.history.pushState({}, "", href(CPU));
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("doc-editor").querySelector(".cm-content")).toBeTruthy());
+    await new Promise((r) => setTimeout(r, 400));
+    expect(who).toBe("bob");
+    expect(bodies.filter((b) => b.method !== "GET" && b.url.startsWith("/workbench/settings"))).toEqual([]);
+    expect(settings.get("ui.last_document")).toBeUndefined();
+  });
+  it("F8: text typed while an autosave is in flight survives leaving by an in-app door (the leave-write is queued, not racing)", async () => {
+    await openDoc();
+    gate = new Promise<void>((r) => { release = r; });
+    type(" FIRST");
+    await new Promise((r) => setTimeout(r, 1800)); // the autosave's PUT is applied and its answer is held
+    expect(gate).toBeNull();
+    type(" SECOND");                                // typed while that save is in flight
+    act(() => { window.history.pushState({}, "", "/documents"); window.dispatchEvent(new PopStateEvent("popstate")); });
+    await waitFor(() => expect(screen.queryByTestId("doc-editor")).toBeNull());
+    release();
+    await waitFor(() => expect(fileOf().content).toMatch(/ SECOND$/));
+    expect(fileOf().content).toMatch(/ FIRST SECOND$/);
+    expect(screen.queryByTestId("toasts")?.textContent ?? "").not.toMatch(/NOT saved/);
+  });
+  it("F8: when the leave-write cannot write (changed elsewhere), the person is told by a toast, not left to find out", async () => {
+    await openDoc();
+    type(" LAST WORDS");
+    const b = fileOf();
+    fake.handle("alice", "PUT", `/workbench/documents/file?path=${CPU}`, { content: b.content + " theirs", if_match: b.hash });
+    act(() => { window.history.pushState({}, "", "/documents"); window.dispatchEvent(new PopStateEvent("popstate")); });
+    await waitFor(() => expect(screen.getByTestId("toasts").textContent).toMatch(/Your last changes to the document you just left were NOT saved: it was changed somewhere else/));
+    expect(fileOf().content).toMatch(/ theirs$/);
+  });
   it("F3: leaving the screen after a silent change of person writes nothing (pins the whoami read on the leave-write)", async () => {
     await openDoc();
     type(" ALICE-SILENT");

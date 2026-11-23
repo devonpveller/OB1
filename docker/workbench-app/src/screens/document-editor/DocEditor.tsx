@@ -72,6 +72,8 @@ export function DocEditor({ path, subject }: { path: string; subject: string }) 
 
 function Writing({ path, subject, first }: { path: string; subject: string; first: Loaded }) {
   const toast = useToast();
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
   const locked = useSyncExternalStore(subscribeState, getLockedDocument);
   const epoch0 = useRef(stateEpoch());
   const host = useRef<HTMLDivElement>(null);
@@ -87,6 +89,7 @@ function Writing({ path, subject, first }: { path: string; subject: string; firs
   const uncommitted = useRef(false); // written, but not yet a version
   const conflicted = useRef(false);
   const chain = useRef<Promise<boolean>>(Promise.resolve(true));
+  const fail = useRef<"conflict" | "error" | "person" | null>(null); // why the last doSave wrote nothing (the leave-write reads it)
   const replacing = useRef(false);   // the box is being set to the other version: not an edit by the person
 
   const [title] = useState(first.title);
@@ -106,7 +109,8 @@ function Writing({ path, subject, first }: { path: string; subject: string; firs
 
   // ── the saving machine ──
   const doSave = useCallback(async (commit: boolean): Promise<boolean> => {
-    if (conflicted.current) return false;
+    fail.current = null;
+    if (conflicted.current) { fail.current = "conflict"; return false; }
     if (!commit && !dirty.current) return true;
     if (commit && !dirty.current && !uncommitted.current) return true;
     const text = front.current + body.current;
@@ -116,6 +120,7 @@ function Writing({ path, subject, first }: { path: string; subject: string; firs
     // not send this text under the next person's sign-in
     if (!(await isSamePerson(subject))) {
       if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+      fail.current = "person";
       if (alive.current) { setStatus("error"); setError("Not saved: this page could not confirm that you are still the person who opened this document. Nothing was sent."); }
       return false;
     }
@@ -133,10 +138,12 @@ function Writing({ path, subject, first }: { path: string; subject: string; firs
     } catch (e) {
       if (e instanceof Conflict) {
         conflicted.current = true;
+        fail.current = "conflict";
         if (timer.current) { clearTimeout(timer.current); timer.current = null; }
         if (alive.current) { setStatus("conflict"); setAsking(false); }
         return false;
       }
+      fail.current = "error";
       if (alive.current) { setStatus("error"); setError(problem(e, "Not saved: the document could not be written. Your text is still here.")); }
       return false;
     }
@@ -147,10 +154,19 @@ function Writing({ path, subject, first }: { path: string; subject: string; firs
     return chain.current;
   }, [doSave]);
 
+  // EVERY write this screen makes (a save, the write on leaving, Research this, Lock / Swap / Unlock and its Undo) goes
+  // through `ifSamePerson`: it re-reads who is signed in and runs the write only for the person who opened the document
+  // (the shell notices a change of person on a 30 s timer; until then a write would leave under the next person's session)
+  const ifSamePerson = useCallback(async <T,>(write: () => Promise<T> | T): Promise<{ ran: true; value: T } | { ran: false }> => {
+    if (!(await isSamePerson(subject))) return { ran: false };
+    return { ran: true, value: await write() };
+  }, [subject]);
+  const NOT_SAME = "Not sent: this page could not confirm that you are still the person who opened this document.";
+
   // ── opening: the Last document, the version, the breadcrumb, back to the top ──
   useEffect(() => {
     alive.current = true;
-    if (getLastDocument()?.id !== path) setLastDocument({ id: path, title: first.title });
+    if (getLastDocument()?.id !== path) void ifSamePerson(() => setLastDocument({ id: path, title: first.title }));
     readVersion(path).then((v) => { if (alive.current) { setVersion(v); setSavedAt(v.at); } }, () => {});
     readRoot().then((root) => { if (alive.current) setCrumbs(crumbsOf(path, root)); });
     const main = document.getElementById("main");
@@ -158,14 +174,22 @@ function Writing({ path, subject, first }: { path: string; subject: string; firs
     return () => {
       alive.current = false;
       if (timer.current) { clearTimeout(timer.current); timer.current = null; }
-      // leaving by any in-app door writes what is unwritten, for the same person only (a change of person
-      // bumps the state epoch: nothing of theirs is sent under the next person's sign-in)
-      if (dirty.current && !conflicted.current && epoch0.current === stateEpoch()) {
-        const text = front.current + body.current, h = hash.current;
-        void isSamePerson(subject).then((same) => (same ? saveDocument(path, text, h, false) : undefined)).catch(() => {});
+      // Leaving by any in-app door writes what is unwritten, for the same person only (a change of person bumps the state
+      // epoch, and doSave re-reads whoami). The write is QUEUED on the same chain as every other save and reads the text and
+      // the hash when it RUNS, so a save still in flight (which moves the hash) cannot make it a 409 that loses the text typed
+      // since. When it still cannot write, the person is told by a toast (this screen is gone): the text was not saved.
+      if (epoch0.current === stateEpoch()) {
+        const say = toastRef.current;
+        void save(false).then((ok) => {
+          if (!ok && (fail.current === "conflict" || fail.current === "error") && dirty.current) {
+            say({ message: fail.current === "conflict"
+              ? "Your last changes to the document you just left were NOT saved: it was changed somewhere else, and nothing was overwritten."
+              : "Your last changes to the document you just left were NOT saved: the write failed. Reopen the document and check its text.", ms: 20000 });
+          }
+        });
       }
     };
-  }, [path, subject, first.title]);
+  }, [path, subject, first.title, save, ifSamePerson]);
 
   // a warning when the page itself is closed with text that was not written
   useEffect(() => {
@@ -181,14 +205,6 @@ function Writing({ path, subject, first }: { path: string; subject: string; firs
     const order = [...new Set(protectedSpans(body.current).map((x) => x.reference_id))];
     setDrawer({ kind: "reference", id: s.reference_id, n: order.indexOf(s.reference_id) + 1 });
   }, []);
-  // EVERY write this screen makes (a save, the write on leaving, Research this, Lock / Swap / Unlock and its Undo) goes
-  // through `ifSamePerson`: it re-reads who is signed in and runs the write only for the person who opened the document
-  // (the shell notices a change of person on a 30 s timer; until then a write would leave under the next person's session)
-  const ifSamePerson = useCallback(async <T,>(write: () => Promise<T> | T): Promise<{ ran: true; value: T } | { ran: false }> => {
-    if (!(await isSamePerson(subject))) return { ran: false };
-    return { ran: true, value: await write() };
-  }, [subject]);
-  const NOT_SAME = "Not sent: this page could not confirm that you are still the person who opened this document.";
   const research = useCallback(() => {
     const text = selRef.current.trim();
     if (!text) return;
@@ -280,7 +296,13 @@ function Writing({ path, subject, first }: { path: string; subject: string; firs
       const r = await ifSamePerson(() => setLockedDocumentSaved(null));
       if (!r.ran) { setLockErr(NOT_SAME); return; }
       if (!r.value) { setLockErr("The unlock could not be saved."); return; }
-      toast({ message: "Unlocked.", onUndo: () => { if (stateEpoch() === epoch) void ifSamePerson(() => setLockedDocumentSaved(was)); } });
+      toast({ message: "Unlocked.", onUndo: () => {
+        if (stateEpoch() !== epoch) return;
+        // a toast, not setLockErr: the toast outlives this screen, where `alive` may be false
+        void ifSamePerson(() => setLockedDocumentSaved(was)).then((u) => {
+          if (!u.ran) toast({ message: NOT_SAME }); else if (!u.value) toast({ message: "The lock could not be put back." });
+        });
+      } });
       return;
     }
     const r = await ifSamePerson(() => setLockedDocumentSaved({ id: path, title }));

@@ -12,23 +12,23 @@ Every package below can be part of the shipped app bundle; each keeps its notice
 | @codemirror/lang-javascript | 6.2.5 | MIT |
 | @codemirror/lang-markdown | 6.5.2 | MIT |
 | @codemirror/language | 6.13.1 | MIT |
-| @codemirror/lint | 6.9.8 | MIT |
+| @codemirror/lint | 6.9.7 | MIT |
 | @codemirror/state | 6.7.6 | MIT |
 | @codemirror/streamparser | 6.0.0 | MIT |
 | @codemirror/view | 6.43.15 | MIT |
-| @lezer/common | 1.5.6 | MIT |
+| @lezer/common | 1.5.4 | MIT |
 | @lezer/css | 1.3.9 | MIT |
 | @lezer/highlight | 1.2.5 | MIT |
 | @lezer/html | 1.3.13 | MIT |
 | @lezer/javascript | 1.5.6 | MIT |
-| @lezer/lr | 1.4.12 | MIT |
+| @lezer/lr | 1.4.11 | MIT |
 | @lezer/markdown | 1.8.1 | MIT |
 | @marijn/find-cluster-break | 1.0.4 | MIT |
 | crelt | 1.0.7 | MIT |
 | react | 19.3.1 | MIT |
 | react-dom | 19.3.1 | MIT |
 | scheduler | 0.28.0 | MIT |
-| style-mod | 4.1.5 | MIT |
+| style-mod | 4.1.4 | MIT |
 | w3c-keyname | 2.2.8 | MIT |
 
 ## @codemirror/autocomplete 6.20.4 (MIT)
@@ -213,7 +213,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## @codemirror/lint 6.9.8 (MIT)
+## @codemirror/lint 6.9.7 (MIT)
 
 ```
 MIT License
@@ -317,7 +317,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## @lezer/common 1.5.6 (MIT)
+## @lezer/common 1.5.4 (MIT)
 
 ```
 MIT License
@@ -447,7 +447,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-## @lezer/lr 1.4.12 (MIT)
+## @lezer/lr 1.4.11 (MIT)
 
 ```
 MIT License
@@ -627,7 +627,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## style-mod 4.1.5 (MIT)
+## style-mod 4.1.4 (MIT)
 
 ```
 Copyright (C) 2018 by Marijn Haverbeke <marijn@haverbeke.berlin> and others

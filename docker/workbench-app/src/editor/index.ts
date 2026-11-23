@@ -1,6 +1,6 @@
 // The writing surface's editor: CodeMirror 6 (pinned by package-lock.json) with the legacy notes
 // editor's parity set (D12 items 1-4: live preview, [[ autocomplete, link hover popover, the cursor
-// toolbar, the standard keymap, undo/redo history, tab indent, the placeholder) and the P2b
+// toolbar, the standard keymap, undo/redo history, (Tab leaves the box; Mod-[ and Mod-] indent), the placeholder) and the P2b
 // reference behaviour (protected transclusions, chips, the deliberate break, stale flags, inject
 // at the cursor, mirror a selection to the panels).
 import { EditorSelection, EditorState } from "@codemirror/state";
