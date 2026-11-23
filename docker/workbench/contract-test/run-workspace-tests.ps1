@@ -487,7 +487,7 @@ try {
   $null = Stamp-Guard 'DISABLE'   # rw-inlet-stamp: the test plants a legacy (unowned) idea thought
   Write-Host '[5h] the ideas and refinery view integration test (owner-checked idea functions, the dossier into the room, archive, user sources)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault", '-e', 'DOCS_TEST_VAULT=/vault',
-    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
+    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key", '-e', "DOCS_TEST_SERVICE_KEY=$svcKey",
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/ideas/ideas_integration_test.ts')
   $null = Stamp-Guard 'ENABLE ALWAYS'
