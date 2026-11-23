@@ -372,8 +372,8 @@ t("C7: grounded-in links to private sources are visible only to their owner (als
   // B: nowhere (by id, in lists, the shared pool, copying is refused as missing)
   for (const r of [await asB("GET", `/presenters/${W.presenter}`), await asB("GET", "/presenters?scope=shared"), await asB("GET", "/presenters"),
     await asB("POST", `/presenters/${W.presenter}/copy`)]) {
-    assert(!r.text.includes(PRIV), "B never sees the private link");
-    noMarkers("B", r.text);
+    // (B legitimately holds C2's copies of what A shared then - stance and all; what must never reach B is the private link)
+    assert(!r.text.includes(PRIV) && !r.text.includes(M.privTitle), "B never sees the private link or its title");
   }
   // even if the database held a shared presenter with such a link (the check script's rule), B's read omits it
   await sql(`UPDATE public.podcast_presenters SET shared = true WHERE id = $1`, [mycopy.json.id]);
@@ -426,7 +426,15 @@ t("C9: nothing private from this item reaches a shared surface - shared search, 
       for (const path of [`/workbench/contract/search?q=${encodeURIComponent(m)}`, `/workbench/search?q=${encodeURIComponent(m)}`]) {
         const r = await fetch(`${BASE}${path}`, { headers: { "x-brain-key": KEY, [SUB_HEADER]: who } });
         const text = await r.text();
-        assert(!text.includes(m) || r.status >= 400, `${path} as ${who === A ? "A" : "B"} answers ${r.status} with the marker`);
+        if (r.status >= 400) continue;
+        let body: any = null;
+        try {
+          body = JSON.parse(text);
+        } catch { /* not json */ }
+        // a search answers its own query back (query: the marker): judge everything else it says
+        if (body && typeof body === "object" && body.query === m) delete body.query;
+        const rest = body === null ? text : JSON.stringify(body);
+        assert(!rest.includes(m), `${path} as ${who === A ? "A" : "B"} answers ${r.status} with the marker outside its query echo`);
       }
     }
   }

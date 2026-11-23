@@ -47,7 +47,7 @@ export function castError(e: unknown): unknown {
 }
 
 // ── voice links ───────────────────────────────────────────────────────────────────────────────
-const VOICE_COLS = `v.id, v.route, v.voice, v.speed::float8 AS speed, v.created_at, v.updated_at,
+const VOICE_COLS = `v.id, v.route, v.voice, round(v.speed::numeric, 3)::float8 AS speed, v.created_at, v.updated_at,
   COALESCE((SELECT json_agg(json_build_object('id', p.id, 'name', p.name) ORDER BY p.name, p.id)
               FROM public.podcast_presenters p WHERE p.voice_link_id = v.id AND p.owner_sub = v.owner_sub), '[]'::json) AS used_by`;
 
@@ -102,7 +102,7 @@ export async function deleteVoice(db: Db, sub: string, id: string) {
 // a SHARED source (a link to anything else - a private source - is the owner's alone).
 const PRESENTER_COLS = `p.id, p.name, p.personality, p.backstory, p.language, p.role, p.focus, p.stance, p.tone, p.speaking_style,
   p.system_prompt, p.system_prompt_mode, CASE WHEN p.owner_sub = $1 THEN p.notes END AS notes,
-  json_build_object('id', v.id, 'route', v.route, 'voice', v.voice, 'speed', v.speed) AS voice,
+  json_build_object('id', v.id, 'route', v.route, 'voice', v.voice, 'speed', round(v.speed::numeric, 3)) AS voice,
   COALESCE((SELECT json_agg(json_build_object('kind', g.kind, 'ref', g.ref, 'title', s.title, 'is_shared', s.id IS NOT NULL) ORDER BY g.position)
               FROM public.podcast_presenter_grounding g
               LEFT JOIN public.sources s ON g.kind = 'source' AND s.id::text = g.ref

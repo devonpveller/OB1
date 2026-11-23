@@ -355,7 +355,7 @@ try {
   Save 'dredd-cast.log' $clean
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '^(fail|error):|^\s+(expected|real|body)' } | Select-Object -First 40) { Write-Host "    $l" }
   $dm = ([regex]'complete: (\d+) passing, (\d+) failing, (\d+) errors, (\d+) skipped, (\d+) total').Match($clean)
-  Check ($dm.Success -and $dm.Groups[2].Value -eq '0' -and $dm.Groups[3].Value -eq '0' -and $dm.Groups[4].Value -eq '0' -and $castOps -eq 26 -and $castNames.Count -eq $castOps -and [int]$dm.Groups[1].Value -eq $castOps) "Dredd over the cast routes: $($dm.Value) (cast operations in the document: $castOps; 2xx transactions named: $($castNames.Count); none skipped)"
+  Check ($dm.Success -and $dm.Groups[2].Value -eq '0' -and $dm.Groups[3].Value -eq '0' -and ([int]$dm.Groups[5].Value - [int]$dm.Groups[4].Value) -eq $castOps -and $castOps -eq 26 -and $castNames.Count -eq $castOps -and [int]$dm.Groups[1].Value -eq $castOps) "Dredd over the cast routes: $($dm.Value) (cast operations in the document: $castOps; 2xx transactions named: $($castNames.Count); every cast one run, the rest left out by --only)"
   Save 'workbench.log' (Dk logs --tail 120 "$P-wb")
 } catch {
   Fail "the run stopped: $_"
