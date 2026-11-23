@@ -326,7 +326,7 @@ describe("acceptance 6: Close then open from Documents reopens the same document
     expect(view().state.selection.main.head).toBe(0);
     expect(text()).toBe("ALPHA body of the CPU plan.\nSecond line.\nclosing words");
     expect(screen.getByTestId("main").scrollTop).toBe(0);
-    expect(version()).toMatch(/^v2 /); // Close made a version of the unsaved change
+    await waitFor(() => expect(version()).toMatch(/^v2 /)); // Close made a version of the unsaved change (the history read lands a moment after the box)
   });
   it("Close writes the autosave-only text into a version, and with nothing changed sends nothing at all", async () => {
     await openDoc();
