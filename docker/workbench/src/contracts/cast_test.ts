@@ -106,6 +106,11 @@ Deno.test("a database refusal becomes a fixed message: no row text, no value, re
   const dup = castError(pg("23505", 'duplicate key value violates unique constraint "podcast_teams_owner_sub_name_key" DETAIL: Key (owner_sub, name)=(sub-a, SecretTeamName)'));
   assert(dup instanceof Conflict);
   assertEquals((dup as Error).message.includes("SecretTeamName"), false);
+  // the one-default-format index is its own message (not "name already taken")
+  const def = castError(Object.assign(new Error("dup"), { fields: { code: "23505", constraint: "uq_podcast_formats_default", message: 'duplicate key value violates unique constraint "uq_podcast_formats_default"' } }));
+  assert(def instanceof Conflict);
+  assert(/default format/.test((def as Error).message) && !/name/.test((def as Error).message), (def as Error).message);
+  assert(/name is already taken/.test((dup as Error).message));
   assert(castError(pg("23503", "violates foreign key")) instanceof Conflict);
   assert(castError(pg("23514", "violates check")) instanceof BadRequest);
   const other = new Error("x");

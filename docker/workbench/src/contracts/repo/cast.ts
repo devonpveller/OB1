@@ -12,6 +12,7 @@
 //   * Sharing never exposes an unshared row: a presenter that links a private source cannot be shared (Q12), a team
 //     only with every member shared, a format only with its team shared; and the reverse (unsharing a presenter of a
 //     shared team, adding an unshared presenter to one) is refused while it would.
+//   * The two share rules above hold under concurrent requests of one owner, by lock order (LOCK ORDER below).
 //   * A team is at most 26 seats in order: up to 25 presenters (HOST A ...) plus the user's seat.
 //   * A presenter in a team cannot be deleted until it is taken out; a team with formats, episodes or render
 //     requests cannot be deleted (existing episodes keep their team); a voice link voicing a presenter neither.
@@ -39,8 +40,15 @@ const READ_ONLY = (what: string) => `a shared ${what} is read-only: copy it to m
 
 // A database refusal as a fixed message: the row's text never reaches a log or another user.
 export function castError(e: unknown): unknown {
-  const code = (e as { fields?: { code?: string } })?.fields?.code;
-  if (code === "23505") return new Conflict("that name is already taken by one of yours");
+  const f = (e as { fields?: { code?: string; constraint?: string; message?: string } })?.fields;
+  const code = f?.code;
+  if (code === "23505") {
+    // the one-default-format index is not a name clash (two requests setting a default at the same moment)
+    if ((f?.constraint ?? "") === "uq_podcast_formats_default" || (f?.message ?? "").includes("uq_podcast_formats_default")) {
+      return new Conflict("another default format was set at the same moment: try again");
+    }
+    return new Conflict("that name is already taken by one of yours");
+  }
   if (code === "23503") return new Conflict("it is still in use");
   if (code === "23514") return new BadRequest("a value is out of range");
   return e;
@@ -230,6 +238,18 @@ async function sharedTeamsOf(db: Db, sub: string, presenterId: string) {
   );
 }
 
+// LOCK ORDER. Two share rules must hold between transactions, not only inside one: a shared team never holds an unshared
+// presenter, a shared format never an unshared team. Each is a check in one request against a row another request
+// changes, so a plain read in both lets both commit (write skew). Every writer therefore takes row locks by LEVEL:
+//   format (FOR UPDATE via writable) > team (FOR UPDATE via writable, or FOR SHARE via ownTeam) > presenter (FOR UPDATE via
+//   writable, or FOR SHARE via checkMembers).
+// A transaction asks for a lock only of a LOWER level than any it holds (updateFormat: format, then its team; updateTeam /
+// createTeam: team, then the members, in id order; updatePresenter / deletePresenter: only the presenter). The waits-for
+// graph can only point down a level (or, within a level, at a lock whose holder asks for nothing), so it has no cycle: no
+// deadlock. The share rules then serialise: the side that unshares (FOR UPDATE on the row it changes) and the side that
+// relies on "shared" (FOR SHARE on the same row) conflict; whichever commits first, the other re-reads the committed row
+// (READ COMMITTED: a blocked locking read returns the new version) and the unshare path's membership check is a new
+// statement after the add committed, so it sees the member: one of the two is refused (409).
 export interface PresenterIn {
   name?: string;
   voice_id?: string;
@@ -416,7 +436,8 @@ async function checkMembers(db: Db, sub: string, members: string[], seat: number
   if (members.length + 1 > MAX_SEATS) throw new BadRequest(`a team has at most ${MAX_SEATS} seats: ${MAX_SEATS - 1} presenters and yours`);
   if (seat !== undefined && (seat < 0 || seat > members.length)) throw new BadRequest(`user_seat is 0 .. ${members.length} (the number of presenters)`);
   const own = await db.query<{ id: string; shared: boolean; name: string }>(
-    `SELECT id, shared, name FROM public.podcast_presenters WHERE id = ANY($1::text[]) AND owner_sub = $2`, [members, sub],
+    // FOR SHARE: a concurrent unshare of one of them (FOR UPDATE in updatePresenter) waits for this transaction, then sees it
+    `SELECT id, shared, name FROM public.podcast_presenters WHERE id = ANY($1::text[]) AND owner_sub = $2 ORDER BY id FOR SHARE`, [members, sub],
   );
   if (own.length !== members.length) throw new NotFound(NO_SUCH.presenter);
   return own;
@@ -513,13 +534,13 @@ async function uniqueName(t: Db, table: string, sub: string, base: string): Prom
 async function copyTeamRow(t: Db, sub: string, src: Row): Promise<string> {
   const members = await t.query<Row>(
     `SELECT p.* FROM public.podcast_team_members m JOIN public.podcast_presenters p ON p.id = m.presenter_id AND p.owner_sub = $2
-      WHERE m.team_id = $1 ORDER BY m.position`, [src.id, src.owner_sub],
-  );
+      WHERE m.team_id = $1 AND ($3 OR p.shared) ORDER BY m.position`, [src.id, src.owner_sub, src.owner_sub === sub],
+  ); // another user's team brings only its SHARED presenters (defence in depth: the share rules keep a shared team's all shared)
   const ids: string[] = [];
   for (const p of members) ids.push(await copyPresenterRow(t, sub, p));
   const id = newId("team");
   await t.query(`INSERT INTO public.podcast_teams (id, owner_sub, name, description, user_seat, shared, copied_from) VALUES ($1, $2, $3, $4, $5, false, $6)`,
-    [id, sub, await uniqueName(t, "podcast_teams", sub, String(src.name)), src.description, src.user_seat ?? null, src.id]);
+    [id, sub, await uniqueName(t, "podcast_teams", sub, String(src.name)), src.description, src.user_seat === null || src.user_seat === undefined ? null : Math.min(Number(src.user_seat), ids.length), src.id]);
   await writeMembers(t, id, ids);
   return id;
 }
@@ -572,7 +593,7 @@ async function checkFormatRegistries(reg: RegistryReader, b: FormatIn) {
 }
 
 async function ownTeam(t: Db, sub: string, id: string) {
-  const r = (await t.query<{ id: string; shared: boolean; name: string }>(`SELECT id, shared, name FROM public.podcast_teams WHERE id = $1 AND owner_sub = $2`, [id, sub]))[0];
+  const r = (await t.query<{ id: string; shared: boolean; name: string }>(`SELECT id, shared, name FROM public.podcast_teams WHERE id = $1 AND owner_sub = $2 FOR SHARE`, [id, sub]))[0]; // FOR SHARE: see LOCK ORDER
   if (!r) throw new NotFound(NO_SUCH.team);
   return r;
 }

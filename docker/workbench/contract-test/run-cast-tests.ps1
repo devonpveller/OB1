@@ -248,7 +248,7 @@ try {
   Check (Wait-Http "http://$P-wb:8000/health" 90) "$P-wb is up (DB role $($wbDb.role))"
   Check (Wait-Http "http://openbrain-postgrest:3000/" 60) 'PostgREST is up'
 
-  Write-Host '[5a] the cast integration test (C1-C12)'
+  Write-Host '[5a] the cast integration test (C1-C16)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
     '-e', "CAST_TEST_BASE=http://$P-wb:8000", '-e', "CAST_TEST_KEY=$key", '-e', 'CAST_TEST_REST=http://openbrain-postgrest:3000',
     '-e', 'CAST_TEST_RECIPES=/recipes', '-e', 'CAST_TEST_MARKER_OUT=/out/markers.txt',
@@ -259,7 +259,7 @@ try {
   Save 'cast-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED|ignored)|^(ok|FAILED) \||^C\d+:|error:|Assertion|=> |^\s+at ' } | Select-Object -First 200) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED|ignored)' }) { Write-Host "    $l" }
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed(?: \| (\d+) ignored)?').Match($clean)
-  Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 13 -and (-not $sum.Groups[4].Success -or $sum.Groups[4].Value -eq '0')) "the cast integration test: C1-C12 and the pool close, none ignored ($($sum.Value))"
+  Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 17 -and (-not $sum.Groups[4].Success -or $sum.Groups[4].Value -eq '0')) "the cast integration test: C1-C16 and the pool close, none ignored ($($sum.Value))"
   $null = Dk cp (Join-Path $dockerDir 'check-cast.sql') "${db}:/tmp/check-cast.sql"
   $chk = (Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/check-cast.sql | Out-String)
   Save 'check-cast-lab.log' $chk
@@ -332,6 +332,23 @@ try {
   $revObjs = (Get-Content -Raw (Join-Path $dockerDir 'revert-cast.sql'))
   Check (($revObjs -notmatch '(?i)DROP TABLE[^;]*(podcast_(presenters|teams|formats|voice_links|team_members|episodes|render_requests)\b|sources|claims|thoughts)')) 'the revert drops no table of slot 330 or of the shared knowledge'
   Save 'schema-roundtrip.log' "forward-twice identical: $($d1 -eq $d1b); revert byte-identical: $($d0b -eq $d0); rows unchanged: $($rows1 -eq $rows0); forward-after-revert identical: $($d2 -eq $d1)"
+
+  Write-Host '[5e] check-cast.sql can FAIL on bad data: each data rule planted alone (one rolled-back transaction each) prints its own FAIL'
+  $null = Dk cp (Join-Path $ct 'check-cast-plant.sql') "${db}:/tmp/check-cast-plant.sql"
+  $plantOut = ''
+  foreach ($rule in @('shared_presenter_private_links', 'shared_team_unshared_members', 'shared_format_unshared_team', 'grounding_cross_owner',
+      'team_member_cross_owner', 'format_team_cross_owner', 'voice_cross_owner', 'owners_with_two_defaults', 'teams_over_26_seats',
+      'columns_missing', 'grounding_table_without_rls', 'registry_entries')) {
+    $po = (Dk exec $db psql -U postgres -d openbrain -X -A -t -q -v ON_ERROR_STOP=1 -v "rule=$rule" -v check=/tmp/check-cast.sql -f /tmp/check-cast-plant.sql | Out-String)
+    $plantOut += "== $rule`n$po`n"
+    Check (($po -match "check: FAIL \($rule\)") -and ($po -notmatch 'check: OK') -and ($po -notmatch 'malformed array')) "planted $rule -> check: FAIL ($rule)"
+  }
+  $po = (Dk exec $db psql -U postgres -d openbrain -X -A -t -q -v ON_ERROR_STOP=1 -v rule=none -v check=/tmp/check-cast.sql -f /tmp/check-cast-plant.sql | Out-String)
+  $plantOut += "== none (control: the clean base)`n$po`n"
+  Check ($po -match 'check: OK' -and $po -notmatch 'check: FAIL') 'control: the clean planted base alone prints check: OK'
+  Save 'check-cast-plant.log' $plantOut
+  $chk2 = (Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/check-cast.sql | Out-String)
+  Check ($chk2 -match 'check: OK' -and $chk2 -notmatch 'check: FAIL' -and (Psql $db "select count(*) from public.podcast_presenters where id like 'cc-%'") -eq '0') 'the plants were rolled back: check-cast OK again, no cc- row left'
 
   Write-Host '[5d] Dredd over the cast routes (generated/openapi.json against the lab workbench; hooks as the contract run)'
   $dreddTag = "rw-dredd:wt-$short"

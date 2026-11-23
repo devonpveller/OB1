@@ -3,7 +3,7 @@
 // its disposable lab (the real initdb chain incl. 560-init-cast.sql, fixtures.sql, the :wt workbench logged in as
 // ob_workbench with WORKSPACE_IDENTITY_HEADER=X-Test-Sub, PostgREST + the rest Caddy). Never point it at a live stack.
 //
-// C1..C12 name the acceptance statements (test-plans/rwr-cast-edit-api.md). A and B are fresh lab subjects per run.
+// C1..C16 name the acceptance statements (test-plans/rwr-cast-edit-api.md). A and B are fresh lab subjects per run.
 // Environment: CAST_TEST_BASE, CAST_TEST_KEY, CAST_TEST_SUB_HEADER (default X-Test-Sub), CAST_TEST_REST (the lab's
 // PostgREST root, for C5), CAST_TEST_RECIPES (the recipes mount, for C5), CAST_TEST_MARKER_OUT (a file the run writes
 // its planted markers to, so the runner can search the workbench's log for them),
@@ -500,6 +500,178 @@ t("C12: voice links - a change re-voices the presenters it voices", async () => 
   assertEquals([v.status, v.json.voice, v.json.speed], [200, "bf_emma", 0.9]);
   assert(v.json.used_by.some((u: any) => u.id === W.presenter));
   assertEquals((await asA("GET", `/presenters/${W.presenter}`)).json.voice.voice, "bf_emma");
+});
+
+// ── C13-C16: the share rules hold under concurrent requests of the owner (found by the tester, attempt 1) ──────────────────
+// A shared team never holds an unshared presenter; a shared format never an unshared team. Each is checked by one request
+// against a row another request changes: repo/cast.ts "LOCK ORDER" serialises them. Statuses of a race are only ever 200 or
+// 409 (never a 500: no deadlock), and the invariant holds in the database after every one.
+const sharedPresenter = async (name: string) => {
+  const p = await asA("POST", "/presenters", { name, voice_id: W.voice, stance: M.stance });
+  assertEquals(p.status, 201, p.text);
+  assertEquals((await share("presenters", p.json.id)).status, 200);
+  return p.json.id as string;
+};
+const sharedTeam = async (name: string, members: string[]) => {
+  const tm = await asA("POST", "/teams", { name, members });
+  assertEquals(tm.status, 201, tm.text);
+  assertEquals((await share("teams", tm.json.id)).status, 200);
+  return tm.json.id as string;
+};
+const teamHoldsUnshared = async (teamId: string) => (await sql(
+  `SELECT count(*)::int AS n FROM public.podcast_team_members m JOIN public.podcast_teams t ON t.id = m.team_id
+     JOIN public.podcast_presenters p ON p.id = m.presenter_id WHERE t.id = $1 AND t.shared AND NOT p.shared`, [teamId]))[0].n;
+const formatOnUnsharedTeam = async (formatId: string) => (await sql(
+  `SELECT count(*)::int AS n FROM public.podcast_formats f JOIN public.podcast_teams t ON t.id = f.team_id WHERE f.id = $1 AND f.shared AND NOT t.shared`, [formatId]))[0].n;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+t("C13: a shared team never ends up holding an unshared presenter (add-to-shared-team vs unshare, fixed ordering and 30 natural races)", async () => {
+  await setup();
+  // (a) the add has read the presenter and waits at its member rewrite (a test-held lock on the team's member rows) while the unshare runs
+  {
+    const p1 = await sharedPresenter(`c13-one-${RUN}`);
+    const p3 = await sharedPresenter(`c13-three-${RUN}`);
+    const tm = await sharedTeam(`c13-team-${RUN}`, [p1]);
+    const c = await pool!.connect();
+    let add: Promise<Res>, unshare: Promise<Res>;
+    try {
+      await c.queryArray("BEGIN");
+      await c.queryArray("SELECT 1 FROM public.podcast_team_members WHERE team_id = $1 FOR UPDATE", [tm]);
+      add = asA("PATCH", `/teams/${tm}`, { members: [p1, p3] });
+      await sleep(1500);
+      unshare = asA("PATCH", `/presenters/${p3}`, { shared: false });
+      await sleep(1500);
+    } finally {
+      await c.queryArray("COMMIT");
+      c.release();
+    }
+    const [a, u] = [await add!, await unshare!];
+    assertEquals(await teamHoldsUnshared(tm), 0, `add ${a.status}, unshare ${u.status}: a shared team holds an unshared presenter`);
+    assertEquals([a.status, u.status].sort(), [200, 409], `exactly one of the two wins: add ${a.status} ${a.text} / unshare ${u.status} ${u.text}`);
+    // what B copies carries nothing of an unshared presenter: every presenter of B's copy was shared at the source
+    const bc = await asB("POST", `/teams/${tm}/copy`);
+    assertEquals(bc.status, 201, bc.text);
+    const srcShared = (await sql(`SELECT count(*)::int AS n FROM public.podcast_team_members m JOIN public.podcast_presenters p ON p.id = m.presenter_id WHERE m.team_id = $1 AND p.shared`, [tm]))[0].n;
+    const copied = (await sql(`SELECT count(*)::int AS n FROM public.podcast_team_members WHERE team_id = $1`, [bc.json.id]))[0].n;
+    assertEquals(copied, srcShared, "B's copy has exactly the shared presenters of the team");
+  }
+  // (b) the other order: the unshare has committed between the add's request and its member check (the add waits on the row, then re-reads)
+  {
+    const p1 = await sharedPresenter(`c13b-one-${RUN}`);
+    const p3 = await sharedPresenter(`c13b-three-${RUN}`);
+    const tm = await sharedTeam(`c13b-team-${RUN}`, [p1]);
+    const c = await pool!.connect();
+    let add: Promise<Res>;
+    try {
+      await c.queryArray("BEGIN");
+      await c.queryArray("UPDATE public.podcast_presenters SET shared = false WHERE id = $1", [p3]);
+      add = asA("PATCH", `/teams/${tm}`, { members: [p1, p3] });
+      await sleep(1500);
+    } finally {
+      await c.queryArray("COMMIT");
+      c.release();
+    }
+    const a = await add!;
+    assertEquals(a.status, 409, `the add after a committed unshare is refused: ${a.text}`);
+    assertEquals(await teamHoldsUnshared(tm), 0);
+  }
+  // (c) natural: the same two requests fired together, 30 times: 200/409 only, the invariant after every one
+  const wins = [0, 0];
+  for (let i = 0; i < 30; i++) {
+    const p1 = await sharedPresenter(`c13n-${i}a-${RUN}`);
+    const p3 = await sharedPresenter(`c13n-${i}b-${RUN}`);
+    const tm = await sharedTeam(`c13n-${RUN}-${i}`, [p1]);
+    const [x, y] = await Promise.all([asA("PATCH", `/teams/${tm}`, { members: [p1, p3] }), asA("PATCH", `/presenters/${p3}`, { shared: false })]);
+    assert([200, 409].includes(x.status) && [200, 409].includes(y.status), `race ${i}: ${x.status} ${y.status} ${x.text} ${y.text}`);
+    assertEquals(await teamHoldsUnshared(tm), 0, `race ${i}: add ${x.status}, unshare ${y.status}: a shared team holds an unshared presenter`);
+    if (x.status === 200) wins[0]++;
+    if (y.status === 200) wins[1]++;
+  }
+  console.log(`C13 natural: add won ${wins[0]}, unshare won ${wins[1]} of 30`);
+});
+
+t("C14: a shared format never ends up on an unshared team (share-the-format vs unshare-its-team, fixed ordering and 30 natural races)", async () => {
+  await setup();
+  const mkFormat = async (tag: string) => {
+    const p = await sharedPresenter(`c14-${tag}-p-${RUN}`);
+    const tm = await sharedTeam(`c14-${tag}-t-${RUN}`, [p]);
+    const f = await asA("POST", "/formats", { name: `c14-${tag}-f-${RUN}`, team_id: tm });
+    assertEquals(f.status, 201, f.text);
+    const pv = await asA("GET", `/formats/${f.json.id}/share-preview`);
+    assertEquals(pv.status, 200, pv.text);
+    return { tm, f: f.json.id as string, digest: pv.json.share_digest as string };
+  };
+  // (a) the team's unshare has committed between the share request and its team check (the share waits on the team row, then re-reads)
+  {
+    const x = await mkFormat("fixed");
+    const c = await pool!.connect();
+    let sh: Promise<Res>;
+    try {
+      await c.queryArray("BEGIN");
+      await c.queryArray("UPDATE public.podcast_teams SET shared = false WHERE id = $1", [x.tm]);
+      sh = asA("PATCH", `/formats/${x.f}`, { shared: true, share_digest: x.digest });
+      await sleep(1500);
+    } finally {
+      await c.queryArray("COMMIT");
+      c.release();
+    }
+    const r = await sh!;
+    assertEquals(r.status, 409, `sharing a format whose team was just unshared is refused: ${r.text}`);
+    assertEquals(await formatOnUnsharedTeam(x.f), 0);
+  }
+  // (b) natural, 30 times
+  for (let i = 0; i < 30; i++) {
+    const x = await mkFormat(`n${i}`);
+    const [a, b] = await Promise.all([asA("PATCH", `/formats/${x.f}`, { shared: true, share_digest: x.digest }), asA("PATCH", `/teams/${x.tm}`, { shared: false })]);
+    assert([200, 409].includes(a.status) && [200, 409].includes(b.status), `race ${i}: ${a.status} ${b.status} ${a.text} ${b.text}`);
+    assertEquals(await formatOnUnsharedTeam(x.f), 0, `race ${i}: share ${a.status}, unshare team ${b.status}: a shared format sits on an unshared team`);
+  }
+});
+
+t("C15: an unshared presenter cannot join an already-shared team; a shared format cannot move to an unshared team; a copy of a team brings only shared presenters", async () => {
+  await setup();
+  const p1 = await sharedPresenter(`c15-one-${RUN}`);
+  const priv = await asA("POST", "/presenters", { name: `c15-private-${RUN}`, voice_id: W.voice, stance: M.stance });
+  assertEquals(priv.status, 201, priv.text);
+  const tm = await sharedTeam(`c15-team-${RUN}`, [p1]);
+  const add = await asA("PATCH", `/teams/${tm}`, { members: [p1, priv.json.id] });
+  assertEquals(add.status, 409, add.text);
+  assert(add.text.includes(`c15-private-${RUN}`), "the refusal names the unshared presenter to its owner");
+  assertEquals((await sql(`SELECT count(*)::int AS n FROM public.podcast_team_members WHERE team_id = $1`, [tm]))[0].n, 1, "the team is unchanged");
+  assertEquals(await teamHoldsUnshared(tm), 0);
+  // a shared format moved onto an unshared team
+  const f = await asA("POST", "/formats", { name: `c15-f-${RUN}`, team_id: tm });
+  assertEquals((await share("formats", f.json.id)).status, 200);
+  const priv1 = await asA("POST", "/teams", { name: `c15-private-team-${RUN}`, members: [p1] });
+  assertEquals(priv1.status, 201, priv1.text);
+  const mv = await asA("PATCH", `/formats/${f.json.id}`, { team_id: priv1.json.id });
+  assertEquals(mv.status, 409, mv.text);
+  assertEquals(await formatOnUnsharedTeam(f.json.id), 0);
+  // defence in depth: were a shared team to hold an unshared presenter (planted here by the superuser), another user's copy still
+  // brings only the shared ones (nothing of the unshared presenter reaches B)
+  await sql(`INSERT INTO public.podcast_team_members (team_id, position, presenter_id) VALUES ($1, 1, $2)`, [tm, priv.json.id]);
+  try {
+    const bc = await asB("POST", `/teams/${tm}/copy`);
+    assertEquals(bc.status, 201, bc.text);
+    const rows = await sql<{ name: string }>(
+      `SELECT p.name FROM public.podcast_team_members m JOIN public.podcast_presenters p ON p.id = m.presenter_id WHERE m.team_id = $1 ORDER BY m.position`, [bc.json.id]);
+    assertEquals(rows.map((r) => r.name), [`c15-one-${RUN}`], "B's copy has the shared presenter only");
+    assert(!bc.text.includes(`c15-private-${RUN}`), "B never sees the unshared presenter's name");
+    assertEquals(bc.json.seats, 2, "the copy's seats follow its members (one presenter and the user)");
+  } finally {
+    await sql(`DELETE FROM public.podcast_team_members WHERE team_id = $1 AND presenter_id = $2`, [tm, priv.json.id]);
+  }
+});
+
+t("C16: two requests setting a default format at the same moment: the loser is told so, not 'name already taken'", async () => {
+  await setup();
+  const rs = await Promise.all([...Array(8).keys()].map((i) => asA("POST", "/formats", { name: `c16-${RUN}-${i}`, team_id: W.team, is_default: true })));
+  for (const r of rs) assert(r.status === 201 || r.status === 409, `${r.status} ${r.text}`);
+  for (const r of rs.filter((x) => x.status === 409)) {
+    assert(!/name is already taken/.test(r.text), `a default-format clash is not a name clash: ${r.text}`);
+    assert(/default format/.test(r.text), r.text);
+  }
+  assertEquals((await sql(`SELECT count(*)::int AS n FROM public.podcast_formats WHERE owner_sub = $1 AND is_default`, [A]))[0].n, 1);
 });
 
 t("closes the pool", async () => {
