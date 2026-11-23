@@ -9,7 +9,7 @@ import { type AdmissionScorer, decideReopen } from "../logic/reopen.ts";
 import type { MetadataFilter } from "../logic/scope.ts";
 import type { RegistryReader } from "../registry.ts";
 import { tombstoneById, tombstoneForUrl, tombstoneOut } from "./sources.ts";
-import { FOREIGN_DOC, type Viewer } from "../../documents/ownership.ts";
+import { FOREIGN_DOC, FOREIGN_IDEA, type Viewer } from "../../documents/ownership.ts";
 import { mayLiftTombstone } from "../logic/lift.ts";
 import type { Identity } from "../../middleware/identity.ts";
 import { ownsRef } from "./actions.ts";
@@ -84,10 +84,11 @@ export async function dependence(db: Db, reg: RegistryReader, id: string, f: Met
     [id, mf],
   );
   // a held source belongs to a refinery, which carries no metadata: never in scope under a filter
-  // (rw-p0-contract2 attempt 2; the same rule as sources.ts getHeld)
+  // (rw-p0-contract2 attempt 2; the same rule as sources.ts getHeld) and another user's held source is
+  // not here either: it answers as a missing id (rw-held-owner-scope; no caller = an internal read)
   const held = life[0] || mf !== null ? null : await db.query<{ id: string }>(
-    `SELECT id FROM public.held_sources WHERE id = $1`,
-    [id],
+    `SELECT id FROM public.held_sources WHERE id = $1 AND ($2::text IS NULL OR NOT ${FOREIGN_IDEA("refinery_id", "$2")})`,
+    [id, who?.sub ?? null],
   );
   const lifecycle = life[0]?.lifecycle ?? (held && held[0] ? "held" : null);
   const defs = kindDefs(await reg.entries("dependence_kinds"));

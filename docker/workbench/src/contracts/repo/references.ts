@@ -20,7 +20,7 @@ import {
   anchorText, deriveWholeSourceSelectors, frontmatterSources, noteRefsCited, planLegacyHolders,
   requiredSelectorKinds,
 } from "../logic/citations.ts";
-import { FOREIGN_DOC, type Viewer } from "../../documents/ownership.ts";
+import { FOREIGN_DOC, FOREIGN_IDEA, type Viewer } from "../../documents/ownership.ts";
 import { getHeld, getSource, omitted, reference, sourceReference, tombstoneBySource, tombstoneOut } from "./sources.ts";
 
 // The holder kind the legacy note routes use (a key of reference_holder_kinds).
@@ -131,13 +131,16 @@ async function sourceTargets(db: Db, ids: string[]): Promise<Map<string, Target>
   return new Map(rows.map((r) => [r.id, r]));
 }
 
-async function anyTarget(db: Db, id: string): Promise<Target | null> {
+// A held source is private to the owner of its refinery (rw-held-owner-scope): `who` is the caller, and
+// another user's held row is not a target - it answers as a missing id. `who` is null only for the
+// system's own seeding (documents/seed.ts), which has no caller.
+async function anyTarget(db: Db, id: string, who: { sub: string } | null): Promise<Target | null> {
   const s = (await sourceTargets(db, [id.toLowerCase()])).get(id.toLowerCase());
   if (s) return s;
   const h = await db.query<Target>(
     `SELECT h.id::text AS id, false AS in_sources, h.content_type, h.revision, h.content AS text, h.title
-       FROM public.held_sources h WHERE h.id = $1`,
-    [id],
+       FROM public.held_sources h WHERE h.id = $1 AND ($2::text IS NULL OR NOT ${FOREIGN_IDEA("h.refinery_id", "$2")})`,
+    [id, who?.sub ?? null],
   );
   return h[0] ?? null;
 }
@@ -186,6 +189,7 @@ export interface CreateInput {
   chunk_idx?: number;
   holder?: { kind: string; ref: string; origin?: string };
   by?: string;
+  who: { sub: string } | null; // the caller (a held source of another user is not a target); null = the system's own seeding
 }
 
 export class SelectorRefused extends Error {}
@@ -199,7 +203,7 @@ export async function createReference(db: Db, reg: RegistryReader, input: Create
     await requireRegistered(reg, REGISTRY.referenceOrigins, input.holder.origin ?? "added");
   }
   return await db.tx(async (t) => {
-    const target = await anyTarget(t, input.source_id);
+    const target = await anyTarget(t, input.source_id, input.who);
     if (!target) throw new NotFound("no source or held source with this id");
     // The quote must be what the position selects in the pinned revision.
     const quote = input.selectors.quote as { exact: string };
@@ -523,10 +527,11 @@ export interface PlaceInput {
   holder: { kind: string; ref: string; origin?: string };
   provenance?: string;
   by?: string;
+  who: { sub: string } | null; // the caller; null = the system's own seeding (documents/seed.ts)
 }
 
 export async function placeReference(db: Db, reg: RegistryReader, input: PlaceInput) {
-  const target = await anyTarget(db, input.source_id);
+  const target = await anyTarget(db, input.source_id, input.who);
   if (!target) throw new NotFound("no source or held source with this id");
   const required = requiredSelectorKinds(await selectorEntries(db), target.content_type);
   const exact = (input.exact ?? "").trim() ? input.exact! : null;
@@ -552,7 +557,7 @@ export async function placeReference(db: Db, reg: RegistryReader, input: PlaceIn
   }
   return await createReference(db, reg, {
     source_id: target.id, selectors, provenance: input.provenance ?? "user", scope,
-    holder: input.holder, by: input.by,
+    holder: input.holder, by: input.by, who: input.who,
   });
 }
 
@@ -576,8 +581,8 @@ async function quoteStart(db: Db, target: Target, text: string, exact: string, n
 
 // The id, revision and content type of a source or held source - no text (the documents API checks
 // a link target exists before it pins it).
-export async function targetHead(db: Db, id: string) {
-  const t = await anyTarget(db, id);
+export async function targetHead(db: Db, id: string, who: { sub: string } | null) {
+  const t = await anyTarget(db, id, who);
   return t ? { id: t.id, in_sources: t.in_sources, revision: t.revision, content_type: t.content_type, title: t.title } : null;
 }
 
@@ -622,23 +627,23 @@ const TARGET_COLS = (sid: string, idx: string) => `
 // Under a filter only a SOURCE whose metadata contains it is visible: a held source is out of scope
 // whatever its own metadata says (it belongs to a refinery, which carries no metadata - P0's getHeld
 // rule, rw-p0-contract2 attempt 2), and an erased or unknown id is omitted.
-async function diffBarePins(db: Db, refs: { source_id: string; revision: number; chunk_idx?: number }[], f: MetadataFilter) {
+async function diffBarePins(db: Db, refs: { source_id: string; revision: number; chunk_idx?: number }[], f: MetadataFilter, who: Viewer) {
   return await db.query<DiffRow>(
     `SELECT q.ord::int AS ord, NULL::text AS reference_id, q.source_id::text AS source_id, q.revision AS pinned_revision,
             q.chunk_idx, ($4::jsonb IS NULL OR COALESCE(s.metadata @> $4::jsonb, false)) AS visible,
             NULL::text AS reanchor, NULL::int AS moved_idx, ${TARGET_COLS("q.source_id", "q.chunk_idx")}
        FROM unnest($1::uuid[], $2::int[], $3::int[]) WITH ORDINALITY AS q(source_id, revision, chunk_idx, ord)
        LEFT JOIN public.sources s ON s.id = q.source_id
-       LEFT JOIN public.held_sources h ON h.id = q.source_id AND s.id IS NULL
+       LEFT JOIN public.held_sources h ON h.id = q.source_id AND s.id IS NULL AND NOT ${FOREIGN_IDEA("h.refinery_id", "$5")}
       ORDER BY q.ord`,
-    [refs.map((r) => r.source_id), refs.map((r) => r.revision), refs.map((r) => r.chunk_idx ?? null), f ? JSON.stringify(f) : null],
+    [refs.map((r) => r.source_id), refs.map((r) => r.revision), refs.map((r) => r.chunk_idx ?? null), f ? JSON.stringify(f) : null, who.sub],
   );
 }
 
 // For an out-of-date pin, the scope's reanchor rule (registry reference_scopes) finds the chunk
 // of the current revision that stands for it - INSIDE the database: strpos over the current
 // chunks returns an index, never the text.
-async function diffRecords(db: Db, ids: string[]) {
+async function diffRecords(db: Db, ids: string[], who: Viewer) {
   return await db.query<DiffRow>(
     `SELECT q.ord::int AS ord, rr.id::text AS reference_id, rr.source_id::text AS source_id, rr.pinned_revision,
             rr.chunk_idx, true AS visible, COALESCE(sc.definition ->> 'reanchor', 'quote') AS reanchor,
@@ -647,7 +652,7 @@ async function diffRecords(db: Db, ids: string[]) {
        FROM unnest($1::uuid[]) WITH ORDINALITY AS q(id, ord)
        JOIN public.reference_records rr ON rr.id = q.id
        LEFT JOIN public.sources s ON s.id = rr.source_id
-       LEFT JOIN public.held_sources h ON h.id = rr.source_id AND s.id IS NULL
+       LEFT JOIN public.held_sources h ON h.id = rr.source_id AND s.id IS NULL AND NOT ${FOREIGN_IDEA("h.refinery_id", "$2")}
        LEFT JOIN public.contract_registry_entries sc ON sc.registry = 'reference_scopes' AND sc.key = rr.scope
        LEFT JOIN LATERAL (
          SELECT CASE WHEN s.id IS NOT NULL THEN COALESCE((SELECT max(sr.revision) FROM public.source_revisions sr WHERE sr.source_id = s.id), 1)
@@ -665,7 +670,7 @@ async function diffRecords(db: Db, ids: string[]) {
                          AND strpos(x.content, rr.selectors #>> '{quote,exact}') > 0 ORDER BY x.idx LIMIT 1))
          END AS moved_idx) mv ON true
       ORDER BY q.ord`,
-    [ids],
+    [ids, who.sub],
   );
 }
 
@@ -703,7 +708,7 @@ function result(r: DiffRow) {
 // diffCheck(references | holder). A metadata filter (the cloud door) fails closed for reference
 // records and holders, which carry no metadata; a bare pin is answered only for a source (never a
 // held source) whose metadata contains the filter.
-export async function diffCheck(db: Db, input: DiffCheckInput, f: MetadataFilter) {
+export async function diffCheck(db: Db, input: DiffCheckInput, f: MetadataFilter, who: Viewer) {
   if (input.holder) {
     if (f) return { results: [] };
     const ids = (await db.query<{ id: string }>(
@@ -711,7 +716,7 @@ export async function diffCheck(db: Db, input: DiffCheckInput, f: MetadataFilter
         WHERE holder_kind = $1 AND holder_ref = $2 AND reference_id IS NOT NULL ORDER BY seq`,
       [input.holder.kind, input.holder.ref],
     )).map((r) => r.id);
-    return { results: (await diffRecords(db, ids)).map(result) };
+    return { results: (await diffRecords(db, ids, who)).map(result) };
   }
   const refs = input.references ?? [];
   if (!refs.length) throw new BadRequest("give references or holder");
@@ -723,7 +728,7 @@ export async function diffCheck(db: Db, input: DiffCheckInput, f: MetadataFilter
     // records carry no metadata: under a filter they do not exist for the caller (fail closed,
     // as GET /references/{id} answers 404)
     if (f) throw new NotFound(`no reference record with id ${ids.join(", ")}`);
-    const rows = await diffRecords(db, ids);
+    const rows = await diffRecords(db, ids, who);
     const found = new Map(rows.map((r) => [r.reference_id!, r]));
     const missing = ids.filter((id) => !found.has(id));
     if (missing.length) throw new NotFound(`no reference record with id ${missing.join(", ")}`);
@@ -731,7 +736,7 @@ export async function diffCheck(db: Db, input: DiffCheckInput, f: MetadataFilter
   }
   if (pinIdx.length) {
     const pins = pinIdx.map((i) => refs[i] as { source_id: string; revision: number; chunk_idx?: number });
-    const rows = await diffBarePins(db, pins, f);
+    const rows = await diffBarePins(db, pins, f, who);
     rows.forEach((r, k) => out[pinIdx[k]] = result(r));
   }
   return { results: out };

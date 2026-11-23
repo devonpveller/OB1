@@ -27,6 +27,7 @@ import { Conflict } from "../contracts/repo/lifecycle.ts";
 import type { Identity } from "../middleware/identity.ts";
 import { vaultExists, vaultRead } from "../util/vault.ts";
 import { parseDocument } from "./grammar.ts";
+import { FOREIGN_IDEA } from "./ownership.ts";
 import { listingRow, type OutboundLink, syncListing } from "./listing.ts";
 import { DocError, ownedPath, readDocument } from "./repo.ts";
 import { HOLDER_KIND } from "./paths.ts";
@@ -161,8 +162,8 @@ export async function locateLinks(db: Db, sourceId: string, who: Identity) {
   // round 3: only a source or held source is located; any other id (an idea's, a job's) is unknown
   // here - 404, not a 200 that echoes the id back
   const known = await db.query<{ n: number }>(
-    `SELECT 1 AS n FROM public.sources WHERE id::text = $1 UNION ALL SELECT 1 FROM public.held_sources WHERE id::text = $1 LIMIT 1`,
-    [sourceId],
+    `SELECT 1 AS n FROM public.sources WHERE id::text = $1 UNION ALL SELECT 1 FROM public.held_sources WHERE id::text = $1 AND NOT ${FOREIGN_IDEA("refinery_id", "$2")} LIMIT 1`,
+    [sourceId, who.sub],
   );
   if (!known.length) throw new DocError("no source or held source with this id", 404);
   const docs = await db.query<{ path: string; owner_sub: string }>(
@@ -223,10 +224,10 @@ interface HeldHead {
   content_hash: string | null;
 }
 
-async function heldHead(db: Db, id: string): Promise<HeldHead | null> {
+async function heldHead(db: Db, id: string, who: Identity): Promise<HeldHead | null> {
   return (await db.query<HeldHead>(
-    `SELECT id::text AS id, refinery_id::text AS refinery_id, url, title, revision, content_hash FROM public.held_sources WHERE id = $1`,
-    [id],
+    `SELECT id::text AS id, refinery_id::text AS refinery_id, url, title, revision, content_hash FROM public.held_sources WHERE id = $1 AND NOT ${FOREIGN_IDEA("refinery_id", "$2")}`,
+    [id, who.sub],
   ))[0] ?? null;
 }
 
@@ -252,7 +253,7 @@ async function repinLinkRecord(deps: RefineryDeps, rel: string, sourceId: string
     }
     if (!doc.links.some((l) => l.kind === "source" && l.id === sourceId)) return null;
     const placed = await placeReference(t, deps.reg, {
-      source_id: sourceId, holder: { kind: HOLDER_KIND, ref: rel, origin: "cited" }, by: who.name,
+      source_id: sourceId, holder: { kind: HOLDER_KIND, ref: rel, origin: "cited" }, by: who.name, who,
     });
     return placed.record;
   });
@@ -266,7 +267,7 @@ export async function replaceUserSource(
   deps: RefineryDeps, path: string, sourceId: string, input: { title?: string; content?: string }, who: Identity,
 ) {
   const rel = await ownedPath(deps.db, path, who);
-  const h = await heldHead(deps.db, sourceId);
+  const h = await heldHead(deps.db, sourceId, who);
   if (!h) throw new DocError("replace is offered for a held user source only (a folded source cannot be replaced yet)", 409);
   if (h.url) {
     if (!deps.refetch) throw new DocError("no fetch path is configured for a refetch", 503);

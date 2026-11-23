@@ -108,7 +108,7 @@ function registerSourceReads(app: ContractApp, deps: ContractDeps) {
       if (input.holder && !(await ownsDocumentPaths(deps.db, documentPathsIn(input.holder.ref ?? ""), await identityOf(c)))) {
         return c.json({ error: "no such document" }, 404);
       }
-      return send(c, DiffCheck, await refs.diffCheck(deps.db, input, parseMetadataFilter(c.req.valid("query").metadata_filter)));
+      return send(c, DiffCheck, await refs.diffCheck(deps.db, input, parseMetadataFilter(c.req.valid("query").metadata_filter), await identityOf(c)));
     } catch (e) {
       return fail(c, e);
     }

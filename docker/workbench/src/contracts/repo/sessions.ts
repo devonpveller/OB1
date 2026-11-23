@@ -180,10 +180,10 @@ export async function jobs(db: Db, state: string | null, kinds: string[], limit:
   if (want("held") && (state === null || state === "held")) {
     const rows = await db.query<{ id: string; created_at: string; updated_at: string; detail: Record<string, unknown> }>(
       `SELECT rus.source_id::text AS id, rus.added_at AS created_at, COALESCE(h.updated_at, rus.added_at) AS updated_at,
-              jsonb_build_object('refinery_id', CASE WHEN ${FOREIGN_IDEA("rus.refinery_id", "$2")} THEN NULL ELSE rus.refinery_id END,
-                                 'title', COALESCE(h.title, '')) AS detail
+              jsonb_build_object('refinery_id', rus.refinery_id, 'title', COALESCE(h.title, '')) AS detail
          FROM public.refinery_user_sources rus LEFT JOIN public.held_sources h ON h.id = rus.source_id
-        WHERE rus.status = 'held' ORDER BY rus.added_at DESC LIMIT $1`,
+        WHERE rus.status = 'held' AND NOT ${FOREIGN_IDEA("rus.refinery_id", "$2")}
+        ORDER BY rus.added_at DESC LIMIT $1`,
       [limit, who.sub],
     );
     out.push(...rows.map((r) => ({ kind: "held", status: "held", state: "current", ...r })));

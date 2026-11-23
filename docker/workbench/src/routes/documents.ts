@@ -21,6 +21,7 @@ import { seedFromIdea } from "../documents/seed.ts";
 import { syncListing } from "../documents/listing.ts";
 import { chipText, transclusionText } from "../documents/grammar.ts";
 import { HOLDER_KIND } from "../documents/paths.ts";
+import { FOREIGN_IDEA } from "../documents/ownership.ts";
 import { acknowledge, acknowledged } from "../documents/workspace.ts";
 import { vaultExists, vaultRead } from "../util/vault.ts";
 import { documentExportMarkdown, documentExportRefs } from "../export/repo.ts";
@@ -139,7 +140,7 @@ export function documentsRouter(rdeps: DocumentsDeps) {
     const placed = await placeReference(db, reg, {
       source_id: str(b.source_id), exact: b.exact ? str(b.exact) : null,
       near_chunk: typeof b.chunk_idx === "number" ? b.chunk_idx : null,
-      holder: { kind: HOLDER_KIND, ref: rel, origin: form === "added" ? "added" : "cited" }, by: who.name,
+      holder: { kind: HOLDER_KIND, ref: rel, origin: form === "added" ? "added" : "cited" }, by: who.name, who,
     });
     const rec = placed.record;
     const quote = (rec.selectors as { quote?: { exact?: string } }).quote?.exact ?? "";
@@ -161,12 +162,12 @@ export function documentsRouter(rdeps: DocumentsDeps) {
       `SELECT h.origin, h.seq, r.id::text AS reference_id, r.source_id::text AS source_id, r.pinned_revision, r.scope,
               COALESCE(NULLIF(rr.csl ->> 'title', ''), NULLIF(rv.title, ''), s.title, hs.title, '') AS title
          FROM public.reference_holders h JOIN public.reference_records r ON r.id = h.reference_id
-         LEFT JOIN public.sources s ON s.id = r.source_id LEFT JOIN public.held_sources hs ON hs.id = r.source_id
+         LEFT JOIN public.sources s ON s.id = r.source_id LEFT JOIN public.held_sources hs ON hs.id = r.source_id AND NOT ${FOREIGN_IDEA("hs.refinery_id", "$3")}
          LEFT JOIN public.source_revisions rv ON rv.source_id = s.id AND rv.revision = r.pinned_revision
          LEFT JOIN LATERAL (SELECT x.csl FROM public.reference_resolutions x WHERE x.reference_id = r.id
                              ORDER BY x.resolved_at DESC LIMIT 1) rr ON true
         WHERE h.holder_kind = $1 AND h.holder_ref = $2 ORDER BY h.seq`,
-      [HOLDER_KIND, rel],
+      [HOLDER_KIND, rel, who.sub],
     );
     // research-workbench P6b round 2 (tester D4, coordinator ruling): `listed` is what the export's
     // reference list will hold - ONE entry per source, in the document's citation order (cited first, by
@@ -220,7 +221,7 @@ export function documentsRouter(rdeps: DocumentsDeps) {
     ))[0];
     if (!old) return c.json({ error: "no reference record with this id" }, 404);
     const placed = await placeReference(db, reg, {
-      source_id: old.source_id, exact: old.exact, holder: { kind: HOLDER_KIND, ref: rel, origin: "cited" }, by: who.name,
+      source_id: old.source_id, exact: old.exact, holder: { kind: HOLDER_KIND, ref: rel, origin: "cited" }, by: who.name, who,
     });
     return c.json({ replaces: str(c.req.param("id")), record: placed.record, insert: transclusionText(placed.record.id, old.exact) }, 201);
   }));
