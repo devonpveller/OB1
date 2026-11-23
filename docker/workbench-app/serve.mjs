@@ -13,6 +13,7 @@
 import http from "node:http";
 import { createReadStream } from "node:fs";
 import { stat, readFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -35,10 +36,15 @@ const MIME = {
 
 // Content-Security-Policy on the app's HTML (round 2): the app is same-origin only (scripts, styles, fonts,
 // fetches), images may be data: URIs, nothing may frame it, <base> and cross-origin forms are out.
-export const CSP = [
-  "default-src 'self'", "script-src 'self'", "style-src 'self'", "img-src 'self' data:", "font-src 'self'",
+// rwr-doc-editor: the writing surface (CodeMirror) adds its own <style> element at run time, which `style-src 'self'`
+// refuses. It is allowed by a per-response NONCE, never by 'unsafe-inline': index.html is served with a fresh nonce in the
+// policy and in <meta name="csp-nonce">, and the editor hands that nonce to CodeMirror (EditorView.cspNonce). Only a
+// <style> element carrying the nonce runs; a style attribute or an injected element without it is still refused.
+export const cspFor = (nonce) => [
+  "default-src 'self'", "script-src 'self'", `style-src 'self' 'nonce-${nonce}'`, "img-src 'self' data:", "font-src 'self'",
   "connect-src 'self'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'self'",
 ].join("; ");
+export const NONCE_PLACEHOLDER = "__CSP_NONCE__";
 // Vite content-hashes its build files (name-<hash>.ext); only those may be cached for good. Anything else
 // under /assets (the notices file) is revalidated.
 const HASHED = /-[A-Za-z0-9_-]{6,}\.(js|mjs|css|woff2?|svg|png|jpe?g|webp|gif|ico|map)$/;
@@ -48,7 +54,15 @@ export function createHandler({ dist, proxy }) {
   async function sendFile(req, res, file, cache) {
     const st = await stat(file);
     const type = MIME[extname(file)] || "application/octet-stream";
-    res.writeHead(200, { "content-type": type, "content-length": st.size, "cache-control": cache, ...(type.startsWith("text/html") ? { "content-security-policy": CSP } : {}) });
+    if (type.startsWith("text/html")) {
+      // the page: a fresh nonce for this response, in the policy and in the page's meta tag
+      const nonce = randomBytes(16).toString("base64");
+      const html = Buffer.from((await readFile(file, "utf8")).split(NONCE_PLACEHOLDER).join(nonce), "utf8");
+      res.writeHead(200, { "content-type": type, "content-length": html.length, "cache-control": cache, "content-security-policy": cspFor(nonce) });
+      res.end(req.method === "HEAD" ? undefined : html);
+      return;
+    }
+    res.writeHead(200, { "content-type": type, "content-length": st.size, "cache-control": cache });
     if (req.method === "HEAD") { res.end(); return; }
     createReadStream(file).pipe(res);
   }
