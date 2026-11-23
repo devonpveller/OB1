@@ -187,21 +187,37 @@ export async function deleteFolder(deps: DocDeps, path: string, who: Identity) {
 }
 
 // ── move, trash, restore, archive ─────────────────────────────────────────────────────────
-export async function moveTo(deps: DocDeps, from: string, to: string, message: string, who: Identity) {
+export async function moveTo(
+  deps: DocDeps, from: string, to: string, message: string, who: Identity, opts: { trail?: "restored" | "unarchived" } = {},
+) {
   // under the source path's lock: a removal of the same path (delete forever, empty trash, the nightly) and
   // a move out of it never interleave (rwr-docs-lifecycle-api round 2)
-  return await withPathLock(from, () => moveToLocked(deps, from, to, message, who));
+  return await withPathLock(from, () => moveToLocked(deps, from, to, message, who, opts.trail));
 }
 
-async function moveToLocked(deps: DocDeps, from: string, to: string, message: string, who: Identity) {
+async function moveToLocked(deps: DocDeps, from: string, to: string, message: string, who: Identity, trailKind?: "restored" | "unarchived") {
   await owned(deps.db, from, who);
   if (!(await vaultExists(from))) throw new DocError("no such document", 404);
   if (await vaultExists(to)) throw new DocError("a document with that name already exists there", 409);
   await withPathLock(VAULT_GIT, () => gitMv(from, to, message, who.name));
+  // The listing follows the file first, in its own transaction. A document put back (restore, unarchive) then writes its
+  // one trail line AFTER that has committed, so a failing trail write (a table without the slot-510 re-run, a refused
+  // insert) can never roll the listing row back: the document id, its refinery link and its reference holders stay with
+  // the file. Only a move that really happened reaches here (404, 409 and a failing git mv throw above): no move, no line.
+  const row = trailKind ? await listingRow(deps.db, from).catch(() => null) : null;
   try {
     await moveListing(deps.db, from, to);
   } catch (e) {
     console.error(`[documents] listing move ${from} -> ${to} failed (the reconcile pass repairs it):`, (e as Error).message);
+  }
+  if (trailKind) {
+    try {
+      await writeTrail(deps.db, {
+        owner_sub: row?.owner_sub ?? who.sub, actor_sub: who.sub, kind: trailKind, document_id: row?.id ?? null, path: to, trashed_at: null,
+      });
+    } catch (e) {
+      console.error(`[documents] ${to} was put back (${trailKind}) but its trail line could not be written:`, (e as Error).message);
+    }
   }
   return to;
 }
@@ -226,7 +242,7 @@ export async function trashDocument(deps: DocDeps, path: string, who: Identity) 
 export async function restoreDocument(deps: DocDeps, path: string, who: Identity) {
   const from = await ownedPath(deps.db, path, who);
   if (!isTrashed(from) && !isArchived(from)) throw new DocError("not in the trash or the archive", 400);
-  return { restored: await moveTo(deps, from, liveRel(from), `documents: restore ${from}`, who) };
+  return { restored: await moveTo(deps, from, liveRel(from), `documents: restore ${from}`, who, { trail: "restored" }) };
 }
 
 export async function archiveDocument(deps: DocDeps, path: string, who: Identity) {

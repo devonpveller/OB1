@@ -1,10 +1,11 @@
-// The removal trail of user documents (rwr-docs-lifecycle-api): one line per document removed for good.
+// The removal trail of user documents (rwr-docs-lifecycle-api): one line per document removed for good, and (rwr-trail-grants-exact)
+// one per document put back (restored from the trash, unarchived).
 // Per owner (slot 510, user_document_trail): the line names the document by id and path, never its
 // text or title; it is read only through the identity seam, for the caller's own subject.
 import type { Db } from "../contracts/db.ts";
 import type { Identity } from "../middleware/identity.ts";
 
-export type TrailKind = "delete_forever" | "empty_trash" | "nightly_expired";
+export type TrailKind = "delete_forever" | "empty_trash" | "nightly_expired" | "restored" | "unarchived";
 export const NIGHTLY_ACTOR = "system:nightly";
 
 export interface TrailLine {
