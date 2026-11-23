@@ -343,8 +343,8 @@ title: "squatter"
   assertEquals((await lines(tp2)).length, 0);
   assert(await exists(tp2), "the trashed document is where it was");
   // the same for a missing document
-  assertEquals((await call("POST", `${D}/unarchive`, { path: `documents/none/.archive/x-${run}.md` })).status, 404);
-  assertEquals((await sql(`SELECT count(*)::int AS n FROM public.user_document_trail WHERE path LIKE $1`, [`%x-${run}.md`]))[0].n, 0);
+  assertEquals((await call("POST", `${D}/unarchive`, { path: `documents/none/.archive/ghost-${run}.md` })).status, 404);
+  assertEquals((await sql(`SELECT count(*)::int AS n FROM public.user_document_trail WHERE path LIKE $1`, [`%ghost-${run}.md`]))[0].n, 0);
   // the trail is still append-only through the app role: no UPDATE / TRUNCATE for the workbench's own login
   const ob = await sql(`SELECT has_table_privilege('ob_app_memory','public.user_document_trail','UPDATE') AS u, has_table_privilege('ob_app_memory','public.user_document_trail','TRUNCATE') AS tr`);
   assertEquals([ob[0].u, ob[0].tr], [false, false]);
