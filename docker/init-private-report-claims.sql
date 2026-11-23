@@ -652,14 +652,14 @@ BEGIN
      WHERE c.id NOT IN (SELECT id FROM _prc)
      GROUP BY c.id;
     INSERT INTO _prc (id, owners, owner)
-    SELECT d.id, d.owners, CASE WHEN NOT d.nobody AND cardinality(d.owners) = 1 THEN d.owners[1] END FROM _prc_dup d;
+    SELECT dp.id, dp.owners, CASE WHEN NOT dp.nobody AND cardinality(dp.owners) = 1 THEN dp.owners[1] END FROM _prc_dup dp;
     CREATE TEMP TABLE _prc_newlinks ON COMMIT DROP AS
-    SELECT DISTINCT d.id AS claim_id, pc.report_id
-      FROM _prc_dup d JOIN _prc x ON x.id = d.id AND x.owner IS NOT NULL
-      JOIN public.research_private_report_claims pc ON pc.claim_id = ANY(d.restates)
+    SELECT DISTINCT dp.id AS claim_id, pc.report_id
+      FROM _prc_dup dp JOIN _prc x ON x.id = dp.id AND x.owner IS NOT NULL
+      JOIN public.research_private_report_claims pc ON pc.claim_id = ANY(dp.restates)
       JOIN public.research_private_reports p ON p.id = pc.report_id AND p.owner_sub = x.owner;
     INSERT INTO _prc_n (id, owner, n)
-    SELECT x.id, x.owner, public.private_report_claim_norm(c.text) FROM _prc_dup d JOIN _prc x ON x.id = d.id JOIN public.claims c ON c.id = d.id;
+    SELECT x.id, x.owner, public.private_report_claim_norm(c.text) FROM _prc_dup dp JOIN _prc x ON x.id = dp.id JOIN public.claims c ON c.id = dp.id;
     SELECT count(*) INTO n_dup FROM _prc_dup;
     SELECT count(*) FILTER (WHERE owner IS NOT NULL), count(*) FILTER (WHERE owner IS NULL) INTO n_own, n_held FROM _prc;
     -- fix item round 2 (P2 #4): a synthesis copy keeps its title / research_query only when the question was public (a
