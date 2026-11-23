@@ -14,7 +14,7 @@ import { resetState, getLockedDocument, setLockedDocument } from "../src/lib/sta
 import { NOT_FOUND } from "../src/screens/documents/docs-data";
 import { DOC_TABS } from "../src/screens/document-editor/InThisDoc";
 import { cspNonce } from "../src/editor";
-import { createFake, PEOPLE, REF_A } from "../e2e/docs-fake.mjs";
+import { createFake, PEOPLE, REF_A, REF_C } from "../e2e/docs-fake.mjs";
 
 // a parallel full run loads the machine: the default 1 s wait is too short for a screen that reads three routes
 configure({ asyncUtilTimeout: 5000 });
@@ -246,6 +246,18 @@ describe("acceptance 3: a citation chip opens the cited section of the pinned re
     fireEvent.keyDown(view().contentDOM, { key: "Enter", altKey: true });
     await screen.findByTestId("source-drawer");
   });
+  it("F4: a HELD source (title in held.title, source null) shows its title, pinned words and passage", async () => {
+    fake.db().docs.get(CPU)!.raw = `---
+title: "x"
+---
+A held cite [@ref:${REF_C}] here.`;
+    await openDoc();
+    fireEvent.mouseDown(screen.getByTestId("doc-editor").querySelector("button.ws-chip")!);
+    await waitFor(() => expect(screen.getByTestId("drawer-body")).toBeTruthy());
+    expect(screen.getByTestId("drawer-title").textContent).toBe("SRC-ALPHA Held notes");
+    expect(screen.getByTestId("drawer-quote").textContent).toBe("held words only the refinery has");
+    expect(screen.getByTestId("drawer-passage").textContent).toMatch(/Held chunk zero/);
+  });
   it("a source that is gone says so in one sentence", async () => {
     fake.db().docs.get(CPU)!.raw = `---\ntitle: "x"\n---\nA [@ref:a1000000-0000-4000-8000-0000000000ff] cite.`;
     await openDoc();
@@ -463,6 +475,65 @@ describe("acceptance 7: two identities - bob never sees alice's text, titles, lo
     fireEvent.click(screen.getByTestId("doc-save"));
     await new Promise((r) => setTimeout(r, 100));
     expect(bodies.slice(n).filter((b) => b.method === "PUT")).toEqual([]);
+  });
+  // F1, F2, F3 (tester attempt 1): EVERY write the editor makes re-reads who is signed in first. The person changes SILENTLY
+  // (the fake's session flips, the page is not told: no resetState, no new subject prop), then each write control is used.
+  const writesAfter = (n: number) => bodies.slice(n).filter((b) => b.method !== "GET");
+  const noAlice = (n: number) => bodies.slice(n).every((b) => !/ALICE-SILENT|k-a|cpu\.md/.test(JSON.stringify(b.body ?? "") + (b.method !== "GET" ? b.url : "")));
+  const silent = async (control: string) => {
+    await openDoc();
+    if (control === "unlock" || control === "undo") {
+      fireEvent.click(screen.getByTestId("doc-lock"));
+      await waitFor(() => expect(screen.getByTestId("doc-lock").textContent).toBe("Unlock"));
+      await waitFor(() => expect(settings.get("ui.locked_document")?.value).toBe(CPU));
+    }
+    if (control === "undo") {
+      fireEvent.click(screen.getByTestId("doc-lock"));
+      await waitFor(() => expect(screen.getByTestId("toast-undo")).toBeTruthy());
+    }
+    if (control === "swap") {
+      act(() => setLockedDocument({ id: "documents/k-a/Stack/gateway.md", title: "ALPHA One gateway" }));
+      await waitFor(() => expect(settings.get("ui.locked_document")?.value).toBe("documents/k-a/Stack/gateway.md")); // set up before the person changes
+    }
+    type(" ALICE-SILENT");
+    select(0, 5);
+    const settingsBefore = new Map(settings);
+    who = "bob";
+    const n = bodies.length;
+    if (control === "save") fireEvent.click(screen.getByTestId("doc-save"));
+    if (control === "research") fireEvent.click(screen.getByTestId("research-this"));
+    if (control === "research-key") fireEvent.keyDown(view().contentDOM, { key: "r", ctrlKey: true, altKey: true });
+    if (control === "lock" || control === "swap" || control === "unlock") fireEvent.click(screen.getByTestId("doc-lock"));
+    if (control === "undo") fireEvent.click(screen.getByTestId("toast-undo"));
+    if (control === "close") fireEvent.click(screen.getByTestId("doc-close"));
+    if (control === "autosave") await new Promise((r) => setTimeout(r, 1800));
+    await new Promise((r) => setTimeout(r, 250));
+    return { n, settingsBefore };
+  };
+  for (const control of ["save", "research", "research-key", "lock", "swap", "unlock", "undo", "close", "autosave"]) {
+    it(`silent change of person, then ${control}: nothing is written, nothing of alice leaves, and the screen says so`, async () => {
+      const { n, settingsBefore } = await silent(control);
+      expect(writesAfter(n)).toEqual([]);
+      expect(noAlice(n)).toBe(true);
+      expect([...settings]).toEqual([...settingsBefore]); // no account key changed
+      expect(fake.db().research).toEqual([]);
+      expect(fileOf().content).not.toMatch(/ALICE-SILENT/);
+      if (control === "research" || control === "research-key") expect(screen.getByTestId("research-err").textContent).toMatch(/Not sent/);
+      if (control === "lock" || control === "swap" || control === "unlock") expect(screen.getByRole("alert").textContent).toMatch(/Not sent/);
+      if (control === "close") expect(window.location.pathname).toBe(href(CPU));
+    });
+  }
+  it("F3: leaving the screen after a silent change of person writes nothing (pins the whoami read on the leave-write)", async () => {
+    await openDoc();
+    type(" ALICE-SILENT");
+    who = "bob";
+    const n = bodies.length;
+    act(() => { window.history.pushState({}, "", "/documents"); window.dispatchEvent(new PopStateEvent("popstate")); });
+    await waitFor(() => expect(screen.queryByTestId("doc-editor")).toBeNull());
+    await new Promise((r) => setTimeout(r, 300));
+    expect(writesAfter(n)).toEqual([]);
+    expect(bodies.slice(n).some((b) => b.url.startsWith("/workbench/workspace/whoami"))).toBe(true); // it asked first
+    expect(fileOf().content).not.toMatch(/ALICE-SILENT/);
   });
   it("leaving by an in-app door writes the unwritten text for the same person", async () => {
     await openDoc();

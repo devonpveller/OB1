@@ -78,9 +78,13 @@ export function seed(now = Date.now()) {
 export const REF_A = "a1000000-0000-4000-8000-0000000000a1";
 export const REF_B = "a1000000-0000-4000-8000-0000000000b2";
 export const SRC_A = "b1000000-0000-4000-8000-0000000000a1";
+export const REF_C = "a1000000-0000-4000-8000-0000000000c3"; // a reference into a HELD source (title in held.title, source null)
+export const SRC_C = "b1000000-0000-4000-8000-0000000000c3";
 const REFS = [
   [REF_A, { source_id: SRC_A, title: "SRC-ALPHA Socket guide", pinned_revision: 2, current: 3, chunk_idx: 1, quote: "the LGA2066 socket takes a 165 W part",
     chunks: ["SRC-ALPHA intro chunk.", "Chunk two: the LGA2066 socket takes a 165 W part, per the vendor.", "SRC-ALPHA closing chunk."] }],
+  [REF_C, { source_id: SRC_C, title: "SRC-ALPHA Held notes", pinned_revision: 1, current: 1, chunk_idx: 0, quote: "held words only the refinery has", held: true,
+    chunks: ["Held chunk zero: held words only the refinery has."] }],
   [REF_B, { source_id: "b1000000-0000-4000-8000-0000000000b2", title: "SRC-ALPHA Whole source", pinned_revision: 1, current: 1, chunk_idx: null, quote: "a whole-source pin", chunks: [] }],
 ];
 
@@ -128,8 +132,14 @@ export function createFake(opts = {}) {
         id, kind: "reference", requested_version: ref.pinned_revision, tombstone: null, held: null,
         record: { id, source_id: ref.source_id, scope: ref.chunk_idx === null ? "source" : "passage", pinned_revision: ref.pinned_revision,
           chunk_idx: ref.chunk_idx, state: "active", selectors: { quote: { exact: ref.quote } }, created_by: "lab", created_at: "2026-01-01T00:00:00.000Z" },
+        ...(ref.held ? {
+          // referenceById, the held branch: source is null, the title and excerpt are in held; state "held", lifecycle "held"
+          state: "held", lifecycle: "held", version: ref.current, state_detail: { refinery_id: "r-1", scope: "refinery only until folded" }, source: null,
+          held: { refinery_id: "r-1", title: ref.title, url: null, excerpt: ref.quote, user_source_status: "ready" },
+        } : {
         state: ref.current > ref.pinned_revision ? "updated" : "active", lifecycle: "active", version: ref.current, state_detail: {},
         source: { title: ref.title, url: null, content_type: "text/plain", domain: null, family: "general", excerpt: ref.quote, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-02T00:00:00.000Z" },
+        }),
       } };
     }
     const cm = /^\/workbench\/contract\/chunks\/([0-9a-f-]{36}):(\d{1,6})\/context$/i.exec(decodeURIComponent(p)); // the server's router decodes a path parameter

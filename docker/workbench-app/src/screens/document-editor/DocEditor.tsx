@@ -181,16 +181,24 @@ function Writing({ path, subject, first }: { path: string; subject: string; firs
     const order = [...new Set(protectedSpans(body.current).map((x) => x.reference_id))];
     setDrawer({ kind: "reference", id: s.reference_id, n: order.indexOf(s.reference_id) + 1 });
   }, []);
+  // EVERY write this screen makes (a save, the write on leaving, Research this, Lock / Swap / Unlock and its Undo) goes
+  // through `ifSamePerson`: it re-reads who is signed in and runs the write only for the person who opened the document
+  // (the shell notices a change of person on a 30 s timer; until then a write would leave under the next person's session)
+  const ifSamePerson = useCallback(async <T,>(write: () => Promise<T> | T): Promise<{ ran: true; value: T } | { ran: false }> => {
+    if (!(await isSamePerson(subject))) return { ran: false };
+    return { ran: true, value: await write() };
+  }, [subject]);
+  const NOT_SAME = "Not sent: this page could not confirm that you are still the person who opened this document.";
   const research = useCallback(() => {
     const text = selRef.current.trim();
     if (!text) return;
     setResearchErr("");
     const q = text.slice(0, RESEARCH_CAP);
-    queueResearch(path, q).then(
-      () => { if (alive.current) toast({ message: text.length > RESEARCH_CAP ? `Research queued on the first ${RESEARCH_CAP} characters of the selection.` : "Research queued on the selected text." }); },
-      (e) => { if (alive.current) setResearchErr(researchProblem(e)); },
-    );
-  }, [path, toast]);
+    ifSamePerson(() => queueResearch(path, q)).then((r) => {
+      if (!r.ran) { if (alive.current) setResearchErr(NOT_SAME); return; }
+      if (alive.current) toast({ message: text.length > RESEARCH_CAP ? `Research queued on the first ${RESEARCH_CAP} characters of the selection.` : "Research queued on the selected text." });
+    }).catch((e) => { if (alive.current) setResearchErr(researchProblem(e)); });
+  }, [path, toast, ifSamePerson]);
   const researchRef = useRef(research);
   researchRef.current = research;
 
@@ -269,13 +277,15 @@ function Writing({ path, subject, first }: { path: string; subject: string; firs
     if (here) {
       const epoch = stateEpoch();
       const was = locked!;
-      const ok = await setLockedDocumentSaved(null);
-      if (!ok) { setLockErr("The unlock could not be saved."); return; }
-      toast({ message: "Unlocked.", onUndo: () => { if (stateEpoch() === epoch) void setLockedDocumentSaved(was); } });
+      const r = await ifSamePerson(() => setLockedDocumentSaved(null));
+      if (!r.ran) { setLockErr(NOT_SAME); return; }
+      if (!r.value) { setLockErr("The unlock could not be saved."); return; }
+      toast({ message: "Unlocked.", onUndo: () => { if (stateEpoch() === epoch) void ifSamePerson(() => setLockedDocumentSaved(was)); } });
       return;
     }
-    const ok = await setLockedDocumentSaved({ id: path, title });
-    if (!ok) { setLockErr("The lock could not be saved."); return; }
+    const r = await ifSamePerson(() => setLockedDocumentSaved({ id: path, title }));
+    if (!r.ran) { setLockErr(NOT_SAME); return; }
+    if (!r.value) { setLockErr("The lock could not be saved."); return; }
     toast({ message: "Locked." });
   };
   const lockLabel = here ? "Unlock" : locked ? "Swap" : "Lock";
