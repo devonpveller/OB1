@@ -10,6 +10,10 @@ export const CANCELLABLE = ["queued", "fetching", "extracting"];
 export const KINDS = ["import", "add", "chunk", "extract", "entity"];
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// rwr-imports-server-api: a job is retried ONCE (intake/repo.ts MAX_ATTEMPTS, RETRIED_ALREADY)
+export const MAX_ATTEMPTS = 2;
+export const RETRIED_ALREADY = "this job was already retried once, so it cannot be retried again: add the link or file again as a new item";
+
 export function actionsOf(status) {
   if (CANCELLABLE.includes(status)) return { actions: ["cancel"], primary: "cancel" };
   if (ACTIVE.includes(status)) return { actions: [], primary: "wait" };
@@ -22,6 +26,7 @@ export function createFake() {
   const jobs = new Map();
   const docs = []; // { owner, path, title, refinery: bool }
   const ideas = []; // { owner, id, title, status }
+  const inlets = []; // { owner, kind, created } - the caller's own connections (slot 600's inlet_connections_of)
   const log = []; // every call the fake answered: { who, method, path }
   const id = () => "00000000-0000-4000-8000-" + String(++n).padStart(12, "0");
   const iso = (ms) => new Date(ms).toISOString();
@@ -77,6 +82,7 @@ export function createFake() {
         return { status: 200, body: { job: shape(j) } };
       }
       if (!actionsOf(j.status).actions.includes("retry")) return { status: 409, body: { error: `a ${j.status} ${j.mode} job cannot be retried` } };
+      if (j.attempts >= MAX_ATTEMPTS) return { status: 409, body: { error: RETRIED_ALREADY } };
       touch(j, { status: "queued", error: null, attempts: j.attempts + 1 });
       return { status: 202, body: { job: shape(j) } };
     }
@@ -112,6 +118,10 @@ export function createFake() {
       const j = seed(who, { mode: "add", status: "queued", url: url || null, filename: file ? file.name : null, refinery_id: refineryId ? refineryId.toLowerCase() : null, doc_path: docPath });
       return { status: 202, body: { job_id: j.id, kind: "add", status: "queued", origin: "workspace" } };
     }
+    if (method === "GET" && path === "/workbench/contract/inlets/connections") {
+      // kind and stamps only, the caller's rows only (slot 600); a person with none gets an empty list
+      return { status: 200, body: { connections: inlets.filter((i) => i.owner === who).sort((a, b) => a.created - b.created).map((i) => ({ kind: i.kind, created_at: iso(i.created), updated_at: iso(i.created) })) } };
+    }
     if (method === "GET" && path === "/workbench/contract/documents") {
       return { status: 200, body: { documents: docs.filter((d) => d.owner === who).map((d) => ({ title: d.title, path: d.path, updated: iso(Date.now()), outbound_links: [] })) } };
     }
@@ -120,5 +130,5 @@ export function createFake() {
     }
     return null;
   }
-  return { handle, seed, set, jobs, docs, ideas, log, shape };
+  return { handle, seed, set, jobs, docs, ideas, inlets, log, shape };
 }

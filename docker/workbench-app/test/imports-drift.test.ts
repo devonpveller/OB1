@@ -6,7 +6,7 @@
 import { describe, it, expect } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { ACTIVE, CANCELLABLE, KINDS } from "../e2e/imports-fake.mjs";
+import { ACTIVE, CANCELLABLE, KINDS, MAX_ATTEMPTS as FAKE_MAX, RETRIED_ALREADY } from "../e2e/imports-fake.mjs";
 import { FILE_LIMIT_BYTES, JOBS_LIMIT, MAX_ATTEMPTS } from "../src/screens/imports/imports-data";
 
 const SERVER = resolve(__dirname, "../../workbench/src/intake");
@@ -58,15 +58,23 @@ describe.skipIf(!have)("the fake matches the server's intake source", () => {
   });
 });
 
-describe("the forwarder in front of the workbench", () => {
-  const candidates = [resolve(__dirname, "../lib/shared/workbench-proxy.mjs"), resolve(__dirname, "../../wiki-viewer/lib/workbench-proxy.mjs")];
-  const file = candidates.find(existsSync);
-  it("refuses a body over 1 MB except on the old import route: a file add here is capped at FILE_LIMIT_BYTES", () => {
-    expect(file).toBeTruthy();
-    const text = readFileSync(file!, "utf8");
-    expect(text).toMatch(/UPLOAD\.test\(path\) \? 100 \* MB : 1 \* MB/);
-    expect(text).toMatch(/const UPLOAD = \/\^\\\/workbench\\\/\(import\(/);
-    expect(text).not.toMatch(/intake/); // the add route is not an upload path
-    expect(FILE_LIMIT_BYTES).toBe(1024 * 1024);
+describe.skipIf(!have)("the file limit, the retry cap and the own-inlets route are the server's", () => {
+  it("the screen's up-front file limit is the intake route's own (25 MB), read from its source", () => {
+    const m = src("routes.ts").match(/deps\.maxFileBytes \?\? (\d+) \* 1024 \* 1024/);
+    expect(m).toBeTruthy();
+    expect(FILE_LIMIT_BYTES).toBe(Number(m![1]) * 1024 * 1024);
+    expect(src("routes.ts")).toContain("the file is larger than ${maxFile} bytes");
+  });
+  it("the retry cap and its reason match intake/repo.ts and the route's 409", () => {
+    const repo = src("repo.ts");
+    expect(Number(repo.match(/MAX_ATTEMPTS = (\d+)/)![1])).toBe(FAKE_MAX);
+    expect(repo).toContain(`RETRIED_ALREADY = "${RETRIED_ALREADY}"`);
+    expect(src("routes.ts")).toMatch(/attempts \?\? 1\) >= repo\.MAX_ATTEMPTS\) return c\.json\(\{ error: repo\.RETRIED_ALREADY \}, 409\)/);
+  });
+  it("the own-inlets route answers kind and the two stamps, as the fake does", () => {
+    const base = resolve(__dirname, "../../workbench/src/contracts");
+    const schema = readFileSync(resolve(base, "schemas/inlets.ts"), "utf8");
+    for (const f of ["kind", "created_at", "updated_at"]) expect(schema).toContain(`${f}:`);
+    expect(readFileSync(resolve(base, "routes/inlets.ts"), "utf8")).toContain("/inlets/connections");
   });
 });

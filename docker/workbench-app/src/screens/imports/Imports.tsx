@@ -8,9 +8,9 @@ import { getLockedDocument } from "../../lib/state";
 import type { ScreenProps } from "../../routes";
 import { ago } from "../home/home-data";
 import {
-  addOne, canCancel, canRetry, cancelJob, FILE_LIMIT_BYTES, fileProblem, FILTERS, fromOf, isActive, JOBS_LIMIT, landedIn, linkProblem, passes,
+  addOne, canCancel, inletName, readInlets, canRetry, cancelJob, FILE_LIMIT_BYTES, fileProblem, FILTERS, fromOf, isActive, JOBS_LIMIT, landedIn, linkProblem, passes,
   readJobs, readLandings, reasonOf, retriedAlready, retryJob, statusOf, stepsOf, titleOf, weekOf, whoSees, isPrivate,
-  type Filter, type Job, type JobsRead, type LandingOption,
+  type Filter, type Inlet, type Job, type JobsRead, type LandingOption,
 } from "./imports-data";
 import "./imports.css";
 
@@ -191,16 +191,32 @@ function Details({ job, onChanged }: { job: Job | null; onChanged: (message: str
   );
 }
 
-// The connected-inlets panel. The workbench has NO read of the connection record today (inlet_connections is readable
-// by no app role: init-inlet-stamp.sql), so the panel does not list connections and does not pretend to. It shows what
-// the caller's own jobs say about where items came from, and where connecting is done.
+// The connected-inlets panel: the caller's OWN connections, read through the workbench's own-inlets route (kind and
+// dates only; the server answers rows owned by the identity seam's subject and nothing of anyone else's). A failed read
+// says so and offers a retry; it is never shown as "no inlets".
 function Inlets({ jobs, ok }: { jobs: Job[]; ok: boolean }) {
+  const [state, setState] = useState<{ s: "loading" } | { s: "failed" } | { s: "ok"; rows: Inlet[] }>({ s: "loading" });
+  const live = useRef(true);
+  const load = useCallback(() => {
+    setState({ s: "loading" });
+    readInlets().then((rows) => { if (live.current) setState({ s: "ok", rows }); }, () => { if (live.current) setState({ s: "failed" }); });
+  }, []);
+  useEffect(() => { live.current = true; load(); return () => { live.current = false; }; }, [load]);
   const owui = jobs.filter((j) => j.origin === "owui").length;
   return (
     <section className="card" aria-labelledby="imp-i-h" data-testid="imp-inlets">
       <h2 id="imp-i-h">Connected inlets</h2>
-      <p data-testid="inlets-unavailable">Your connected inlets (Gmail, podcasts, Open WebUI chats, Google activity) can't be listed here yet: the workbench has no read for them. They are not hidden, just not shown.</p>
-      {ok && <p className="meta" data-testid="inlets-origin">Items of yours that came from Open WebUI chats: {owui}. Everything else in your list was added here.</p>}
+      {state.s === "loading" && <p className="meta" role="status" data-testid="inlets-loading">Loading...</p>}
+      {state.s === "failed" && <p className="meta" data-testid="inlets-failed">Could not load your inlets. <button type="button" onClick={load}>Try again</button></p>}
+      {state.s === "ok" && state.rows.length === 0 && <p className="empty" data-testid="inlets-empty">No inlet is connected for you yet.</p>}
+      {state.s === "ok" && state.rows.length > 0 && (
+        <ul className="imp-inlets" data-testid="inlets-list">
+          {state.rows.map((r, i) => (
+            <li key={i} data-testid="inlet-row"><span className="row-title">{inletName(r.kind)}</span> <span className="imp-pill priv">Only you</span> <span className="meta">connected {ago(r.since)}</span></li>
+          ))}
+        </ul>
+      )}
+      {ok && <p className="meta" data-testid="inlets-origin">Items of yours that came from Open WebUI chats: {owui}.</p>}
       <p className="meta">Connecting or pausing an inlet is done in <Link to="/settings">Settings</Link>. Your inlets are yours: what they bring in is held for you alone.</p>
     </section>
   );

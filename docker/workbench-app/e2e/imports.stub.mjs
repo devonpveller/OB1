@@ -25,6 +25,7 @@ fake.seed("u-alice", { filename: "ALPHA-notes.pdf", status: "failed", error: "th
 fake.seed("u-alice", { mode: "import", url: LONG, status: "done", source_id: "aaaaaaaa-0000-4000-8000-000000000002", created: ago(9 * D) });
 fake.seed("u-bob", { url: "https://bravo.example/own", status: "held", doc_path: "documents/k-b/bravo.md", created: ago(H) });
 
+fake.inlets.push({ owner: "u-alice", kind: "gmail", created: Date.now() - 5 * D }, { owner: "u-alice", kind: "vault", created: Date.now() - 4 * D }, { owner: "u-bob", kind: "gmail", created: Date.now() - D });
 const UI_KEYS = ["ui.locked_document", "ui.last_document", "ui.start_screen", "library.recent"];
 let mode = "alice";
 const log = [];

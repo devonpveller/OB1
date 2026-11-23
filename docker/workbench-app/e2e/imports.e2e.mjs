@@ -126,22 +126,25 @@ await click("[data-testid=add-submit]");
 ok(await waitFor(`[...document.querySelectorAll('[data-testid=imp-title]')].some(e=>e.textContent==='ALPHA-upload.pdf')`), "a PDF added from the form is in the list");
 const fpost = (await stub("/__log")).filter((x) => x.method === "POST" && x.url === "/workbench/intake/add").pop();
 ok(JSON.stringify(fpost.keys.sort()) === JSON.stringify(["file", "refinery_id"]), `the file went as multipart with its file and the idea's refinery_id only: ${JSON.stringify(fpost.keys)}`);
-// over 1 MB is refused on the page, before any request
+// over the intake limit is refused on the page, before any request
 await click("[data-testid=imp-add-toggle]");
 await waitFor(`document.querySelectorAll('[data-testid=where-opt]').length===3`);
 await ev(`[...document.querySelectorAll('[data-testid=where-opt]')].find(o=>o.parentElement.textContent.includes('ALPHA plan')).click()`);
 await click("[data-testid=mode-file]");
 const before = (await stub("/__log")).filter((x) => x.method === "POST").length;
-await ev(`(()=>{const i=document.querySelector('[data-testid=add-file]');const dt=new DataTransfer();dt.items.add(new File([new Uint8Array(1100000)],'big.pdf',{type:'application/pdf'}));i.files=dt.files;i.dispatchEvent(new Event('change',{bubbles:true}));})()`);
+await ev(`(()=>{const i=document.querySelector('[data-testid=add-file]');const dt=new DataTransfer();dt.items.add(new File([new Uint8Array(26 * 1024 * 1024)],'big.pdf',{type:'application/pdf'}));i.files=dt.files;i.dispatchEvent(new Event('change',{bubbles:true}));})()`);
 await click("[data-testid=add-submit]");
-ok(/over 1 MB/.test(await txt("[data-testid=add-problem]")) && (await stub("/__log")).filter((x) => x.method === "POST").length === before, "a file over 1 MB is refused with a reason and nothing is sent");
+ok(/over 25 MB/.test(await txt("[data-testid=add-problem]")) && (await stub("/__log")).filter((x) => x.method === "POST").length === before, "a file over 25 MB (the intake route's own limit) is refused with a reason and nothing is sent");
 await axeBoth("Imports add form with a refusal");
 await click("[data-testid=imp-add-toggle]");
 
 // ---- 5. the connected inlets panel
 await click("[data-testid=panel-inlets]");
-ok(/can't be listed here yet/.test(await txt("[data-testid=inlets-unavailable]")) && /Open WebUI chats: 1\./.test(await txt("[data-testid=inlets-origin]")), "the inlets panel says what it cannot read, and counts only alice's own Open WebUI item");
-ok((await stub("/__log")).every((x) => !/inlet/i.test(x.url)), "no inlet route was asked for");
+ok(await waitFor(`document.querySelectorAll('[data-testid=inlet-row]').length===2`), "the inlets panel lists alice's two own connections");
+ok(/Gmail/.test(await ev(`document.querySelectorAll('[data-testid=inlet-row]')[0].textContent`)) && /Vault/.test(await ev(`document.querySelectorAll('[data-testid=inlet-row]')[1].textContent`)), "kind and when, no mailbox id or owner");
+ok(/Open WebUI chats: 1\./.test(await txt("[data-testid=inlets-origin]")) && !/can't be listed/.test(await txt("[data-testid=imp-inlets]")), "alice's own Open WebUI item is counted; nothing says the connections cannot be listed");
+const il = (await stub("/__log")).filter((x) => /inlets/.test(x.url));
+ok(il.length >= 1 && il.every((x) => x.method === "GET" && x.url === "/workbench/contract/inlets/connections" && x.keyOk && x.keys.length === 0), "the panel read only GET /workbench/contract/inlets/connections, no body, no person named");
 await axeBoth("Imports connected inlets panel");
 await click("[data-testid=panel-details]");
 
@@ -165,7 +168,7 @@ await click("[data-testid=imp-add-toggle]");
 await waitFor(`document.querySelectorAll('[data-testid=where-opt]').length===2`);
 ok(!/ALPHA|alpha/i.test(await ev(`document.documentElement.outerHTML`)), "bob's add form offers none of alice's documents or ideas");
 await click("[data-testid=panel-inlets]");
-ok(/Open WebUI chats: 0\./.test(await txt("[data-testid=inlets-origin]")), "bob's inlets panel counts none of alice's");
+ok(await waitFor(`document.querySelectorAll('[data-testid=inlet-row]').length===1`) && !/Vault/.test(await ev(`document.body.innerText`)) && /Open WebUI chats: 0\./.test(await txt("[data-testid=inlets-origin]")), "bob's inlets panel lists his one connection and counts none of alice's");
 await axeBoth("Imports as bob");
 // bob asks for alice's job by id: the same 404 as a missing one (the stub's fake is the server's logic)
 const aid = await ev(`fetch('/workbench/intake/jobs?kinds=import,add').then(r=>r.json()).then(j=>j.jobs.length)`);

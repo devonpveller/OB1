@@ -78,10 +78,8 @@ for "where it lands". Listed: what / status / from / who sees it / when; "This w
 counted from the person's own jobs read. A failed item shows the server's recorded reason; Try again is offered once
 (`attempts` starts at 1; the screen offers it while it is below 2, the server itself would allow more). Held adds are
 shown as "Only you" (a held source is private to its refinery until admitted); the older import route lands in the shared
-library. One link or file lands in a chosen document or idea (the existing add route); a file is limited to 1 MB because
-the forwarder in front of the workbench caps request bodies there (`FILE_LIMIT_BYTES`, checked by `test/imports-drift.test.ts`).
-The Connected inlets panel says plainly that connections cannot be listed yet (the workbench has no read of
-`inlet_connections`: no app role may read it) and shows only the person's own items that came from Open WebUI chats.
+library. One link or file lands in a chosen document or idea (the existing add route); a file is checked up front against the intake route's own limit (25 MB, `FILE_LIMIT_BYTES`, read from the route's source by `test/imports-drift.test.ts`); the forwarder's smaller body cap (rwr-intake-upload-cap widens it) answers 413 and the screen shows its reason.
+The Connected inlets panel lists the person's own connections (kind and when) from `GET /workbench/contract/inlets/connections` (rwr-imports-server-api, slot 600) and says plainly when a read fails. A retry the server refuses (a second one, 409) shows the server's reason; the screen also never offers it.
 Tests: `test/imports.test.tsx` (vitest against `e2e/imports-fake.mjs`, a fake of the real routes that the e2e stub shares),
 `test/imports-drift.test.ts` (the fake against the server's source), `e2e/imports.e2e.mjs` run by `e2e/run-imports-e2e.ps1`
 (lab subnet 10.250.113.0/24).

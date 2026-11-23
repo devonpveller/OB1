@@ -11,10 +11,23 @@ import { api, apiForm, ApiError } from "../../lib/api";
 
 export const JOBS_LIMIT = 200; // the server's per-kind maximum (parseLimit(.., 50, 200))
 export const WEEK_MS = 7 * 24 * 3600 * 1000;
-// The forwarder in front of the workbench (wiki-viewer/lib/workbench-proxy.mjs bodyCap) refuses a request body over
-// 1 MB except on the old import route, so a file add through this door is limited to that. Checked by a test that
-// reads the forwarder's source, so a change there is seen here.
-export const FILE_LIMIT_BYTES = 1024 * 1024;
+// The intake route's own file limit (workbench/src/intake/routes.ts: `deps.maxFileBytes ?? 25 * 1024 * 1024`), checked
+// up front so a person is not made to wait for a refusal. test/imports-drift.test.ts reads the route's source. The
+// forwarder in front of the workbench has its own, smaller body cap until rwr-intake-upload-cap widens it; a file over
+// THAT gets the forwarder's 413 and the screen shows its reason as the server says it (ApiError body.error).
+export const FILE_LIMIT_BYTES = 25 * 1024 * 1024;
+
+export type Inlet = { kind: string; since: string };
+export async function readInlets(): Promise<Inlet[]> {
+  const { data } = await api("GET", "/workbench/contract/inlets/connections");
+  if (!data || !Array.isArray(data.connections)) throw new Error("unexpected answer: no connections");
+  return data.connections.map((c: any) => {
+    if (!c || typeof c.kind !== "string") throw new Error("unexpected answer: a connection");
+    return { kind: c.kind, since: str(c.created_at) };
+  });
+}
+const INLET_NAME: Record<string, string> = { gmail: "Gmail", vault: "Vault (notes)" };
+export const inletName = (kind: string) => INLET_NAME[kind] ?? kind;
 
 export type JobKind = "import" | "add";
 export type Job = {
@@ -161,7 +174,7 @@ export function linkProblem(s: string): string | null {
 export const FILE_TYPES = /\.(pdf|html?|xhtml)$/i;
 export function fileProblem(f: File): string | null {
   if (!FILE_TYPES.test(f.name)) return "A file is a PDF or a saved web page. Other kinds can't be read yet.";
-  if (f.size > FILE_LIMIT_BYTES) return "This file is over 1 MB, which is the most that can be added here for now. Add its link instead if it has one.";
+  if (f.size > FILE_LIMIT_BYTES) return `This file is over ${FILE_LIMIT_BYTES / 1024 / 1024} MB, which is the most that can be added here. Add its link instead if it has one.`;
   return null;
 }
 

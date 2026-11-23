@@ -8,7 +8,7 @@ import { App } from "../src/App";
 import { Imports } from "../src/screens/imports/Imports";
 import { setFetcher, requestLog, clearRequestLog } from "../src/lib/api";
 import { resetState } from "../src/lib/state";
-import { createFake } from "../e2e/imports-fake.mjs";
+import { createFake, RETRIED_ALREADY } from "../e2e/imports-fake.mjs";
 
 const H = 3600 * 1000, D = 24 * H;
 let fake = createFake();
@@ -28,6 +28,7 @@ function seedAll() {
   fake.seed("u-alice", { url: "https://alpha.example/chat-link", status: "fetching", origin: "owui", refinery_id: "11111111-1111-4111-8111-111111111111", created: Date.now() - H });
   fake.seed("u-alice", { filename: "ALPHA-notes.pdf", status: "failed", error: "the file could not be read", attempts: 2, doc_path: "documents/k-a/alpha-plan.md", created: Date.now() - 5 * H });
   fake.seed("u-alice", { mode: "import", url: "https://alpha.example/old-import", status: "done", source_id: "aaaaaaaa-0000-4000-8000-000000000002", created: Date.now() - 9 * D });
+  fake.inlets.push({ owner: "u-alice", kind: "gmail", created: Date.now() - 5 * D }, { owner: "u-alice", kind: "vault", created: Date.now() - 4 * D }, { owner: "u-bob", kind: "gmail", created: Date.now() - D });
   fake.seed("u-bob", { url: "https://bravo.example/own", status: "held", doc_path: "documents/k-b/bravo.md", created: Date.now() - H });
 }
 const jobIdOf = (owner: string, part: string) => [...fake.jobs.values()].find((j) => j.owner === owner && (j.url ?? j.filename).includes(part)).id;
@@ -255,14 +256,14 @@ describe("one link or file lands in the chosen document through the existing rou
     await waitFor(() => expect(screen.getByTestId("add-problem").textContent).toMatch(/this document has no open refinery/));
     expect(screen.getByTestId("imp-form")).toBeTruthy();
   });
-  it("a file: sent as a multipart form to the same route; over 1 MB or not a PDF / saved page is refused before sending", async () => {
+  it("a file: sent as a multipart form to the same route; over the intake limit (25 MB) or not a PDF / saved page is refused before sending", async () => {
     await openForm();
     chooseDoc("ALPHA plan");
     fireEvent.click(screen.getByTestId("mode-file"));
     const pick = (f: File) => fireEvent.change(screen.getByTestId("add-file"), { target: { files: [f] } });
-    pick(new File([new Uint8Array(2 * 1024 * 1024)], "big.pdf", { type: "application/pdf" }));
+    pick(new File([new Uint8Array(26 * 1024 * 1024)], "big.pdf", { type: "application/pdf" }));
     fireEvent.click(screen.getByTestId("add-submit"));
-    expect(screen.getByTestId("add-problem").textContent).toMatch(/over 1 MB/);
+    expect(screen.getByTestId("add-problem").textContent).toMatch(/over 25 MB/);
     pick(new File(["MZ"], "tool.exe"));
     fireEvent.click(screen.getByTestId("add-submit"));
     expect(screen.getByTestId("add-problem").textContent).toMatch(/PDF or a saved web page/);
@@ -290,15 +291,69 @@ describe("one link or file lands in the chosen document through the existing rou
   });
 });
 
-describe("the connected inlets panel (acceptance 4): only the caller's own, and honest about what it cannot read", () => {
-  it("says the connections cannot be listed yet, reads no inlet route, and counts only the caller's own Open WebUI items", async () => {
+describe("files over the old 1 MB are sent; a refusal is shown as the server says it", () => {
+  it("a 2 MB PDF goes up (the intake route's limit is 25 MB); a 413 from the door is shown verbatim", async () => {
+    window.history.pushState({}, "", "/imports");
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId("imports")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("imp-add-toggle"));
+    await waitFor(() => expect(screen.getAllByTestId("where-opt").length).toBeGreaterThan(0));
+    fireEvent.click(screen.getAllByTestId("where-opt")[0]);
+    fireEvent.click(screen.getByTestId("mode-file"));
+    const f = new File([new Uint8Array(2 * 1024 * 1024)], "two.pdf", { type: "application/pdf" });
+    fireEvent.change(screen.getByTestId("add-file"), { target: { files: [f] } });
+    setFetcher(async () => new Response(JSON.stringify({ error: "request body over 1 MB" }), { status: 413 }));
+    fireEvent.click(screen.getByTestId("add-submit"));
+    await waitFor(() => expect(screen.getByTestId("add-problem").textContent).toBe("request body over 1 MB"));
+    expect(screen.getByTestId("imp-form")).toBeTruthy();
+    expect(requestLog().filter((r) => r.method === "POST" && r.url === "/workbench/intake/add")).toHaveLength(1);
+  });
+});
+
+describe("the server's own retry cap", () => {
+  it("if the server refuses a retry (already retried elsewhere), its reason is shown and nothing changes", async () => {
     await open();
-    fireEvent.click(screen.getByTestId("panel-inlets"));
-    expect(screen.getByTestId("inlets-unavailable").textContent).toMatch(/can't be listed here yet/);
+    pickRow("refused");
+    fake.jobs.get(jobIdOf("u-alice", "refused")).attempts = 2; // retried from another window after this page read it
+    fireEvent.click(screen.getByTestId("imp-retry"));
+    await waitFor(() => expect(screen.getByTestId("imp-note").textContent).toBe(RETRIED_ALREADY));
+    expect(fake.jobs.get(jobIdOf("u-alice", "refused"))).toMatchObject({ status: "failed", attempts: 2 });
+  });
+});
+
+describe("the connected inlets panel (acceptance 4): only the caller's own connections", () => {
+  const inletsOpen = async () => { await open(); fireEvent.click(screen.getByTestId("panel-inlets")); await waitFor(() => expect(screen.queryByTestId("inlets-loading")).toBeNull()); };
+  it("lists the caller's own connections (kind and when), from the own-inlets read only", async () => {
+    await inletsOpen();
+    const rows = screen.getAllByTestId("inlet-row").map((r) => r.textContent!);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatch(/Gmail/); expect(rows[0]).toMatch(/Only you/); expect(rows[0]).toMatch(/connected 5 days ago/);
+    expect(rows[1]).toMatch(/Vault/);
     expect(screen.getByTestId("inlets-origin").textContent).toMatch(/Open WebUI chats: 1\./);
-    expect(requestLog().every((r) => !/inlet/i.test(r.url))).toBe(true);
-    who = "bob"; cleanup(); await open(); fireEvent.click(screen.getByTestId("panel-inlets"));
-    expect(screen.getByTestId("inlets-origin").textContent).toMatch(/Open WebUI chats: 0\./);
+    const r = requestLog().filter((x) => /inlets/.test(x.url));
+    expect(r).toEqual([{ method: "GET", url: "/workbench/contract/inlets/connections" }]);
+    expect(screen.queryByText(/can't be listed/)).toBeNull();
+  });
+  it("a person sees only their own: bob has one, a person with none gets one plain line", async () => {
+    who = "bob"; await inletsOpen();
+    expect(screen.getAllByTestId("inlet-row")).toHaveLength(1);
+    expect(document.body.innerText).not.toMatch(/Vault/);
+    cleanup(); who = "nobody"; await inletsOpen();
+    expect(screen.getByTestId("inlets-empty").textContent).toMatch(/No inlet is connected/);
+  });
+  it("a read that fails says so and offers a retry (never 'no inlets')", async () => {
+    failing = ["/inlets/connections"];
+    await inletsOpen();
+    expect(screen.getByTestId("inlets-failed")).toBeTruthy();
+    expect(screen.queryByTestId("inlets-empty")).toBeNull();
+    failing = [];
+    fireEvent.click(within(screen.getByTestId("inlets-failed")).getByRole("button"));
+    await waitFor(() => expect(screen.getAllByTestId("inlet-row")).toHaveLength(2));
+  });
+  it("a malformed answer is a failure, not an empty list", async () => {
+    malformed = ["/inlets/connections"];
+    await inletsOpen();
+    expect(screen.getByTestId("inlets-failed")).toBeTruthy();
   });
 });
 
