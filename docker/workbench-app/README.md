@@ -30,8 +30,12 @@ image, `openbrain-workbench-app`. Later items fill it in. Not a stack service ye
 ## The shell (item `rwr-shell-nav`)
 
 - `src/routes.ts` is the route table the left menu and the router share. A screen that is not built yet shows
-  "This screen is coming in phase N" (`shell/Placeholder.tsx`); a later item gives its route a real screen and
-  the menu does not change. `/what-moved-where` is the static Overview.
+  "This screen is coming in phase N" (`shell/Placeholder.tsx`). A built screen is its entry's `screen` field
+  (rwr-docs-list): `App.tsx` renders `screen` when there is one, else the placeholder, so adding a screen is ONE
+  change in `routes.ts` (`screen: X` on its entry, plus the import); the menu and `App.tsx` do not change. Every
+  screen gets `ScreenProps`: `{ route, params, subject, whoAnswered }` (`params` = the decoded `:name` segments,
+  `routeParams()`). Tests that walk the placeholders skip entries with a `screen`. `/what-moved-where` is the
+  static Overview.
 - `shell/`: `TopBar` (Ctrl K search box, + Start research, avatar, locked-document chip), `Rail` (menu, counts,
   Last / Locked document slot), `SearchOverlay` (empty on purpose; rwr-search fills it), `Banner` (default
   subject), and the components later screens use: `ForDocumentBar` (amber, with a way back), `TypedConfirm`,
@@ -69,3 +73,19 @@ route through `lib/api.ts` only, caches nothing and writes nothing to the browse
 - Tests: `npx vitest run` (unit + component + two-identity), and the headless-Chromium e2e with axe on an `--internal`
   network: build with `--build-arg PICKER_HARNESS=1` (adds the dev-only `/picker-harness.html`; the default image has
   none) then `test/e2e/run-picker-lab.ps1`.
+
+## Documents (item `rwr-docs-list`)
+
+- `src/screens/documents/`: `Documents.tsx` (screen 2: folders with counts, + Folder, + New document, the table,
+  Active / Archived / Trash, Open, Archive, Unarchive, Move to trash, Restore, Delete forever and Empty the trash
+  behind the shared `shell/TypedConfirm` with the word `DELETE` and a Lost / Stays summary, the Undo toast),
+  `DocumentScreen.tsx` (the `/documents/:id` frame rwr-doc-editor fills in: active and archived documents open
+  read-only, archived with Unarchive; a trashed one does not open and offers Restore; someone else's or a missing
+  one is the same sentence), `docs-data.ts` (every read and write, through `lib/api.ts`).
+- Routes used: `contract/documents?limit=500`, `documents/folders`, `POST documents`, `documents/folders`,
+  `archive`, `unarchive`, `trash`, `restore`, `delete-forever` and `empty-trash` (`confirm: true`), `state`, `file`.
+  The trash's "goes by itself in N days" is 30 days (Q9) from the listing's date, which the trash move sets.
+- The menu's Last / Locked document follows a document that is archived, unarchived or restored (its path
+  changes); a trash move or a delete clears it, and Undo puts it back.
+- Tests: `test/documents.test.tsx` and `e2e/docs.e2e.mjs` (`e2e/run-docs-e2e.ps1`), both against ONE fake documents
+  back end, `e2e/docs-fake.mjs` (the server's own isolation is its lab's: `run-docs-lifecycle-tests.ps1`).

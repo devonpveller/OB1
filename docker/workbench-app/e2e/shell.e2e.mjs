@@ -10,7 +10,7 @@ const ok = (c, m) => { console.log((c ? "PASS " : "FAIL ") + m); if (!c) fails++
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const MENU = [
-  ["/", "Home", 0], ["/research", "Research", 3], ["/chat", "Chat", 4], ["/documents", "Documents", 1], ["/ideas", "Ideas", 4],
+  ["/", "Home", 0], ["/research", "Research", 3], ["/chat", "Chat", 4], ["/documents", "Documents", null], ["/ideas", "Ideas", 4],
   ["/podcasts", "Podcasts", 3], ["/library", "Library", 2], ["/imports", "Imports", 5], ["/removals", "Removals and trail", 5],
   ["/cleanup", "Cleanup", 5], ["/settings", "Settings", 6],
 ];
@@ -56,7 +56,7 @@ async function axe(label) {
 // ---- 1. every route, opened directly and by clicking its menu entry: never blank, plain phase message, no errors
 await setMode("alice");
 await scheme("light");
-for (const [path, label, phase] of ALL.filter((a) => a[0] !== "/")) { // Home is a real screen: e2e/home.e2e.mjs
+for (const [path, label, phase] of ALL.filter((a) => a[0] !== "/")) { // Home and Documents are real screens (phase null: no placeholder): home.e2e.mjs, docs.e2e.mjs
   await go(path);
   const s = await ev(`JSON.stringify({h1:document.querySelector('h1')?.textContent, coming:document.querySelector('[data-testid=coming]')?.textContent||null, len:document.querySelector('main').innerText.trim().length, cur:document.querySelector('[aria-current=page]')?.textContent?.replace(/\\d+ \\w+( \\w+)?$/,'').trim(), title:document.title})`);
   const o = JSON.parse(s);
@@ -75,7 +75,8 @@ for (const [path, label] of ALL.slice(1)) {
 await go("/deep/unknown/path");
 ok((await ev(`document.querySelector('h1')?.textContent`)) === "No such screen", "an unknown path says so (not blank)");
 await go("/documents/abc");
-ok(/phase 1/.test(await ev(`document.querySelector('[data-testid=coming]')?.textContent`)), "a deep link /documents/abc opens its placeholder");
+for (let i = 0; i < 20 && !(await ev(`!!document.querySelector('[data-testid=doc-gone]')`)); i++) await sleep(150);
+ok((await ev(`!!document.querySelector('[data-testid=document]') && !document.querySelector('[data-testid=not-found]')`)), "a deep link /documents/abc opens the document screen (which says there is no such document), not No such screen");
 
 // ---- 2. counts equal the stub's fixture (alice: 2 sessions, 1 retry job of 3, 3 sources + 1 candidate with evidence)
 await go("/research"); // not Home: Home makes its own reads
@@ -89,7 +90,7 @@ ok(SIX.every((x) => seenPaths.includes(x)) && lg.every((x) => x.method === "GET"
 ok(["/workbench/settings", "/workbench/documents/file", "/workbench/documents/state"].every((x) => seenPaths.includes(x)), `and the account's reads (settings, then the locked document's state and title) are in the log too`);
 // the exact set: bar Home's own named reads (checked in home.e2e.mjs), the shell and the account read nothing beyond the
 // six and the account's three (settings, the locked document's file and state)
-const HOME_READS = ["/workbench/contract/documents", "/workbench/contract/ideas", "/workbench/contract/library/recent", "/workbench/contract/library/waiting-claims", "/workbench/contract/podcasts", "/workbench/contract/podcasts/requests", "/workbench/contract/search"];
+const HOME_READS = ["/workbench/contract/documents", "/workbench/documents/folders", "/workbench/contract/ideas", "/workbench/contract/library/recent", "/workbench/contract/library/waiting-claims", "/workbench/contract/podcasts", "/workbench/contract/podcasts/requests", "/workbench/contract/search"];
 const shellReads = seenPaths.filter((p) => !HOME_READS.includes(p));
 ok(shellReads.join() === [...SIX, "/workbench/documents/file", "/workbench/documents/state", "/workbench/settings"].sort().join(), `exactly those: the shell and the account read only the six and the three: ${shellReads.join(", ")}`);
 
