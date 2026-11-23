@@ -226,6 +226,10 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   assertEquals(madeTrash.status, 201, madeTrash.text);
   const bTrashed: string = (await wb("POST", "/workbench/documents/trash", { path: madeTrash.json.path }, B)).json.trashed;
   assert(bTrashed, "B's trashed document planted");
+  // rw-sweep-admin-trash: B's trail is read RELATIVE to here (the sessions lab runs the sweep several times on one
+  // database with the same B, so an earlier run's lines are residue, not a leak); likewise B's admin_audit rows
+  const bTrailBefore = (await wb("GET", "/workbench/documents/trail", undefined, B)).json.total as number;
+  const bAuditBefore = Number((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.admin_audit WHERE subject_sub = $1`, [bSub]))[0].n);
   // rw-p4b-sessions round 3 (tester t-p4b-sessions2): an ADMIN steers a SERVICE's job with a marker. The
   // service's job is shared, but the steer's text is the admin's (and who may act's): for a non-admin A every
   // route below must carry none of it (the timeline leaked it in attempt 2). Only where the lab passes the
@@ -624,11 +628,21 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   for (const h of [...new Set(hits)]) console.log(`  ${h}`);
   // shared knowledge answers both users alike
   // (the fixture source may have been changed by A's mutating calls - shared, so alike for both)
+  // rw-sweep-admin-trash: a search hit's `cited_by` (rwr-picker) is the ONE per-caller field of shared knowledge: it
+  // counts the CALLER's own documents that cite the source, so A's and B's can differ by design (they count different users' documents;
+  // B's may cite the fixture source, A's not). Everything else of a hit must read the same for both
+  const sharedOnly = (t: string): string => {
+    try {
+      return JSON.stringify(JSON.parse(t), (k, v) => (k === "cited_by" ? undefined : v));
+    } catch {
+      return t;
+    }
+  };
   for (const p of [`/workbench/contract/sources/${FX_ACTIVE}`, `/workbench/contract/search?q=fixture`, `/workbench/contract/sources?limit=50`]) {
     const a = await wb("GET", p);
     const b = await wb("GET", p, undefined, B);
     assertEquals(a.status, b.status, `${p}: ${a.status} ${b.status}`);
-    assertEquals(a.text, b.text, `${p}: shared knowledge reads the same for both users`);
+    assertEquals(sharedOnly(a.text), sharedOnly(b.text), `${p}: shared knowledge reads the same for both users`);
   }
   assertEquals((await wb("GET", `/workbench/contract/search?q=fixture`)).status, 200, "shared search answers");
   // rw-boundary-core: a derived job's question is public - A reads it on its session (the positive control of the
@@ -640,8 +654,22 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   }
   // B's document is B's: unchanged by A's calls, and B still reads it
   assertEquals(await Deno.readTextFile(`${VAULT}/${bPath}`), before, "user A's calls left B's document unchanged");
-  assert(await Deno.stat(`${VAULT}/${bTrashed}`).then(() => true, () => false), "user A's confirmed delete-forever / empty-trash calls left B's trashed document in B's trash");
-  assertEquals((await wb("GET", "/workbench/documents/trail", undefined, B)).json.total, 0, "nothing of B's was removed: B's trail is empty");
+  const bTrashedThere = await Deno.stat(`${VAULT}/${bTrashed}`).then(() => true, () => false);
+  const bTrailAfter = (await wb("GET", "/workbench/documents/trail", undefined, B)).json;
+  if (aIsAdmin) {
+    // a real admin MAY delete another user's trashed document forever (audited, attributed to its owner): that is
+    // the designed behaviour, so the sweep asserts it happened exactly so - not that it did not happen
+    assert(!bTrashedThere, "a real admin's confirmed delete-forever removed B's trashed document (allowed, audited)");
+    assertEquals(bTrailAfter.total, bTrailBefore + 1, "B's trail grew by exactly one line (the admin's delete-forever)");
+    const newest = bTrailAfter.lines?.[0];
+    assertEquals(newest?.kind, "delete_forever", "the new trail line is a delete_forever");
+    assert(newest?.actor_sub && newest.actor_sub !== bSub, `the delete_forever line names the admin as actor, not B: ${newest?.actor_sub}`);
+    const bAuditAfter = Number((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.admin_audit WHERE subject_sub = $1`, [bSub]))[0].n);
+    assert(bAuditAfter > bAuditBefore, "an admin_audit row names B as the subject of the admin's delete-forever");
+  } else {
+    assert(bTrashedThere, "user A's confirmed delete-forever / empty-trash calls left B's trashed document in B's trash");
+    assertEquals(bTrailAfter.total, bTrailBefore, "nothing of B's was removed: B's trail is unchanged since before A's calls");
+  }
   assertEquals((await wb("GET", `/workbench/documents/file?path=${encodeURIComponent(bPath)}`, undefined, B)).status, 200);
   // rw-p8a3-room: B's room is B's - B still reads its transcript and draft, and A's calls added nothing to it
   const bRoomRead = await wb("GET", `/workbench/rooms/${bRoom}`, undefined, B);
