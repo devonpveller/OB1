@@ -89,6 +89,19 @@ export async function api<T = any>(method: string, url: string, body?: unknown):
   return { status: r.status, data };
 }
 
+// A multipart POST (a file upload): the same door, the same guard and the same log; the browser sets the
+// multipart boundary itself, so no content-type header is given. Errors are ApiErrors, as in api().
+export async function apiForm<T = any>(url: string, form: FormData): Promise<{ status: number; data: T }> {
+  const target = guard(url);
+  log.push({ method: "POST", url: target });
+  const r = await fetcher(target, { method: "POST", body: form, credentials: "same-origin", cache: "no-store" });
+  const text = await r.text();
+  let data: any = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { text }; }
+  if (!r.ok) throw new ApiError(r.status, data);
+  return { status: r.status, data };
+}
+
 // A GET whose answer may be a FILE: the raw response, through the same door and the same log.
 export async function raw(url: string): Promise<Response> {
   const target = guard(url);

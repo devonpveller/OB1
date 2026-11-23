@@ -69,3 +69,19 @@ route through `lib/api.ts` only, caches nothing and writes nothing to the browse
 - Tests: `npx vitest run` (unit + component + two-identity), and the headless-Chromium e2e with axe on an `--internal`
   network: build with `--build-arg PICKER_HARNESS=1` (adds the dev-only `/picker-harness.html`; the default image has
   none) then `test/e2e/run-picker-lab.ps1`.
+
+## Imports (item `rwr-imports`)
+
+`src/screens/imports/` (`Imports.tsx`, `imports-data.ts`, `imports.css`): screen 14 on today's intake routes
+(`/workbench/intake/jobs`, `.../jobs/:kind/:id/retry|cancel`, `.../add`), plus the contract's documents and ideas reads
+for "where it lands". Listed: what / status / from / who sees it / when; "This week" counts and the four filters are
+counted from the person's own jobs read. A failed item shows the server's recorded reason; Try again is offered once
+(`attempts` starts at 1; the screen offers it while it is below 2, the server itself would allow more). Held adds are
+shown as "Only you" (a held source is private to its refinery until admitted); the older import route lands in the shared
+library. One link or file lands in a chosen document or idea (the existing add route); a file is limited to 1 MB because
+the forwarder in front of the workbench caps request bodies there (`FILE_LIMIT_BYTES`, checked by `test/imports-drift.test.ts`).
+The Connected inlets panel says plainly that connections cannot be listed yet (the workbench has no read of
+`inlet_connections`: no app role may read it) and shows only the person's own items that came from Open WebUI chats.
+Tests: `test/imports.test.tsx` (vitest against `e2e/imports-fake.mjs`, a fake of the real routes that the e2e stub shares),
+`test/imports-drift.test.ts` (the fake against the server's source), `e2e/imports.e2e.mjs` run by `e2e/run-imports-e2e.ps1`
+(lab subnet 10.250.113.0/24).

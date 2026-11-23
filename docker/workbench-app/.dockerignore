@@ -1,3 +1,6 @@
 node_modules
 dist
 e2e
+# the shared fake intake back end is used by the vitest suite too (test/imports.test.tsx)
+!e2e/imports-fake.mjs
+!e2e/imports-fake.d.mts

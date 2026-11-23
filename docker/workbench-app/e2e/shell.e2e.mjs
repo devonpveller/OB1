@@ -11,7 +11,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const MENU = [
   ["/", "Home", 0], ["/research", "Research", 3], ["/chat", "Chat", 4], ["/documents", "Documents", 1], ["/ideas", "Ideas", 4],
-  ["/podcasts", "Podcasts", 3], ["/library", "Library", 2], ["/imports", "Imports", 5], ["/removals", "Removals and trail", 5],
+  ["/podcasts", "Podcasts", 3], ["/library", "Library", 2], ["/imports", "Imports", null], ["/removals", "Removals and trail", 5],
   ["/cleanup", "Cleanup", 5], ["/settings", "Settings", 6],
 ];
 const ALL = [...MENU, ["/what-moved-where", "What moved where", null]];
@@ -56,7 +56,7 @@ async function axe(label) {
 // ---- 1. every route, opened directly and by clicking its menu entry: never blank, plain phase message, no errors
 await setMode("alice");
 await scheme("light");
-for (const [path, label, phase] of ALL.filter((a) => a[0] !== "/")) { // Home is a real screen: e2e/home.e2e.mjs
+for (const [path, label, phase] of ALL.filter((a) => a[0] !== "/")) { // Home and Imports are real screens (phase null: no placeholder): home.e2e.mjs, imports.e2e.mjs
   await go(path);
   const s = await ev(`JSON.stringify({h1:document.querySelector('h1')?.textContent, coming:document.querySelector('[data-testid=coming]')?.textContent||null, len:document.querySelector('main').innerText.trim().length, cur:document.querySelector('[aria-current=page]')?.textContent?.replace(/\\d+ \\w+( \\w+)?$/,'').trim(), title:document.title})`);
   const o = JSON.parse(s);
