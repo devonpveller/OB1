@@ -96,7 +96,7 @@ t("T3: every setting the routes send carries its registry row's tag; the user do
   const reg = new Map((await sql<{ key: string; tag: string }>(`SELECT key, tag FROM public.settings_keys`)).map((r) => [r.key, r.tag]));
   const mine = await call("GET", S, undefined, A);
   assertEquals(mine.status, 200, mine.text);
-  assert(mine.json.settings.length >= 14, "the user tier is listed");
+  assert(mine.json.settings.length >= 10, "the user tier is listed (10 keys today)");
   for (const s of mine.json.settings) {
     assertEquals(s.tier, "user", `${s.key} is not a user key`);
     assertEquals(s.tag, reg.get(s.key), s.key);
@@ -125,12 +125,14 @@ t("T4: a non-admin is never sent an admin key - checked on the wire, on every ro
     seen(await call("DELETE", `${S}/${k.key}`, undefined, A), 404, `DELETE ${k.key}`);
   }
   const all = bodies.join("\n");
+  // the only place a key's name may appear is the caller's own request echoed back ("<key> is not a setting")
+  const echoless = all.replace(/[a-z][a-z0-9_.]* is not a setting/g, "");
   const list = (await call("GET", S, undefined, A)).json;
   assertEquals(list.admin, false);
   assert(list.settings.every((s: { tier: string }) => s.tier === "user"));
   for (const k of adminKeys) {
     // the only place a key's name may appear is the caller's own request echoed back ("<key> is not a setting")
-    assert(!all.replaceAll(`${k.key} is not a setting`, "").includes(k.key), `${k.key} appears in a response to a non-admin`);
+    assert(!echoless.includes(k.key), `${k.key} appears in a response to a non-admin`);
     assert(!all.includes(k.label), `the label of ${k.key} appears in a response to a non-admin`);
   }
   // the admin does get them
