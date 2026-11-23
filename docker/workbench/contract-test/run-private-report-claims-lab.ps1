@@ -27,6 +27,11 @@
 # now called through the door with no token (401) and with EACH minted caller's own token (every door role: refused, no
 # claim text). 480 is in the chain, so ob_workbench is the chain's own role (ob-workbench-role.ps1, as the sibling labs) and
 # [9] re-runs the tree's init-owner-private-view.sql, not a branch of another item. No superuser / service_role shortcut.
+# Fix item rw-private-report-claims-fix (2026-11-22): the plant adds the P2 shapes (a shared synthesis restating B's claim,
+# one restating B's and A's, B's and A's shared questions whose reports restated B's claim, a separate control synthesis),
+# a human steer typing one of B's claims (F2); the cases tagged [fix] are A1 / F2 / P2. -OldSql <an earlier
+# init-private-report-claims.sql> is the fix's RED: after [4] it applies THAT file instead of the tree's, runs the
+# migrated phase and requires every [fix] case to FAIL, then stops (no revert / green: the lab is thrown away).
 param(
   [string]$Id = 'wt-rw-private-report-claims',
   [string]$Subnet = '',
@@ -34,7 +39,8 @@ param(
   [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
   [string]$PgrstImage = 'postgrest/postgrest:v12.2.3',
   [string]$CaddyImage = 'caddy:2-alpine',
-  [switch]$KeepImages
+  [switch]$KeepImages,
+  [string]$OldSql = ''
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -149,6 +155,9 @@ SELECT string_agg(t || '=' || h, ' ' ORDER BY t) FROM (
   UNION ALL SELECT 'steers', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.research_steers x
   UNION ALL SELECT 'events', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.research_job_events x
   UNION ALL SELECT 'private_edges', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.claim_id, x.edge_ref, x.batch), '')) FROM public.inlet_private_claim_sources x
+  UNION ALL SELECT 'sources', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.sources x
+  UNION ALL SELECT 'private_reports', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.research_private_reports x
+  UNION ALL SELECT 'source_chunks', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.source_id, x.idx), '')) FROM public.source_chunks x
   UNION ALL SELECT 'link_fk', md5(coalesce((SELECT string_agg(conname || ' ' || pg_get_constraintdef(oid), '|' ORDER BY conname) FROM pg_constraint
                                            WHERE conrelid = 'public.research_private_report_claims'::regclass AND contype = 'f'), ''))
 ) s
@@ -266,14 +275,31 @@ try {
   Check ($pt.m.Success -and $pt.m.Groups[1].Value -eq 'ok' -and [int]$pt.m.Groups[2].Value -eq 1) "planted the 390-shaped private-report claims and everything naming them ($($pt.m.Value))"
   # round 2 (tester F1): the plant LANDED - the phase above asserts it (landed()); the lab counts it once more itself
   $pl = Q "SELECT (SELECT count(*) FROM public.lab_prc_plant) || '/' || (SELECT count(*) FROM public.research_private_report_claims) || '/' || (SELECT count(*) FROM public.research_steers) || '/' || (SELECT count(*) FROM public.wiki_pages WHERE slug LIKE 'content/topic/prc-%')"
-  Check ($pl -eq '1/8/1/8') "the plant is in the database (plant record / links / steers / pages = $pl, want 1/8/1/8)"
-  if ($pl -ne '1/8/1/8') { throw 'the plant did not land' }
+  Check ($pl -eq '1/9/2/8') "the plant is in the database (plant record / links / steers / pages = $pl, want 1/9/2/8)"
+  if ($pl -ne '1/9/2/8') { throw 'the plant did not land' }
   $h0 = Q $hashQ; Save 'hash-planted.txt' $h0
   # P2 (operator decision): how many shared outputs restate a private-report claim - before 570
   $null = Dk cp (Join-Path $dockerDir 'count-private-report-claim-reuse.sql') "${db}:/tmp/prcreuse.sql"
   $p2a = ((Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/prcreuse.sql) | Out-String).Trim(); Save 'p2-count-before-570.log' $p2a
   Write-Host ($p2a -replace "`n", ' | ')
-  Check ($p2a -match 'mixed claims \(a shared synthesis also filed them; shared\)=1' -and $p2a -match "shared syntheses carrying a private-report claim's sentence=1" -and $p2a -match 'shared job reports carrying one=1') 'P2 count before 570: 1 mixed claim, 1 shared synthesis, 1 shared job report (the plant)'
+  Check ($p2a -match 'mixed claims \(a shared synthesis also filed them, still in the shared table\)=1' -and $p2a -match "shared syntheses carrying a private-report claim's sentence=2" -and $p2a -match 'shared job reports carrying one=2') 'P2 count before 570: 1 mixed claim, 2 shared syntheses, 2 shared job reports (the plant)'
+  if ($OldSql) {
+    # ---------------------------------------------------------------- the fix's RED: the earlier 570 on the same plant
+    Write-Host "[fix RED] the earlier slot 570 ($OldSql) on the plant; every [fix] case must fail"
+    $io = Psql-File $OldSql 'the earlier 570'
+    Check ($io.rc -eq 0) "the earlier 570 applies on the plant (exit $($io.rc))"
+    $old = Invoke-Test 'migrated'
+    $oldCases = Case-Results $old.out
+    Save 'fix-red-cases.txt' (($oldCases.Keys | Sort-Object | ForEach-Object { "$($oldCases[$_])  $_" }) -join "`n")
+    $fixAll = @($oldCases.Keys | Where-Object { $_ -match '\[fix\]' })
+    $fixRed = @($fixAll | Where-Object { $oldCases[$_] -eq 'FAILED' })
+    foreach ($k in ($fixAll | Sort-Object)) { Write-Host "    $($oldCases[$k])  $k" }
+    Check ($fixAll.Count -ge 5 -and $fixRed.Count -eq $fixAll.Count) "fix RED: every [fix] case fails on the earlier 570 ($($fixRed.Count) of $($fixAll.Count))"
+    $cOld = Check-Script; Save 'check-earlier-570.log' $cOld
+    $p2o = ((Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/prcreuse.sql) | Out-String).Trim(); Save 'p2-count-earlier-570.log' $p2o
+    Write-Host ($p2o -replace "`n", ' | ')
+    throw 'STOP-OLDSQL'
+  }
   # ---------------------------------------------------------------- [5] RED
   Write-Host '[5] RED: before 570'
   $red = Invoke-Test 'red'
@@ -284,7 +310,7 @@ try {
   $ctlRed = @($redCases.Keys | Where-Object { $_ -match '\[(control|owner)\]' -and $redCases[$_] -eq 'FAILED' })
   Save 'red-cases.txt' (($redCases.Keys | Sort-Object | ForEach-Object { "$($redCases[$_])  $_" }) -join "`n")
   Check ($leakRed.Count -ge 6) "RED: $($leakRed.Count) [leak] read path(s) fail before 570 (B's claims reach A, the lane, a service, A signed in or the admin)"
-  Check ($dbRed.Count -eq @($redCases.Keys | Where-Object { $_ -match '\[db\]' }).Count -and $dbRed.Count -ge 7) "RED: every [db] case fails before 570 ($($dbRed.Count))"
+  Check ($dbRed.Count -eq @($redCases.Keys | Where-Object { $_ -match '\[db\]' }).Count -and $dbRed.Count -ge 9) "RED: every [db] case fails before 570 ($($dbRed.Count))"
   Check ($ctlRed.Count -eq 0) "RED: the controls and the owner's read pass before 570 ($($ctlRed.Count) failed)"
   $cr = Check-Script; Save 'check-red.log' $cr
   Check ($cr -match 'check: FAIL' -and $cr -match 'in the shared table=[1-9]') 'RED: the check script reports private-report claims on a shared surface and FAILS'
@@ -292,23 +318,25 @@ try {
   # ---------------------------------------------------------------- [6] init x2, revert x2, init
   Write-Host '[6] 570 x2, revert x2 (byte-identical), 570'
   $i1 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570'
-  Check ($i1.rc -eq 0 -and $i1.msg -match '4 claim\(s\) moved to their owner''s store' -and $i1.msg -match '2 withheld' -and $i1.msg -match '1 claim\(s\) a shared synthesis also filed stay shared' -and $i1.msg -match '1 job result\(s\) stripped' -and $i1.msg -match '6 wiki page\(s\) withheld' -and $i1.msg -match '4 gap-work row\(s\) of a shared tree made neutral' -and $i1.msg -match '1 corroboration line') "570 moves B's 3 + A's 1 claims, withholds the two-owner and the ownerless claim, keeps the mixed one, strips the job, withholds the 3 pages (variants), neutralises the 4 gap-work rows and the line (counts only)"
+  Check ($i1.rc -eq 0 -and $i1.msg -match '6 claim\(s\) moved to their owner''s store' -and $i1.msg -match '2 withheld \(no single owner\)' -and $i1.msg -match '1 of them a shared synthesis also filed' -and $i1.msg -match '0 job result\(s\) stripped' -and $i1.msg -match '6 wiki page\(s\) withheld' -and $i1.msg -match '4 gap-work row\(s\) of a shared tree made neutral' -and $i1.msg -match '1 corroboration line') "570 moves B's 5 (the mixed one and the human-typed one included) + A's 1 claims, withholds the two-owner and the ownerless claim, withholds the 6 pages, neutralises the 4 machine gap-work rows (not the human steer) and the line (counts only)"
+  Check ($i1.msg -match '2 shared synthesis\(es\) moved private to their claim''s owner, 1 withheld' -and $i1.msg -match '1 shared job report\(s\) moved private to their claim''s owner, 2 withheld') "P2: the restating and the mixed-filing syntheses move to B, the two-owner one is withheld; B's own question's report moves to B, A's question's and the ownerless job's are withheld"
   $i2 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570 again'
   Check ($i2.rc -eq 0 -and $i2.msg -match 'nothing to move' -and $i2.msg -notmatch 'corroboration line') '570 a second time: nothing to move'
   $c1 = Check-Script; Save 'check-after-570.log' $c1
   Check ($c1 -match 'check: OK') 'after 570 the check script says OK'
   $v1 = Psql-File (Join-Path $dockerDir 'revert-private-report-claims.sql') 'revert'
-  Check ($v1.rc -eq 0 -and $v1.msg -match '6 claim\(s\) restored' -and $v1.msg -match '4 gap-work row\(s\)' -and $v1.msg -match 'foreign key restored') 'the revert restores the 6 claims, the edges, the job, the pages, the gap work, the line and the key'
+  Check ($v1.rc -eq 0 -and $v1.msg -match '8 claim\(s\) restored' -and $v1.msg -match '4 gap-work row\(s\)' -and $v1.msg -match 'foreign key restored') 'the revert restores the 8 claims, the edges, the pages, the gap work, the line and the key'
+  Check ($v1.msg -match '3 shared synthesis\(es\) restored' -and $v1.msg -match '3 shared job report\(s\) restored' -and $v1.msg -match '3 private copy\(ies\) removed') 'the revert restores the 3 P2 syntheses and the 3 P2 job reports and removes the 3 private copies'
   $v2 = Psql-File (Join-Path $dockerDir 'revert-private-report-claims.sql') 'revert again'
   Check ($v2.rc -eq 0 -and $v2.msg -match 'nothing to restore') 'a second revert has nothing to restore'
   $h1 = Q $hashQ; Save 'hash-reverted.txt' $h1
   Check ($h1 -eq $h0) "after the revert every touched table is byte-identical to the planted state"
   if ($h1 -ne $h0) { Save 'hash-diff.txt' ("planted:  $h0`nreverted: $h1") }
   $i3 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570 once more'
-  Check ($i3.rc -eq 0 -and $i3.msg -match '4 claim\(s\) moved') '570 after the revert moves the same claims again'
+  Check ($i3.rc -eq 0 -and $i3.msg -match '6 claim\(s\) moved' -and $i3.msg -match '2 shared synthesis\(es\) moved private') '570 after the revert moves the same claims and summaries again'
   $p2b = ((Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/prcreuse.sql) | Out-String).Trim(); Save 'p2-count-after-570.log' $p2b
   Write-Host ($p2b -replace "`n", ' | ')
-  Check ($p2b -match "shared syntheses carrying a private-report claim's sentence=1" -and $p2b -match 'shared job reports carrying one=1') 'P2 count after 570: unchanged (570 leaves shared syntheses / reports as they are - the operator decides)'
+  Check ($p2b -match 'mixed claims \(a shared synthesis also filed them, still in the shared table\)=0' -and $p2b -match "shared syntheses carrying a private-report claim's sentence=0" -and $p2b -match 'shared job reports carrying one=0') 'P2 count after 570: 0 mixed claims, 0 shared syntheses, 0 shared job reports (operator decision P2)'
   $c2 = Check-Script; Save 'check-green.log' $c2
   Check ($c2 -match 'check: OK') 'the check script says OK'
   # ---------------------------------------------------------------- [7] GREEN
@@ -344,7 +372,7 @@ try {
   $fk = Q "SELECT count(*) FROM pg_constraint WHERE conrelid = 'public.research_private_report_claims'::regclass AND contype = 'f' AND confrelid = 'public.claims'::regclass"
   Check ($fk -eq '1') "the link's foreign key onto claims is back ($fk)"
 } catch {
-  Fail "aborted: $($_.Exception.Message)"
+  if ($_.Exception.Message -ne 'STOP-OLDSQL') { Fail "aborted: $($_.Exception.Message)" }
 } finally {
   Save 'psql.log' ($script:log -join "`n")
   foreach ($c in $script:made.containers) { $null = Dk rm -f $c }

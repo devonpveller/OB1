@@ -189,7 +189,7 @@ try {
   Save 'start-e2e.log' $o
   foreach ($l in ($o -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(slot 540|preview|start|approved_question|attach to nothing|the jobs ran|sweep|search egress|two identities|idea|slot 580|user-start with):' }) { Write-Host "    $l" }
   $sum = Summary $o
-  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 4) "start e2e (round 2: S8, an idea is not a start): $($sum.Value)"
+  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 5) "start e2e (round 2: S8, an idea is not a start; rw-private-report-claims-fix: S9, no private-claim oracle): $($sum.Value)"
 
 
   Write-Host '[4b] round 2: the tester''s COPY probes; TF2 through a real PostgREST (anon = service_role, no token)'
