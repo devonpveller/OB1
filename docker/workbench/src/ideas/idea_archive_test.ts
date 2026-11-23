@@ -17,12 +17,13 @@ function fakeDb(row: Row | null, guardRefuses = false) {
   const db: Db = {
     query: (sql: string, args: unknown[] = []) => {
       seen.push({ sql, args });
+      if (/^\s*SELECT archived_from/i.test(sql)) return Promise.resolve((row && args[0] === ID ? [{ archived_from: row.archived_from }] : []) as never);
       if (/^\s*SELECT/i.test(sql)) {
         const mine = row && args.includes(row.owner) && args[0] === ID;
         return Promise.resolve((mine ? [{ status: row!.status, archived_from: row!.archived_from }] : []) as never);
       }
       if (guardRefuses && /UPDATE public\.ideas SET status = \$2/.test(sql)) {
-        return Promise.reject(Object.assign(new Error("guard"), { fields: { code: "42501" } }));
+        return Promise.reject(Object.assign(new Error("ideas: an idea is promoted only through idea_promote()"), { fields: { code: "42501", message: "ideas: an idea is promoted only through idea_promote()" } }));
       }
       return Promise.resolve([] as never);
     },
@@ -99,4 +100,29 @@ Deno.test("rwr-idea-archive-api: a promoted idea whose document is no longer its
 Deno.test("rwr-idea-archive-api: both routes are user-only paths (a service key is 403 before the route runs)", async () => {
   const { USER_ONLY } = await import("../middleware/identity.ts");
   for (const verb of ["archive", "reopen"]) assert(USER_ONLY.test(`/workbench/ideas/${ID}/${verb}`), verb);
+});
+
+Deno.test("rwr-idea-archive-api: reopen locks the idea row alone and reads archived_from in a LATER statement (a join keeps the pre-wait snapshot)", async () => {
+  const { db, seen } = fakeDb({ status: "archived", archived_from: "dirty", owner: "operator" });
+  await go(app(db), ID, "reopen");
+  const lock = seen.findIndex((s) => /FOR UPDATE/.test(s.sql));
+  assert(lock === 0 && !/refinery_state/.test(seen[lock].sql), "the locking statement names no other table");
+  const read = seen.findIndex((s) => /SELECT archived_from FROM public\.refinery_state/.test(s.sql));
+  assert(read > lock, "the stamp is read after the lock");
+});
+
+Deno.test("rwr-idea-archive-api: only the write guard's own refusal becomes cannot-reopen; any other 42501 is not mislabelled", async () => {
+  const seen: string[] = [];
+  const db = {
+    query: (sql: string, args: unknown[] = []) => {
+      if (/^\s*SELECT status/i.test(sql)) return Promise.resolve([{ status: "archived" }] as never);
+      if (/^\s*SELECT archived_from/i.test(sql)) return Promise.resolve([{ archived_from: "dirty" }] as never);
+      if (/UPDATE public\.ideas SET status = \$2/.test(sql)) return Promise.reject(Object.assign(new Error("permission denied for table ideas"), { fields: { code: "42501", message: "permission denied for table ideas" } }));
+      seen.push(sql); void args;
+      return Promise.resolve([] as never);
+    },
+    tx: (fn: (d: Db) => Promise<unknown>) => fn(db as never),
+  } as never as Db;
+  const r = await go(app(db), ID, "reopen");
+  assertEquals(r.status, 500, "an unrelated permission error stays an internal error, not a 409 about promotion");
 });

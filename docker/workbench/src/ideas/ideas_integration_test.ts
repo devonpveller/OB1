@@ -941,3 +941,88 @@ t("AR5: archive and reopen are user-only paths: a service key is 403 before the 
   }
   assertEquals((await ideaRow(id)).status !== "archived", true);
 });
+// -- TESTER PROBES (t-riaa, rwr-idea-archive-api attempt 1; NOT part of the deliverable) --------------------------
+const tx = async (id: string) => (await sql<{ f: string | null; a: Date | null; ok: string | null; od: string | null }>(
+  `SELECT archived_from AS f, archived_at AS a, origin_kind AS ok, origin_document_id::text AS od FROM public.refinery_state WHERE refinery_id = $1`, [id]))[0];
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+t("XR1 (race): two simultaneous archives - exactly one 200 and one 409, archived_from is the real state", async () => {
+  const out: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const id = await captured(sub(A), `xr1 ${rnd()}`);
+    await sql(`UPDATE public.ideas SET status = 'dirty' WHERE id = $1`, [id]);
+    const [p, q] = await Promise.all([call("POST", `/workbench/ideas/${id}/archive`, {}), call("POST", `/workbench/ideas/${id}/archive`, {})]);
+    const st = [p.status, q.status].sort();
+    const s = await tx(id);
+    out.push(`${st.join("/")} from=${s?.f}`);
+    assertEquals(st, [200, 409], `iter ${i}: ${p.text} | ${q.text}`);
+    assertEquals(s?.f, "dirty", `iter ${i}`);
+  }
+  console.log("XR1", out.join("; "));
+});
+
+t("XR2 (race): two simultaneous reopens - exactly one 200 and one 409, status restored", async () => {
+  for (let i = 0; i < 10; i++) {
+    const id = await captured(sub(A), `xr2 ${rnd()}`);
+    await sql(`UPDATE public.ideas SET status = 'researched' WHERE id = $1`, [id]);
+    assertEquals((await call("POST", `/workbench/ideas/${id}/archive`, {})).status, 200);
+    const [p, q] = await Promise.all([call("POST", `/workbench/ideas/${id}/reopen`, {}), call("POST", `/workbench/ideas/${id}/reopen`, {})]);
+    assertEquals([p.status, q.status].sort(), [200, 409], `iter ${i}: ${p.text} | ${q.text}`);
+    assertEquals((await ideaRow(id)).status, "researched", `iter ${i}`);
+  }
+});
+
+// a reopen that waits on the row lock of an archive in flight: the archive's exact statements (archiveIdea), held open as
+// the app role, then the HTTP reopen, then COMMIT. Correct: reopen restores 'dirty' (what the archive recorded).
+async function reopenBehindHeldArchive(id: string, from: string) {
+  const c = await pool!.connect();
+  try {
+    await c.queryObject("BEGIN");
+    await c.queryObject(`SELECT status FROM public.ideas WHERE id = $1::uuid AND owner_sub = $2 FOR UPDATE`, [id, sub(A)]);
+    await c.queryObject(
+      `INSERT INTO public.refinery_state (refinery_id, archived_at, archived_from) VALUES ($1::uuid, now(), $2)
+       ON CONFLICT (refinery_id) DO UPDATE SET archived_at = now(), archived_from = EXCLUDED.archived_from`, [id, from]);
+    await c.queryObject(`UPDATE public.ideas SET status = 'archived', updated_at = now() WHERE id = $1::uuid`, [id]);
+    const pending = call("POST", `/workbench/ideas/${id}/reopen`, {});
+    await pause(1500);
+    await c.queryObject("COMMIT");
+    return await pending;
+  } finally {
+    c.release();
+  }
+}
+
+t("XR3 (race, deterministic): a reopen queued behind an in-flight archive restores what that archive recorded (doc-less)", async () => {
+  const id = await captured(sub(A), `xr3 ${rnd()}`);
+  await sql(`UPDATE public.ideas SET status = 'dirty' WHERE id = $1`, [id]);
+  const re = await reopenBehindHeldArchive(id, "dirty");
+  const row = await ideaRow(id), s = await tx(id);
+  console.log("XR3 reopen:", re.status, re.text, "final status:", row.status, "stamp:", JSON.stringify(s));
+  assertEquals(re.status, 200, re.text);
+  assertEquals(row.status, "dirty", "reopen must restore the state the archive recorded, not 'engaged'");
+});
+
+t("XR4 (race, deterministic): the same for a document-tethered idea (a refinery_state row already exists)", async () => {
+  const { id } = await docRefinery(A, `xr4 ${rnd()}`);
+  await sql(`UPDATE public.ideas SET status = 'researched' WHERE id = $1`, [id]);
+  const re = await reopenBehindHeldArchive(id, "researched");
+  const row = await ideaRow(id), s = await tx(id);
+  console.log("XR4 reopen:", re.status, re.text, "final status:", row.status, "stamp:", JSON.stringify(s));
+  assertEquals(re.status, 200, re.text);
+  assertEquals(row.status, "researched", "reopen must restore the state the archive recorded, not 'engaged'");
+});
+
+t("XR5 (race, natural): archive racing reopen never leaves a state the idea was never in", async () => {
+  const seen: string[] = [];
+  let bad = 0;
+  for (let i = 0; i < 25; i++) {
+    const id = await captured(sub(A), `xr5 ${rnd()}`);
+    await sql(`UPDATE public.ideas SET status = 'dirty' WHERE id = $1`, [id]);
+    const [a, r] = await Promise.all([call("POST", `/workbench/ideas/${id}/archive`, {}), call("POST", `/workbench/ideas/${id}/reopen`, {})]);
+    const st = (await ideaRow(id)).status;
+    seen.push(`${a.status}/${r.status}->${st}`);
+    if (!["dirty", "archived"].includes(st)) bad++;
+  }
+  console.log("XR5", seen.join(" "));
+  assertEquals(bad, 0, "a status the idea was never in");
+});
