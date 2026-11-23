@@ -130,6 +130,11 @@ ok(!(await stub("/__log")).some((x) => x.url.includes("delete-forever")), "Enter
 await ev(`(()=>{const i=document.querySelector('[data-testid=typed-input]');i.select();})()`);
 await send("Input.insertText", { text: "DELETE" }); await sleep(100);
 ok(!(await ev(`document.querySelector('[data-testid=typed-ok]').disabled`)), "DELETE turns it on");
+// review R1: with A's word typed, the other destructive buttons are off and pressing them changes nothing
+const r1 = JSON.parse(await ev(`(()=>{const e=document.querySelector('[data-testid=empty-trash]');const rs=document.querySelector('[data-testid=act-restore]');const before={e:e.disabled,r:rs.disabled};e.click();
+  const a=document.querySelector('[data-testid=delete-ask]');return JSON.stringify({...before,q:a&&a.querySelector('h2').textContent,typed:a&&a.querySelector('[data-testid=typed-input]').value});})()`));
+ok(r1.e && r1.r && /ALPHA CPU duplicate/.test(r1.q || "") && r1.typed === "DELETE", `with DELETE typed, Empty the trash and Restore are off; clicking Empty the trash does not take over the armed confirmation (${JSON.stringify(r1)})`);
+ok(!(await stub("/__log")).some((x) => x.url.includes("empty-trash")), "...and no empty-trash request left");
 await click("[data-testid=typed-ok]");
 await until(`/Deleted forever: 1 document/.test(document.querySelector('[data-testid=toasts]')?.textContent||'')`);
 const d1 = await db();

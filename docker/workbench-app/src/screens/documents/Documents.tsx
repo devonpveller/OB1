@@ -136,6 +136,7 @@ function DocumentsFor() {
   };
 
   const data = load.state === "ok" ? load.data : null;
+  const off = busy || ask !== null; // one action at a time; nothing else while a destructive confirmation is open
   const inTab = data ? data.docs.filter((d) => d.tab === tab) : [];
   const shown = folder === null ? inTab : inTab.filter((d) => d.folder === folder);
   const fols = data ? foldersFor(data, tab) : [];
@@ -162,7 +163,14 @@ function DocumentsFor() {
       )}
       {making === "doc" && (
         <NewDocument folder={folder ?? ""} busy={busy} onCancel={() => setMaking("")}
-          onMake={(title, f) => run(async () => { const path = await createDocument(title, f); setMaking(""); navigate(docHref(path)); }, "The document could not be made.")} />
+          onMake={(title, f) => run(async () => {
+            const made = await createDocument(title, f);
+            setMaking("");
+            // the file is saved but its listing row was not written (207, listing.ok false): until the reconcile pass
+            // lists it, its page would say "no such document" - say so here instead of opening it (review R2)
+            if (made.listed) navigate(docHref(made.path));
+            else toast({ message: `Saved "${title}". It shows in your documents once the listing catches up (a minute or so).` });
+          }, "The document could not be made.")} />
       )}
       {err && <p className="docs-err" role="alert" data-testid="docs-error">{err}</p>}
 
@@ -189,7 +197,8 @@ function DocumentsFor() {
                   onClick={() => { setTab(t); setAsk(null); }}>{label}</button>
               ))}
             </div>
-            {ask && <DeleteAsk ask={ask} onConfirm={confirmDelete} onCancel={() => setAsk(null)} />}
+            {/* keyed per confirmation: a word typed for one never carries over to another (review R1) */}
+            {ask && <DeleteAsk key={ask.kind === "one" ? "one " + ask.doc.path : "all"} ask={ask} onConfirm={confirmDelete} onCancel={() => setAsk(null)} />}
             {shown.length === 0
               ? <p className="empty docs-empty" data-testid="docs-empty">{emptyText(tab, folder, data.docs.length === 0)}</p>
               : (
@@ -208,13 +217,13 @@ function DocumentsFor() {
                           <td className="docs-acts">
                             {d.tab !== "trash" && <Link to={docHref(d.path)} className="btn sm" data-testid="act-open">Open<span className="sr-only"> {d.title}</span></Link>}
                             {d.tab === "active" && <>
-                              <button type="button" className="btn sm" disabled={busy} onClick={() => doArchive(d)} data-testid="act-archive">Archive<span className="sr-only"> {d.title}</span></button>
-                              <button type="button" className="btn sm" disabled={busy} onClick={() => doTrash(d)} data-testid="act-trash">Move to trash<span className="sr-only"> {d.title}</span></button>
+                              <button type="button" className="btn sm" disabled={off} onClick={() => doArchive(d)} data-testid="act-archive">Archive<span className="sr-only"> {d.title}</span></button>
+                              <button type="button" className="btn sm" disabled={off} onClick={() => doTrash(d)} data-testid="act-trash">Move to trash<span className="sr-only"> {d.title}</span></button>
                             </>}
-                            {d.tab === "archived" && <button type="button" className="btn sm" disabled={busy} onClick={() => doUnarchive(d)} data-testid="act-unarchive">Unarchive<span className="sr-only"> {d.title}</span></button>}
+                            {d.tab === "archived" && <button type="button" className="btn sm" disabled={off} onClick={() => doUnarchive(d)} data-testid="act-unarchive">Unarchive<span className="sr-only"> {d.title}</span></button>}
                             {d.tab === "trash" && <>
-                              <button type="button" className="btn sm" disabled={busy} onClick={() => doRestore(d)} data-testid="act-restore">Restore<span className="sr-only"> {d.title}</span></button>
-                              <button type="button" className="btn sm danger-line" disabled={busy} onClick={() => setAsk({ kind: "one", doc: d })} data-testid="act-delete">Delete forever...<span className="sr-only"> {d.title}</span></button>
+                              <button type="button" className="btn sm" disabled={off} onClick={() => doRestore(d)} data-testid="act-restore">Restore<span className="sr-only"> {d.title}</span></button>
+                              <button type="button" className="btn sm danger-line" disabled={off} onClick={() => setAsk({ kind: "one", doc: d })} data-testid="act-delete">Delete forever...<span className="sr-only"> {d.title}</span></button>
                             </>}
                           </td>
                         </tr>
@@ -226,7 +235,7 @@ function DocumentsFor() {
             <div className="docs-foot">
               <span className="meta">{FOOT[tab]}{data.capped ? ` Showing your newest ${LIST_LIMIT} documents.` : ""}</span>
               {tab === "trash" && trashCount > 0 && (
-                <button type="button" className="btn sm danger-line" disabled={busy} onClick={() => setAsk({ kind: "all", n: trashCount })} data-testid="empty-trash">Empty the trash...</button>
+                <button type="button" className="btn sm danger-line" disabled={off} onClick={() => setAsk({ kind: "all", n: trashCount })} data-testid="empty-trash">Empty the trash...</button>
               )}
             </div>
           </div>

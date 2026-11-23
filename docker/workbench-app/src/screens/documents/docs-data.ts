@@ -139,7 +139,10 @@ export const trash = (path: string) => post<{ trashed: string }>("/workbench/doc
 export const restore = (path: string) => post<{ restored: string }>("/workbench/documents/restore", { path }).then((d) => String(d.restored));
 export const deleteForever = (path: string) => post<{ removed: boolean }>("/workbench/documents/delete-forever", { path, confirm: true });
 export const emptyTrash = () => post<{ removed: number; failed: number }>("/workbench/documents/empty-trash", { confirm: true });
-export const createDocument = (title: string, folder: string) => post<{ path: string }>("/workbench/documents", { title, folder }).then((d) => String(d.path));
+// 201 = saved and listed; 207 = saved, but the listing row was not written (listing.ok false): the reconcile pass repairs it
+export const createDocument = (title: string, folder: string) =>
+  post<{ path: string; listing?: { ok?: boolean } }>("/workbench/documents", { title, folder })
+    .then((d) => ({ path: String(d.path), listed: d.listing?.ok !== false }));
 export const createFolder = (path: string) => post<{ path: string; created: boolean }>("/workbench/documents/folders", { path });
 
 // ── one document, for the document screen ──

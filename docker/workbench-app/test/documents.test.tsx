@@ -289,6 +289,79 @@ describe("acceptance 4: Delete forever needs the typed word and shows what is lo
   });
 });
 
+describe("r2 (review R1): a typed word never carries over to another confirmation", () => {
+  const second = () => fake.db().docs.set("documents/k-a/.trash/second.md", { owner: "u-alice", title: "ALPHA second", body: "", updated: new Date(NOW).toISOString(), links: [], history: [] });
+  // whatever the screen does when another destructive button is pressed with A's word typed (refuse it, or open a
+  // fresh confirmation), the result is never an armed button and never a removal
+  const notArmed = async (label: string) => {
+    const ask = screen.queryByTestId("delete-ask");
+    if (ask) {
+      expect((within(ask).getByTestId("typed-input") as HTMLInputElement).value, label).toBe(ask.textContent!.includes("ALPHA CPU duplicate") ? "DELETE" : "");
+      if (!ask.textContent!.includes("ALPHA CPU duplicate")) {
+        const ok = within(ask).getByTestId("typed-ok") as HTMLButtonElement;
+        expect(ok.disabled, label).toBe(true);
+        fireEvent.click(ok);
+      }
+    }
+    await new Promise((r) => setTimeout(r, 30));
+    expect(bodies.filter((b) => /delete-forever|empty-trash/.test(b.url)), label).toEqual([]);
+    expect(fake.db().docs.has("documents/k-a/.trash/second.md"), label).toBe(true);
+  };
+  it("DELETE typed for document A, then Empty the trash: not armed, nothing removed", async () => {
+    second();
+    await openDocs(); await tab("trash");
+    fireEvent.click(within(row("ALPHA CPU duplicate")).getByTestId("act-delete"));
+    fireEvent.change(screen.getByTestId("typed-input"), { target: { value: "DELETE" } });
+    fireEvent.click(screen.getByTestId("empty-trash"));
+    await notArmed("A -> Empty the trash");
+  });
+  it("DELETE typed for document A, then Delete forever on document B: not armed, nothing removed", async () => {
+    second();
+    await openDocs(); await tab("trash");
+    fireEvent.click(within(row("ALPHA CPU duplicate")).getByTestId("act-delete"));
+    fireEvent.change(screen.getByTestId("typed-input"), { target: { value: "DELETE" } });
+    fireEvent.click(within(row("ALPHA second")).getByTestId("act-delete"));
+    await notArmed("A -> B");
+  });
+  it("while a confirmation is open the other destructive buttons are off; after Cancel the next one starts empty", async () => {
+    second();
+    await openDocs(); await tab("trash");
+    fireEvent.click(within(row("ALPHA CPU duplicate")).getByTestId("act-delete"));
+    fireEvent.change(screen.getByTestId("typed-input"), { target: { value: "DELETE" } });
+    for (const b of [...screen.getAllByTestId("act-delete"), ...screen.getAllByTestId("act-restore"), screen.getByTestId("empty-trash")]) {
+      expect((b as HTMLButtonElement).disabled).toBe(true);
+    }
+    fireEvent.click(screen.getByTestId("typed-cancel"));
+    fireEvent.click(screen.getByTestId("empty-trash"));
+    expect((screen.getByTestId("typed-input") as HTMLInputElement).value).toBe("");
+    expect((screen.getByTestId("typed-ok") as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("r2 (review R2): a new document whose listing write failed (207, listing.ok false)", () => {
+  it("is not opened onto 'There is no such document.': the screen says it was saved and will show shortly", async () => {
+    await openDocs();
+    const base = fake.handle;
+    const spy = vi.spyOn(fake, "handle").mockImplementation((p, m, u, b) => {
+      if (m === "POST" && u === "/workbench/documents") {
+        const r = base(p, m, u, b)!; // the file is made ...
+        const path = r.body.path;
+        fake.db().docs.delete(path); // ... but no listing row exists (the fake's docs map IS the listing)
+        return { status: 207, body: { path, hash: "h", listing: { ok: false, error: "the listing could not be updated" } } };
+      }
+      return base(p, m, u, b);
+    });
+    try {
+      fireEvent.click(screen.getByTestId("new-doc"));
+      fireEvent.change(screen.getByTestId("doc-name"), { target: { value: "ALPHA unlisted" } });
+      fireEvent.click(screen.getByTestId("doc-ok"));
+      await waitFor(() => expect(screen.getByTestId("toast").textContent).toMatch(/Saved "ALPHA unlisted"\. It shows in your documents once the listing catches up/));
+      expect(window.location.pathname).toBe("/documents");
+      expect(screen.queryByTestId("doc-gone")).toBeNull();
+    } finally { spy.mockRestore(); }
+  });
+});
+
 describe("acceptance 5: Empty the trash needs a typed word and empties only the caller's trash", () => {
   it("typed DELETE, a body of {confirm: true} only, and bob's trash is untouched", async () => {
     fake.db().docs.set("documents/k-a/.trash/second.md", { owner: "u-alice", title: "ALPHA second", body: "", updated: new Date(NOW).toISOString(), links: [], history: [] });
