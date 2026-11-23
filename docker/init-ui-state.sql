@@ -21,8 +21,8 @@
 -- RE-RUN IT AFTER ANY RE-RUN OF SLOT 400: this file replaces two of 400's functions (setting_problem and
 -- user_setting_set), and a re-run of 400 puts 400's text back (ref_list refused, no doc_path rule, no advisory
 -- lock, no tombstone check, so every versioned write of a key that was ever deleted is a 409 until this file runs).
--- Revert, in this order: put the PREVIOUS workbench image back FIRST (the new one reads the tombstone table and
--- calls user_setting_clear on every settings request), then revert-ui-state.sql (discards the four keys' stored
+-- Revert, in this order: put the PREVIOUS workbench image back FIRST (the new one reads the tombstone table on every
+-- settings GET and calls user_setting_clear on every DELETE), then revert-ui-state.sql (discards the four keys' stored
 -- values and every tombstone; after the revert of any later migration that added 'ui' keys), then, if ever,
 -- revert-settings.sql.
 -- ============================================================

@@ -1400,7 +1400,19 @@ try {
     Check ($rv5[1] -match "-> $f490 \| ui keys 4" -and $rv5[2] -match "-> $f490 \| ui keys 4" -and $rv5[5] -match "-> $f490 \| ui keys 4") '[5m2] slot 490: a second init changes nothing, init again restores the same catalog and four keys'
     Check ($rv5[3] -match 'ui values 0$' -and $rv5[4] -match 'ui values 0$') '[5m2] slot 490: the revert discarded the stored ui values (documented)'
     Check ((& $q "SELECT count(*) FROM public.user_settings WHERE key = 'refinery.dormancy_days' AND owner_sub = 'ui-revert-$rand'") -eq '1') '[5m2] slot 490: the revert touched no other key''s stored value'
-    Check ((& $q "SELECT (to_regprocedure('public.user_setting_clear(text,text,integer)') IS NOT NULL)::text || ' ' || (SELECT count(*) FROM public.settings_keys WHERE key IN ('ui.locked_document','ui.last_document','ui.start_screen','library.recent'))::text") -eq 'true 4') '[5m2] slot 490 is back in force after the 400 re-runs above (user_setting_clear and the four keys; 490 is re-run after any 400 re-run)'
+    # rwr-ui-state-drift-check: "in force" is the drift pair (setting_problem accepts library.recent, user_setting_set takes the advisory lock) plus the tombstone table and user_setting_clear,
+    # judged by the deploy check's own SQL (check-ui-state.sql). A 400 re-run over 490 keeps user_setting_clear and the four keys, so the old check passed on it.
+    $uiCheck = { $null = Dk cp (Join-Path $dockerDir 'check-ui-state.sql') "${db}:/tmp/uichk.sql"; ((Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/uichk.sql) | Out-String).Trim() -replace '\s+', ' ' }
+    $uiPair = { & $q "SELECT (setting_problem('x', 'library.recent', '[]'::jsonb) IS NULL)::text || ' ' || (position('pg_advisory_xact_lock' IN pg_get_functiondef('public.user_setting_set(text,text,jsonb,text,integer)'::regprocedure)) > 0)::text || ' ' || (to_regclass('public.user_setting_tombstones') IS NOT NULL)::text || ' ' || (to_regprocedure('public.user_setting_clear(text,text,integer)') IS NOT NULL)::text" }
+    Check ((& $uiPair) -eq 'true true true true' -and (& $uiCheck) -match 'OK$') '[5m2] slot 490 is back in force after the 400 re-runs above (setting_problem accepts library.recent, user_setting_set takes the advisory lock, tombstone table and user_setting_clear exist; the deploy check says OK)'
+    $null = Dk cp (Join-Path $dockerDir 'init-settings.sql') "${db}:/tmp/rv400b.sql"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv400b.sql
+    $drift400 = & $uiCheck; $pair400 = & $uiPair
+    $null = Dk cp (Join-Path $dockerDir 'init-ui-state.sql') "${db}:/tmp/rv490b.sql"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv490b.sql
+    Save 'ui-state-drift.log' "after slot 400 re-run over 490: $drift400 | pair $pair400`nafter 490 re-run: $(& $uiCheck) | pair $(& $uiPair)"
+    Check ($pair400 -notmatch '^true true' -and $drift400 -match 'DRIFT' -and $drift400 -notmatch 'OK$') '[5m2] slot 400 re-run over 490: the pair fails (it did not before: user_setting_clear and the four keys survive a 400 re-run) and the deploy check says DRIFT'
+    Check ((& $uiPair) -eq 'true true true true' -and (& $uiCheck) -match 'OK$') '[5m2] slot 490 re-run after that 400 re-run: the pair passes again and the deploy check says OK'
     $null = & $q "DELETE FROM public.user_settings WHERE owner_sub = 'ui-revert-$rand'"
   }
   if (-not $Red) {
