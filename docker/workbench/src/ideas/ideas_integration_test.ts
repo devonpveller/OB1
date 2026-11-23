@@ -967,8 +967,8 @@ t("rw-held-owner-scope: another user's held source answers exactly like a missin
   }
 
   // dedupe: B adds A's URL: B gets a held row of B's own and A's row is untouched, byte for byte
+  // (B sent A's URL itself, so B's own row naturally carries it: this response is not searched for A's tokens)
   const dup = await call("POST", `${D}/user-sources`, { path: b.path, title: `B's own take ${uid()}`, url: T.url, content: "B's different content for the same link" }, Bh);
-  seen.push(dup.text);
   assertEquals(dup.status, 201, dup.text);
   assertNotEquals(dup.json.source.source_id, hid, "B was handed A's held id");
   assert(!dup.json.deduped, "B's add was deduped onto A's row");

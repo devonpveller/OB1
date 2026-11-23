@@ -643,7 +643,9 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     const a = await wb("GET", p);
     const b = await wb("GET", p, undefined, B);
     assertEquals(a.status, b.status, `${p}: ${a.status} ${b.status}`);
-    assertEquals(a.text, b.text, `${p}: shared knowledge reads the same for both users`);
+    let at = 0;
+    while (at < a.text.length && a.text[at] === b.text[at]) at++;
+    assertEquals(a.text, b.text, `${p}: shared knowledge reads the same for both users (first difference at ${at}: A ...${a.text.slice(Math.max(0, at - 80), at + 160)} | B ...${b.text.slice(Math.max(0, at - 80), at + 160)})`);
   }
   assertEquals((await wb("GET", `/workbench/contract/search?q=fixture`)).status, 200, "shared search answers");
   // rw-boundary-core: a derived job's question is public - A reads it on its session (the positive control of the
