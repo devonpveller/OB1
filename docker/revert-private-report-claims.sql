@@ -18,7 +18,8 @@
 --     referenced it - re-inserted where the foreign key cascaded, re-pointed where it set NULL / its default), the shared
 --     job reports get their (result, metrics) back, and the private copies it made (research_private_reports) go;
 --   * fix item (A1): the derived-question guard on research_handbacks goes;
---   * fix item round 2: the links it added for a moved duplicate claim go; the threads it re-described come back whole;
+--   * fix item round 2: the links it added for a moved duplicate claim go; the threads it re-described come back whole
+--     (name, description, slug, embedding); round 3: the notebook labels, the curator answers and the entity bumps too;
 --   * the functions go; the archive and salt tables stay (restored rows carry restored_at).
 -- Counts only (NOTICE). A second run has nothing to restore. Run it BEFORE the 480 / 470 / 440 / 390 reverts.
 -- ============================================================
@@ -54,6 +55,9 @@ DECLARE
     v_tcols TEXT;
     n_l     BIGINT := 0;
     n_t     BIGINT := 0;
+    n_n     BIGINT := 0;
+    n_b     BIGINT := 0;
+    n_u     BIGINT := 0;
 BEGIN
     IF to_regclass('public.private_report_claims_archive') IS NULL THEN
         RAISE NOTICE 'private report claims revert: slot 570 was never applied - nothing to restore';
@@ -206,6 +210,24 @@ BEGIN
                        (SELECT string_agg('r.' || quote_ident(attname), ', ' ORDER BY attnum) FROM pg_attribute WHERE attrelid = 'public.claims'::regclass AND attnum > 0 AND NOT attisdropped AND attgenerated = ''))
             USING v_batch;
         GET DIAGNOSTICS v_n = ROW_COUNT; n_m := n_m + v_n;
+        -- round 3: the curator answers it renamed (n), BEFORE the stripped results (j): a job in both gets j's earlier image
+        UPDATE public.research_jobs j SET result = a.row_data -> 'result'
+          FROM public.private_report_claims_archive a
+         WHERE a.batch = v_batch AND a.action = 'n' AND a.restored_at IS NULL AND j.id::text = a.ref;
+        GET DIAGNOSTICS v_n = ROW_COUNT; n_n := n_n + v_n;
+        -- round 3: the notebook labels it relabelled (b), only where still so; the entities it bumped (u), only where still so
+        UPDATE public.sources s SET notebook = a.row_data ->> 'notebook'
+          FROM public.private_report_claims_archive a
+         WHERE a.batch = v_batch AND a.action = 'b' AND a.restored_at IS NULL AND a.ref = s.id::text
+           AND s.notebook IS NOT DISTINCT FROM a.row_data ->> 'relabelled_to';
+        GET DIAGNOSTICS v_n = ROW_COUNT; n_b := n_b + v_n;
+        IF to_regclass('public.entities') IS NOT NULL THEN
+            EXECUTE 'UPDATE public.entities e SET updated_at = (a.row_data ->> ''updated_at'')::timestamptz
+                       FROM public.private_report_claims_archive a
+                      WHERE a.batch = $1 AND a.action = ''u'' AND a.restored_at IS NULL AND a.ref = e.id::text
+                        AND e.updated_at = (a.row_data ->> ''bumped_to'')::timestamptz' USING v_batch;
+            GET DIAGNOSTICS v_n = ROW_COUNT; n_u := n_u + v_n;
+        END IF;
         IF EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.research_jobs'::regclass AND attname = 'metrics' AND NOT attisdropped) THEN
             UPDATE public.research_jobs j SET result = a.row_data -> 'result', metrics = a.row_data -> 'metrics'
               FROM public.private_report_claims_archive a
@@ -267,13 +289,14 @@ BEGIN
         UPDATE public.private_report_claims_archive SET restored_at = now() WHERE action = 'f' AND restored_at IS NULL;
     END LOOP;
 
-    IF n_filed + n_point + n_k + n_e + n_m + n_j + n_w + n_fk + n_c + n_g + n_s + n_d + n_p + n_r + n_l + n_t = 0 THEN
+    IF n_filed + n_point + n_k + n_e + n_m + n_j + n_w + n_fk + n_c + n_g + n_s + n_d + n_p + n_r + n_l + n_t + n_n + n_b + n_u = 0 THEN
         RAISE NOTICE 'private report claims revert: nothing to restore';
     ELSE
         RAISE NOTICE 'private report claims revert: % claim(s) restored (% edge(s), % shared claim image(s)), % job result(s), % wiki page(s), % corroboration line(s), % gap-work row(s), foreign key %; % curator filing(s) made shared again, % re-pointed at a shared claim',
             n_k, n_e, n_m, n_j, n_w, n_c, n_g, CASE WHEN n_fk = 1 THEN 'restored' ELSE 'already there' END, n_filed, n_point;
         RAISE NOTICE 'private report claims revert (P2): % shared synthesis(es) restored (% referencing row(s)), % shared job report(s) restored, % private copy(ies) removed, % added link(s) removed, % thread(s) restored',
             n_s, n_d, n_p, n_r, n_l, n_t;
+        RAISE NOTICE 'private report claims revert (P2): % curator answer(s), % notebook label(s), % entit(ies) restored', n_n, n_b, n_u;
     END IF;
 END $$;
 

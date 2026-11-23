@@ -86,7 +86,17 @@ jobs AS (SELECT DISTINCT j.id, j.gap_ref FROM shared_jobs j, texts t WHERE posit
 -- own) carrying one (a synthesis filed its sentence into another thread)
 threads AS (
     SELECT DISTINCT th.id FROM public.threads th, texts t
-     WHERE position(t.n IN pg_temp.prc_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, ''))) > 0),
+     WHERE position(t.n IN pg_temp.prc_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, '') || ' ' || coalesce(th.slug, ''))) > 0),
+-- round 3: notebook labels (a thread's name on each filed source) and the thread names in job curator answers
+notebooks AS (
+    SELECT DISTINCT s.id FROM public.sources s, texts t
+     WHERE coalesce(s.notebook, '') <> '' AND position(t.n IN pg_temp.prc_norm(s.notebook)) > 0),
+curator AS (
+    SELECT DISTINCT j.id FROM public.research_jobs j, texts t
+     WHERE jsonb_typeof(j.result -> 'curator') = 'object'
+       AND position(t.n IN pg_temp.prc_norm(coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((
+               SELECT string_agg(x ->> 'name', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'shortlist') = 'array'
+                                                                                  THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), ''))) > 0),
 dup_claims AS (
     SELECT DISTINCT c.id FROM public.claims c, texts t
      WHERE c.id NOT IN (SELECT id FROM linked) AND position(t.n IN pg_temp.prc_norm(c.text)) > 0),
@@ -101,6 +111,8 @@ SELECT line FROM (
     UNION ALL SELECT 4, 'reuse: shared job reports carrying one=' || (SELECT count(*) FROM jobs)
     UNION ALL SELECT 5, 'reuse: of those, gap branches verifying a claim=' || (SELECT count(*) FROM jobs WHERE gap_ref LIKE 'claim:%')
     UNION ALL SELECT 6, 'reuse: distinct private-report sentences restated in a shared output=' || (SELECT count(*) FROM claims_reused)
-    UNION ALL SELECT 7, 'reuse: threads whose name or description carries one=' || (SELECT count(*) FROM threads)
-    UNION ALL SELECT 8, 'reuse: other shared claims carrying one (filed into another thread)=' || (SELECT count(*) FROM dup_claims)
+    UNION ALL SELECT 7, 'reuse: threads whose name, description or slug carries one=' || (SELECT count(*) FROM threads)
+    UNION ALL SELECT 8, 'reuse: other shared claims carrying one (another thread, or a superseded synthesis)=' || (SELECT count(*) FROM dup_claims)
+    UNION ALL SELECT 9, 'reuse: shared sources whose notebook label carries one=' || (SELECT count(*) FROM notebooks)
+    UNION ALL SELECT 10, 'reuse: job curator answers naming a thread by one=' || (SELECT count(*) FROM curator)
 ) x ORDER BY o;

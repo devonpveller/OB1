@@ -105,6 +105,10 @@ LOCK TABLE public.claims, public.claim_sources, public.research_private_report_c
     IN SHARE ROW EXCLUSIVE MODE;
 DO $$
 BEGIN
+    IF to_regclass('public.entities') IS NOT NULL THEN LOCK TABLE public.entities IN SHARE ROW EXCLUSIVE MODE; END IF;
+END $$;
+DO $$
+BEGIN
     -- fix item (A1): the derived-question guard sits on the hand-backs (slot 420); locked with the rest when present
     IF to_regclass('public.research_handbacks') IS NOT NULL THEN
         LOCK TABLE public.research_handbacks IN SHARE ROW EXCLUSIVE MODE;
@@ -296,12 +300,13 @@ SET search_path = public, pg_temp
 AS $$
 BEGIN
     IF NEW.page_class = 'note' THEN
-        IF public.private_report_claims_own_text_shows(nullif(current_setting('ob.page_author', true), ''), NEW.title, NEW.body) THEN
+        IF public.private_report_claims_own_text_shows(nullif(current_setting('ob.page_author', true), ''), coalesce(NEW.slug, '') || ' ' || coalesce(NEW.title, ''), NEW.body) THEN
             RAISE EXCEPTION 'wiki_pages: this page cannot be saved' USING ERRCODE = '42501';
         END IF;
         RETURN NEW;
     END IF;
-    IF public.private_report_claims_page_shows(NEW.title, NEW.body) THEN
+    -- (round 3: the slug is part of the page's text - a hub page's path is its thread's slug)
+    IF public.private_report_claims_page_shows(coalesce(NEW.slug, '') || ' ' || coalesce(NEW.title, ''), NEW.body) THEN
         PERFORM public.wiki_guard_mark_withheld();
         RETURN NULL;
     END IF;
@@ -547,6 +552,9 @@ DECLARE
     n_dup     BIGINT := 0;
     n_thr     BIGINT := 0;
     n_link    BIGINT := 0;
+    n_relabel BIGINT := 0;
+    n_curname BIGINT := 0;
+    n_ent     BIGINT := 0;
     v_sids    UUID[];
     d         RECORD;
 BEGIN
@@ -642,15 +650,18 @@ BEGIN
     -- claim's, find_or_create_claim makes a separate shared row with the same text) follows the claim it restates: it
     -- moves to the same single owner (linked to that owner's reports, so it is a private-report claim like the rest) or
     -- is withheld with it. The links this adds are archived (l) and the revert removes them.
+    -- round 3 (tester attempt 2, P2 #2): ANY shared claim whose text carries a moved claim's sentence, whichever synthesis
+    -- filed it - a synthesis superseded in place (ON CONFLICT DO UPDATE content) leaves the claims filed from its earlier
+    -- text behind, filed by a synthesis that no longer restates them. The match is the check script's (the claim's
+    -- skeleton contains the private claim's), so a successful run and its check agree.
     CREATE TEMP TABLE _prc_dup ON COMMIT DROP AS
-    SELECT c.id, array_agg(DISTINCT t.owner) FILTER (WHERE t.owner IS NOT NULL) AS owners, bool_or(t.owner IS NULL) AS nobody,
+    WITH cn AS (
+        SELECT c.id, public.private_report_claim_norm(c.text) AS n FROM public.claims c
+         WHERE c.id NOT IN (SELECT id FROM _prc) AND EXISTS (SELECT 1 FROM _prc_n))
+    SELECT cn.id, array_agg(DISTINCT t.owner) FILTER (WHERE t.owner IS NOT NULL) AS owners, bool_or(t.owner IS NULL) AS nobody,
            array_agg(DISTINCT t.id) AS restates
-      FROM public.claims c
-      JOIN _p2s s ON s.id = c.synthesis_id
-      JOIN _prc_n t ON length(public.private_report_claim_norm(c.text)) >= 24
-                   AND (position(t.n IN public.private_report_claim_norm(c.text)) > 0 OR position(public.private_report_claim_norm(c.text) IN t.n) > 0)
-     WHERE c.id NOT IN (SELECT id FROM _prc)
-     GROUP BY c.id;
+      FROM cn JOIN _prc_n t ON position(t.n IN cn.n) > 0
+     GROUP BY cn.id;
     INSERT INTO _prc (id, owners, owner)
     SELECT dp.id, dp.owners, CASE WHEN NOT dp.nobody AND cardinality(dp.owners) = 1 THEN dp.owners[1] END FROM _prc_dup dp;
     CREATE TEMP TABLE _prc_newlinks ON COMMIT DROP AS
@@ -682,11 +693,17 @@ BEGIN
     CREATE TEMP TABLE _prc_threads ON COMMIT DROP AS
     SELECT DISTINCT th.id
       FROM public.threads th
-     WHERE EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN public.private_report_claim_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, ''))) > 0)
+     WHERE EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN public.private_report_claim_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, '') || ' ' || coalesce(th.slug, ''))) > 0)
         OR th.id IN (SELECT ts.thread_id FROM public.thread_sources ts WHERE ts.source_id IN (SELECT id FROM _p2s))
         OR th.id::text IN (SELECT j.result -> 'curator' ->> 'thread_id' FROM public.research_jobs j WHERE j.id IN (SELECT id FROM _p2j)
                            UNION SELECT e.payload ->> 'thread_id' FROM public.research_job_events e WHERE e.type = 'filed' AND e.job_id IN (SELECT id FROM _p2j)
                            UNION SELECT e.payload ->> 'thread_id' FROM public.research_job_events e WHERE e.type = 'filed' AND e.payload ->> 'synthesis_id' IN (SELECT id::text FROM _p2s));
+    -- round 3 (sibling sweep): the entities a moved synthesis's extraction named (source_entities, gone with it by the
+    -- cascade) are bumped after the move, so the next compile regenerates their pages from what is still shared (390's rule)
+    CREATE TEMP TABLE _prc_ents (id BIGINT PRIMARY KEY) ON COMMIT DROP;
+    IF to_regclass('public.source_entities') IS NOT NULL AND to_regclass('public.entities') IS NOT NULL THEN
+        EXECUTE 'INSERT INTO _prc_ents SELECT DISTINCT se.entity_id FROM public.source_entities se WHERE se.source_id IN (SELECT id FROM _p2s)';
+    END IF;
 
 
     -- a dependent this move cannot archive stops it, nothing changed: any other foreign key onto claims with a row on a
@@ -1023,7 +1040,11 @@ BEGIN
                                            ORDER BY s.title LIMIT 8) x),
                    embedding = NULL,
                    name = CASE WHEN EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN public.private_report_claim_norm(th.name)) > 0)
-                               THEN 'Research thread ' || left(th.id::text, 8) ELSE th.name END
+                               THEN 'Research thread ' || left(th.id::text, 8) ELSE th.name END,
+                   -- round 3 (tester attempt 2, P2 #1): the slug is slugifyBase(name) in full - the wiki hub page's path
+                   slug = CASE WHEN th.slug IS NOT NULL
+                                    AND EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN public.private_report_claim_norm(th.name || ' ' || th.slug)) > 0)
+                               THEN 'research-thread-' || left(th.id::text, 8) ELSE th.slug END
              WHERE th.id IN (SELECT id FROM _prc_threads);
             PERFORM set_config('session_replication_role', 'origin', true);
         END IF;
@@ -1031,6 +1052,74 @@ BEGIN
                     WHERE position(t.n IN public.private_report_claim_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, ''))) > 0)
            OR EXISTS (SELECT 1 FROM public.claims c WHERE c.id IN (SELECT id FROM _prc_dup)) THEN
             RAISE EXCEPTION 'private report claims: refused, nothing changed - a thread or a shared claim still restates a moved claim' USING ERRCODE = '55000';
+        END IF;
+        -- round 3 (tester attempt 2, P2 #1): the NOTEBOOK labels. Each source the curator filed into a thread carries the
+        -- thread's name as its notebook label, and the notebook backfill (synthesize-notebooks.mjs) mints a thread from a
+        -- label that matches no thread name - the old name would come back as a new shared thread. A label carrying a
+        -- moved claim's sentence, or equal to a renamed thread's old name, is relabelled (archived b) to the new name of the
+        -- tied thread the source is linked to or that carried that name, else cleared.
+        CREATE TEMP TABLE _prc_relabel ON COMMIT DROP AS
+        SELECT s.id, s.notebook AS old,
+               (SELECT th.name FROM public.threads th
+                 WHERE th.id IN (SELECT id FROM _prc_threads)
+                   AND (th.id IN (SELECT ts.thread_id FROM public.thread_sources ts WHERE ts.source_id = s.id)
+                        OR EXISTS (SELECT 1 FROM public.private_report_claims_archive a
+                                    WHERE a.batch = v_batch AND a.action = 't' AND a.ref = th.id::text AND a.row_data ->> 'name' = s.notebook))
+                 ORDER BY th.id LIMIT 1) AS new_label
+          FROM public.sources s
+         WHERE coalesce(s.notebook, '') <> ''
+           AND (EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN public.private_report_claim_norm(s.notebook)) > 0)
+                OR s.notebook IN (SELECT a.row_data ->> 'name' FROM public.private_report_claims_archive a JOIN public.threads th ON th.id::text = a.ref
+                                   WHERE a.batch = v_batch AND a.action = 't' AND (a.row_data ->> 'name') IS DISTINCT FROM th.name));
+        INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
+        SELECT v_batch, 'public.sources', 'b', x.id::text, jsonb_build_object('id', x.id, 'notebook', x.old, 'relabelled_to', x.new_label)
+          FROM _prc_relabel x;
+        GET DIAGNOSTICS n_relabel = ROW_COUNT;
+        -- (sibling sweep) the curator's answer in a job's result names the thread (thread_name, the shortlist's names):
+        -- a renamed thread's old name there becomes its new one (archived n: the result as it was). A shared job whose
+        -- result carries the sentence is a P2 job (its report left whole); this reaches the rest, a private job included.
+        INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
+        SELECT v_batch, 'public.research_jobs', 'n', j.id::text, jsonb_build_object('id', j.id, 'result', j.result)
+          FROM public.research_jobs j
+         WHERE jsonb_typeof(j.result -> 'curator') = 'object' AND j.id NOT IN (SELECT id FROM _p2j)
+           AND EXISTS (SELECT 1 FROM public.private_report_claims_archive a JOIN public.threads th ON th.id::text = a.ref
+                        WHERE a.batch = v_batch AND a.action = 't' AND (a.row_data ->> 'name') IS DISTINCT FROM th.name
+                          AND position(substr(to_jsonb(a.row_data ->> 'name')::text, 2, length(to_jsonb(a.row_data ->> 'name')::text) - 2)
+                                       IN (j.result -> 'curator')::text) > 0);
+        GET DIAGNOSTICS n_curname = ROW_COUNT;
+        IF n_relabel + n_curname > 0 THEN
+            PERFORM set_config('session_replication_role', 'replica', true);
+            UPDATE public.sources s SET notebook = x.new_label FROM _prc_relabel x WHERE x.id = s.id;
+            FOR r IN SELECT substr(to_jsonb(a.row_data ->> 'name')::text, 2, length(to_jsonb(a.row_data ->> 'name')::text) - 2) AS old,
+                            substr(to_jsonb(th.name)::text, 2, length(to_jsonb(th.name)::text) - 2) AS new
+                       FROM public.private_report_claims_archive a JOIN public.threads th ON th.id::text = a.ref
+                      WHERE a.batch = v_batch AND a.action = 't' AND (a.row_data ->> 'name') IS DISTINCT FROM th.name LOOP
+                UPDATE public.research_jobs j
+                   SET result = jsonb_set(j.result, '{curator}', replace((j.result -> 'curator')::text, r.old, r.new)::jsonb)
+                 WHERE j.id::text IN (SELECT a.ref FROM public.private_report_claims_archive a WHERE a.batch = v_batch AND a.action = 'n')
+                   AND position(r.old IN (j.result -> 'curator')::text) > 0;
+            END LOOP;
+            PERFORM set_config('session_replication_role', 'origin', true);
+        END IF;
+        -- the entities (above): bumped, their old updated_at archived (u)
+        INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
+        SELECT v_batch, 'public.entities', 'u', e.id::text, jsonb_build_object('id', e.id, 'updated_at', e.updated_at, 'bumped_to', clock_timestamp())
+          FROM _prc_ents e0 JOIN LATERAL (SELECT x.id, x.updated_at FROM public.entities x WHERE x.id = e0.id) e ON true;
+        GET DIAGNOSTICS n_ent = ROW_COUNT;
+        IF n_ent > 0 THEN
+            PERFORM set_config('session_replication_role', 'replica', true);
+            UPDATE public.entities e SET updated_at = (a.row_data ->> 'bumped_to')::timestamptz
+              FROM public.private_report_claims_archive a WHERE a.batch = v_batch AND a.action = 'u' AND a.ref = e.id::text;
+            PERFORM set_config('session_replication_role', 'origin', true);
+        END IF;
+        IF EXISTS (SELECT 1 FROM public.threads th, _prc_n t WHERE position(t.n IN public.private_report_claim_norm(coalesce(th.slug, ''))) > 0)
+           OR EXISTS (SELECT 1 FROM public.sources s, _prc_n t WHERE coalesce(s.notebook, '') <> '' AND position(t.n IN public.private_report_claim_norm(s.notebook)) > 0)
+           OR EXISTS (SELECT 1 FROM public.research_jobs j, _prc_n t
+                       WHERE jsonb_typeof(j.result -> 'curator') = 'object'
+                         AND position(t.n IN public.private_report_claim_norm(coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((
+                               SELECT string_agg(x ->> 'name', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'shortlist') = 'array'
+                                                                                                  THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), ''))) > 0) THEN
+            RAISE EXCEPTION 'private report claims: refused, nothing changed - a thread slug, a notebook label or a curator answer still restates a moved claim' USING ERRCODE = '55000';
         END IF;
         IF EXISTS (SELECT 1 FROM public.sources s WHERE s.id = ANY(coalesce(v_sids, '{}')))
            OR EXISTS (SELECT 1 FROM public.sources s, _prc_n t
@@ -1046,7 +1135,7 @@ BEGIN
     -- archived and withheld - whatever this run moved, a later page included
     INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
     SELECT v_batch, 'public.wiki_pages', 'w', w.slug, to_jsonb(w)
-      FROM public.wiki_pages w WHERE w.page_class IS DISTINCT FROM 'note' AND public.private_report_claims_page_shows(w.title, w.body);
+      FROM public.wiki_pages w WHERE w.page_class IS DISTINCT FROM 'note' AND public.private_report_claims_page_shows(coalesce(w.slug, '') || ' ' || coalesce(w.title, ''), w.body);
     -- (fix item round 2, A1: a person's note is never withheld for another user's claim - see the wiki guard)
     GET DIAGNOSTICS n_pages = ROW_COUNT;
     DELETE FROM public.wiki_pages w USING public.private_report_claims_archive a
@@ -1055,7 +1144,7 @@ BEGIN
     -- fail closed: nothing of what moved is left on a shared surface
     IF EXISTS (SELECT 1 FROM public.claims c WHERE c.id IN (SELECT id FROM _prc))
        OR EXISTS (SELECT 1 FROM public.claim_sources cs WHERE cs.claim_id IN (SELECT id FROM _prc) OR cs.parent_claim_id IN (SELECT id FROM _prc))
-       OR EXISTS (SELECT 1 FROM public.wiki_pages w WHERE w.page_class IS DISTINCT FROM 'note' AND public.private_report_claims_page_shows(w.title, w.body)) THEN
+       OR EXISTS (SELECT 1 FROM public.wiki_pages w WHERE w.page_class IS DISTINCT FROM 'note' AND public.private_report_claims_page_shows(coalesce(w.slug, '') || ' ' || coalesce(w.title, ''), w.body)) THEN
         RAISE EXCEPTION 'private report claims: refused, nothing changed - a moved claim is still on a shared surface after the move' USING ERRCODE = '55000';
     END IF;
 
@@ -1068,8 +1157,10 @@ BEGIN
             n_edges, n_touched, n_jobs, n_pages, n_gap;
         RAISE NOTICE 'private report claims (P2): % shared synthesis(es) moved private to their claim''s owner, % withheld (several owners or none); % shared job report(s) moved private to their claim''s owner, % withheld; % row(s) that referenced a moved synthesis archived',
             n_syn_own, n_syn_held, n_job_own, n_job_held, n_dep;
-        RAISE NOTICE 'private report claims (P2): % shared claim(s) a moved synthesis filed with a moved claim''s sentence moved or withheld with it (% link(s) added), % thread(s) re-described',
+        RAISE NOTICE 'private report claims (P2): % other shared claim(s) carrying a moved claim''s sentence moved or withheld with it (% link(s) added), % thread(s) re-described',
             n_dup, n_link, n_thr;
+        RAISE NOTICE 'private report claims (P2): % notebook label(s) relabelled, % curator answer(s) renamed, % entit(ies) bumped for a recompile',
+            n_relabel, n_curname, n_ent;
     END IF;
 END $$;
 

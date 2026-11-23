@@ -34,6 +34,8 @@
 # migrated phase and requires every [fix] case to FAIL, then stops (no revert / green: the lab is thrown away).
 # Round 2 (tester attempt 1): the note A1 rule, the tied thread, the duplicate shared claim and the copy's question are
 # [fix2] cases; -OldSql <999107d's init file> -OldTag fix2 requires every [fix2] case to fail on the round-1 fix.
+# Round 3 (tester attempt 2): the thread's slug / hub page / notebook labels / curator answers, the entity bump and a
+# claim left by a superseded synthesis are [fix3] cases (-OldSql <63c92c2's init file> -OldTag fix3).
 param(
   [string]$Id = 'wt-rw-private-report-claims',
   [string]$Subnet = '',
@@ -164,6 +166,7 @@ SELECT string_agg(t || '=' || h, ' ' ORDER BY t) FROM (
   UNION ALL SELECT 'sources', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.sources x
   UNION ALL SELECT 'private_reports', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.research_private_reports x
   UNION ALL SELECT 'threads', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.threads x
+  UNION ALL SELECT 'entities', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.entities x
   UNION ALL SELECT 'thread_sources', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.thread_id, x.source_id), '')) FROM public.thread_sources x
   UNION ALL SELECT 'source_chunks', md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.source_id, x.idx), '')) FROM public.source_chunks x
   UNION ALL SELECT 'link_fk', md5(coalesce((SELECT string_agg(conname || ' ' || pg_get_constraintdef(oid), '|' ORDER BY conname) FROM pg_constraint
@@ -299,7 +302,7 @@ try {
   $null = Dk cp (Join-Path $dockerDir 'count-private-report-claim-reuse.sql') "${db}:/tmp/prcreuse.sql"
   $p2a = ((Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/prcreuse.sql) | Out-String).Trim(); Save 'p2-count-before-570.log' $p2a
   Write-Host ($p2a -replace "`n", ' | ')
-  Check ($p2a -match 'mixed claims \(a shared synthesis also filed them, still in the shared table\)=1' -and $p2a -match "shared syntheses carrying a private-report claim's sentence=3" -and $p2a -match 'shared job reports carrying one=2' -and $p2a -match 'threads whose name or description carries one=1' -and $p2a -match 'other shared claims carrying one \(filed into another thread\)=1') 'P2 count before 570: 1 mixed claim, 3 shared syntheses, 2 shared job reports, 1 thread, 1 other shared claim (the plant)'
+  Check ($p2a -match 'mixed claims \(a shared synthesis also filed them, still in the shared table\)=1' -and $p2a -match "shared syntheses carrying a private-report claim's sentence=3" -and $p2a -match 'shared job reports carrying one=2' -and $p2a -match 'threads whose name, description or slug carries one=1' -and $p2a -match 'other shared claims carrying one \(another thread, or a superseded synthesis\)=2' -and $p2a -match 'shared sources whose notebook label carries one=1' -and $p2a -match 'job curator answers naming a thread by one=1') 'P2 count before 570: 1 mixed claim, 3 shared syntheses, 2 shared job reports, 1 thread, 2 other shared claims, 1 notebook label, 1 curator answer (the plant)'
   if ($OldSql) {
     # ---------------------------------------------------------------- the fix's RED: the earlier 570 on the same plant
     Write-Host "[fix RED] the earlier slot 570 ($OldSql) on the plant; every [fix] case must fail"
@@ -331,29 +334,29 @@ try {
   Check ($ctlRed.Count -eq 0) "RED: the controls and the owner's read pass before 570 ($($ctlRed.Count) failed)"
   $cr = Check-Script; Save 'check-red.log' $cr
   Check ($cr -match 'check: FAIL' -and $cr -match 'in the shared table=[1-9]') 'RED: the check script reports private-report claims on a shared surface and FAILS'
-  Check ($cr -match "wiki pages carrying one's text=6" -and $cr -match 'job results naming one for someone else=1' -and $cr -match "gap-work rows of a shared tree carrying one's text=[1-9]") 'RED (tester F4): before 570 the check script sees the 3 pages (variants included), the job result and the gap work'
+  Check ($cr -match "wiki pages carrying one's text=7" -and $cr -match 'job results naming one for someone else=1' -and $cr -match "gap-work rows of a shared tree carrying one's text=[1-9]") 'RED (tester F4): before 570 the check script sees the 3 pages (variants included), the job result and the gap work'
   # ---------------------------------------------------------------- [6] init x2, revert x2, init
   Write-Host '[6] 570 x2, revert x2 (byte-identical), 570'
   $i1 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570'
-  Check ($i1.rc -eq 0 -and $i1.msg -match '7 claim\(s\) moved to their owner''s store' -and $i1.msg -match '2 withheld \(no single owner\)' -and $i1.msg -match '1 of them a shared synthesis also filed' -and $i1.msg -match '0 job result\(s\) stripped' -and $i1.msg -match '6 wiki page\(s\) withheld' -and $i1.msg -match '4 gap-work row\(s\) of a shared tree made neutral' -and $i1.msg -match '1 corroboration line') "570 moves B's 5 (the mixed one and the human-typed one included) + A's 1 claims, withholds the two-owner and the ownerless claim, withholds the 6 pages, neutralises the 4 machine gap-work rows (not the human steer) and the line (counts only)"
-  Check ($i1.msg -match '3 shared synthesis\(es\) moved private to their claim''s owner, 1 withheld' -and $i1.msg -match '1 shared job report\(s\) moved private to their claim''s owner, 2 withheld' -and $i1.msg -match '1 shared claim\(s\) a moved synthesis filed' -and $i1.msg -match '\(1 link\(s\) added\), 1 thread\(s\) re-described') "P2: the restating and the mixed-filing syntheses move to B, the two-owner one is withheld; B's own question's report moves to B, A's question's and the ownerless job's are withheld"
+  Check ($i1.rc -eq 0 -and $i1.msg -match '8 claim\(s\) moved to their owner''s store' -and $i1.msg -match '2 withheld \(no single owner\)' -and $i1.msg -match '1 of them a shared synthesis also filed' -and $i1.msg -match '0 job result\(s\) stripped' -and $i1.msg -match '7 wiki page\(s\) withheld' -and $i1.msg -match '4 gap-work row\(s\) of a shared tree made neutral' -and $i1.msg -match '1 corroboration line') "570 moves B's 5 (the mixed one and the human-typed one included) + A's 1 claims, withholds the two-owner and the ownerless claim, withholds the 6 pages, neutralises the 4 machine gap-work rows (not the human steer) and the line (counts only)"
+  Check ($i1.msg -match '3 shared synthesis\(es\) moved private to their claim''s owner, 1 withheld' -and $i1.msg -match '1 shared job report\(s\) moved private to their claim''s owner, 2 withheld' -and $i1.msg -match '2 other shared claim\(s\) carrying a moved claim''s sentence' -and $i1.msg -match '\(2 link\(s\) added\), 1 thread\(s\) re-described' -and $i1.msg -match '1 notebook label\(s\) relabelled, 1 curator answer\(s\) renamed, 1 entit\(ies\) bumped') "P2: the restating and the mixed-filing syntheses move to B, the two-owner one is withheld; B's own question's report moves to B, A's question's and the ownerless job's are withheld"
   $i2 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570 again'
   Check ($i2.rc -eq 0 -and $i2.msg -match 'nothing to move' -and $i2.msg -notmatch 'corroboration line') '570 a second time: nothing to move'
   $c1 = Check-Script; Save 'check-after-570.log' $c1
   Check ($c1 -match 'check: OK') 'after 570 the check script says OK'
   $v1 = Psql-File (Join-Path $dockerDir 'revert-private-report-claims.sql') 'revert'
-  Check ($v1.rc -eq 0 -and $v1.msg -match '9 claim\(s\) restored' -and $v1.msg -match '4 gap-work row\(s\)' -and $v1.msg -match 'foreign key restored') 'the revert restores the 8 claims, the edges, the pages, the gap work, the line and the key'
-  Check ($v1.msg -match '4 shared synthesis\(es\) restored' -and $v1.msg -match '3 shared job report\(s\) restored' -and $v1.msg -match '4 private copy\(ies\) removed' -and $v1.msg -match '1 added link\(s\) removed, 1 thread\(s\) restored') 'the revert restores the 4 P2 syntheses, the 3 P2 job reports and the thread, removes the 4 private copies and the added link'
+  Check ($v1.rc -eq 0 -and $v1.msg -match '10 claim\(s\) restored' -and $v1.msg -match '4 gap-work row\(s\)' -and $v1.msg -match 'foreign key restored') 'the revert restores the 8 claims, the edges, the pages, the gap work, the line and the key'
+  Check ($v1.msg -match '4 shared synthesis\(es\) restored' -and $v1.msg -match '3 shared job report\(s\) restored' -and $v1.msg -match '4 private copy\(ies\) removed' -and $v1.msg -match '2 added link\(s\) removed, 1 thread\(s\) restored' -and $v1.msg -match '1 curator answer\(s\), 1 notebook label\(s\), 1 entit\(ies\) restored') 'the revert restores the 4 P2 syntheses, the 3 P2 job reports and the thread, removes the 4 private copies and the added link'
   $v2 = Psql-File (Join-Path $dockerDir 'revert-private-report-claims.sql') 'revert again'
   Check ($v2.rc -eq 0 -and $v2.msg -match 'nothing to restore') 'a second revert has nothing to restore'
   $h1 = Q $hashQ; Save 'hash-reverted.txt' $h1
   Check ($h1 -eq $h0) "after the revert every touched table is byte-identical to the planted state"
   if ($h1 -ne $h0) { Save 'hash-diff.txt' ("planted:  $h0`nreverted: $h1") }
   $i3 = Psql-File (Join-Path $dockerDir 'init-private-report-claims.sql') '570 once more'
-  Check ($i3.rc -eq 0 -and $i3.msg -match '7 claim\(s\) moved' -and $i3.msg -match '3 shared synthesis\(es\) moved private') '570 after the revert moves the same claims and summaries again'
+  Check ($i3.rc -eq 0 -and $i3.msg -match '8 claim\(s\) moved' -and $i3.msg -match '3 shared synthesis\(es\) moved private') '570 after the revert moves the same claims and summaries again'
   $p2b = ((Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/prcreuse.sql) | Out-String).Trim(); Save 'p2-count-after-570.log' $p2b
   Write-Host ($p2b -replace "`n", ' | ')
-  Check ($p2b -match 'mixed claims \(a shared synthesis also filed them, still in the shared table\)=0' -and $p2b -match "shared syntheses carrying a private-report claim's sentence=0" -and $p2b -match 'shared job reports carrying one=0' -and $p2b -match 'threads whose name or description carries one=0' -and $p2b -match 'other shared claims carrying one \(filed into another thread\)=0') 'P2 count after 570: 0 mixed claims, 0 shared syntheses, 0 shared job reports (operator decision P2)'
+  Check ($p2b -match 'mixed claims \(a shared synthesis also filed them, still in the shared table\)=0' -and $p2b -match "shared syntheses carrying a private-report claim's sentence=0" -and $p2b -match 'shared job reports carrying one=0' -and $p2b -match 'threads whose name, description or slug carries one=0' -and $p2b -match 'other shared claims carrying one \(another thread, or a superseded synthesis\)=0' -and $p2b -match 'shared sources whose notebook label carries one=0' -and $p2b -match 'job curator answers naming a thread by one=0') 'P2 count after 570: 0 mixed claims, 0 shared syntheses, 0 shared job reports (operator decision P2)'
   $c2 = Check-Script; Save 'check-green.log' $c2
   Check ($c2 -match 'check: OK') 'the check script says OK'
   # ---------------------------------------------------------------- [7] GREEN

@@ -167,7 +167,7 @@ async function plant(): Promise<Record<string, any>> {
 // gap row is in its table or the archive; the shared job and the gap branch exist.
 // deno-lint-ignore no-explicit-any
 async function landed(p: Record<string, any>): Promise<void> {
-  const ids = [p.b1, p.b2, p.b3, p.a1, p.multi, p.orph, p.ctl, p.mix, p.bh, p.dupB3];
+  const ids = [p.b1, p.b2, p.b3, p.a1, p.multi, p.orph, p.ctl, p.mix, p.bh, p.dupB3, p.supB2];
   // fix item (P2): each planted shared synthesis is in sources or 570's archive (moved / withheld); each P2 job exists
   const syns = [p.syn, p.p2syn, p.p2multi, p.synCtl, p.p2synB];
   const p2 = (await sql<{ s: number; j: number }>(
@@ -261,9 +261,24 @@ t(["plant"], "plant two users' private reports and their claims in the shape slo
   const p2synB = await one(`INSERT INTO public.sources (title, content, content_type, research_key, research_query) VALUES ($1, $2, 'research_synthesis', $3, 'another shared question') RETURNING id::text AS id`,
     [`B question title ${R}`, `B's run. ${b3text}`, `rk-prc-sharedB-${R}`]);
   // round 2 (P2 #1): a thread minted from the restating synthesis (its description is the report's headline) and linked to it
-  const p2thread = await one(`INSERT INTO public.threads (name, description, status) VALUES ($1, $2, 'active') RETURNING id::text AS id`,
-    [`Minted thread ${R}`, `Research on: ${b3text}`]);
+  // (round 3, tester attempt 2: NAMED from the report - its slug is slugifyBase(name) in full, the hub page's path)
+  const p2name = `Thread: ${b3text}`;
+  const p2slug = p2name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const p2thread = await one(`INSERT INTO public.threads (name, description, status, slug) VALUES ($1, $2, 'active', $3) RETURNING id::text AS id`,
+    [p2name, `Research on: ${b3text}`, p2slug]);
   await sql(`INSERT INTO public.thread_sources (thread_id, source_id) VALUES ($1, $2)`, [p2thread, p2syn]);
+  // round 3: a shared web source the curator filed into that thread carries its name as the notebook label
+  const nbSrc = await one(`INSERT INTO public.sources (title, content, content_type, url, notebook) VALUES ($1, 'public page text', 'web_article', $2, $3) RETURNING id::text AS id`,
+    [`Filed web page ${R}`, `https://example.org/prc-${R}/filed`, p2name]);
+  await sql(`INSERT INTO public.thread_sources (thread_id, source_id) VALUES ($1, $2)`, [p2thread, nbSrc]);
+  // round 3: the thread's hub page (its path is the slug; title and body neutral)
+  const hubPage = `notebooks/${p2slug}/${p2slug}`;
+  await sql(`INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'hub', 'Hub', 'A hub page.')`, [hubPage]).catch(async () =>
+    await sql(`INSERT INTO public.wiki_pages (slug, page_class, title, body) VALUES ($1, 'entity', 'Hub', 'A hub page.')`, [hubPage]));
+  // round 3 (sibling sweep): an entity the synthesis's extraction named
+  const entity = (await sql<{ id: string; at: string }>(`INSERT INTO public.entities (entity_type, canonical_name, normalized_name) VALUES ('topic', $1, $2) RETURNING id::text AS id, updated_at::text AS at`,
+    [`Theta topic ${R}`, `theta topic ${R}`.toLowerCase()]))[0];
+  await sql(`INSERT INTO public.source_entities (source_id, entity_id, mention_role) VALUES ($1, $2::bigint, 'about')`, [p2syn, entity.id]);
   // round 2 (P2 #2): the curator filed the synthesis's sentence into ITS thread - a separate SHARED row with B's text
   const dupB3 = await claim(b3text, p2thread, p2syn);
   // fix item (P2): B's own shared question (B's prompt) whose report restated B's claim - moves private to B, copied
@@ -293,6 +308,13 @@ t(["plant"], "plant two users' private reports and their claims in the shape slo
   // a shared control synthesis (the control claim's own; it restates nothing private and stays shared)
   const synCtl = await one(`INSERT INTO public.sources (title, content, content_type, research_key) VALUES ($1, 'a shared control report', 'research_synthesis', $2) RETURNING id::text AS id`,
     [`Shared control report ${R}`, `rk-prc-sharedctl-${R}`]);
+  // round 3 (tester attempt 2, P2 #2): a shared claim with B's beta sentence left behind by a synthesis superseded in
+  // place - its filer (the control synthesis) no longer restates it - in another thread
+  const thread3 = await one(`INSERT INTO public.threads (name, description, status) VALUES ($1, 'another shared thread', 'active') RETURNING id::text AS id`, [`Other thread ${R}`]);
+  const supB2 = await claim(`The ${w.b} beta result held for 40 participants over six months.`, thread3, synCtl);
+  // round 3 (sibling sweep): A's idea job's curator answer named the minted thread (thread_name, the shortlist)
+  await sql(`UPDATE public.research_jobs SET result = coalesce(result, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
+    [aIdea.job, JSON.stringify({ curator: { thread_id: p2thread, thread_name: p2name, shortlist: [{ thread_id: p2thread, name: p2name, distance: 0.1 }] } })]);
   const multi = await claim(`The ${w.multi} delta result appeared in both private reports alike.`, thread, null);
   await link(bReport, multi); await link(aReport, multi);
   const orph = await claim(`The ${w.orph} epsilon result came from a report whose idea is gone.`, thread, null);
@@ -346,7 +368,8 @@ t(["plant"], "plant two users' private reports and their claims in the shape slo
   await sql(`CREATE TABLE IF NOT EXISTS public.lab_prc_plant (k TEXT PRIMARY KEY, v JSONB NOT NULL)`);
   await sql(`INSERT INTO public.lab_prc_plant (k, v) VALUES ('plant', $1::jsonb) ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v`,
     [JSON.stringify({ R, w, thread, s1, s2, syn, bIdea, aIdea, bReport, aReport, orphReport, b1, b2, b3, a1, multi, orph, ctl, mix, job, child, page, pageCite, pageBold, pageWiki, pageMid, pageSup, near, clean, p2syn, p2job,
-      p2jobA, p2multi, synCtl, bh, hjob, hchild, b3text, bhText, human: await humanImage(hjob, hchild), p2synB, p2thread, dupB3 })]);
+      p2jobA, p2multi, synCtl, bh, hjob, hchild, b3text, bhText, human: await humanImage(hjob, hchild), p2synB, p2thread, dupB3,
+      p2slug, nbSrc, hubPage, entity, thread3, supB2 })]);
   await landed(await plant());
 });
 
@@ -842,6 +865,32 @@ t(BOTH, "[db] [fix2] P2 a synthesis copy keeps its title / question only when th
   const b = await copy(p.p2synB);
   assert(b, "the synthesis of B's own question is copied to B");
   assertEquals([b.title, b.research_query], [`B question title ${p.R}`, "another shared question"], "B's own question stays on B's copy");
+});
+// fix item round 3 (tester attempt 2): the thread's slug and notebook labels; the curator answers naming it; its hub
+// page; the entities the synthesis named (sibling sweep); a claim left by a superseded synthesis
+t(BOTH, "[db] [fix3] P2 the minted thread's slug and hub page, the shared sources' notebook labels and a curator answer naming it carry no private sentence; the synthesis's entity is bumped", async () => {
+  const p = await plant();
+  const th = (await sql<{ name: string; slug: string | null }>(`SELECT name, slug FROM public.threads WHERE id = $1`, [p.p2thread]))[0];
+  assert(!`${th.name} ${th.slug ?? ""}`.includes(p.w.b3), "the thread's name and slug carry no private word");
+  assertEquals(th.slug, `research-thread-${p.p2thread.slice(0, 8)}`, "re-slugged");
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.threads WHERE coalesce(slug, '') LIKE '%' || $1 || '%'`, [p.w.b3]))[0].n, 0, "no slug carries it");
+  const nb = (await sql<{ notebook: string | null }>(`SELECT notebook FROM public.sources WHERE id = $1`, [p.nbSrc]))[0];
+  assertEquals(nb.notebook, th.name, "the filed source's notebook label is the thread's new name");
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.sources WHERE coalesce(notebook, '') LIKE '%' || $1 || '%'`, [p.w.b3]))[0].n, 0, "no notebook label carries it");
+  const cur = (await sql<{ t: string }>(`SELECT (result -> 'curator')::text AS t FROM public.research_jobs WHERE id = $1`, [p.aIdea.job]))[0];
+  assert(!cur.t.includes(p.w.b3) && cur.t.includes(th.name), "A's job's curator answer names the thread by its new name");
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE slug = $1`, [p.hubPage]))[0].n, 0, "the hub page at the old slug is withheld");
+  const ent = (await sql<{ at: string }>(`SELECT updated_at::text AS at FROM public.entities WHERE id = $1::bigint`, [p.entity.id]))[0];
+  assert(ent.at !== p.entity.at, "the entity the moved synthesis named is bumped (its page recompiles from shared material)");
+});
+t(BOTH, "[db] [fix3] P2 a shared claim left by a superseded synthesis (its filer no longer restates it) moves to B with the claim it restates", async () => {
+  const p = await plant();
+  const r = (await sql<{ shared: number; owner: string | null; linked: number }>(
+    `SELECT (SELECT count(*)::int FROM public.claims WHERE id = $1) AS shared,
+            (SELECT inlet_owner_sub FROM public.inlet_private_claims WHERE id = $1) AS owner,
+            (SELECT count(*)::int FROM public.research_private_report_claims WHERE claim_id = $1 AND report_id = $2) AS linked`, [p.supB2, p.bReport]))[0];
+  assertEquals([r.shared, r.owner === B, r.linked], [0, true, 1], "the left-behind claim is B's, not shared");
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.sources WHERE id = $1`, [p.synCtl]))[0].n, 1, "its filer (which restates nothing) stays shared");
 });
 // final round (tester attempt 2 F3): slot 480's workbench login reads the owner's claims, owner-scoped; it files nothing
 t([...BOTH, "p480"], "[db] slot 480's ob_workbench login reads only the verified subject's private-report claims, and files none", async () => {
