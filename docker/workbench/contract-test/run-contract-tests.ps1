@@ -139,6 +139,7 @@ function DanglingVolumes { @((Dk volume ls -q --filter dangling=true | Out-Strin
 $volBefore = DanglingVolumes
 $made = @{ net = $false; containers = @(); images = @(); smokeDir = $null }
 
+$script:wbRole = @{}
 function Start-Db([string]$name) {
   $o = Dk run -d --name $name --label $label --network $net -e "POSTGRES_PASSWORD=$pw" -e POSTGRES_DB=openbrain `
     -v "${stage}:/docker-entrypoint-initdb.d:ro" $PgImage
@@ -163,6 +164,10 @@ function Start-Db([string]$name) {
   # The production DB user shape: not a superuser, no BYPASSRLS, a member of service_role.
   $o = Dk exec $name psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) "$name has ob_app_memory (non-superuser, service_role member)"
+  # the workbench logs in as ob_workbench, as compose does (slot 480; slot 600's inlet_connections_of is executable by it only)
+  $db = $name
+  . (Join-Path $ct 'ob-workbench-role.ps1')
+  $script:wbRole[$name] = Use-ObWorkbenchRole $appPw
   $null = Dk cp (Join-Path $ct 'fixtures.sql') "${name}:/tmp/fixtures.sql"
   # rw-inlet-stamp (slot 470): fixtures.sql is legacy-shaped (an unowned idea thought); the LAB switches 470's guards off
   # around this load only and on again right after (the migration has no escape hatch)
@@ -324,7 +329,7 @@ try {
   $o = Dk run -d --name $embName --label $label --network $net -v "${ct}:/ct:ro" $tag deno run --allow-net /ct/stub-embed.ts
   if ($script:rc -eq 0) { $made.containers += $embName }
   $o = Dk run -d --name $wbName --label $label --network $net -e PORT=8000 -e "WORKBENCH_KEY=$key" `
-    -e "DB_HOST=$dbB" -e DB_USER=ob_app_memory -e "DB_PASSWORD=$appPw" -e OPEN_BRAIN_URL=http://unreachable.invalid `
+    -e "DB_HOST=$dbB" -e "DB_USER=$($script:wbRole[$dbB].role)" -e "DB_PASSWORD=$($script:wbRole[$dbB].pw)" -e OPEN_BRAIN_URL=http://unreachable.invalid `
     -e "EMBEDDING_API_BASE=http://${embName}:8080/v1" -e WIKI_GIT_DIR=/tmp/wiki -e WIKI_ASSETS_DIR=/tmp/wiki/assets `
     -e CONTRACT_MOUNTS_ROOT=/mounts -e WORKSPACE_IDENTITY_HEADER=X-Test-Sub -v "$(Join-Path $ob1 'recipes'):/recipes:ro" $tag
   Check ($script:rc -eq 0) "workbench $wbName started"
@@ -525,7 +530,7 @@ try {
     Check ($script:rc -eq 0) "pre-change workbench $baseTag built from OB1 $BaseSha"
     if ($script:rc -eq 0) { $made.images += $baseTag }
     $o = Dk run -d --name $baseName --label $label --network $net -e PORT=8000 -e "WORKBENCH_KEY=$key" `
-      -e "DB_HOST=$dbB" -e DB_USER=ob_app_memory -e "DB_PASSWORD=$appPw" -e OPEN_BRAIN_URL=http://unreachable.invalid `
+      -e "DB_HOST=$dbB" -e "DB_USER=$($script:wbRole[$dbB].role)" -e "DB_PASSWORD=$($script:wbRole[$dbB].pw)" -e OPEN_BRAIN_URL=http://unreachable.invalid `
       -e "EMBEDDING_API_BASE=http://${embName}:8080/v1" -e WIKI_GIT_DIR=/tmp/wiki -e WIKI_ASSETS_DIR=/tmp/wiki/assets `
       -v "$(Join-Path $ob1 'recipes'):/recipes:ro" $baseTag
     if ($script:rc -eq 0) { $made.containers += $baseName }
