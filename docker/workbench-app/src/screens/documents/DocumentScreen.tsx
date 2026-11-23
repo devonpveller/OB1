@@ -1,7 +1,7 @@
-// The document screen's frame (/documents/:id), as far as rwr-docs-list needs it: a title from the Documents list
-// always lands here and opens the document. rwr-doc-editor replaces the body with the writing surface (and its
-// Lock / Close / tab strip); until then the text is shown read-only for every document.
-//   - active: the text, and Close (back to Documents). Opening it makes it the Last document (the account key).
+// The document screen's frame (/documents/:id): a title from the Documents list always lands here and opens the
+// document.
+//   - active: the writing surface (document-editor/DocEditor.tsx, rwr-doc-editor): breadcrumb, version, Lock / Save / Close,
+//     the "In this doc" tabs. Opening it makes it the Last document (the account key).
 //   - archived: the text, READ-ONLY by design (no input, no editable region), with an Unarchive button.
 //   - trashed: it does not open; it says when it goes by itself and offers Restore.
 //   - missing or someone else's: the same one sentence (docs-data NOT_FOUND), never the server's details.
@@ -11,6 +11,7 @@ import { Link } from "../../shell/Link";
 import { useToast } from "../../shell/Toast";
 import { navigate } from "../../lib/router";
 import { getLastDocument, getLockedDocument, setLastDocument, setLockedDocument } from "../../lib/state";
+import { DocEditor } from "../document-editor/DocEditor";
 import { docHref, goesText, NOT_FOUND, problem, readFile, readListing, readState, restore, unarchive } from "./docs-data";
 
 type View =
@@ -18,15 +19,16 @@ type View =
   | { state: "gone" }
   | { state: "failed" }
   | { state: "trashed"; path: string; title: string; goes: string }
+  | { state: "writing"; path: string }
   | { state: "open"; path: string; title: string; body: string; archived: boolean };
 
 export function DocumentScreen({ params, subject }: ScreenProps) {
   const path = params.id ?? "";
   if (!subject) return <section className="screen doc" data-testid="document"><h1>Document</h1><p className="meta" role="status">Checking who you are...</p></section>;
-  return <DocumentFor key={subject + "\u0000" + path} path={path} />;
+  return <DocumentFor key={subject + "\u0000" + path} path={path} subject={subject} />;
 }
 
-function DocumentFor({ path }: { path: string }) {
+function DocumentFor({ path, subject }: { path: string; subject: string }) {
   const [view, setView] = useState<View>({ state: "loading" });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -48,10 +50,12 @@ function DocumentFor({ path }: { path: string }) {
         if (live.current) setView({ state: "trashed", path: st.path, title, goes });
         return;
       }
+      // an active document goes to the writing surface, which reads the file itself (with its hash) and makes the
+      // document the Last document; an archived one is shown read-only here
+      if (!st.archived) { setView({ state: "writing", path: st.path }); return; }
       const f = await readFile(st.path);
       if (!live.current) return;
       setView({ state: "open", path: st.path, title: f.title, body: f.body, archived: st.archived });
-      // an opened document is the Last document (identifier only; the title is shown from memory, never stored)
       if (getLastDocument()?.id !== st.path) setLastDocument({ id: st.path, title: f.title });
     } catch (e) {
       if (live.current) setView(problem(e, "") === NOT_FOUND ? { state: "gone" } : { state: "failed" });
@@ -72,6 +76,7 @@ function DocumentFor({ path }: { path: string }) {
 
   const back = <Link to="/documents" className="btn" data-testid="doc-close">Close</Link>;
   if (view.state === "loading") return <section className="screen doc" data-testid="document"><h1>Document</h1><p className="meta" role="status">Loading...</p></section>;
+  if (view.state === "writing") return <DocEditor key={view.path} path={view.path} subject={subject} />;
   if (view.state === "gone") {
     return (
       <section className="screen doc" data-testid="document">
@@ -114,7 +119,6 @@ function DocumentFor({ path }: { path: string }) {
             onClick={() => act(() => unarchive(view.path), "Unarchived.", "The document could not be unarchived.")}>Unarchive</button></div>
         </div>
       )}
-      {!view.archived && <p className="meta" data-testid="doc-soon">The writing surface is coming next in phase 1; the text is shown read-only until then.</p>}
       <article className="card doc-body" data-testid="doc-body" aria-label="Document text">{view.body || "(this document is empty)"}</article>
     </section>
   );

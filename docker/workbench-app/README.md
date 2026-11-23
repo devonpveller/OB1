@@ -89,3 +89,17 @@ route through `lib/api.ts` only, caches nothing and writes nothing to the browse
   changes); a trash move or a delete clears it, and Undo puts it back.
 - Tests: `test/documents.test.tsx` and `e2e/docs.e2e.mjs` (`e2e/run-docs-e2e.ps1`), both against ONE fake documents
   back end, `e2e/docs-fake.mjs` (the server's own isolation is its lab's: `run-docs-lifecycle-tests.ps1`).
+
+## The document screen (item `rwr-doc-editor`)
+
+`/documents/:id` for an active document is the writing surface: `src/screens/document-editor/` (`DocEditor`, `InThisDoc`,
+`SourceDrawer`, `editor-data`) on the CodeMirror editor in `src/editor/` (restored from the old workspace app, last tree
+`99cc465^`). It edits the file's body (the front matter is kept verbatim), autosaves after a pause, makes a version on Save /
+Ctrl+S / Close (the indicator `vN` counts the history, `v30+` at the route's cap), sends the file's hash with every save and
+answers a 409 with a message and BOTH texts kept, opens a citation `[n]` in a side drawer (the pinned words, the pinned
+revision, the cited chunk), locks / unlocks / swaps the document through the ui-state keys, queues "Research this" through
+`POST /workbench/documents/research`, and shows the seven "In this doc" tabs as placeholders (`InThisDoc.tsx` `DOC_TABS`: a later
+item sets one tab's `panel`). Saves are sent only for the person who opened the document (`isSamePerson`). Nothing is kept in the
+browser. `src/lib/grammar.ts` is a byte-identical twin of `workbench/src/documents/grammar.ts`:
+`node scripts/grammar-twin.mjs` checks it, and the lab runner `run-workspace-tests.ps1` step `[5c]` does too. The CodeMirror
+`<style>` element runs under a per-response CSP nonce (`serve.mjs`). E2E: `e2e/run-editor-e2e.ps1` (subnet 10.250.103.0/24).

@@ -58,6 +58,8 @@ const openDocs = async () => {
 const rows = () => screen.queryAllByTestId("doc-row").map((r) => within(r).getByTestId("doc-title").textContent);
 const row = (title: string) => screen.getAllByTestId("doc-row").find((r) => within(r).getByTestId("doc-title").textContent === title)!;
 const tab = async (t: "active" | "archived" | "trash") => { fireEvent.click(screen.getByTestId("tab-" + t)); await settle(); };
+// the writing surface's text (rwr-doc-editor): an ACTIVE document opens in the editor, whose text is in .cm-content
+const edText = () => screen.getByTestId("doc-editor").querySelector(".cm-content")?.textContent ?? "";
 const noEditable = () => {
   const m = screen.getByTestId("main");
   return m.querySelectorAll("input, textarea, [contenteditable]:not([contenteditable=false])").length === 0;
@@ -158,24 +160,24 @@ describe("acceptance 1: clicking a title always opens the document screen", () =
       expect(t.getAttribute("href")).toBe(href);
       fireEvent.click(t);
       expect(window.location.pathname).toBe(href);
-      await waitFor(() => expect(screen.getByTestId("doc-body").textContent).toMatch(/ALPHA body of the CPU plan/));
-      fireEvent.click(screen.getByTestId("doc-close"));
-      expect(window.location.pathname).toBe("/documents");
+      await waitFor(() => expect(edText()).toMatch(/ALPHA body of the CPU plan/));
+      fireEvent.click(screen.getByTestId("doc-close")); // Close saves first (nothing changed here), then returns to Documents
+      await waitFor(() => expect(window.location.pathname).toBe("/documents"));
       await waitFor(() => expect(screen.getAllByTestId("doc-row").length).toBe(3));
     }
     cleanup(); // a reload: a fresh App on the same URL
     resetState();
     await openDocs();
     fireEvent.click(within(row("ALPHA Upgrading the CPU")).getByTestId("act-open"));
-    await waitFor(() => expect(screen.getByTestId("doc-body").textContent).toMatch(/ALPHA body/));
+    await waitFor(() => expect(edText()).toMatch(/ALPHA body/));
     cleanup(); // a reload ON the document's URL
     render(<App />);
-    await waitFor(() => expect(screen.getByTestId("doc-body").textContent).toMatch(/ALPHA body/));
+    await waitFor(() => expect(edText()).toMatch(/ALPHA body/));
   });
-  it("an active document opens read-only for now (the writing surface is rwr-doc-editor) and becomes the Last document", async () => {
+  it("an active document opens in the writing surface (rwr-doc-editor) and becomes the Last document", async () => {
     window.history.pushState({}, "", "/documents/" + encodeURIComponent("documents/k-a/Stack/gateway.md"));
     render(<App />);
-    await waitFor(() => expect(screen.getByTestId("doc-body").textContent).toBe("ALPHA gateway notes."));
+    await waitFor(() => expect(edText()).toBe("ALPHA gateway notes."));
     expect(screen.getByTestId("document").dataset.docState).toBe("active");
     await waitFor(() => expect(getLastDocument()?.id).toBe("documents/k-a/Stack/gateway.md"));
     await waitFor(() => expect(settings.get("ui.last_document")?.value).toBe("documents/k-a/Stack/gateway.md"));
@@ -228,7 +230,7 @@ describe("acceptance 3: trashed documents do not open until restored and say whe
     expect(requestLog().some((r) => r.url.startsWith("/workbench/documents/file"))).toBe(false);
     expect(screen.getByTestId("main").textContent).not.toMatch(/ALPHA trashed text/);
     fireEvent.click(screen.getByTestId("doc-restore"));
-    await waitFor(() => expect(screen.getByTestId("doc-body").textContent).toBe("ALPHA trashed text."));
+    await waitFor(() => expect(edText()).toBe("ALPHA trashed text."));
     expect(window.location.pathname).toBe("/documents/" + encodeURIComponent("documents/k-a/Hardware/dup.md"));
   });
   it("Restore from the Trash tab puts it back in Active, in its folder", async () => {
@@ -370,7 +372,7 @@ describe("acceptance 8: nothing private is cached in the browser or put on a sha
     const con = ["log", "info", "warn", "error", "debug"].map((m) => vi.spyOn(console, m as "log"));
     await openDocs();
     fireEvent.click(within(row("ALPHA Upgrading the CPU")).getByTestId("doc-title"));
-    await waitFor(() => expect(screen.getByTestId("doc-body")).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId("doc-editor")).toBeTruthy());
     expect(document.title).toBe("Document - Research workbench");
     act(() => navigate("/documents"));
     await waitFor(() => expect(screen.getAllByTestId("doc-row").length).toBe(3));

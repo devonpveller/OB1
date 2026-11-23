@@ -3,7 +3,7 @@
 //   POST /__mode/<alice|bob>   who the next requests belong to
 //   POST /__reset              the planted data again, empty accounts and log
 //   GET  /__log                every request seen (method, url, mode, whether the door key was present)
-//   GET  /__db                 the fake's documents (path, owner, history) and trail, for the driver's checks
+//   GET  /__db                 the fake's documents (path, owner, history, raw file once saved), trail and queued research, for the driver's checks
 import http from "node:http";
 import { createFake, PEOPLE } from "./docs-fake.mjs";
 
@@ -24,7 +24,7 @@ http.createServer((req, res) => {
     if (p === "/__log") return json(log);
     if (p === "/__db") {
       const db = fake.db();
-      return json({ docs: [...db.docs].map(([path, d]) => ({ path, owner: d.owner, title: d.title, history: d.history })), trail: db.trail });
+      return json({ docs: [...db.docs].map(([path, d]) => ({ path, owner: d.owner, title: d.title, history: d.history, raw: d.raw ?? null })), trail: db.trail, research: db.research });
     }
     if (p === "/__reset") { fake.reset(); log = []; account = { alice: new Map(), bob: new Map() }; mode = "alice"; return json({ ok: true }); }
     const m = /^\/__mode\/(\w+)$/.exec(p);

@@ -37,7 +37,7 @@ function get(path, { method = "GET", headers = {} } = {}) {
 before(async () => {
   dist = await mkdtemp(join(tmpdir(), "wbapp-"));
   await mkdir(join(dist, "assets"));
-  await writeFile(join(dist, "index.html"), "<!doctype html><title>INDEX</title>");
+  await writeFile(join(dist, "index.html"), '<!doctype html><meta name="csp-nonce" content="__CSP_NONCE__"><title>INDEX</title>');
   await writeFile(join(dist, "assets", "index-abc123.js"), "console.log(1)");
   await writeFile(join(dist, "assets", "index-abc123.css"), "a{}");
   await writeFile(join(dist, "assets", "THIRD-PARTY-NOTICES.txt"), "notices");
@@ -193,7 +193,8 @@ test("the HTML carries a Content-Security-Policy: same-origin only, no framing",
   const d = Object.fromEntries(csp.split(";").map((x) => x.trim()).filter(Boolean).map((x) => { const [k, ...v] = x.split(/\s+/); return [k, v.join(" ")]; }));
   assert.equal(d["default-src"], "'self'");
   assert.equal(d["script-src"], "'self'");
-  assert.equal(d["style-src"], "'self'");
+  // rwr-doc-editor: the editor's own <style> element runs by a per-response nonce (below), never by 'unsafe-inline'
+  assert.match(d["style-src"], /^'self' 'nonce-[A-Za-z0-9+/]{22}=='$/);
   assert.equal(d["img-src"], "'self' data:");
   assert.equal(d["font-src"], "'self'");
   assert.equal(d["connect-src"], "'self'");
@@ -201,5 +202,21 @@ test("the HTML carries a Content-Security-Policy: same-origin only, no framing",
   assert.equal(d["base-uri"], "'none'");
   assert.equal(d["form-action"], "'self'");
   assert.ok(!/unsafe-inline|unsafe-eval|\*/.test(csp.replace(/'self'/g, "")), "no wildcard, no unsafe-*");
-  for (const p of ["/documents/x", "/research/abc?y=1"]) assert.equal((await get(p)).headers["content-security-policy"], csp, p);
+  const strip = (c) => c.replace(/'nonce-[^']+'/, "'nonce-X'");
+  for (const p of ["/documents/x", "/research/abc?y=1"]) assert.equal(strip((await get(p)).headers["content-security-policy"]), strip(csp), p);
+});
+
+// rwr-doc-editor: the nonce is fresh per response, the same one in the policy and in the page's meta tag, and no
+// placeholder is left in what the browser gets
+test("the style nonce is fresh for every response and matches the page's meta tag", async () => {
+  const nonceOf = (r) => /'nonce-([^']+)'/.exec(r.headers["content-security-policy"])[1];
+  const a = await get("/"), b = await get("/documents/x");
+  assert.notEqual(nonceOf(a), nonceOf(b));
+  for (const r of [a, b]) {
+    assert.ok(r.body.includes(`<meta name="csp-nonce" content="${nonceOf(r)}">`), "the meta tag carries this response's nonce");
+    assert.ok(!r.body.includes("__CSP_NONCE__"), "no placeholder reaches the browser");
+    assert.equal(Number(r.headers["content-length"]), Buffer.byteLength(r.body), "content-length is the rewritten page's");
+  }
+  assert.equal((await get("/", { method: "HEAD" })).body, "");
+  assert.ok(!/nonce/.test((await get("/assets/index-abc123.css")).headers["content-security-policy"] ?? ""), "only the page carries the policy");
 });

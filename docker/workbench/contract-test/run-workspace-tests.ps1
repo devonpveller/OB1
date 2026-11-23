@@ -1,8 +1,8 @@
 # run-workspace-tests.ps1 - the disposable lab run for research-workbench P2b (rw-p2b-workspace): the documents API and
 # the back-end suites that grew on it (cleanup, intake, ideas, settings, privacy, inlet-owner), the viewer as the front door
 # and the two-user isolation sweep. The file keeps its historic name; rwr-remove-workspace deleted the old /workspace UI,
-# so its headless-Chromium e2e ([5b]) and the e2e runner image are gone, and the grammar byte-identity check ([5c]) is
-# SUSPENDED until rwr-doc-editor lands the new app's grammar copy. Every back-end suite below still runs.
+# so its headless-Chromium e2e ([5b]) and the e2e runner image are gone. The grammar byte-identity check ([5c]) runs again
+# (rwr-doc-editor), against the new app's copy (workbench-app/src/lib/grammar.ts). Every back-end suite below still runs.
 #
 #   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-workspace-tests.ps1 -Subnet <x.y.z.0/24> [-Id <owner>] [-Evidence <dir>] [-Red]
 #
@@ -1436,10 +1436,13 @@ try {
 
   if ($script:pvRan) { Invoke-OwnerPrivateViewRevert }
 
-  # [5c] SUSPENDED (rwr-remove-workspace): the grammar byte-identity check compared src/documents/grammar.ts with the old
-  # workspace's copy (wiki-viewer/workspace/src/lib/grammar.ts), deleted with the workspace. It returns, pointed at the new
-  # app's copy, when rwr-doc-editor lands it. Until then the editor grammar has ONE copy and nothing to drift from.
-  Write-Host '[5c] the grammar copy byte-identity check: SUSPENDED until rwr-doc-editor lands the new app''s copy (the old workspace twin is deleted)'
+  # [5c] the grammar copy: src/documents/grammar.ts and the writing surface's twin in the new app (workbench-app/src/lib/grammar.ts)
+  # must be BYTE-IDENTICAL, so the editor and the documents API read a document the same way. One byte of difference fails
+  # (workbench-app/scripts/grammar-twin.mjs is the same comparison, run by the app's vitest where both files are present).
+  Write-Host '[5c] the grammar copy'
+  $a = [System.IO.File]::ReadAllBytes((Join-Path $wb 'src/documents/grammar.ts'))
+  $b = [System.IO.File]::ReadAllBytes((Join-Path $dockerDir 'workbench-app/src/lib/grammar.ts'))
+  Check ([Convert]::ToBase64String($a) -eq [Convert]::ToBase64String($b)) 'the workbench app''s grammar copy is byte-identical to the documents API grammar'
 
   # D12 at the end of everything: no user document became a page
   $rows = (Dk exec $db psql -U postgres -d openbrain -tAc "select count(*) from wiki_pages where slug like 'documents/%'").Trim()

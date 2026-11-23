@@ -71,16 +71,16 @@ await scheme("light");
 let opened = 0;
 for (let i = 0; i < 3; i++) {
   await inRow("ALPHA Upgrading the CPU", "doc-title");
-  if (await until(`(document.querySelector('[data-testid=doc-body]')?.textContent||'').includes('ALPHA body of the CPU plan')`, 40) && (await ev("location.pathname")) === H(CPU)) opened++;
+  if (await until(`(document.querySelector('[data-testid=doc-editor] .cm-content')?.textContent||'').includes('ALPHA body of the CPU plan')`, 40) && (await ev("location.pathname")) === H(CPU)) opened++;
   await click("[data-testid=doc-close]");
   await until(`location.pathname==='/documents' && document.querySelectorAll('[data-testid=doc-row]').length===3`);
 }
 ok(opened === 3, `title -> document -> Close -> title, three times: opened ${opened}/3`);
 await reload();
 await inRow("ALPHA Upgrading the CPU", "doc-title");
-ok(await until(`(document.querySelector('[data-testid=doc-body]')?.textContent||'').includes('ALPHA body')`), "after a reload of Documents the title still opens the document");
+ok(await until(`(document.querySelector('[data-testid=doc-editor] .cm-content')?.textContent||'').includes('ALPHA body')`), "after a reload of Documents the title still opens the document");
 await reload();
-ok(await until(`(document.querySelector('[data-testid=doc-body]')?.textContent||'').includes('ALPHA body')`), "a reload ON the document's URL opens it again");
+ok(await until(`(document.querySelector('[data-testid=doc-editor] .cm-content')?.textContent||'').includes('ALPHA body')`), "a reload ON the document's URL opens it again");
 for (const sch of ["light", "dark"]) { await scheme(sch); await axe(`${sch} document screen (active)`); }
 await scheme("light");
 await go(H(CPU));
@@ -113,7 +113,7 @@ await until(`!!document.querySelector('[data-testid=doc-trashed]')`);
 ok(/opens only after you restore it; it goes by itself in 28 days/.test(await ev(`document.querySelector('[data-testid=doc-trashed]').textContent`)) && !(await ev(`!!document.querySelector('[data-testid=doc-body]')`)), "the trashed document's URL does not open it and says when it goes");
 ok(!(await stub("/__log")).some((x) => x.url.startsWith("/workbench/documents/file")), "its text was never read");
 await click("[data-testid=doc-restore]");
-ok(await until(`(document.querySelector('[data-testid=doc-body]')?.textContent||'')==='ALPHA trashed text.'`), "after Restore it opens");
+ok(await until(`(document.querySelector('[data-testid=doc-editor] .cm-content')?.textContent||'')==='ALPHA trashed text.'`), "after Restore it opens");
 
 // ---- 5. acceptance 4: Delete forever: typed DELETE, Lost / Stays
 await stub("/__reset", "POST"); await setMode("alice");

@@ -7,7 +7,20 @@
 //   - a move (archive, unarchive, trash, restore) keeps the document's history and sets its listing date to now;
 //   - delete-forever and empty-trash need confirm: true (400 otherwise, nothing touched); empty-trash removes only
 //     the caller's own trashed documents; each removal writes one trail line (path, kind, when - never text).
+// rwr-doc-editor adds the writing surface's routes, copied from the same repo code:
+//   - GET /documents/file answers { path, content, hash } with hash = the SHA-256 hex of the file (repo.ts sha256);
+//   - PUT /documents/file?path=&commit=1 takes { content, if_match }: a stale if_match is 409
+//     {"error":"conflict","current_hash":<hash>} and writes nothing (repo.ts saveDocument); a save answers
+//     { path, hash, listing: { ok: true } }; commit=1 makes ONE commit and only when the file differs from the last
+//     commit (vaultCommitPath: nothing to commit = no commit); the listing's title follows the file's (syncListing);
+//   - GET /documents/history answers { path, commits: [{ hash, author, date, message }] } newest first, at most 30
+//     (vaultFileHistory(rel, 30), content stripped);
+//   - POST /documents/research answers 202 { job_id, refinery_id, kind }, 400 { error: "query is required" } for an
+//     empty query, 404 for a document that is not the caller's (routes/documents.ts, refinery.queueResearch);
+//   - GET /contract/references/<id> and /contract/chunks/<source>:<idx>/context answer the contract's shapes
+//     (referenceById / sourceReference, chunkContext) for the planted references below.
 // The fake is not the server: the server's own isolation is tested by its lab (run-docs-lifecycle-tests.ps1).
+import { createHash } from "node:crypto";
 
 export const PEOPLE = {
   alice: { sub: "u-alice", key: "k-a", name: "Alice Lab" },
@@ -20,6 +33,23 @@ const isArchived = (p) => SUBTREE.exec(p)?.[2] === "archive";
 const liveRel = (p) => p.replace(SUBTREE, "$1");
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80) || "document";
 const NO = { status: 404, body: { error: "no such document" } };
+const sha256 = (t) => createHash("sha256").update(String(t), "utf8").digest("hex");
+// the file as it lies in the vault: a planted document is its front matter (title as JSON) and its body
+const fileText = (d) => d.raw ?? `---\ntitle: ${JSON.stringify(d.title)}\n---\n${d.body}`;
+// the listing's title after a save: the front matter's, else the first heading, else the file name (grammar.ts titleOf)
+const titleAfter = (content, path) => {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(\r?\n|$)/.exec(content);
+  let fm = "";
+  if (m) { const t = /^title\s*:\s*(.*)$/m.exec(m[1]); if (t) { const v = t[1].trim(); try { fm = v.startsWith('"') ? JSON.parse(v) : v.replace(/^'|'$/g, ""); } catch { fm = v; } } }
+  if (fm) return fm;
+  const h = /^#\s+(.+)$/m.exec(content.slice(m ? m[0].length : 0));
+  return h ? h[1].trim() : (path.split("/").pop() ?? path).replace(/\.md$/i, "");
+};
+const HISTORY_CAP = 30; // vaultFileHistory(rel, 30)
+const commitsOf = (d, path, who) => d.history.map((message, i) => ({
+  hash: createHash("sha1").update(`${path}:${i}:${message}`).digest("hex"), author: who.name,
+  date: (d.hdates ?? [])[i] ?? d.updated, message,
+})).reverse().slice(0, HISTORY_CAP);
 
 // Planted data: every title and text of alice's carries ALPHA, every one of bob's BRAVO, so a leak is a string match.
 export function seed(now = Date.now()) {
@@ -38,8 +68,21 @@ export function seed(now = Date.now()) {
     ]),
     folders: new Set(["documents/k-a/Hardware", "documents/k-a/Stack", "documents/k-a/Recipes"]),
     trail: [],
+    research: [],
+    refs: new Map(REFS.map(([k, v]) => [k, { ...v }])),
   };
 }
+
+// Planted references (shared knowledge in the real server: a reference record is read by its id). The source text
+// carries the marker SRC-ALPHA.
+export const REF_A = "a1000000-0000-4000-8000-0000000000a1";
+export const REF_B = "a1000000-0000-4000-8000-0000000000b2";
+export const SRC_A = "b1000000-0000-4000-8000-0000000000a1";
+const REFS = [
+  [REF_A, { source_id: SRC_A, title: "SRC-ALPHA Socket guide", pinned_revision: 2, current: 3, chunk_idx: 1, quote: "the LGA2066 socket takes a 165 W part",
+    chunks: ["SRC-ALPHA intro chunk.", "Chunk two: the LGA2066 socket takes a 165 W part, per the vendor.", "SRC-ALPHA closing chunk."] }],
+  [REF_B, { source_id: "b1000000-0000-4000-8000-0000000000b2", title: "SRC-ALPHA Whole source", pinned_revision: 1, current: 1, chunk_idx: null, quote: "a whole-source pin", chunks: [] }],
+];
 
 export function createFake(opts = {}) {
   let clock = opts.now ?? (() => Date.now());
@@ -53,7 +96,8 @@ export function createFake(opts = {}) {
     if (db.docs.has(to)) return { status: 409, body: { error: "a document with that name already exists there" } };
     const d = db.docs.get(from);
     db.docs.delete(from);
-    db.docs.set(to, { ...d, updated: new Date(clock()).toISOString(), history: [...d.history, `${what} ${from} -> ${to}`] });
+    const at = new Date(clock()).toISOString();
+    db.docs.set(to, { ...d, updated: at, history: [...d.history, `${what} ${from} -> ${to}`], hdates: [...(d.hdates ?? d.history.map(() => d.updated)), at] });
     return null;
   };
   const remove = (p, who, kind) => {
@@ -66,7 +110,7 @@ export function createFake(opts = {}) {
     const who = PEOPLE[person];
     const u = new URL(url, "http://x");
     const p = u.pathname;
-    if (!who) return p.startsWith("/workbench/documents") || p === "/workbench/contract/documents" ? { status: 401, body: { error: "sign in" } } : null;
+    if (!who) return p.startsWith("/workbench/documents") || p.startsWith("/workbench/contract/") ? { status: 401, body: { error: "sign in" } } : null;
     const q = (k) => u.searchParams.get(k) ?? "";
     if (p === "/workbench/contract/documents" && method === "GET") {
       const lim = Math.min(500, Number(q("limit") || 100));
@@ -74,6 +118,29 @@ export function createFake(opts = {}) {
         .sort((a, b) => b[1].updated.localeCompare(a[1].updated)).slice(0, lim)
         .map(([path, d]) => ({ title: d.title, path, updated: d.updated, outbound_links: d.links.map((l) => ({ ...l, pin: null, reference_id: null })) }));
       return { status: 200, body: { documents: rows } };
+    }
+    const rm = /^\/workbench\/contract\/references\/([^/]+)$/.exec(p);
+    if (rm && method === "GET") {
+      const id = decodeURIComponent(rm[1]);
+      const ref = db.refs.get(id);
+      if (!ref) return { status: 404, body: { error: "no reference record, source, held source or tombstone with this id" } };
+      return { status: 200, body: {
+        id, kind: "reference", requested_version: ref.pinned_revision, tombstone: null, held: null,
+        record: { id, source_id: ref.source_id, scope: ref.chunk_idx === null ? "source" : "passage", pinned_revision: ref.pinned_revision,
+          chunk_idx: ref.chunk_idx, state: "active", selectors: { quote: { exact: ref.quote } }, created_by: "lab", created_at: "2026-01-01T00:00:00.000Z" },
+        state: ref.current > ref.pinned_revision ? "updated" : "active", lifecycle: "active", version: ref.current, state_detail: {},
+        source: { title: ref.title, url: null, content_type: "text/plain", domain: null, family: "general", excerpt: ref.quote, created_at: "2026-01-01T00:00:00.000Z", updated_at: "2026-01-02T00:00:00.000Z" },
+      } };
+    }
+    const cm = /^\/workbench\/contract\/chunks\/([0-9a-f-]{36}):(\d{1,6})\/context$/i.exec(decodeURIComponent(p)); // the server's router decodes a path parameter
+    if (cm && method === "GET") {
+      const ref = [...db.refs.values()].find((x) => x.source_id === cm[1]);
+      const idx = Number(cm[2]), win = Math.min(10, Number(q("window") || 1));
+      if (!ref || !ref.chunks[idx]) return { status: 404, body: { error: "no such chunk" } };
+      return { status: 200, body: {
+        chunk_id: `${cm[1]}:${idx}`, source_id: cm[1], idx, window: win, state: "active", lifecycle: "active", state_detail: {},
+        chunks: ref.chunks.map((content, i) => ({ idx: i, content })).filter((c) => Math.abs(c.idx - idx) <= win).map((c) => ({ ...c, is_target: c.idx === idx })),
+      } };
     }
     if (!p.startsWith("/workbench/documents")) return null;
     const r = rootOf(who);
@@ -96,8 +163,11 @@ export function createFake(opts = {}) {
       const f = String(body.folder ?? "").trim();
       const path = `${f ? `${r}/${f}` : r}/${slug(title)}.md`;
       if (db.docs.has(path)) return { status: 409, body: { error: "a document with that name already exists there" } };
-      db.docs.set(path, { owner: who.sub, title, body: "", updated: new Date(clock()).toISOString(), links: [], history: ["created " + path] });
-      return { status: 201, body: { path, hash: "h", listing: { ok: true } } };
+      const at = new Date(clock()).toISOString();
+      const d = { owner: who.sub, title, body: "", updated: at, links: [], history: ["created " + path], hdates: [at] };
+      d.committed = fileText(d);
+      db.docs.set(path, d);
+      return { status: 201, body: { path, hash: sha256(fileText(d)), listing: { ok: true } } };
     }
     if (p === "/workbench/documents/state" && method === "GET") {
       const path = rel(q("path"), who);
@@ -108,17 +178,43 @@ export function createFake(opts = {}) {
       const path = rel(q("path"), who);
       const d = mine(path, who);
       if (!d) return NO;
-      return { status: 200, body: { path, content: `---\ntitle: ${JSON.stringify(d.title)}\n---\n${d.body}`, hash: "h" } };
+      return { status: 200, body: { path, content: fileText(d), hash: sha256(fileText(d)) } };
+    }
+    if (p === "/workbench/documents/file" && method === "PUT") {
+      const path = rel(q("path"), who);
+      const d = mine(path, who);
+      if (!d) return NO;
+      const current = sha256(fileText(d));
+      if (body.if_match != null && current !== body.if_match) return { status: 409, body: { error: "conflict", current_hash: current } };
+      const content = String(body.content ?? "");
+      const lastCommitted = d.committed ?? fileText(d);
+      d.raw = content;
+      d.title = titleAfter(content, path);
+      d.updated = new Date(clock()).toISOString();
+      if (q("commit") === "1" && lastCommitted !== content) {
+        d.committed = content;
+        d.hdates = [...(d.hdates ?? d.history.map(() => d.updated)), d.updated];
+        d.history.push(`documents: edit ${path}`);
+      }
+      return { status: 200, body: { path, hash: sha256(content), listing: { ok: true } } };
     }
     if (p === "/workbench/documents/history" && method === "GET") {
       const path = rel(q("path"), who);
       const d = mine(path, who);
-      return d ? { status: 200, body: { path, commits: d.history.map((m) => ({ message: m })) } } : NO;
+      return d ? { status: 200, body: { path, commits: commitsOf(d, path, who) } } : NO;
     }
     if (p === "/workbench/documents/trail" && method === "GET") {
       return { status: 200, body: { lines: db.trail.filter((t) => t.owner === who.sub).map(({ owner: _o, ...t }) => t) } };
     }
     if (method !== "POST") return { status: 404, body: { error: "not found" } };
+    if (p === "/workbench/documents/research") {
+      if (!String(body.query ?? "").trim()) return { status: 400, body: { error: "query is required" } };
+      if (!mine(rel(body.path, who), who)) return NO;
+      const kind = body.kind === "gap" ? "gap" : "research";
+      const job = { job_id: `j-${db.research.length + 1}`, owner: who.sub, path: rel(body.path, who), query: String(body.query), kind };
+      db.research.push(job);
+      return { status: 202, body: { job_id: job.job_id, refinery_id: null, kind } };
+    }
     const path = rel(body.path, who);
     const lifecycle = ["/workbench/documents/delete-forever", "/workbench/documents/empty-trash"];
     if (lifecycle.includes(p) && body.confirm !== true) {
