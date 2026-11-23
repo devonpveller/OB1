@@ -111,9 +111,11 @@ describe("the counts match the reads (acceptance 2)", () => {
     expect(screen.getByTestId("count-imports").textContent).toBe("1 failed");
     expect(screen.getByTestId("count-cleanup").textContent).toBe("4 to review");
     // exactly these reads, GET only, all through the one door
-    expect(seen.map((u) => u.split("?")[0]).sort()).toEqual([
+    // the counts appear when the three data reads settle; the settings / whoami / me reads are made by other
+    // parts of the shell and can land later on a loaded host, so wait for the whole list rather than race it
+    await waitFor(() => expect(seen.map((u) => u.split("?")[0]).sort()).toEqual([
       "/workbench/auth/me", "/workbench/contract/cleanup/reopen-candidates", "/workbench/contract/cleanup/sources",
-      "/workbench/contract/sessions", "/workbench/intake/jobs", "/workbench/settings", "/workbench/workspace/whoami"]);
+      "/workbench/contract/sessions", "/workbench/intake/jobs", "/workbench/settings", "/workbench/workspace/whoami"]), { timeout: 4000 });
     expect(requestLog().every((r) => r.method === "GET" && r.url.startsWith("/workbench/"))).toBe(true);
   });
   it("zero is shown as zero; a read that fails shows no count (never an invented one)", async () => {
