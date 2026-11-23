@@ -197,7 +197,9 @@ describe("every card title opens the right screen (acceptance 4)", () => {
       await renderHome();
       fireEvent.click(screen.getByTestId(t));
       expect(window.location.pathname).toBe(path);
-      expect(screen.getByTestId("coming")).toBeTruthy();
+      // Ideas is a real screen now (ideas.test.tsx); the others still say what phase builds them
+      if (path === "/ideas") expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Ideas");
+      else expect(screen.getByTestId("coming")).toBeTruthy();
     });
   }
   it("Start research, and a row, open their screens", async () => {

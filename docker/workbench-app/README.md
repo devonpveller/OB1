@@ -69,3 +69,16 @@ route through `lib/api.ts` only, caches nothing and writes nothing to the browse
 - Tests: `npx vitest run` (unit + component + two-identity), and the headless-Chromium e2e with axe on an `--internal`
   network: build with `--build-arg PICKER_HARNESS=1` (adds the dev-only `/picker-harness.html`; the default image has
   none) then `test/e2e/run-picker-lab.ps1`.
+
+## Ideas (`rwr-ideas`)
+
+`src/screens/ideas/`: the person's own ideas by state (New, Refining, Has a document, Parked, Archived), one open: its
+wording, where it came from and when, what belongs to it, how it changed (each revision, with the run started from that
+wording by id), and Research this idea / Create or Open its document / Revise / Archive or Reopen. Every idea says
+"private to you". Reads: `contract/ideas`, `contract/ideas/{id}`, `ideas/{id}/research`. Writes: `ideas/{id}/research-now`
+(the idea's own research through the request boundary; the screen never opens Start research or posts to
+`/workbench/research`), `ideas/{id}/edit`, `ideas/{id}/archive` and `/reopen` (rwr-idea-archive-api), `documents/seed`.
+Discuss it and Refine it in chat are not shown until their screens exist. The screen lives under a key made of the last
+known subject (a different person on the page drops everything of the first one); an idea's text is never put in the page
+title, a URL, a toast or browser storage. `e2e/ideas-fake.mjs` is the one fake back end for the vitest suite and the lab
+(`e2e/run-ideas-e2e.ps1`: image, stub, headless Chrome and axe on an `--internal` network).

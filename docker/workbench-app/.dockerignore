@@ -1,3 +1,6 @@
 node_modules
 dist
 e2e
+# the shared fake ideas back end is used by the vitest suite too (test/ideas.test.tsx)
+!e2e/ideas-fake.mjs
+!e2e/ideas-fake.d.mts

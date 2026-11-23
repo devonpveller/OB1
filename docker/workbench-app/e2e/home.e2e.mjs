@@ -74,7 +74,7 @@ for (const [t, path] of TITLES) {
   await ev(`document.querySelector('[data-testid=title-${t}]').click()`);
   await sleep(150);
   const o = JSON.parse(await ev(`JSON.stringify({p:location.pathname,coming:!!document.querySelector('[data-testid=coming]')})`));
-  ok(o.p === path && o.coming, `title "${t}" opens ${path} (${o.p}, coming-state ${o.coming})`);
+  ok(o.p === path && (o.coming || path === "/ideas"), `title "${t}" opens ${path} (${o.p}, coming-state ${o.coming})`); // Ideas is a real screen (ideas.e2e.mjs)
 }
 await go("/");
 await ev(`document.querySelector('[data-testid=card-docs] [data-testid=row-doc]').click()`); await sleep(150);
