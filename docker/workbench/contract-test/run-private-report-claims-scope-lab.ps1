@@ -412,16 +412,38 @@ try {
       }
       Check $up "${ph}: the workbench is up"
       if (-not $up) { Save "wb-$ph.log" ((Dk logs $wbName) | Out-String); continue }
-      foreach ($case in @(@('a_quotes_b', $subA, "Notes from a call. $t_b1 More notes."), @('b_quotes_own', $subB, "My summary. $t_b1"), @('a_clean', $subA, 'A clean note about zebra crossings and nothing private.'))) {
+      # (name, writer, content, title, agent, chat) - title '@NB' = the notebook's own name (its hub path on the tip),
+      # '@NBVAR' = a spelling that slugifies to it (case, punctuation); attempt 2: the tester's hub-path oracle and F1
+      $none = 'Notes. The prcznobody zeta finding is in no private report anywhere at all.'
+      $cases = @(
+        @('a_quotes_b', $subA, "Notes from a call. $t_b1 More notes.", '', '', ''),
+        @('b_quotes_own', $subB, "My summary. $t_b1", '', '', ''),
+        @('a_clean', $subA, 'A clean note about zebra crossings and nothing private.', '', '', ''),
+        @('a_hub_quotes_b', $subA, "Notes from a call. $t_b1 More notes.", '@NB', '', ''),
+        @('a_hub_quotes_none', $subA, $none, '@NB', '', ''),
+        @('a_hubvar_quotes_b', $subA, "Notes from a call. $t_b1 More notes.", '@NBVAR', '', ''),
+        @('a_hubvar_quotes_none', $subA, $none, '@NBVAR', '', ''),
+        @('b_own_in_agent', $subB, 'A clean note body.', '', $t_b1, ''),
+        @('b_own_in_chat', $subB, 'A clean note body.', '', '', $t_b1))
+      foreach ($case in $cases) {
         $nb = "prcr5$ph$($case[0] -replace '_', '')"
-        $js = "const r = await fetch('http://${wbName}:8000/workbench/notes', { method: 'POST', headers: { 'content-type': 'application/json', 'x-brain-key': Deno.env.get('R5_KEY'), 'X-Test-Sub': Deno.env.get('R5_SUB') }, body: JSON.stringify({ notebook: Deno.env.get('R5_NB'), title: 'r5 note', content: Deno.env.get('R5_CONTENT'), source: 'user_note' }) }); const t = await r.text(); console.log('R5STATUS=' + r.status); console.log('R5BODY=' + t.slice(0, 300));"
-        $out = Dk run --rm --label $label --network $net -e "R5_KEY=$key" -e "R5_SUB=$($case[1])" -e "R5_NB=$nb" -e "R5_CONTENT=$($case[2])" --entrypoint deno $tag eval $js
+        $title = switch ($case[3]) { '@NB' { $nb } '@NBVAR' { $nb.ToUpper() + '!' } '' { 'r5 note' } default { $case[3] } }
+        $js = "const o = { notebook: Deno.env.get('R5_NB'), title: Deno.env.get('R5_TITLE'), content: Deno.env.get('R5_CONTENT'), source: 'user_note' }; if (Deno.env.get('R5_AGENT')) o.agent = Deno.env.get('R5_AGENT'); if (Deno.env.get('R5_CHAT')) o.chat = Deno.env.get('R5_CHAT'); const r = await fetch('http://${wbName}:8000/workbench/notes', { method: 'POST', headers: { 'content-type': 'application/json', 'x-brain-key': Deno.env.get('R5_KEY'), 'X-Test-Sub': Deno.env.get('R5_SUB') }, body: JSON.stringify(o) }); const t = await r.text(); console.log('R5STATUS=' + r.status); console.log('R5BODY=' + t.slice(0, 300));"
+        $envs = @('-e', "R5_KEY=$key", '-e', "R5_SUB=$($case[1])", '-e', "R5_NB=$nb", '-e', "R5_TITLE=$title", '-e', "R5_CONTENT=$($case[2])")
+        if ($case[4]) { $envs += @('-e', "R5_AGENT=$($case[4])") }
+        if ($case[5]) { $envs += @('-e', "R5_CHAT=$($case[5])") }
+        $out = Lab-Docker 600 (@('run', '--rm', '--label', $label, '--network', $net) + $envs + @('--entrypoint', 'deno', $tag, 'eval', $js))
         $st = ([regex]'R5STATUS=(\d+)').Match($out).Groups[1].Value
         $bd = ([regex]'R5BODY=(.*)').Match($out).Groups[1].Value
         $files = @(Get-ChildItem -Recurse -File -Path (Join-Path $vault 'content\notebooks') -Filter '*.md' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match [regex]::Escape($nb) }).Count
         $rows = Q "SELECT count(*) FROM public.wiki_pages WHERE slug LIKE 'content/notebooks/$nb/%'"
         $r5["${ph}_$($case[0])"] = "status=$st file=$files row=$rows"
         $r5["${ph}_$($case[0])_body"] = $bd
+        # the body's shape: its keys, and the stored path with this case's notebook slug masked
+        $shape = (([regex]'"([a-z_]+)":').Matches($bd) | ForEach-Object { $_.Groups[1].Value }) -join ','
+        $pm = ([regex]'"path":"([^"]*)"').Match($bd)
+        if ($pm.Success) { $shape += ' path=' + ($pm.Groups[1].Value -replace [regex]::Escape($nb), 'NB') }
+        $r5["${ph}_$($case[0])_shape"] = $shape
         if ($case[0] -eq 'a_quotes_b') {
           # served: an author-less re-sync of the same row (the viewer's reconcile) keeps it (UPDATE ... RETURNING)
           $r5["${ph}_$($case[0])_served"] = Q "WITH u AS (UPDATE public.wiki_pages SET body = body WHERE slug LIKE 'content/notebooks/$nb/%' RETURNING 1) SELECT count(*) FROM u"
@@ -438,6 +460,18 @@ try {
     Check ($r5['green_a_quotes_b'] -eq 'status=201 file=1 row=1' -and $r5['green_a_quotes_b_served'] -eq '1') "R5 GREEN: A's note quoting only B's sentence is SAVED and SERVED like any note (201, file, row; still there after an author-less re-sync): $($r5['green_a_quotes_b']) served=$($r5['green_a_quotes_b_served'])"
     Check ($r5['red_a_quotes_b'] -eq 'status=201 file=1 row=1') "R5: on the tip too, A's note quoting B's sentence is saved (the fix changes nothing there): $($r5['red_a_quotes_b'])"
     Check ($r5['red_a_clean'] -eq 'status=201 file=1 row=1' -and $r5['green_a_clean'] -eq 'status=201 file=1 row=1') "R5: a note with no such sentence saves as before on both (red $($r5['red_a_clean']); green $($r5['green_a_clean']))"
+    # attempt 2 (the tester's hub-path oracle): title = the notebook's name, A quoting B's sentence vs a sentence nobody holds
+    foreach ($v in @('hub', 'hubvar')) {
+      $qb = "a_${v}_quotes_b"; $qn = "a_${v}_quotes_none"
+      Check ($r5["red_$qb"] -ne $r5["red_$qn"]) "R5 RED (the tip, title = notebook$(if ($v -eq 'hubvar') { ', another spelling' })): A quoting B's sentence and A quoting nobody's are DISTINGUISHABLE (the oracle) - B's: $($r5["red_$qb"]); nobody's: $($r5["red_$qn"])"
+      Check ($r5["green_$qb"] -eq 'status=201 file=1 row=1' -and $r5["green_$qn"] -eq 'status=201 file=1 row=1' -and $r5["green_${qb}_shape"] -eq $r5["green_${qn}_shape"] -and $r5["green_${qb}_shape"] -match 'path=content/notebooks/NB/NB-note\.md') "R5 GREEN (title = notebook$(if ($v -eq 'hubvar') { ', another spelling' })): both SAVED and served beside the hub, the same status and body shape - B's: $($r5["green_$qb"]) [$($r5["green_${qb}_shape"])]; nobody's: $($r5["green_$qn"]) [$($r5["green_${qn}_shape"])]"
+    }
+    # attempt 2 (F1): the writer's own sentence in a field that lands in the vault file's frontmatter
+    foreach ($f in @('agent', 'chat')) {
+      $k = "b_own_in_$f"
+      Check ($r5["red_$k"] -eq 'status=201 file=1 row=1') "R5 RED (the tip): B's own sentence in the $f field is SAVED into the shared vault file: $($r5["red_$k"])"
+      Check ($r5["green_$k"] -eq 'status=422 file=0 row=0' -and $r5["green_${k}_body"] -match [regex]::Escape($msg)) "R5 GREEN: B's own sentence in the $f field is REFUSED (422, the one message, no file, no row): $($r5["green_$k"])"
+    }
     $leak = @($r5.Keys | Where-Object { $_ -like '*_body' } | Where-Object { $r5[$_] -match 'prcb' })
     Check ($leak.Count -eq 0) 'R5: no refusal body carries the claim''s text'
   }

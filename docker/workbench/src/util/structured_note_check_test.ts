@@ -7,6 +7,7 @@ import {
   NOTE_CHECK_UNAVAILABLE,
   NOTE_QUOTES_PRIVATE_REPORT,
   StructuredNoteRefused,
+  structuredNoteFileSlug,
 } from "./structured-note-check.ts";
 
 const row = { slug: "content/notebooks/nb/a-note", title: "A note", body: "Some text." };
@@ -40,11 +41,19 @@ Deno.test("R5: writeStructuredNote checks BEFORE the vault write and the row syn
   }
   const w = repo.slice(repo.indexOf("export async function writeStructuredNote("));
   const fnBody = w.slice(0, w.indexOf("\n}\n"));
-  const check = fnBody.indexOf("await assertStructuredNoteShareable(parseNoteRow(rel, body), askNoteRefused(input.authorSub ?? \"\"));");
-  assert(check > 0, "the check runs on the row parseNoteRow makes of the file");
+  const check = fnBody.indexOf("await assertStructuredNoteShareable({ slug: row.slug, title: row.title, body }, askNoteRefused(input.authorSub ?? \"\"));");
+  assert(check > 0, "the check reads the WHOLE file (frontmatter agent / chat / notebook / title and content), with the row's slug and title");
+  assert(fnBody.includes("const fileSlug = structuredNoteFileSlug(nbSlug, slugifyNotebook(input.title) || \"note\");"), "the file slug never takes the hub's");
   assert(check < fnBody.indexOf("await vaultWrite(rel, body);") && check < fnBody.indexOf("await syncNoteRow(rel, body, input.authorSub);"), "before the vault file and the row");
   assert(fnBody.includes("await syncNoteRow(rel, body, input.authorSub);"), "the row names its writer (the guard judges it author-only, as the check)");
   assert(repo.includes("SELECT public.private_report_claims_note_refused($1, $2, $3, $4) AS refused") && repo.includes("[authorSub, slug, title, body]"), "the database's answer for THIS writer (slot 575)");
   assert(route.includes("repo.writeStructuredNote({ ...body, authorSub: (await identityOf(c)).sub })"), "the writer is the verified identity, not a body field");
   assert(route.includes("if (e instanceof repo.StructuredNoteRefused) return c.json({ error: e.message }, e.status);"), "the route answers the refusal's status");
+});
+
+Deno.test("attempt 2: a structured note never takes its notebook's hub path; decided from the slugs alone", () => {
+  assertEquals(structuredNoteFileSlug("my-notebook", "my-notebook"), "my-notebook-note", "title = notebook -> beside the hub, not on it");
+  assertEquals(structuredNoteFileSlug("my-notebook", "a-note"), "a-note");
+  assertEquals(structuredNoteFileSlug("my-notebook", "my-notebook-note"), "my-notebook-note");
+  for (const nb of ["x", "notes", "index"]) assert(structuredNoteFileSlug(nb, nb) !== nb, `never ${nb}/${nb}`);
 });

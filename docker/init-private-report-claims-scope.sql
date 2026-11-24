@@ -188,12 +188,13 @@ $$;
 
 -- -- R5 (operator decision 2026-11-24): the structured-note check -------------------------------------------------
 -- The workbench's structured / AI-note hand-off (POST /workbench/notes, writeStructuredNote) writes into the SHARED
--- wiki (content/notebooks/..., class 'note', no author). It asks this BEFORE it writes anything - the vault file or the
--- row - and refuses the note (422) when the answer is true: the wiki guard's own decision for the row it would store
--- (a person's note: its author's own claims, as the guard; any other row: any private-report claim's text, the
--- writer's own included). Note: a refusal tells the writer that SOME private report holds the sentence (the operator's
--- choice; the guard withheld such a row silently before). Callable by the workbench's login (ob_workbench), the
--- services' login (ob_app_memory) or a superuser session, never through PostgREST (570's reader gate).
+-- wiki (content/notebooks/<nb>/<note>, class 'note', the writer named as the row's author). It asks this BEFORE it
+-- writes anything - the vault file or the row - and refuses the note (422) when the answer is true: the wiki guard's
+-- author-only decision for that writer (the operator's second ruling 2026-11-24: only the WRITER's OWN private-report
+-- sentences; another user's sentence changes nothing, so neither the answer nor the page tells anyone it exists). The
+-- workbench never asks about (or writes) the notebook's hub path: it keeps structured notes off <nb>/<nb>. Callable by
+-- the workbench's login (ob_workbench), the services' login (ob_app_memory) or a superuser session, never through
+-- PostgREST (570's reader gate).
 CREATE OR REPLACE FUNCTION public.private_report_claims_note_refused(p_author TEXT, p_slug TEXT, p_title TEXT, p_body TEXT) RETURNS BOOLEAN
 LANGUAGE plpgsql STABLE
 SECURITY DEFINER

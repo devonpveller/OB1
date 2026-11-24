@@ -7,7 +7,7 @@ import { safeFolderRel, safeJoin, safeRelPath } from "../util/paths.ts";
 // @ts-ignore — plain .mjs from the /recipes bind-mount.
 import { slugifyNotebook } from "@shared/slug";
 import { parseNoteRow } from "../util/notes-parse.ts";
-import { assertStructuredNoteShareable } from "../util/structured-note-check.ts";
+import { assertStructuredNoteShareable, structuredNoteFileSlug } from "../util/structured-note-check.ts";
 export { parseNoteRow };
 import { pool } from "../db/pool.ts";
 import { poolDb } from "../contracts/db.ts";
@@ -144,7 +144,7 @@ export async function writeNote(
 }
 
 // rw-570-hub-note-scope R5: the structured-note check (util/structured-note-check.ts) asks the database this - the
-// wiki guard's predicate on the row the write would store.
+// wiki guard's author-only predicate for this writer (slot 575's private_report_claims_note_refused).
 export { StructuredNoteRefused } from "../util/structured-note-check.ts";
 function askNoteRefused(authorSub: string): (slug: string, title: string, body: string) => Promise<boolean | null> {
   return async (slug, title, body) => {
@@ -170,7 +170,12 @@ export async function writeStructuredNote(input: {
   authorSub?: string | null;
 }): Promise<{ path: string; hash: string }> {
   const nbSlug = slugifyNotebook(input.notebook);
-  const fileSlug = slugifyNotebook(input.title) || "note";
+  // rw-570-hub-note-scope attempt 2 (tester defect): a structured note is NEVER stored at a shared regenerable path.
+  // content/notebooks/<nb>/<nb> is the notebook's HUB (the notebook synthesis owns it; the wiki guard judges it as shared
+  // text, any user's claim): a title that slugifies to the notebook's own slug (any case or punctuation) is stored at
+  // <nb>/<nb>-note instead. Decided from the slugs alone, never from the content, so the same request is stored at the
+  // same path whatever its text - the hub shape can never answer differently for another user's sentence.
+  const fileSlug = structuredNoteFileSlug(nbSlug, slugifyNotebook(input.title) || "note");
   // Layout (operator-chosen): AI-generated content (from external inlets) lives
   // on the wiki/AI side under content/notebooks/<notebook>/ so it propagates;
   // user notes live under notes/notebooks/<notebook>/ (#4/#5). They never mix.
@@ -195,7 +200,10 @@ export async function writeStructuredNote(input: {
   // Round 2 (the operator's second ruling): only the WRITER's own private-report claims refuse the note; a sentence
   // that is only in another user's report is saved and served (the row names its author, so the guard judges it
   // author-only too - no refusal, no silent withhold, no existence signal).
-  await assertStructuredNoteShareable(parseNoteRow(rel, body), askNoteRefused(input.authorSub ?? ""));
+  // Attempt 2 (tester F1): the check reads the WHOLE file the vault would hold - the frontmatter's title, agent, chat
+  // and notebook as well as the content - since the vault file is the shared page; the row's slug and title as stored.
+  const row = parseNoteRow(rel, body);
+  await assertStructuredNoteShareable({ slug: row.slug, title: row.title, body }, askNoteRefused(input.authorSub ?? ""));
   await vaultWrite(rel, body);
   await syncNoteRow(rel, body, input.authorSub);
   await vaultCommit(`ai-note: write ${rel}`);
