@@ -23,6 +23,13 @@ export function navigate(to: string) {
   window.dispatchEvent(new PopStateEvent("popstate"));
 }
 
+// Swap the address for another WITHOUT adding a history entry (an old /documents/<path> address becomes the id form:
+// the path must not stay in the history).
+export function replaceUrl(to: string) {
+  window.history.replaceState({}, "", to);
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
 export function useRoute(): Route {
   const [route, setRoute] = useState(() => parseRoute(window.location.pathname));
   useEffect(() => {

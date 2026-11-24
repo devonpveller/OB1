@@ -187,6 +187,17 @@ export interface ListingRow {
   owner_sub: string;
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// The row with this id (rw opaque document links). A value that is not a uuid is simply no row.
+export async function listingById(db: Db, id: string): Promise<ListingRow | null> {
+  if (!UUID.test(id)) return null;
+  return (await db.query<ListingRow>(
+    `SELECT id::text AS id, path, title, updated_at, refinery_id::text AS refinery_id, owner_sub
+       FROM public.user_document_listings WHERE id = $1`, [id],
+  ))[0] ?? null;
+}
+
 export async function listingRow(db: Db, rel: string): Promise<ListingRow | null> {
   return (await db.query<ListingRow>(
     `SELECT id::text AS id, path, title, updated_at, refinery_id::text AS refinery_id, owner_sub

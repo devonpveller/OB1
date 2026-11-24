@@ -533,17 +533,17 @@ export async function removeHeld(db: Db, refineryId: string, sourceId: string, o
   });
 }
 
-// D12: title, path, updated, outbound links. Nothing else is selected, so nothing else can leak.
+// D12: id, title, path, updated, outbound links. Nothing else is selected, so nothing else can leak.
 // User documents are per user (rw-p2b-workspace): only the requesting identity's are listed.
 export async function documents(db: Db, limit: number, owner: string) {
-  const rows = await db.query<{ title: string; path: string; updated: string; outbound_links: Link[] }>(
-    `SELECT d.title, d.path, d.updated_at AS updated, ${RESOLVED_LINKS("d")} AS outbound_links
+  const rows = await db.query<{ id: string; title: string; path: string; updated: string; outbound_links: Link[] }>(
+    `SELECT d.id::text AS id, d.title, d.path, d.updated_at AS updated, ${RESOLVED_LINKS("d")} AS outbound_links
        FROM public.user_document_listings d WHERE d.owner_sub = $2 ORDER BY d.updated_at DESC LIMIT $1`,
     [limit, owner],
   );
   return {
     documents: rows.map((r) => ({
-      title: r.title, path: r.path, updated: r.updated,
+      id: r.id, title: r.title, path: r.path, updated: r.updated,
       outbound_links: (r.outbound_links ?? []).map((l) => ({
         kind: l.kind, id: l.id, pin: l.pin ?? null, reference_id: l.reference_id ?? null,
       })),

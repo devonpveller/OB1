@@ -13,14 +13,15 @@ import { startResearchHref } from "../src/screens/research-start/start-data";
 
 type Id = "alice" | "bob";
 const MARK = "PERSONAL-MARKER-7731"; // planted in alice's document text: must never reach the preview or a request
+const NEW = "c0000000-0000-4000-8000-000000000001"; // the opaque id of "ALPHA newest draft": addresses carry it, never the path
 const DB = {
   alice: { docs: [
-    { title: "ALPHA newest draft", path: "documents/alice/alpha-new.md", text: `---\ntitle: "ALPHA newest draft"\n---\nbody ${MARK} https://example.org/public` },
-    { title: "ALPHA older note", path: "documents/alice/alpha-old.md", text: `---\ntitle: "ALPHA older note"\n---\nold` },
-    { title: "ALPHA trashed", path: "documents/alice/.trash/alpha-gone.md", text: "x" },
-    { title: "ALPHA archived", path: "documents/alice/.archive/alpha-arch.md", text: "x" },
+    { id: "c0000000-0000-4000-8000-000000000001", title: "ALPHA newest draft", path: "documents/alice/alpha-new.md", text: `---\ntitle: "ALPHA newest draft"\n---\nbody ${MARK} https://example.org/public` },
+    { id: "c0000000-0000-4000-8000-000000000002", title: "ALPHA older note", path: "documents/alice/alpha-old.md", text: `---\ntitle: "ALPHA older note"\n---\nold` },
+    { id: "c0000000-0000-4000-8000-000000000003", title: "ALPHA trashed", path: "documents/alice/.trash/alpha-gone.md", text: "x" },
+    { id: "c0000000-0000-4000-8000-000000000004", title: "ALPHA archived", path: "documents/alice/.archive/alpha-arch.md", text: "x" },
   ] },
-  bob: { docs: [{ title: "BRAVO plan", path: "documents/bob/bravo.md", text: `---\ntitle: "BRAVO plan"\n---\nplan` }] },
+  bob: { docs: [{ id: "c0000000-0000-4000-8000-000000000005", title: "BRAVO plan", path: "documents/bob/bravo.md", text: `---\ntitle: "BRAVO plan"\n---\nplan` }] },
 } as const;
 
 let who: Id = "alice";
@@ -44,12 +45,17 @@ function stub() {
     if (path === "/workbench/workspace/whoami") return j({ subject_sub: "u-" + who, actor_sub: "u-" + who, name: who });
     if (path === "/workbench/auth/me") return j({ mode: "forward-auth" });
     if (path === "/workbench/settings") return j({ admin: false, settings: [] });
-    if (path === "/workbench/contract/documents") return j({ documents: mine.map((d) => ({ title: d.title, path: d.path, updated: new Date().toISOString(), outbound_links: [] })) });
+    if (path === "/workbench/contract/documents") return j({ documents: mine.map((d) => ({ id: d.id, title: d.title, path: d.path, updated: new Date().toISOString(), outbound_links: [] })) });
     if (path === "/workbench/documents/state") {
       const p = url.searchParams.get("path") ?? "";
       const d = mine.find((x) => x.path === p);
       if (!d) return j({ error: "not found" }, 404); // someone else's and a missing one: the same answer
-      return j({ path: p, listed: true, trashed: /\/\.trash\//.test(p), archived: /\/\.archive\//.test(p) });
+      return j({ id: d.id, path: p, listed: true, trashed: /\/\.trash\//.test(p), archived: /\/\.archive\//.test(p) });
+    }
+    if (path === "/workbench/documents/resolve") {
+      const d = mine.find((x) => x.id === url.searchParams.get("id")); // the owner's only: another person's id is a missing one
+      if (!d) return j({ error: "no such document" }, 404);
+      return j({ id: d.id, path: d.path, listed: true, trashed: /\/\.trash\//.test(d.path), archived: /\/\.archive\//.test(d.path) });
     }
     if (path === "/workbench/documents/file") {
       const d = mine.find((x) => x.path === url.searchParams.get("path"));
@@ -100,11 +106,11 @@ afterEach(() => cleanup());
 
 describe("prefill and the amber bar (acceptance 1)", () => {
   it("from a document the dialog is prefilled with it and carries the For document bar", async () => {
-    await openAt(startResearchHref("documents/alice/alpha-new.md"));
+    await openAt(startResearchHref(NEW));
     const bar = await screen.findByTestId("for-document");
     expect(within(bar).getByTestId("for-document-title").textContent).toBe("ALPHA newest draft");
     expect(bar.textContent).toMatch(/For document/);
-    expect(within(bar).getByTestId("for-document-back").getAttribute("href")).toBe("/documents/" + encodeURIComponent("documents/alice/alpha-new.md"));
+    expect(within(bar).getByTestId("for-document-back").getAttribute("href")).toBe("/documents/d/" + NEW);
     expect(screen.getByTestId("attach-doc").getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByTestId("attach-none").getAttribute("aria-pressed")).toBe("false");
     expect(document.activeElement).toBe(screen.getByTestId("start-question"));
@@ -158,7 +164,7 @@ describe("the preview and what Start sends (acceptance 2)", () => {
     expect((screen.getByTestId("start-go") as HTMLButtonElement).disabled).toBe(false);
   });
   it("Start sends the SAME body the preview did, plus exactly the text it showed; the job's request is that text", async () => {
-    await openAt(startResearchHref("documents/alice/alpha-new.md"));
+    await openAt(startResearchHref(NEW));
     await screen.findByTestId("for-document");
     fireEvent.click(screen.getByTestId("depth-deep"));
     type("Does an X299 board need a BIOS update?");
@@ -175,7 +181,7 @@ describe("the preview and what Start sends (acceptance 2)", () => {
     expect(Object.keys(starts[0]).sort()).toEqual(["approved_question", "attach", "depth", "question"]); // no owner, no user
   });
   it("shows the topic, the public pages and the limits of the chosen depth, and the depth's estimate", async () => {
-    await openAt(startResearchHref("documents/alice/alpha-new.md"));
+    await openAt(startResearchHref(NEW));
     await screen.findByTestId("for-document");
     type("q one");
     await screen.findByTestId("leaves-ok", undefined, { timeout: 2500 });
@@ -191,7 +197,7 @@ describe("the preview and what Start sends (acceptance 2)", () => {
 
 describe("Start opens the run in Research (acceptance 3)", () => {
   it("navigates to /research with the new run, and the toast names no title and no question", async () => {
-    await openAt(startResearchHref("documents/alice/alpha-new.md"));
+    await openAt(startResearchHref(NEW));
     await screen.findByTestId("for-document");
     type("A private question about ALPHA things");
     await waitFor(() => expect((screen.getByTestId("start-go") as HTMLButtonElement).disabled).toBe(false), { timeout: 2500 });
@@ -215,7 +221,7 @@ describe("Start opens the run in Research (acceptance 3)", () => {
 
 describe("a planted personal marker stays here (acceptance 4)", () => {
   it("is in the document the person opened, and in no preview, no start, no request body and nowhere on the page", async () => {
-    await openAt(startResearchHref("documents/alice/alpha-new.md"));
+    await openAt(startResearchHref(NEW));
     await screen.findByTestId("for-document");
     type("what about the board?");
     await waitFor(() => expect((screen.getByTestId("start-go") as HTMLButtonElement).disabled).toBe(false), { timeout: 2500 });
@@ -230,7 +236,7 @@ describe("a planted personal marker stays here (acceptance 4)", () => {
 describe("two identities (acceptance 5)", () => {
   it("bob cannot prefill from, attach to, or learn the title of alice's document", async () => {
     who = "bob";
-    await openAt(startResearchHref("documents/alice/alpha-new.md"));
+    await openAt(startResearchHref(NEW));
     await screen.findByTestId("doc-gone");
     expect(screen.getByTestId("doc-gone").textContent).toBe("That document is not available.");
     expect(screen.queryByTestId("for-document")).toBeNull();
@@ -245,10 +251,10 @@ describe("two identities (acceptance 5)", () => {
   });
   it("a missing document and another person's are one sentence", async () => {
     who = "bob";
-    await openAt(startResearchHref("documents/alice/alpha-new.md"));
+    await openAt(startResearchHref(NEW));
     const a = (await screen.findByTestId("doc-gone")).textContent;
     cleanup();
-    await openAt(startResearchHref("documents/bob/nothing-here.md"));
+    await openAt(startResearchHref("c0000000-0000-4000-8000-0000000000ff"));
     expect((await screen.findByTestId("doc-gone")).textContent).toBe(a);
   });
   it("the back end answers 404 to bob for alice's document (the fake keeps the real route's rule)", async () => {
@@ -258,7 +264,7 @@ describe("two identities (acceptance 5)", () => {
   });
   it("a different person on the page empties the dialog: no question, no document, no preview, no toast", async () => {
     const tree = (s: string | null) => <ToastProvider><StartResearch subject={s} whoAnswered={true} /></ToastProvider>;
-    window.history.pushState({}, "", startResearchHref("documents/alice/alpha-new.md"));
+    window.history.pushState({}, "", startResearchHref(NEW));
     const { rerender } = render(tree("u-alice"));
     await screen.findByTestId("for-document");
     type("ALPHA secret question");
@@ -311,7 +317,7 @@ describe("an idea is never an attachment (acceptance 8)", () => {
 
 describe("what it asks for, and what it keeps (acceptance 6)", () => {
   it("every request is a same-origin /workbench route; nothing else is read or sent", async () => {
-    await openAt(startResearchHref("documents/alice/alpha-new.md"));
+    await openAt(startResearchHref(NEW));
     await screen.findByTestId("for-document");
     type("q about cpus");
     await waitFor(() => expect((screen.getByTestId("start-go") as HTMLButtonElement).disabled).toBe(false), { timeout: 2500 });
@@ -385,14 +391,15 @@ describe("leaving", () => {
     fireEvent.click(screen.getByTestId("start-cancel"));
     expect(window.location.pathname).toBe("/");
     cleanup();
-    await openAt(startResearchHref("documents/alice/alpha-new.md"));
+    await openAt(startResearchHref(NEW));
     await screen.findByTestId("for-document");
     fireEvent.keyDown(screen.getByTestId("start-question"), { key: "Escape" });
-    expect(window.location.pathname).toBe("/documents/" + encodeURIComponent("documents/alice/alpha-new.md"));
+    expect(window.location.pathname).toBe("/documents/d/" + NEW);
   });
   it("Research this builds the document address", () => {
     expect(startResearchHref()).toBe("/research/start");
-    expect(startResearchHref("documents/a b/x.md")).toBe("/research/start?document=documents%2Fa%20b%2Fx.md");
+    expect(startResearchHref(NEW)).toBe("/research/start?document=" + NEW);
+    expect(startResearchHref("documents/a b/x.md")).toBe("/research/start"); // a path never goes into an address
   });
   it("a malformed document in the address is no document (nothing is asked about it)", async () => {
     await openAt("/research/start?document=" + encodeURIComponent("../../etc/passwd"));

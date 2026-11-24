@@ -13,14 +13,15 @@ type Id = "alice" | "bob" | "nobody" | "admin";
 const NOW = Date.now();
 const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
 const H = 3600 * 1000, D = 24 * H;
+const NEW_ID = "a0000000-0000-4000-8000-0000000000a2"; // the listing id of "ALPHA newest draft": its address is /documents/d/<id>
 
 // What the stub back end holds. Alice's and Bob's items carry their own marker so a leak is a string match.
 const DB = {
   alice: {
     documents: [
-      { title: "ALPHA older note", path: "documents/alpha-old.md", updated: iso(3 * D), outbound_links: [] },
-      { title: "ALPHA newest draft", path: "documents/alpha-new.md", updated: iso(2 * H), outbound_links: [{ kind: "source" }, { kind: "source" }] },
-      { title: "ALPHA middle", path: "documents/alpha-mid.md", updated: iso(D), outbound_links: [{ kind: "source" }] },
+      { id: "a0000000-0000-4000-8000-0000000000a1", title: "ALPHA older note", path: "documents/alpha-old.md", updated: iso(3 * D), outbound_links: [] },
+      { id: NEW_ID, title: "ALPHA newest draft", path: "documents/alpha-new.md", updated: iso(2 * H), outbound_links: [{ kind: "source" }, { kind: "source" }] },
+      { id: "a0000000-0000-4000-8000-0000000000a3", title: "ALPHA middle", path: "documents/alpha-mid.md", updated: iso(D), outbound_links: [{ kind: "source" }] },
     ],
     ideas: [{ id: "i1", title: "ALPHA pantry idea", status: "researched", updated_at: iso(D) }],
     episodes: [{ id: "e1", title: "ALPHA digest episode", team_id: "t", audio_format: "mp3", seconds: 840, shared: false, mine: true, created_at: iso(H) }],
@@ -34,7 +35,7 @@ const DB = {
     ],
   },
   bob: {
-    documents: [{ title: "BRAVO plan", path: "documents/bravo.md", updated: iso(H), outbound_links: [] }],
+    documents: [{ id: "b0000000-0000-4000-8000-0000000000b1", title: "BRAVO plan", path: "documents/bravo.md", updated: iso(H), outbound_links: [] }],
     ideas: [], episodes: [], requests: [],
     sessions: [{ id: "s9", status: "running", query: "BRAVO own question", can_act: true, mine: true, waiting_on: { kind: "stage", detail: "plan" }, tree: [{}], created_at: iso(H), started_at: iso(H), finished_at: null }],
   },
@@ -115,7 +116,7 @@ describe("each card lists the same items as its source read (acceptance 1)", () 
     await renderHome();
     expect(rowTitles("docs")).toEqual(["ALPHA newest draft", "ALPHA middle", "ALPHA older note"]);
     expect(within(card("docs")).getAllByTestId("row-doc")[0].textContent).toMatch(/edited 2 h ago · 2 references/);
-    expect(within(card("docs")).getAllByTestId("row-doc")[0].getAttribute("href")).toBe("/documents/documents%2Falpha-new.md");
+    expect(within(card("docs")).getAllByTestId("row-doc")[0].getAttribute("href")).toBe("/documents/d/" + NEW_ID);
   });
   it("Continue writing: a trashed or archived document is never listed, only the active one", async () => {
     const keep = DB.alice.documents;
@@ -223,7 +224,7 @@ describe("every card title opens the right screen (acceptance 4)", () => {
     window.history.pushState({}, "", "/");
     cleanup(); await renderHome();
     fireEvent.click(within(card("docs")).getAllByTestId("row-doc")[0]);
-    expect(window.location.pathname).toBe("/documents/documents%2Falpha-new.md");
+    expect(window.location.pathname).toBe("/documents/d/" + NEW_ID);
   });
 });
 
@@ -395,10 +396,11 @@ describe("round 3 (tester attempt 1)", () => {
     expect(screen.queryByTestId("not-found")).toBeNull();
   });
   it("F2: parseRoute splits first, then decodes each segment; a decode error is not found", () => {
-    const r = parseRoute("/documents/documents%2Falpha-new.md");
+    const r = parseRoute("/documents/documents%2Falpha-new.md"); // the old address form: still a route (it is replaced by the id form)
     expect(r.segments).toEqual(["documents", "documents/alpha-new.md"]);
     expect(matchRoute(r.path)).not.toBeNull();
     expect((matchRoute(r.path) as any).path).toBe("/documents/:id");
+    expect((matchRoute(parseRoute("/documents/d/" + NEW_ID).path) as any).path).toBe("/documents/d/:ref");
     expect(parseRoute("/a%20b/c").segments).toEqual(["a b", "c"]);
     const bad = parseRoute("/documents/%E0%A4%A");
     expect(bad.bad).toBe(true);
@@ -505,8 +507,8 @@ describe("round 4 (review)", () => {
   });
   it("2: the rail marks a slot whose id holds a slash as current on its own page", async () => {
     const { setLastDocument } = await import("../src/lib/state");
-    setLastDocument({ id: "documents/alpha-new.md", title: "Slot doc" });
-    window.history.pushState({}, "", "/documents/documents%2Falpha-new.md");
+    setLastDocument({ id: "documents/alpha-new.md", title: "Slot doc", ref: NEW_ID });
+    window.history.pushState({}, "", "/documents/d/" + NEW_ID);
     render(<App />);
     await waitFor(() => expect(screen.getByTestId("doc-slot").className).toMatch(/\bon\b/));
   });
@@ -547,12 +549,15 @@ describe("round 4 (review)", () => {
       expect(screen.getByTestId("capped-research").textContent).toMatch(/200/);
     } finally { mine.length = 0; mine.push(...saved); }
   });
-  it("5: a document path that cannot be encoded makes that card Could not load, not a blank app", async () => {
-    (DB.alice.documents as unknown as any[]).push({ title: "bad", path: "documents/\ud800.md", updated: iso(H), outbound_links: [] });
+  it("5: a listing row with no id (or an odd path) still draws; its link is /documents, never the path", async () => {
+    (DB.alice.documents as unknown as any[]).push({ title: "noid", path: "documents/\ud800.md", updated: iso(H), outbound_links: [] });
     try {
       await renderHome();
-      expect(screen.getByTestId("failed-docs")).toBeTruthy();
+      expect(screen.queryByTestId("failed-docs")).toBeNull();
       expect(screen.getByTestId("card-research")).toBeTruthy();
+      const hrefs = within(card("docs")).getAllByTestId("row-doc").map((a) => a.getAttribute("href"));
+      expect(hrefs).toContain("/documents");
+      expect(hrefs.some((h) => /ud800|%2F|alpha/i.test(h ?? ""))).toBe(false);
     } finally { (DB.alice.documents as unknown as any[]).pop(); }
   });
 });

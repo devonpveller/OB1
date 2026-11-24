@@ -27,7 +27,7 @@ import { parseDocument, setFrontmatterField } from "./grammar.ts";
 import { expired, later, TRASH_KEEP_DAYS } from "./trash_age.ts";
 import { VAULT_GIT, withPathLock } from "./path_lock.ts";
 import { NIGHTLY_ACTOR, type TrailKind, writeTrail } from "./trail.ts";
-import { deleteListing, listingRow, type ListingRow, moveListing, syncListing } from "./listing.ts";
+import { deleteListing, listingById, listingRow, type ListingRow, moveListing, syncListing } from "./listing.ts";
 import {
   ARCHIVE, DOCUMENTS_ROOT, docRel, folderRel, inSubtree, isArchived, isTrashed, liveRel, rootOf, slugify, TRASH,
 } from "./paths.ts";
@@ -419,6 +419,14 @@ export async function reconcile(deps: DocDeps, who: Identity, opts: { legacyRoot
 
 // For a document that is open: whether it is listed, trashed or archived, whether it carries an idea,
 // and its refinery (with the "refinery archived" tag).
+// The opaque id of a document to its state, for the caller's OWN documents only. Another person's id, a deleted
+// one and a value that is no id at all answer the same 404 with the same words (never a way to tell them apart).
+export async function documentById(deps: DocDeps, id: string, who: Identity) {
+  const row = await listingById(deps.db, id);
+  if (!row || row.owner_sub !== who.sub) throw new DocError("no such document", 404);
+  return await documentState(deps, row.path, who);
+}
+
 export async function documentState(deps: DocDeps, path: string, who: Identity) {
   const rel = await ownedPath(deps.db, path, who);
   const row = await listingRow(deps.db, rel);
@@ -433,7 +441,7 @@ export async function documentState(deps: DocDeps, path: string, who: Identity) 
     if (r) refinery = { id: row.refinery_id, status: r.status, archived: !!r.archived_at };
   }
   return {
-    path: rel, listed: !!row, trashed: isTrashed(rel), archived: isArchived(rel), carries_idea: !!idea,
+    id: row?.id ?? null, path: rel, listed: !!row, trashed: isTrashed(rel), archived: isArchived(rel), carries_idea: !!idea,
     refinery, tags: refinery?.archived ? ["refinery archived"] : [],
   };
 }

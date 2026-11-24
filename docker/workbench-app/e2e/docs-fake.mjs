@@ -19,6 +19,9 @@
 //     empty query, 404 for a document that is not the caller's (routes/documents.ts, refinery.queueResearch);
 //   - GET /contract/references/<id> and /contract/chunks/<source>:<idx>/context answer the contract's shapes
 //     (referenceById / sourceReference, chunkContext) for the planted references below.
+// Opaque document ids (rwr-doc-opaque-urls): every document has an id (the listing row's, kept through a move); the
+// listing and the state answer carry it, and GET /documents/resolve?id= answers the OWNER's document by it - another
+// person's id, a deleted one and a made-up one are the same 404 (repo.ts documentById).
 // The fake is not the server: the server's own isolation is tested by its lab (run-docs-lifecycle-tests.ps1).
 import { createHash } from "node:crypto";
 
@@ -51,10 +54,17 @@ const commitsOf = (d, path, who) => d.history.map((message, i) => ({
   date: (d.hdates ?? [])[i] ?? d.updated, message,
 })).reverse().slice(0, HISTORY_CAP);
 
+// a stable uuid-shaped id from a text (the listing row's id: nothing of the path or the title is in it)
+export const uid = (text) => {
+  const h = createHash("sha256").update("opaque:" + text).digest("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`;
+};
+let made = 0;
+
 // Planted data: every title and text of alice's carries ALPHA, every one of bob's BRAVO, so a leak is a string match.
 export function seed(now = Date.now()) {
   const iso = (ms) => new Date(now - ms).toISOString();
-  const doc = (owner, path, title, body, msAgo, links = []) => [path, { owner, title, body, updated: iso(msAgo), links, history: ["created " + path] }];
+  const doc = (owner, path, title, body, msAgo, links = []) => [path, { id: uid(path), owner, title, body, updated: iso(msAgo), links, history: ["created " + path] }];
   return {
     docs: new Map([
       doc("u-alice", "documents/k-a/Hardware/cpu.md", "ALPHA Upgrading the CPU", "ALPHA body of the CPU plan.\nSecond line.", 2 * 3600e3,
@@ -120,7 +130,7 @@ export function createFake(opts = {}) {
       const lim = Math.min(500, Number(q("limit") || 100));
       const rows = [...db.docs.entries()].filter(([, d]) => d.owner === who.sub)
         .sort((a, b) => b[1].updated.localeCompare(a[1].updated)).slice(0, lim)
-        .map(([path, d]) => ({ title: d.title, path, updated: d.updated, outbound_links: d.links.map((l) => ({ ...l, pin: null, reference_id: null })) }));
+        .map(([path, d]) => ({ id: d.id, title: d.title, path, updated: d.updated, outbound_links: d.links.map((l) => ({ ...l, pin: null, reference_id: null })) }));
       return { status: 200, body: { documents: rows } };
     }
     const rm = /^\/workbench\/contract\/references\/([^/]+)$/.exec(p);
@@ -174,10 +184,16 @@ export function createFake(opts = {}) {
       const path = `${f ? `${r}/${f}` : r}/${slug(title)}.md`;
       if (db.docs.has(path)) return { status: 409, body: { error: "a document with that name already exists there" } };
       const at = new Date(clock()).toISOString();
-      const d = { owner: who.sub, title, body: "", updated: at, links: [], history: ["created " + path], hdates: [at] };
+      const d = { id: uid("made-" + (++made) + "-" + at), owner: who.sub, title, body: "", updated: at, links: [], history: ["created " + path], hdates: [at] };
       d.committed = fileText(d);
       db.docs.set(path, d);
       return { status: 201, body: { path, hash: sha256(fileText(d)), listing: { ok: true } } };
+    }
+    if (p === "/workbench/documents/resolve" && method === "GET") {
+      const hit = [...db.docs.entries()].find(([, d]) => d.id === q("id") && d.owner === who.sub);
+      if (!hit) return NO;
+      const [path] = hit;
+      return { status: 200, body: { id: hit[1].id, path, listed: true, trashed: isTrashed(path), archived: isArchived(path), carries_idea: false, refinery: null, tags: [] } };
     }
     if (p === "/workbench/documents/state" && method === "GET") {
       const path = rel(q("path"), who);
@@ -187,7 +203,7 @@ export function createFake(opts = {}) {
         if (db.docs.has(path) || !path.startsWith(r + "/")) return NO;
         return { status: 200, body: { path, listed: false, trashed: isTrashed(path), archived: isArchived(path), carries_idea: false, refinery: null, tags: [] } };
       }
-      return { status: 200, body: { path, listed: true, trashed: isTrashed(path), archived: isArchived(path), carries_idea: false, refinery: null, tags: [] } };
+      return { status: 200, body: { id: db.docs.get(path).id, path, listed: true, trashed: isTrashed(path), archived: isArchived(path), carries_idea: false, refinery: null, tags: [] } };
     }
     if (p === "/workbench/documents/file" && method === "GET") {
       const path = rel(q("path"), who);

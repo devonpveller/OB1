@@ -264,13 +264,14 @@ describe("the Last / Locked document slot", () => {
     expect(screen.queryByTestId("lock-chip")).toBeNull();
   });
   it("a last document is a link to it", () => {
-    setLastDocument({ id: "a b", title: "Upgrading the workstation CPU" });
+    setLastDocument({ id: "a b", title: "Upgrading the workstation CPU", ref: "e0000000-0000-4000-8000-0000000000e1" });
     render(<App load={load()} />);
     const l = screen.getByTestId("doc-slot");
     expect(l.textContent).toBe("Upgrading the workstation CPU");
-    expect(l.getAttribute("href")).toBe("/documents/a%20b");
+    // the slot's link is the opaque id: never the stored path, never the title
+    expect(l.getAttribute("href")).toBe("/documents/d/e0000000-0000-4000-8000-0000000000e1");
     fireEvent.click(l);
-    expect(window.location.pathname).toBe("/documents/a%20b");
+    expect(window.location.pathname).toBe("/documents/d/e0000000-0000-4000-8000-0000000000e1");
   });
   it("a locked document shows the amber chip in the top bar and the Locked slot; Unlock offers Undo", () => {
     setLastDocument({ id: "x", title: "Other" });
