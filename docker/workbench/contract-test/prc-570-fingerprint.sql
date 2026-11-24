@@ -47,7 +47,8 @@ INSERT INTO _fp SELECT 12, 'private_reports', count(*), md5(coalesce(string_agg(
 INSERT INTO _fp SELECT 13, 'threads', count(*), md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.threads x;
 INSERT INTO _fp SELECT 14, 'entities', count(*), md5(coalesce(string_agg(CASE WHEN x.id::text IN (SELECT id FROM _fp_bumped) THEN (to_jsonb(x) - 'updated_at')::text ELSE to_jsonb(x)::text END, '|' ORDER BY x.id), '')) FROM public.entities x;
 INSERT INTO _fp SELECT 15, 'thread_sources', count(*), md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.thread_id, x.source_id), '')) FROM public.thread_sources x;
-INSERT INTO _fp SELECT 16, 'source_chunks', count(*), md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.source_id, x.idx), '')) FROM public.source_chunks x;
+-- (one md5 per row first: at live size the chunks' text with their embeddings exceeds 1 GB as one string)
+INSERT INTO _fp SELECT 16, 'source_chunks', count(*), md5(coalesce(string_agg(md5(to_jsonb(x)::text), '|' ORDER BY x.source_id, x.idx), '')) FROM public.source_chunks x;
 INSERT INTO _fp SELECT 17, 'link_fk', count(*), md5(coalesce(string_agg(conname || ' ' || pg_get_constraintdef(oid), '|' ORDER BY conname), '')) FROM pg_constraint
  WHERE conrelid = 'public.research_private_report_claims'::regclass AND contype = 'f';
 INSERT INTO _fp SELECT 18, 'triggers', count(*), md5(coalesce(string_agg(tgrelid::regclass::text || ' ' || tgname || ' ' || pg_get_triggerdef(oid), '|' ORDER BY tgrelid::regclass::text, tgname), '')) FROM pg_trigger
