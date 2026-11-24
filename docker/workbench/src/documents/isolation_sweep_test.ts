@@ -205,6 +205,12 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // a reference row held by B's document (for the holder check below)
   const bRef = await wb("POST", "/workbench/documents/references", { path: bPath, source_id: FX_ACTIVE, exact: "", form: "chip" }, B);
   const bRefId: string = bRef.json.record?.id ?? "";
+  // rw-held-record-residuals: a reference RECORD on B's held source, quoting B's held text (a held marker) - part of
+  // B's held source, so every route A sends its id to (read, diff-check, flag, repin) must answer as for a missing one
+  const bHeldRec = await wb("POST", "/workbench/documents/references", { path: bPath, source_id: bHeld, exact: M.heldBody, form: "chip" }, B);
+  assert(bHeldRec.status < 300, `B cites B's own held source: ${bHeldRec.text}`);
+  const bHeldRef: string = bHeldRec.json.record?.id ?? "";
+  assert(bHeldRef, `B's held record id: ${bHeldRec.text}`);
   // research-workbench P6b (rw-p6b-gate): B's export runs. B exports the document to PDF through the
   // route (the verification gate records the run for B, passed or blocked); a run that never reached
   // the gate (the export refused earlier) is planted by SQL instead. Plus one PASSED run and one
@@ -491,7 +497,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // 1. TEMPLATED: B's ids and paths in every parameter, query and body field (the request gate)
   const LIFECYCLE_IRREVERSIBLE = ["/workbench/documents/delete-forever", "/workbench/documents/empty-trash"];
   let lifecycleTrashCalls = 0;
-  const ids = [bPath, bTrashed, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob].filter(Boolean);
+  const ids = [bPath, bTrashed, bRefinery, bJob, bHeld, bRefId, bHeldRef, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob].filter(Boolean);
   const query = (v: string) => new URLSearchParams({
     path: bPath, ref: bPath, from: bPath, id: v, idea_id: bRefinery, refinery_id: bRefinery, job_id: bJob,
     source_id: bHeld || v, kind: "user_document", holder_kind: "user_document", format: "md", limit: "500", q: "fixture",
@@ -551,9 +557,9 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // 3. ID-ONLY: every read route with a path parameter, filled with each REAL id (harvested, plus B's
   // own ids handed to A directly) and nothing else of B's in the request
   const named = (v: string) =>
-    v === bJob ? "<B job>" : v === bHeld ? "<B held>" : v === bRefId ? "<B ref>" : v === bRefinery ? "<B refinery>" : bExports.includes(v) ? "<B export>"
+    v === bJob ? "<B job>" : v === bHeld ? "<B held>" : v === bRefId ? "<B ref>" : v === bHeldRef ? "<B held ref>" : v === bRefinery ? "<B refinery>" : bExports.includes(v) ? "<B export>"
       : v === bRoom ? "<B room>" : v === bSessRoom ? "<B session room>" : bCleanup.includes(v) ? "<B cleanup action>" : v;
-  const realIds = [...new Set([bJob, bHeld, bRefId, bRefinery, ...bExports, bRoom, bSessRoom, ...bCleanup, ...(bHandback ? [bnd.inlet] : []), pv.pvClaim, pv.pvJob, pv.pvSource, FX_ACTIVE, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
+  const realIds = [...new Set([bJob, bHeld, bRefId, bHeldRef, bRefinery, ...bExports, bRoom, bSessRoom, ...bCleanup, ...(bHandback ? [bnd.inlet] : []), pv.pvClaim, pv.pvJob, pv.pvSource, FX_ACTIVE, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
     .slice(0, 40);
   for (const r of reads.filter((x) => x.path.includes(":"))) {
     for (const v of realIds) {
@@ -635,6 +641,19 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     }
   }
   console.log(`sweep: ${attachCalls} attachment calls (B's non-.md files under documents/<key>/)`);
+  // rw-held-record-residuals (F4): A flags B's held record and a missing record id - the same status and body (the
+  // id A sent is the only difference), so the flag route is no existence oracle on a record of B's held source
+  {
+    const miss = crypto.randomUUID();
+    const flag = (id: string) => call(VIEWER, "POST", "/workbench/contract/flags",
+      { item_kind: "reference", item_id: id, reason: "wrong_claim", from: { kind: "source", ref: FX_ACTIVE } });
+    const real = await flag(bHeldRef), none = await flag(miss);
+    calls += 2;
+    judge("POST /workbench/contract/flags item_kind=reference <B held ref> (viewer)", "", real);
+    if (real.status !== none.status || real.text.split(bHeldRef).join("<ID>") !== none.text.split(miss).join("<ID>")) {
+      hits.push(`HIT flag-oracle POST /workbench/contract/flags <B held ref> -> ${real.status} vs a missing record ${none.status}`);
+    }
+  }
   console.log(`sweep: ${routes.length} routes, ${calls} calls, ${harvested.size} ids harvested, ${streamed} streams read, ${hits.length} hits`);
   for (const h of [...new Set(hits)]) console.log(`  ${h}`);
   // shared knowledge answers both users alike
