@@ -7246,6 +7246,1069 @@
           "summary"
         ],
         "additionalProperties": false
+      },
+      "CastVoices": {
+        "type": "object",
+        "properties": {
+          "voices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CastVoice"
+            }
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "voices",
+          "total"
+        ]
+      },
+      "CastVoice": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "cast-fx-voice"
+          },
+          "route": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$",
+            "description": "a LiteLLM model name (the gateway route); a URL is refused",
+            "example": "local-tts"
+          },
+          "voice": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+            "example": "bm_george"
+          },
+          "speed": {
+            "type": "number"
+          },
+          "used_by": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name"
+              ]
+            },
+            "description": "the caller's presenters this voice voices"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "updated_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "route",
+          "voice",
+          "speed",
+          "used_by",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "CastVoiceCreate": {
+        "type": "object",
+        "properties": {
+          "route": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$",
+            "description": "a LiteLLM model name (the gateway route); a URL is refused"
+          },
+          "voice": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          "speed": {
+            "type": "number",
+            "minimum": 0.25,
+            "exclusiveMinimum": true,
+            "maximum": 4
+          }
+        },
+        "required": [
+          "route",
+          "voice"
+        ],
+        "additionalProperties": false
+      },
+      "CastVoiceUpdate": {
+        "type": "object",
+        "properties": {
+          "route": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$",
+            "description": "a LiteLLM model name (the gateway route); a URL is refused"
+          },
+          "voice": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+          },
+          "speed": {
+            "type": "number",
+            "minimum": 0.25,
+            "exclusiveMinimum": true,
+            "maximum": 4
+          }
+        },
+        "additionalProperties": false
+      },
+      "CastDeleted": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "deleted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "deleted"
+        ]
+      },
+      "CastPresenters": {
+        "type": "object",
+        "properties": {
+          "presenters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CastPresenter"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "description": "every row of the scope (the caller's own, or the shared pool), not only this page"
+          }
+        },
+        "required": [
+          "presenters",
+          "total"
+        ]
+      },
+      "CastPresenter": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "cast-fx-presenter"
+          },
+          "name": {
+            "type": "string"
+          },
+          "personality": {
+            "type": "string"
+          },
+          "backstory": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "description": "new (rwr-cast-edit-api): the presenter's role in the show"
+          },
+          "focus": {
+            "type": "string",
+            "description": "new: what the presenter pays attention to"
+          },
+          "stance": {
+            "type": "string",
+            "description": "new: the position the presenter argues from"
+          },
+          "tone": {
+            "type": "string",
+            "description": "new: how the presenter sounds"
+          },
+          "speaking_style": {
+            "type": "string",
+            "description": "new: how the presenter talks"
+          },
+          "system_prompt": {
+            "type": "string",
+            "description": "new: the owner's own system prompt (used when system_prompt_mode is own)"
+          },
+          "system_prompt_mode": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "podcast_prompt_modes",
+            "example": "built",
+            "description": "built (from the fields; the default) or own (system_prompt)"
+          },
+          "notes": {
+            "type": "string",
+            "nullable": true,
+            "description": "the owner's own notes: null for anyone else"
+          },
+          "voice": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "route": {
+                "type": "string"
+              },
+              "voice": {
+                "type": "string"
+              },
+              "speed": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "id",
+              "route",
+              "voice",
+              "speed"
+            ]
+          },
+          "grounded_in": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CastGrounding"
+            },
+            "description": "in order; a private source link only to its owner"
+          },
+          "teams": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name"
+              ]
+            },
+            "description": "the owner's teams it sits in: [] for anyone else"
+          },
+          "shared": {
+            "type": "boolean"
+          },
+          "mine": {
+            "type": "boolean"
+          },
+          "copied_from": {
+            "type": "string",
+            "nullable": true,
+            "description": "the presenter this one was copied from, while the caller can still see it"
+          },
+          "origin": {
+            "type": "string",
+            "description": "operator | on-capture"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "updated_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "personality",
+          "backstory",
+          "language",
+          "role",
+          "focus",
+          "stance",
+          "tone",
+          "speaking_style",
+          "system_prompt",
+          "system_prompt_mode",
+          "notes",
+          "voice",
+          "grounded_in",
+          "teams",
+          "shared",
+          "mine",
+          "copied_from",
+          "origin",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "CastGrounding": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "podcast_grounding_kinds",
+            "example": "source",
+            "description": "A key of the `podcast_grounding_kinds` registry (GET /workbench/contract/registries/podcast_grounding_kinds)."
+          },
+          "ref": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string",
+            "description": "the source's title, or the topic's words"
+          },
+          "private": {
+            "type": "boolean",
+            "description": "a private source of the caller's own (only its owner ever sees such a link)"
+          }
+        },
+        "required": [
+          "kind",
+          "ref",
+          "label",
+          "private"
+        ]
+      },
+      "CastPresenterCreate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "voice_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "personality": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "backstory": {
+            "type": "string",
+            "maxLength": 8000
+          },
+          "language": {
+            "type": "string",
+            "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,3}$",
+            "example": "en-US"
+          },
+          "role": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "new (rwr-cast-edit-api): the presenter's role in the show"
+          },
+          "focus": {
+            "type": "string",
+            "maxLength": 1000,
+            "description": "new: what the presenter pays attention to"
+          },
+          "stance": {
+            "type": "string",
+            "maxLength": 1000,
+            "description": "new: the position the presenter argues from"
+          },
+          "tone": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "new: how the presenter sounds"
+          },
+          "speaking_style": {
+            "type": "string",
+            "maxLength": 1000,
+            "description": "new: how the presenter talks"
+          },
+          "system_prompt": {
+            "type": "string",
+            "maxLength": 8000,
+            "description": "new: the owner's own system prompt (used when system_prompt_mode is own)"
+          },
+          "system_prompt_mode": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "podcast_prompt_modes",
+            "example": "built",
+            "description": "A key of the `podcast_prompt_modes` registry (GET /workbench/contract/registries/podcast_prompt_modes)."
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "grounded_in": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CastGroundingIn"
+            },
+            "maxItems": 50,
+            "description": "replaces the whole list, in order"
+          }
+        },
+        "required": [
+          "name",
+          "voice_id"
+        ],
+        "additionalProperties": false
+      },
+      "CastGroundingIn": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "podcast_grounding_kinds",
+            "example": "source",
+            "description": "source (a source id: a shared one or one of your private ones) or topic (words)"
+          },
+          "ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "example": "11111111-1111-4111-8111-111111111111"
+          }
+        },
+        "required": [
+          "kind",
+          "ref"
+        ],
+        "additionalProperties": false
+      },
+      "CastPresenterUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "voice_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "personality": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "backstory": {
+            "type": "string",
+            "maxLength": 8000
+          },
+          "language": {
+            "type": "string",
+            "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,3}$",
+            "example": "en-US"
+          },
+          "role": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "new (rwr-cast-edit-api): the presenter's role in the show"
+          },
+          "focus": {
+            "type": "string",
+            "maxLength": 1000,
+            "description": "new: what the presenter pays attention to"
+          },
+          "stance": {
+            "type": "string",
+            "maxLength": 1000,
+            "description": "new: the position the presenter argues from"
+          },
+          "tone": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "new: how the presenter sounds"
+          },
+          "speaking_style": {
+            "type": "string",
+            "maxLength": 1000,
+            "description": "new: how the presenter talks"
+          },
+          "system_prompt": {
+            "type": "string",
+            "maxLength": 8000,
+            "description": "new: the owner's own system prompt (used when system_prompt_mode is own)"
+          },
+          "system_prompt_mode": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "podcast_prompt_modes",
+            "example": "built",
+            "description": "A key of the `podcast_prompt_modes` registry (GET /workbench/contract/registries/podcast_prompt_modes)."
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "grounded_in": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CastGroundingIn"
+            },
+            "maxItems": 50,
+            "description": "replaces the whole list, in order"
+          },
+          "shared": {
+            "type": "boolean",
+            "description": "true shares it to the one shared pool (Q12): only with share_digest, alone in the body; false unshares"
+          },
+          "share_digest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "the digest of GET .../share-preview, read just before (a stale one is refused)"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CastTeams": {
+        "type": "object",
+        "properties": {
+          "teams": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CastTeam"
+            }
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "teams",
+          "total"
+        ]
+      },
+      "CastTeam": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "cast-fx-team"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "position": {
+                  "type": "integer"
+                },
+                "presenter_id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "position",
+                "presenter_id",
+                "name"
+              ]
+            },
+            "description": "in speaking order"
+          },
+          "user_seat": {
+            "type": "integer",
+            "description": "where the user sits in the speaking order: 0 (first) .. members (after the last)"
+          },
+          "seats": {
+            "type": "integer",
+            "description": "members + the user's seat; at most 26"
+          },
+          "formats": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name"
+              ]
+            },
+            "description": "the owner's formats of this team: [] for anyone else"
+          },
+          "shared": {
+            "type": "boolean"
+          },
+          "mine": {
+            "type": "boolean"
+          },
+          "copied_from": {
+            "type": "string",
+            "nullable": true
+          },
+          "origin": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "updated_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "members",
+          "user_seat",
+          "seats",
+          "formats",
+          "shared",
+          "mine",
+          "copied_from",
+          "origin",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "CastTeamCreate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "minItems": 1,
+            "maxItems": 25,
+            "description": "the caller's presenter ids in speaking order (at most 25: the 26th seat is the user's)"
+          },
+          "user_seat": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 25,
+            "description": "default: after the last presenter"
+          }
+        },
+        "required": [
+          "name",
+          "members"
+        ],
+        "additionalProperties": false
+      },
+      "CastTeamUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "minItems": 1,
+            "maxItems": 25,
+            "description": "the caller's presenter ids in speaking order (at most 25: the 26th seat is the user's)"
+          },
+          "user_seat": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 25
+          },
+          "shared": {
+            "type": "boolean",
+            "description": "true shares it to the one shared pool (Q12): only with share_digest, alone in the body; false unshares"
+          },
+          "share_digest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "the digest of GET .../share-preview, read just before (a stale one is refused)"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CastFormats": {
+        "type": "object",
+        "properties": {
+          "formats": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CastFormat"
+            }
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "formats",
+          "total"
+        ]
+      },
+      "CastFormat": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "cast-fx-format"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "team_id": {
+            "type": "string"
+          },
+          "team_name": {
+            "type": "string"
+          },
+          "briefing": {
+            "type": "string"
+          },
+          "segments": {
+            "type": "integer"
+          },
+          "language": {
+            "type": "string"
+          },
+          "script_route": {
+            "type": "string",
+            "description": "the LiteLLM model name that writes the script"
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "podcast_format_kinds",
+            "example": "conversation",
+            "description": "A key of the `podcast_format_kinds` registry (GET /workbench/contract/registries/podcast_format_kinds)."
+          },
+          "use_for": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "x-registry": "podcast_format_uses",
+              "example": "daily",
+              "description": "A key of the `podcast_format_uses` registry (GET /workbench/contract/registries/podcast_format_uses)."
+            },
+            "description": "what it is for; [] = anything"
+          },
+          "is_default": {
+            "type": "boolean",
+            "description": "the owner's default format (at most one); false for anyone else"
+          },
+          "shared": {
+            "type": "boolean"
+          },
+          "mine": {
+            "type": "boolean"
+          },
+          "copied_from": {
+            "type": "string",
+            "nullable": true
+          },
+          "origin": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "updated_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "description",
+          "team_id",
+          "team_name",
+          "briefing",
+          "segments",
+          "language",
+          "script_route",
+          "kind",
+          "use_for",
+          "is_default",
+          "shared",
+          "mine",
+          "copied_from",
+          "origin",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "CastFormatCreate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "team_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "briefing": {
+            "type": "string",
+            "maxLength": 8000
+          },
+          "segments": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "language": {
+            "type": "string",
+            "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,3}$",
+            "example": "en-US"
+          },
+          "script_route": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$",
+            "description": "a LiteLLM model name (the gateway route); a URL is refused"
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "podcast_format_kinds",
+            "example": "conversation",
+            "description": "A key of the `podcast_format_kinds` registry (GET /workbench/contract/registries/podcast_format_kinds)."
+          },
+          "use_for": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "x-registry": "podcast_format_uses",
+              "example": "daily",
+              "description": "A key of the `podcast_format_uses` registry (GET /workbench/contract/registries/podcast_format_uses)."
+            },
+            "maxItems": 10
+          },
+          "is_default": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "team_id"
+        ],
+        "additionalProperties": false
+      },
+      "CastFormatUpdate": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120
+          },
+          "team_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "briefing": {
+            "type": "string",
+            "maxLength": 8000
+          },
+          "segments": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "language": {
+            "type": "string",
+            "pattern": "^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,3}$",
+            "example": "en-US"
+          },
+          "script_route": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$",
+            "description": "a LiteLLM model name (the gateway route); a URL is refused"
+          },
+          "kind": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "podcast_format_kinds",
+            "example": "conversation",
+            "description": "A key of the `podcast_format_kinds` registry (GET /workbench/contract/registries/podcast_format_kinds)."
+          },
+          "use_for": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "x-registry": "podcast_format_uses",
+              "example": "daily",
+              "description": "A key of the `podcast_format_uses` registry (GET /workbench/contract/registries/podcast_format_uses)."
+            },
+            "maxItems": 10
+          },
+          "is_default": {
+            "type": "boolean"
+          },
+          "shared": {
+            "type": "boolean",
+            "description": "true shares it to the one shared pool (Q12): only with share_digest, alone in the body; false unshares"
+          },
+          "share_digest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "the digest of GET .../share-preview, read just before (a stale one is refused)"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CastSharePreview": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "cast-fx-presenter"
+          },
+          "already_shared": {
+            "type": "boolean"
+          },
+          "shareable": {
+            "type": "boolean",
+            "description": "false while blocked_by is not empty"
+          },
+          "would_share": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": {
+                  "type": "string"
+                },
+                "detail": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "label",
+                "detail"
+              ]
+            },
+            "description": "everything every account would see"
+          },
+          "blocked_by": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "ref": {
+                  "type": "string"
+                },
+                "label": {
+                  "type": "string"
+                },
+                "detail": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "ref",
+                "label",
+                "detail"
+              ]
+            },
+            "description": "what must change first: a private source link (presenter), an unshared presenter (team), an unshared team (format)"
+          },
+          "never_shared": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "what stays the owner's even when shared"
+          },
+          "share_digest": {
+            "type": "string",
+            "description": "send it with shared: true to confirm exactly this"
+          }
+        },
+        "required": [
+          "id",
+          "already_shared",
+          "shareable",
+          "would_share",
+          "blocked_by",
+          "never_shared",
+          "share_digest"
+        ]
       }
     },
     "parameters": {}
@@ -16279,6 +17342,3181 @@
           },
           "400": {
             "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/voices": {
+      "get": {
+        "operationId": "castVoices",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "the caller's voice links (how each presenter sounds: a LiteLLM TTS route, a voice, a speed)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,4}$",
+              "description": "1-500, default 100"
+            },
+            "required": false,
+            "description": "1-500, default 100",
+            "name": "limit",
+            "in": "query",
+            "example": "100"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "by voice",
+            "content": {
+              "application/json": {
+                "example": {
+                  "voices": [
+                    {
+                      "id": "cast-fx-voice",
+                      "route": "local-tts",
+                      "voice": "bm_george",
+                      "speed": 1,
+                      "used_by": [
+                        {
+                          "id": "cast-fx-presenter",
+                          "name": "Fixture Morgan"
+                        }
+                      ],
+                      "created_at": "2026-10-17T12:00:00.000Z",
+                      "updated_at": "2026-10-17T12:00:00.000Z"
+                    }
+                  ],
+                  "total": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastVoices"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "castVoiceCreate",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "add a voice link (route: a LiteLLM model name, never a URL)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "route": "local-tts",
+                "voice": "af_bella",
+                "speed": 1.1
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CastVoiceCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "the voice, the caller's",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-voice",
+                  "route": "local-tts",
+                  "voice": "bm_george",
+                  "speed": 1,
+                  "used_by": [],
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastVoice"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/voices/{id}": {
+      "get": {
+        "operationId": "castVoice",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "one of the caller's voice links; anyone else's is not found",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-voice"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the voice",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-voice",
+                  "route": "local-tts",
+                  "voice": "bm_george",
+                  "speed": 1,
+                  "used_by": [
+                    {
+                      "id": "cast-fx-presenter",
+                      "name": "Fixture Morgan"
+                    }
+                  ],
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastVoice"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "castVoiceUpdate",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "change one of the caller's voice links (re-voices only the presenters it voices)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-voice"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "speed": 0.9
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CastVoiceUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the voice, changed",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-voice",
+                  "route": "local-tts",
+                  "voice": "bm_george",
+                  "speed": 0.9,
+                  "used_by": [
+                    {
+                      "id": "cast-fx-presenter",
+                      "name": "Fixture Morgan"
+                    }
+                  ],
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastVoice"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "castVoiceDelete",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "delete one of the caller's voice links; refused (409, naming them) while it voices a presenter",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-voice-del"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "deleted",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-voice-del",
+                  "deleted": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastDeleted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/presenters": {
+      "get": {
+        "operationId": "castPresenters",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "the caller's presenters with every field (scope=mine), or the shared pool (scope=shared)",
+        "description": "A shared presenter of someone else's carries no notes (null), no teams and only its links to shared sources and topics.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,4}$",
+              "description": "1-500, default 100"
+            },
+            "required": false,
+            "description": "1-500, default 100",
+            "name": "limit",
+            "in": "query",
+            "example": "100"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "mine (default: your own) or shared (the one shared pool every account sees, yours included)"
+            },
+            "required": false,
+            "description": "mine (default: your own) or shared (the one shared pool every account sees, yours included)",
+            "name": "scope",
+            "in": "query",
+            "example": "mine"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "by name",
+            "content": {
+              "application/json": {
+                "example": {
+                  "presenters": [
+                    {
+                      "id": "cast-fx-presenter",
+                      "name": "Fixture Morgan",
+                      "personality": "Calm and precise",
+                      "backstory": "A fixture researcher",
+                      "language": "en-US",
+                      "role": "host",
+                      "focus": "retrieval contracts",
+                      "stance": "sceptical of unsourced claims",
+                      "tone": "warm",
+                      "speaking_style": "short sentences",
+                      "system_prompt": "",
+                      "system_prompt_mode": "built",
+                      "notes": "fixture notes",
+                      "voice": {
+                        "id": "cast-fx-voice",
+                        "route": "local-tts",
+                        "voice": "bm_george",
+                        "speed": 1
+                      },
+                      "grounded_in": [
+                        {
+                          "kind": "source",
+                          "ref": "11111111-1111-4111-8111-111111111111",
+                          "label": "Active fixture source",
+                          "private": false
+                        },
+                        {
+                          "kind": "topic",
+                          "ref": "retrieval",
+                          "label": "retrieval",
+                          "private": false
+                        }
+                      ],
+                      "teams": [
+                        {
+                          "id": "cast-fx-team",
+                          "name": "Fixture cast team"
+                        }
+                      ],
+                      "shared": false,
+                      "mine": true,
+                      "copied_from": null,
+                      "origin": "operator",
+                      "created_at": "2026-10-17T12:00:00.000Z",
+                      "updated_at": "2026-10-17T12:00:00.000Z"
+                    }
+                  ],
+                  "total": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastPresenters"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "castPresenterCreate",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "make a presenter of the caller's: a voice of theirs, the fields, grounded-in links (a shared source, a private source of their own, or a topic)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "name": "Dredd presenter",
+                "voice_id": "cast-fx-voice",
+                "personality": "Curious",
+                "role": "co-host",
+                "stance": "optimistic",
+                "tone": "bright",
+                "grounded_in": [
+                  {
+                    "kind": "topic",
+                    "ref": "contracts"
+                  }
+                ]
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CastPresenterCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "the presenter",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "presenter-00000000-0000-4000-8000-000000000002",
+                  "name": "Dredd presenter",
+                  "personality": "Calm and precise",
+                  "backstory": "A fixture researcher",
+                  "language": "en-US",
+                  "role": "host",
+                  "focus": "retrieval contracts",
+                  "stance": "sceptical of unsourced claims",
+                  "tone": "warm",
+                  "speaking_style": "short sentences",
+                  "system_prompt": "",
+                  "system_prompt_mode": "built",
+                  "notes": "fixture notes",
+                  "voice": {
+                    "id": "cast-fx-voice",
+                    "route": "local-tts",
+                    "voice": "bm_george",
+                    "speed": 1
+                  },
+                  "grounded_in": [
+                    {
+                      "kind": "source",
+                      "ref": "11111111-1111-4111-8111-111111111111",
+                      "label": "Active fixture source",
+                      "private": false
+                    },
+                    {
+                      "kind": "topic",
+                      "ref": "retrieval",
+                      "label": "retrieval",
+                      "private": false
+                    }
+                  ],
+                  "teams": [],
+                  "shared": false,
+                  "mine": true,
+                  "copied_from": null,
+                  "origin": "operator",
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastPresenter"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/presenters/{id}": {
+      "get": {
+        "operationId": "castPresenter",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "one presenter: the caller's own, or a shared one; anything else is not found",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-presenter"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the presenter",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-presenter",
+                  "name": "Fixture Morgan",
+                  "personality": "Calm and precise",
+                  "backstory": "A fixture researcher",
+                  "language": "en-US",
+                  "role": "host",
+                  "focus": "retrieval contracts",
+                  "stance": "sceptical of unsourced claims",
+                  "tone": "warm",
+                  "speaking_style": "short sentences",
+                  "system_prompt": "",
+                  "system_prompt_mode": "built",
+                  "notes": "fixture notes",
+                  "voice": {
+                    "id": "cast-fx-voice",
+                    "route": "local-tts",
+                    "voice": "bm_george",
+                    "speed": 1
+                  },
+                  "grounded_in": [
+                    {
+                      "kind": "source",
+                      "ref": "11111111-1111-4111-8111-111111111111",
+                      "label": "Active fixture source",
+                      "private": false
+                    },
+                    {
+                      "kind": "topic",
+                      "ref": "retrieval",
+                      "label": "retrieval",
+                      "private": false
+                    }
+                  ],
+                  "teams": [
+                    {
+                      "id": "cast-fx-team",
+                      "name": "Fixture cast team"
+                    }
+                  ],
+                  "shared": false,
+                  "mine": true,
+                  "copied_from": null,
+                  "origin": "operator",
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastPresenter"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "castPresenterUpdate",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "change the caller's presenter (grounded_in replaces the list; shared: true is refused while it links a private source)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-presenter"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "stance": "cautious",
+                "speaking_style": "asks before answering"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CastPresenterUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the presenter, changed",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-presenter",
+                  "name": "Fixture Morgan",
+                  "personality": "Calm and precise",
+                  "backstory": "A fixture researcher",
+                  "language": "en-US",
+                  "role": "host",
+                  "focus": "retrieval contracts",
+                  "stance": "cautious",
+                  "tone": "warm",
+                  "speaking_style": "asks before answering",
+                  "system_prompt": "",
+                  "system_prompt_mode": "built",
+                  "notes": "fixture notes",
+                  "voice": {
+                    "id": "cast-fx-voice",
+                    "route": "local-tts",
+                    "voice": "bm_george",
+                    "speed": 1
+                  },
+                  "grounded_in": [
+                    {
+                      "kind": "source",
+                      "ref": "11111111-1111-4111-8111-111111111111",
+                      "label": "Active fixture source",
+                      "private": false
+                    },
+                    {
+                      "kind": "topic",
+                      "ref": "retrieval",
+                      "label": "retrieval",
+                      "private": false
+                    }
+                  ],
+                  "teams": [
+                    {
+                      "id": "cast-fx-team",
+                      "name": "Fixture cast team"
+                    }
+                  ],
+                  "shared": false,
+                  "mine": true,
+                  "copied_from": null,
+                  "origin": "operator",
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastPresenter"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "castPresenterDelete",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "delete the caller's presenter; refused (409, naming the team) while it sits in a team",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-presenter-del"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "deleted",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-presenter-del",
+                  "deleted": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastDeleted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/presenters/{id}/copy": {
+      "post": {
+        "operationId": "castPresenterCopy",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "use a presenter: the caller's own copy (with a copy of its voice) of a shared presenter, or of their own; never its owner's notes",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-shared-presenter"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "the caller's copy",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "presenter-00000000-0000-4000-8000-000000000001",
+                  "name": "Fixture Morgan",
+                  "personality": "Calm and precise",
+                  "backstory": "A fixture researcher",
+                  "language": "en-US",
+                  "role": "host",
+                  "focus": "retrieval contracts",
+                  "stance": "sceptical of unsourced claims",
+                  "tone": "warm",
+                  "speaking_style": "short sentences",
+                  "system_prompt": "",
+                  "system_prompt_mode": "built",
+                  "notes": "",
+                  "voice": {
+                    "id": "cast-fx-voice",
+                    "route": "local-tts",
+                    "voice": "bm_george",
+                    "speed": 1
+                  },
+                  "grounded_in": [
+                    {
+                      "kind": "source",
+                      "ref": "11111111-1111-4111-8111-111111111111",
+                      "label": "Active fixture source",
+                      "private": false
+                    },
+                    {
+                      "kind": "topic",
+                      "ref": "retrieval",
+                      "label": "retrieval",
+                      "private": false
+                    }
+                  ],
+                  "teams": [],
+                  "shared": false,
+                  "mine": true,
+                  "copied_from": "cast-fx-shared-presenter",
+                  "origin": "operator",
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastPresenter"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/teams": {
+      "get": {
+        "operationId": "castTeams",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "the caller's teams (scope=mine) or the shared pool (scope=shared): the cast in speaking order and the user's seat",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,4}$",
+              "description": "1-500, default 100"
+            },
+            "required": false,
+            "description": "1-500, default 100",
+            "name": "limit",
+            "in": "query",
+            "example": "100"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "mine (default: your own) or shared (the one shared pool every account sees, yours included)"
+            },
+            "required": false,
+            "description": "mine (default: your own) or shared (the one shared pool every account sees, yours included)",
+            "name": "scope",
+            "in": "query",
+            "example": "mine"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "by name",
+            "content": {
+              "application/json": {
+                "example": {
+                  "teams": [
+                    {
+                      "id": "cast-fx-team",
+                      "name": "Fixture cast team",
+                      "description": "One fixture presenter and the user",
+                      "members": [
+                        {
+                          "position": 0,
+                          "presenter_id": "cast-fx-presenter",
+                          "name": "Fixture Morgan"
+                        }
+                      ],
+                      "user_seat": 1,
+                      "seats": 2,
+                      "formats": [
+                        {
+                          "id": "cast-fx-format",
+                          "name": "Fixture cast format"
+                        }
+                      ],
+                      "shared": false,
+                      "mine": true,
+                      "copied_from": null,
+                      "origin": "operator",
+                      "created_at": "2026-10-17T12:00:00.000Z",
+                      "updated_at": "2026-10-17T12:00:00.000Z"
+                    }
+                  ],
+                  "total": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastTeams"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "castTeamCreate",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "make a team of the caller's presenters, in order (at most 25) with the user's seat (26 seats at most)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "name": "Dredd team",
+                "description": "made by the contract run",
+                "members": [
+                  "cast-fx-presenter"
+                ],
+                "user_seat": 0
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CastTeamCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "the team",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "team-00000000-0000-4000-8000-000000000002",
+                  "name": "Dredd team",
+                  "description": "One fixture presenter and the user",
+                  "members": [
+                    {
+                      "position": 0,
+                      "presenter_id": "cast-fx-presenter",
+                      "name": "Fixture Morgan"
+                    }
+                  ],
+                  "user_seat": 0,
+                  "seats": 2,
+                  "formats": [],
+                  "shared": false,
+                  "mine": true,
+                  "copied_from": null,
+                  "origin": "operator",
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastTeam"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/teams/{id}": {
+      "get": {
+        "operationId": "castTeam",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "one team: the caller's own, or a shared one; anything else is not found",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-team"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the team",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-team",
+                  "name": "Fixture cast team",
+                  "description": "One fixture presenter and the user",
+                  "members": [
+                    {
+                      "position": 0,
+                      "presenter_id": "cast-fx-presenter",
+                      "name": "Fixture Morgan"
+                    }
+                  ],
+                  "user_seat": 1,
+                  "seats": 2,
+                  "formats": [
+                    {
+                      "id": "cast-fx-format",
+                      "name": "Fixture cast format"
+                    }
+                  ],
+                  "shared": false,
+                  "mine": true,
+                  "copied_from": null,
+                  "origin": "operator",
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastTeam"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "castTeamUpdate",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "change the caller's team (members replaces the order; a shared team needs every member shared)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-team"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "description": "changed by the contract run",
+                "user_seat": 1
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CastTeamUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the team, changed",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-team",
+                  "name": "Fixture cast team",
+                  "description": "changed by the contract run",
+                  "members": [
+                    {
+                      "position": 0,
+                      "presenter_id": "cast-fx-presenter",
+                      "name": "Fixture Morgan"
+                    }
+                  ],
+                  "user_seat": 1,
+                  "seats": 2,
+                  "formats": [
+                    {
+                      "id": "cast-fx-format",
+                      "name": "Fixture cast format"
+                    }
+                  ],
+                  "shared": false,
+                  "mine": true,
+                  "copied_from": null,
+                  "origin": "operator",
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastTeam"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "castTeamDelete",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "delete the caller's team; refused (409) while it has formats, episodes or render requests",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-team-del"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "deleted",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-team-del",
+                  "deleted": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastDeleted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/teams/{id}/copy": {
+      "post": {
+        "operationId": "castTeamCopy",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "use a team: the caller's own copy, every presenter copied too, same order and seat",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-shared-team"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "the caller's copy",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "team-00000000-0000-4000-8000-000000000001",
+                  "name": "Fixture cast team",
+                  "description": "One fixture presenter and the user",
+                  "members": [
+                    {
+                      "position": 0,
+                      "presenter_id": "cast-fx-presenter",
+                      "name": "Fixture Morgan"
+                    }
+                  ],
+                  "user_seat": 1,
+                  "seats": 2,
+                  "formats": [],
+                  "shared": false,
+                  "mine": true,
+                  "copied_from": "cast-fx-shared-team",
+                  "origin": "operator",
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastTeam"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/formats": {
+      "get": {
+        "operationId": "castFormats",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "the caller's formats (scope=mine) or the shared pool (scope=shared): kind, use-for, default",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,4}$",
+              "description": "1-500, default 100"
+            },
+            "required": false,
+            "description": "1-500, default 100",
+            "name": "limit",
+            "in": "query",
+            "example": "100"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "mine (default: your own) or shared (the one shared pool every account sees, yours included)"
+            },
+            "required": false,
+            "description": "mine (default: your own) or shared (the one shared pool every account sees, yours included)",
+            "name": "scope",
+            "in": "query",
+            "example": "mine"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "by name",
+            "content": {
+              "application/json": {
+                "example": {
+                  "formats": [
+                    {
+                      "id": "cast-fx-format",
+                      "name": "Fixture cast format",
+                      "description": "A fixture format",
+                      "team_id": "cast-fx-team",
+                      "team_name": "Fixture cast team",
+                      "briefing": "Discuss the fixture.",
+                      "segments": 3,
+                      "language": "en-US",
+                      "script_route": "local-large:nothink",
+                      "kind": "conversation",
+                      "use_for": [
+                        "daily"
+                      ],
+                      "is_default": true,
+                      "shared": false,
+                      "mine": true,
+                      "copied_from": null,
+                      "origin": "operator",
+                      "created_at": "2026-10-17T12:00:00.000Z",
+                      "updated_at": "2026-10-17T12:00:00.000Z"
+                    }
+                  ],
+                  "total": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastFormats"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "castFormatCreate",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "make a format of one of the caller's teams (kind and use_for are registry keys; is_default makes it the caller's one default)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "name": "Dredd format",
+                "team_id": "cast-fx-team",
+                "kind": "briefing",
+                "use_for": [
+                  "research"
+                ],
+                "segments": 2
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CastFormatCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "the format",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "format-00000000-0000-4000-8000-000000000002",
+                  "name": "Dredd format",
+                  "description": "A fixture format",
+                  "team_id": "cast-fx-team",
+                  "team_name": "Fixture cast team",
+                  "briefing": "Discuss the fixture.",
+                  "segments": 3,
+                  "language": "en-US",
+                  "script_route": "local-large:nothink",
+                  "kind": "briefing",
+                  "use_for": [
+                    "research"
+                  ],
+                  "is_default": false,
+                  "shared": false,
+                  "mine": true,
+                  "copied_from": null,
+                  "origin": "operator",
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastFormat"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/formats/{id}": {
+      "get": {
+        "operationId": "castFormat",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "one format: the caller's own, or a shared one; anything else is not found",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-format"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the format",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-format",
+                  "name": "Fixture cast format",
+                  "description": "A fixture format",
+                  "team_id": "cast-fx-team",
+                  "team_name": "Fixture cast team",
+                  "briefing": "Discuss the fixture.",
+                  "segments": 3,
+                  "language": "en-US",
+                  "script_route": "local-large:nothink",
+                  "kind": "conversation",
+                  "use_for": [
+                    "daily"
+                  ],
+                  "is_default": true,
+                  "shared": false,
+                  "mine": true,
+                  "copied_from": null,
+                  "origin": "operator",
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastFormat"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "castFormatUpdate",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "change the caller's format (a shared format needs its team shared)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-format"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "briefing": "Changed by the contract run.",
+                "kind": "debate"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/CastFormatUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the format, changed",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-format",
+                  "name": "Fixture cast format",
+                  "description": "A fixture format",
+                  "team_id": "cast-fx-team",
+                  "team_name": "Fixture cast team",
+                  "briefing": "Changed by the contract run.",
+                  "segments": 3,
+                  "language": "en-US",
+                  "script_route": "local-large:nothink",
+                  "kind": "debate",
+                  "use_for": [
+                    "daily"
+                  ],
+                  "is_default": true,
+                  "shared": false,
+                  "mine": true,
+                  "copied_from": null,
+                  "origin": "operator",
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastFormat"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "castFormatDelete",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "delete the caller's format",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-format-del"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "deleted",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-format-del",
+                  "deleted": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastDeleted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/formats/{id}/copy": {
+      "post": {
+        "operationId": "castFormatCopy",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "use a format: the caller's own copy (of someone else's: its team and presenters copied too); never the default until set",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-shared-format"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "the caller's copy",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "format-00000000-0000-4000-8000-000000000001",
+                  "name": "Fixture cast format",
+                  "description": "A fixture format",
+                  "team_id": "cast-fx-team",
+                  "team_name": "Fixture cast team",
+                  "briefing": "Discuss the fixture.",
+                  "segments": 3,
+                  "language": "en-US",
+                  "script_route": "local-large:nothink",
+                  "kind": "conversation",
+                  "use_for": [
+                    "daily"
+                  ],
+                  "is_default": false,
+                  "shared": false,
+                  "mine": true,
+                  "copied_from": "cast-fx-shared-format",
+                  "origin": "operator",
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastFormat"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/presenters/{id}/share-preview": {
+      "get": {
+        "operationId": "castPresenterSharePreview",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "what sharing the caller's presenter would show every account, what blocks it, and the share_digest that confirms exactly this",
+        "description": "The disclosure step (operator, 2026-11-22: a share first reveals what would be shared). PATCH {shared: true, share_digest} with the digest shares it; a missing or out-of-date digest is refused (409).",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-presenter"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the preview",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-presenter",
+                  "already_shared": false,
+                  "shareable": true,
+                  "would_share": [
+                    {
+                      "label": "Fixture Morgan",
+                      "detail": "the presenter: name, personality, backstory, language, role, focus, stance, tone, speaking style, its voice"
+                    },
+                    {
+                      "label": "Active fixture source",
+                      "detail": "a grounded-in source (a shared source)"
+                    },
+                    {
+                      "label": "retrieval",
+                      "detail": "a grounded-in topic"
+                    }
+                  ],
+                  "blocked_by": [],
+                  "never_shared": [
+                    "notes",
+                    "which of your teams it sits in"
+                  ],
+                  "share_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastSharePreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/teams/{id}/share-preview": {
+      "get": {
+        "operationId": "castTeamSharePreview",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "what sharing the caller's team would show every account, what blocks it, and the share_digest that confirms exactly this",
+        "description": "The disclosure step (operator, 2026-11-22: a share first reveals what would be shared). PATCH {shared: true, share_digest} with the digest shares it; a missing or out-of-date digest is refused (409).",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-team"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the preview",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-team",
+                  "already_shared": false,
+                  "shareable": true,
+                  "would_share": [
+                    {
+                      "label": "Fixture Morgan",
+                      "detail": "the presenter: name, personality, backstory, language, role, focus, stance, tone, speaking style, its voice"
+                    },
+                    {
+                      "label": "Active fixture source",
+                      "detail": "a grounded-in source (a shared source)"
+                    },
+                    {
+                      "label": "retrieval",
+                      "detail": "a grounded-in topic"
+                    }
+                  ],
+                  "blocked_by": [],
+                  "never_shared": [
+                    "notes",
+                    "which of your teams it sits in"
+                  ],
+                  "share_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastSharePreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/cast/formats/{id}/share-preview": {
+      "get": {
+        "operationId": "castFormatSharePreview",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "what sharing the caller's format would show every account, what blocks it, and the share_digest that confirms exactly this",
+        "description": "The disclosure step (operator, 2026-11-22: a share first reveals what would be shared). PATCH {shared: true, share_digest} with the digest shares it; a missing or out-of-date digest is refused (409).",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-format"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the preview",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "cast-fx-format",
+                  "already_shared": false,
+                  "shareable": true,
+                  "would_share": [
+                    {
+                      "label": "Fixture Morgan",
+                      "detail": "the presenter: name, personality, backstory, language, role, focus, stance, tone, speaking style, its voice"
+                    },
+                    {
+                      "label": "Active fixture source",
+                      "detail": "a grounded-in source (a shared source)"
+                    },
+                    {
+                      "label": "retrieval",
+                      "detail": "a grounded-in topic"
+                    }
+                  ],
+                  "blocked_by": [],
+                  "never_shared": [
+                    "notes",
+                    "which of your teams it sits in"
+                  ],
+                  "share_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/CastSharePreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
             "content": {
               "application/json": {
                 "schema": {

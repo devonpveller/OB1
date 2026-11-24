@@ -9,6 +9,21 @@ import type { Format, Presenter, Team, VoiceLink } from "./presenters.ts";
 import { restAuthHeaders } from "../clients/rest-auth.ts";
 type Row = Record<string, unknown>;
 
+// rwr-cast-edit-api (slot 560): the presenter columns the renderer reads (castBlock); never the owner's notes or
+// grounded-in links, which no render uses.
+export const CAST_FIELDS = ",role,focus,stance,tone,speaking_style,system_prompt,system_prompt_mode";
+
+/** The new fields of a presenter row, only those set (a row without them - slot 560 not applied - adds nothing). */
+export function castFieldsOf(p: Row): Partial<Presenter> {
+  const s = (k: string) => (typeof p[k] === "string" && p[k] !== "" ? String(p[k]) : undefined);
+  const out: Partial<Presenter> = {
+    role: s("role"), focus: s("focus"), stance: s("stance"), tone: s("tone"), speakingStyle: s("speaking_style"),
+    systemPrompt: s("system_prompt"), systemPromptMode: s("system_prompt_mode"),
+  };
+  for (const k of Object.keys(out) as (keyof Presenter)[]) if (out[k] === undefined) delete out[k];
+  return out;
+}
+
 export class PresenterStore {
   readonly #base: string;
   readonly #f: typeof fetch;
@@ -33,9 +48,22 @@ export class PresenterStore {
   async team(owner: string, idOrName: string): Promise<Team | null> {
     const q = encodeURIComponent(idOrName);
     const o = encodeURIComponent(owner);
-    const sel = "id,name,description,podcast_team_members(position,podcast_presenters(id,name,personality,backstory,language,podcast_voice_links(id,route,voice,speed)))";
-    let rows = await this.#req<Row[]>("GET", `podcast_teams?select=${sel}&owner_sub=eq.${o}&id=eq.${q}`);
-    if (!rows.length) rows = await this.#req<Row[]>("GET", `podcast_teams?select=${sel}&owner_sub=eq.${o}&name=eq.${q}`);
+    // rwr-cast-edit-api (slot 560): the presenter's new fields, read where the database has them. A database without
+    // slot 560 (PostgREST 42703: no such column) is read as before, so this image never needs 560 to render.
+    const sel = (extra: string) =>
+      `id,name,description,podcast_team_members(position,podcast_presenters(id,name,personality,backstory,language${extra},podcast_voice_links(id,route,voice,speed)))`;
+    const get = async (s: string) => {
+      let rows = await this.#req<Row[]>("GET", `podcast_teams?select=${s}&owner_sub=eq.${o}&id=eq.${q}`);
+      if (!rows.length) rows = await this.#req<Row[]>("GET", `podcast_teams?select=${s}&owner_sub=eq.${o}&name=eq.${q}`);
+      return rows;
+    };
+    let rows: Row[];
+    try {
+      rows = await get(sel(CAST_FIELDS));
+    } catch (e) {
+      if (!/: 400 .*42703/s.test(String((e as Error)?.message ?? ""))) throw e;
+      rows = await get(sel(""));
+    }
     const t = rows[0];
     if (!t) return null;
     const members = (t.podcast_team_members as Row[]).sort((a, b) => Number(a.position) - Number(b.position));
@@ -48,6 +76,7 @@ export class PresenterStore {
           id: String(p.id), name: String(p.name), personality: String(p.personality ?? ""), backstory: String(p.backstory ?? ""),
           language: String(p.language ?? "en-US"),
           voice: { id: String(v.id), route: String(v.route), voice: String(v.voice), speed: Number(v.speed) },
+          ...castFieldsOf(p),
         };
       }),
     };
