@@ -16,9 +16,10 @@
 -- every other (it moves too); the gap work counted is MACHINE rows only (a human steer, its branch and event are never
 -- rewritten, F2); P2 - a SHARED synthesis or a SHARED job report carrying a private-report claim's sentence is a surface;
 -- the derived-question guard sits on research_handbacks (A1).
--- Slot 575 (rw-570-hub-note-scope, review r-rprc R1 / R2): a wiki page is a person's note only when its class is 'note'
--- AND its slug is under notes/ - the notebook tree's hub, MOC and AI notes (class 'note' too) are judged like any shared
--- page; a fragment claim (pg_temp.prc_frag: a shared claim a moved synthesis filed, inside a claim it restated) is a
+-- Slot 575 (rw-570-hub-note-scope, review r-rprc R1 / R2, the operator's second ruling): a wiki page of class 'note' is a
+-- person's note when its slug is under notes/ or it is a structured note content/notebooks/<nb>/<note> - judged by its
+-- author only, so an existing AI note carrying another user's sentence is not counted; the notebook's hub and the index
+-- (class 'note' too) are judged like any shared page; a fragment claim (pg_temp.prc_frag: a shared claim a moved synthesis filed, inside a claim it restated) is a
 -- surface; and once 575 is in, a 570 re-run that put 570's own guard functions back is a FAIL (re-run 575).
 CREATE OR REPLACE FUNCTION pg_temp.prc_norm(p_text TEXT) RETURNS TEXT
 LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE

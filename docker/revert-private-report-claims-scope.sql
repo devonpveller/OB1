@@ -10,6 +10,8 @@
 --     installed; when 570 was reverted already they are not left behind;
 --   * the person-note helper (private_report_claims_person_note) and the structured-note check
 --     (private_report_claims_note_refused, R5) go.
+-- DEPLOY (RV3): put the previous workbench image back FIRST - the new image's POST /workbench/notes asks 575's
+-- private_report_claims_note_refused, which this revert drops, and fails closed (503, nothing written) without it.
 -- Counts only (NOTICE). A second run has nothing to restore. Revert ORDER: this file FIRST, then (if ever)
 -- revert-private-report-claims.sql (570's revert run alone restores this slot's batches too, the newest first, and
 -- drops the two guard functions; only the helper is then left, harmless, and this file drops it).

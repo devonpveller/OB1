@@ -315,12 +315,13 @@ try {
     $fpNew = Q $fpQ; Save 'fingerprint-575.txt' ($fpNew -replace ' ', "`n")
     $pNew = Probe 'probe-575-equiv.txt'
     Check ($fpNew -eq $fpOld) "[equiv] the fingerprint equals the earlier 575's (data, owner stores, archive rows in insert order)$(if ($fpNew -ne $fpOld) { ': ' + (Compare-Object ($fpOld -split ' ') ($fpNew -split ' ') | ForEach-Object { $_.InputObject + $_.SideIndicator }) -join '; ' })"
-    $counts = { param($m) (($m -split ' \| ') | Where-Object { $_ -match 'private report claims scope: [0-9]+ (fragment|edge)' }) -join ' | ' }
+    # (the counts; the earlier 575's NOTICE said 'hub / index / AI-note page(s)', the wording RV1 corrected)
+    $counts = { param($m) ((($m -split ' \| ') | Where-Object { $_ -match 'private report claims scope: [0-9]+ (fragment|edge)' }) -join ' | ') -replace ' / AI-note page', ' page' }
     Check ((& $counts $r.msg) -eq (& $counts $eq.msg) -and (& $counts $r.msg)) "[equiv] the NOTICE counts equal the earlier 575's"
     $pd = @($pNew.Keys | Where-Object { $_ -notlike 'write_*' -and "$($pNew[$_])" -ne "$($pOld[$_])" })
     Check ($pd.Count -eq 0) "[equiv] every state probe equals the earlier 575's$(if ($pd.Count) { ': ' + ($pd -join ', ') })"
   }
-  Check ($r.rc -eq 0 -and $r.msg -match '2 fragment claim\(s\) and 1 claim\(s\) carrying a fragment''s sentence - 2 moved to their owner''s store \(2 edge\(s\) kept for the owner, 2 link\(s\) added\), 1 withheld' -and $r.msg -match '4 edge\(s\) archived and deleted, 1 shared claim\(s\) that lost an edge archived whole, 1 job result\(s\) stripped; 2 notebook hub / index / AI-note page\(s\) withheld, 1 other page\(s\) carrying a fragment withheld') '575 moves f1 and fd to B, withholds f2, strips the job, withholds the hub, the index and the fragment page (counts only)'
+  Check ($r.rc -eq 0 -and $r.msg -match '2 fragment claim\(s\) and 1 claim\(s\) carrying a fragment''s sentence - 2 moved to their owner''s store \(2 edge\(s\) kept for the owner, 2 link\(s\) added\), 1 withheld' -and $r.msg -match '4 edge\(s\) archived and deleted, 1 shared claim\(s\) that lost an edge archived whole, 1 job result\(s\) stripped; 2 notebook hub / index page\(s\) withheld, 1 other page\(s\) carrying a fragment withheld') '575 moves f1 and fd to B, withholds f2, strips the job, withholds the hub, the index and the fragment page (counts only)'
   $green = Probe 'probe-green.txt'
   Check-Probe $green $wantGreen 'GREEN (575)'
   $gc = Psql-Lines $checkSql 'check-575.log'

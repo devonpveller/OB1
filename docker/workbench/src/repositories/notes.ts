@@ -73,7 +73,8 @@ async function resolveLinks(rawLinks: string[]): Promise<string[]> {
 // identity). It is named to the database for this ONE statement (ob.page_author, set_config local): slot 570's wiki
 // guard refuses a note only when it carries its AUTHOR's own private-report claim, never another user's - so a note's
 // save (and its presence in search) never depends on whether someone else holds a sentence. Re-syncs with no author
-// (move, trash, restore, recover, an AI note) name nobody and match nothing.
+// (move, trash, restore, recover) name nobody and match nothing; a structured / AI note (writeStructuredNote) names its
+// writer (rw-570-hub-note-scope, the operator's second ruling).
 async function syncNoteRow(rel: string, content: string, authorSub?: string | null): Promise<void> {
   try {
     const { slug, title, body, tags, rawLinks } = parseNoteRow(rel, content);

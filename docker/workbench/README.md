@@ -640,14 +640,19 @@ without `ob_app_memory`. A shared synthesis that restated a private-report claim
 `revert-private-report-claims.sql` (first, before 480 / 470 / 440 / 390).
 
 **Slot 575 narrows 570's note exemption and adds the fragment rule (rw-570-hub-note-scope; a forward slot, 570 as it ran).**
-A wiki page is a person's note only when its class is `note` AND its slug is under `notes/`: the notebook tree
-(`content/notebooks/...`: the hub, the notebooks index, the AI notes, all stored as `note`) is machine text, withheld when
-it carries any private-report claim's text, and the rows 570 skipped are withheld. A shared claim that a synthesis 570
+A wiki page of class `note` is a person's note when its slug is under `notes/` or it is a structured note
+(`content/notebooks/<nb>/<note>`, written by `POST /workbench/notes` with its writer as the author): judged by its writer's
+own claims only (A1), so an existing AI note carrying another user's sentence is kept, served and not counted. The
+notebook's hub (`content/notebooks/<nb>/<nb>`) and the notebooks index keep the shared rule: withheld when they carry any
+private-report claim's text, and the rows 570 skipped are withheld. A structured note quoting its writer's own
+private-report sentence is refused (422, nothing written). A shared claim that a synthesis 570
 moved had filed, holding a fragment of a claim that synthesis restated, moves to that claim's owner (or is withheld), with
 any shared claim carrying the fragment's sentence. 570's gap guard treats a NULL kind as a non-matching kind. The check
 and count scripts judge the same way. Check: `check-private-report-claims-scope.sql`; lab:
 `contract-test/run-private-report-claims-scope-lab.ps1` (database only); revert: `revert-private-report-claims-scope.sql`
-FIRST, then 570's. Re-run 575 after any 570 re-run.
+FIRST, then 570's. Re-run 575 after any 570 re-run. Deploy order: 575 BEFORE the new workbench image (without 575's
+`private_report_claims_note_refused` the image's `POST /workbench/notes` fails closed with 503); on a 575 revert, put the
+previous workbench image back first (the same 503 otherwise).
 
 **Existing personal data is its owner's, and private (rw-inlet-owner, plan 08 PD1, slot 440, after 430).** `init-inlet-owner.sql`
 (run with `-v owner_sub=<WORKSPACE_DEFAULT_SUB>`; the subject is recorded once in `inlet_owner`) gives every thought an

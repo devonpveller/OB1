@@ -27,8 +27,12 @@
 --   * R4 - 570's gap guard short-circuits a row whose kind is not a machine kind; a NULL kind (NULL NOT IN (...) is NULL)
 --     fell through to the claim-id match. coalesce(.., '') makes a NULL branch_kind / steer_kind / event type exactly a
 --     non-matching kind (the columns are NOT NULL today; a legacy row or a dropped constraint is the case).
--- check-private-report-claims.sql and count-private-report-claim-reuse.sql judge the same: a person's note is notes/
--- only, and the same fragment rule (pg_temp.prc_frag). check-private-report-claims-scope.sql checks this slot.
+-- check-private-report-claims.sql and count-private-report-claim-reuse.sql judge the same: a person's note is notes/...
+-- or a structured note content/notebooks/<nb>/<note> (judged by its writer's own claims only; an existing AI note that
+-- carries another user's sentence is kept, served and not counted), the hub and the index keep the shared rule, and the
+-- same fragment rule (pg_temp.prc_frag). check-private-report-claims-scope.sql checks this slot.
+-- DEPLOY ORDER (RV3): apply 575 BEFORE the new workbench image - without 575's private_report_claims_note_refused the
+-- new image's POST /workbench/notes fails closed (503, nothing written); the same holds after a 575 revert.
 -- The archive is 570's (public.private_report_claims_archive, readable by no app role), same action codes; each batch of
 -- this slot carries one 'z' row (tbl 'slot 575'), so revert-private-report-claims-scope.sql restores exactly this slot's
 -- batches - and 570's own revert, run alone, restores them too (newest first, the codes it knows).
@@ -139,9 +143,11 @@ LOCK TABLE public.sources, public.threads, public.research_steers, public.resear
     IN SHARE MODE;
 
 -- ── R1: who is a person's note ─────────────────────────────────────────────────────────────────────────────────────
--- the workbench's note tree only (repositories/notes.ts notesRel: notes/<path>); every other row, whatever its class, is
--- machine text for the guard. check-private-report-claims.sql, count-private-report-claim-reuse.sql and
--- check-private-report-claims-scope.sql repeat this rule verbatim.
+-- the workbench's note tree (repositories/notes.ts notesRel: notes/<path>) and, since the operator's second ruling
+-- (2026-11-24), a structured note content/notebooks/<nb>/<note> (writeStructuredNote names its writer as the row's
+-- author): judged by the author's own claims only. The notebook's hub content/notebooks/<nb>/<nb> and the index
+-- content/notebooks/index, and every other row, are shared text for the guard. check-private-report-claims.sql,
+-- count-private-report-claim-reuse.sql and check-private-report-claims-scope.sql repeat this rule verbatim.
 CREATE OR REPLACE FUNCTION public.private_report_claims_person_note(p_slug TEXT, p_class TEXT) RETURNS BOOLEAN
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
 SET search_path = pg_catalog
@@ -160,11 +166,12 @@ BEGIN
     END LOOP;
 END $$;
 
--- the wiki guard, 570's with the person-note rule above (slot 575). A machine-written page (a compile, the viewer's
--- reconcile, the notebook synthesis's hub and MOC, an AI note) carrying ANY private-report claim's text is withheld
--- (marked, as 430's writer counts it): no user chose that text. A person's NOTE (notes/...) follows A1: refused with 430's
--- one message ONLY for its AUTHOR's own private claims (ob.page_author, set by the workbench's note write); a note
--- written with no author named matches nothing.
+-- the wiki guard, 570's with the person-note rule above (slot 575). A machine-written page (a compile, the notebook
+-- synthesis's hub and index) carrying ANY private-report claim's text is withheld (marked, as 430's writer counts it): no
+-- user chose that text. A person's NOTE (notes/...) and a structured note (content/notebooks/<nb>/<note>) follow A1:
+-- refused with 430's one message ONLY for its AUTHOR's own private claims (ob.page_author, set by the workbench's write);
+-- a write with no author named (a move, a restore, the viewer's reconcile) matches nothing, so an existing AI note that
+-- carries another user's sentence is kept and served.
 CREATE OR REPLACE FUNCTION public.trg_private_report_claims_wiki_guard()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -620,7 +627,7 @@ BEGIN
         VALUES (v_batch, 'slot 575', 'z', '575', jsonb_build_object('slot', 575));
         RAISE NOTICE 'private report claims scope: % fragment claim(s) and % claim(s) carrying a fragment''s sentence - % moved to their owner''s store (% edge(s) kept for the owner, % link(s) added), % withheld',
             n_frag, n_fdup, n_own, n_kept_e, n_link, n_held;
-        RAISE NOTICE 'private report claims scope: % edge(s) archived and deleted, % shared claim(s) that lost an edge archived whole, % job result(s) stripped; % notebook hub / index / AI-note page(s) withheld, % other page(s) carrying a fragment withheld',
+        RAISE NOTICE 'private report claims scope: % edge(s) archived and deleted, % shared claim(s) that lost an edge archived whole, % job result(s) stripped; % notebook hub / index page(s) withheld, % other page(s) carrying a fragment withheld',
             n_edges, n_touched, n_jobs, n_hub, n_fpages;
     END IF;
 END $$;

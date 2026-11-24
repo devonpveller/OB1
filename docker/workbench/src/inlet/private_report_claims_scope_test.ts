@@ -104,7 +104,7 @@ Deno.test("the check, count and scope scripts judge as slot 575 does: the same n
     assertEquals(tempFn(t, "prc_withheld"), tempFn(chk, "prc_withheld"), `${name}: the withheld texts are the check script's`);
   }
   const rule = "(coalesce(w.page_class, '') = 'note' AND (left(coalesce(w.slug, ''), 6) = 'notes/' OR (left(coalesce(w.slug, ''), 18) = 'content/notebooks/' AND split_part(w.slug, '/', 4) <> '' AND NOT (split_part(w.slug, '/', 5) = '' AND split_part(w.slug, '/', 4) = split_part(w.slug, '/', 3)))))";
-  for (const [name, t] of [["check", chk], ["count", cnt], ["scope", scp]] as const) assert(t.includes(rule), `${name}: a person's note is class note under notes/`);
+  for (const [name, t] of [["check", chk], ["count", cnt], ["scope", scp]] as const) assert(t.includes(rule), `${name}: a person's note is class note under notes/, or a structured note content/notebooks/<nb>/<note> (not the hub or index)`);
   assert(!chk.includes("w.page_class IS DISTINCT FROM 'note'"), "the check no longer skips every note-class page");
   // the fragment rule reads 570's archive as 575 does: the synthesis rows (s), the claim's synthesis_id rows (d), k / x
   const frag = tempFn(chk, "prc_frag");

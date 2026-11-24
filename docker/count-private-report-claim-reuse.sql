@@ -16,9 +16,9 @@
 --                         about the private sentence);
 --   threads             - (round 2) a thread whose name or description carries one (minted / refreshed from a report);
 --   other shared claims - (round 2) a shared claim, not a private report's own, carrying one (a synthesis filed it).
---   notebook-tree pages - (slot 575, review r-rprc R1) a wiki page of class 'note' that is not a person's note (its slug
---                         is not under notes/: a notebook hub, the notebooks index, an AI note) carrying one; 570 left
---                         them out, 575 withholds them;
+--   notebook-tree pages - (slot 575, review r-rprc R1) a wiki page of class 'note' that is not a person's or structured
+--                         note (a notebook hub, the notebooks index) carrying one; 570 left them out, 575 withholds them.
+--                         A structured note content/notebooks/<nb>/<note> is judged by its writer only and not counted;
 --   fragment claims     - (slot 575, R2) a shared claim a synthesis 570 moved had filed, holding a fragment of a claim that
 --                         synthesis restated, and a shared claim carrying such a fragment's sentence; 575 moves them.
 -- A sentence counts after 570's normalisation (case, whitespace, citation markers, emphasis); sentences under 24
