@@ -481,7 +481,8 @@ try {
     Check ($r5['red_b_split_own'] -eq 'status=201 file=1 row=1') "R5 RED (the tip): B's own sentence split across title and content is SAVED: $($r5['red_b_split_own'])"
     Check ($r5['green_b_split_own'] -eq 'status=422 file=0 row=0' -and $r5['green_b_split_own_body'] -match [regex]::Escape($msg)) "R5 GREEN: B's own sentence split across title and content is REFUSED (422, no vault file, no row): $($r5['green_b_split_own'])"
     Check ($r5['red_a_split_b'] -eq 'status=201 file=1 row=1' -and $r5['green_a_split_b'] -eq 'status=201 file=1 row=1') "R5: A writing B's sentence split the same way is SAVED and served on both (red $($r5['red_a_split_b']); green $($r5['green_a_split_b']))"
-    $leak = @($r5.Keys | Where-Object { $_ -like '*_body' } | Where-Object { $r5[$_] -match 'prcb' })
+    # (a refusal body only: a saved note's body echoes its own path, which the split cases build from the writer's own title)
+    $leak = @($r5.Keys | Where-Object { $_ -like '*_body' } | Where-Object { $r5[$_] -match '"error"' -and $r5[$_] -match 'prcb' })
     Check ($leak.Count -eq 0) 'R5: no refusal body carries the claim''s text'
   }
 } catch {
