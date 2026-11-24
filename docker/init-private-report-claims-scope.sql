@@ -257,7 +257,7 @@ BEGIN
     WITH cn AS (
         SELECT DISTINCT c.id, a.ref AS sid, public.private_report_claim_norm(c.text) AS n
           FROM public.private_report_claims_archive a JOIN public.claims c ON c.id::text = a.row_data ->> 'id'
-         WHERE a.action = 'd' AND a.tbl = 'public.claims' AND a.row_data ->> '_col' = 'synthesis_id' AND a.restored_at IS NULL
+         WHERE a.action = 'd' AND a.tbl IN ('public.claims', 'claims') AND a.row_data ->> '_col' = 'synthesis_id' AND a.restored_at IS NULL
            AND a.ref IN (SELECT sid FROM _sc_s)
            AND NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id))
     SELECT cn.id, array_agg(DISTINCT sp.owner) FILTER (WHERE sp.owner IS NOT NULL) AS owners, bool_or(sp.owner IS NULL) AS nobody,

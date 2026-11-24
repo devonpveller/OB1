@@ -97,7 +97,7 @@ DECLARE
         SELECT DISTINCT cn.id, cn.n FROM (
             SELECT c.id, a.ref AS sid, pg_temp.prc_norm(c.text) AS n
               FROM public.private_report_claims_archive a JOIN public.claims c ON c.id::text = a.row_data ->> 'id'
-             WHERE a.action = 'd' AND a.tbl = 'public.claims' AND a.row_data ->> '_col' = 'synthesis_id' AND a.restored_at IS NULL
+             WHERE a.action = 'd' AND a.tbl IN ('public.claims', 'claims') AND a.row_data ->> '_col' = 'synthesis_id' AND a.restored_at IS NULL
                AND a.ref IN (SELECT sid FROM s)
                AND NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)) cn
           JOIN sp ON sp.sid = cn.sid

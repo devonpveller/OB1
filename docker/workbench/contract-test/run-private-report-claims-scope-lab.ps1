@@ -158,9 +158,10 @@ SELECT string_agg(t || '=' || h, ' ' ORDER BY t) FROM (
 ) s
 "@
 $hashQ = ($hashQ -split "`r?`n") -join ' '
-# the two guard functions 575 replaces, as installed (source + config + ACL): 570's must come back byte for byte
-$fnQ = "SELECT coalesce(string_agg(p.proname || ':' || md5(p.prosrc || '|' || coalesce(p.proconfig::text, '') || '|' || coalesce(p.proacl::text, '') || '|' || p.prosecdef::text), ' ' ORDER BY p.proname), 'none') FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('trg_private_report_claims_wiki_guard', 'trg_private_report_claims_gap_guard')"
-$RED = @{
+# the two guard functions 575 replaces, as installed (source + config + ACL): 570's must come back byte for byte. The
+# source is compared without CRs: a Windows checkout (core.autocrlf) feeds psql CRLF files, git holds LF
+$fnQ = "SELECT coalesce(string_agg(p.proname || ':' || md5(replace(p.prosrc, chr(13), '') || '|' || coalesce(p.proconfig::text, '') || '|' || coalesce(p.proacl::text, '') || '|' || p.prosecdef::text), ' ' ORDER BY p.proname), 'none') FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('trg_private_report_claims_wiki_guard', 'trg_private_report_claims_gap_guard')"
+$wantRed = @{
   page_hub = 'present'; page_index = 'present'; page_clean_hub = 'present'; page_person_note = 'present'; page_frag = 'present'
   claim_b1 = 'owner'; claim_m = 'withheld'; claim_f1 = 'shared'; claim_f2 = 'shared'; claim_fd = 'shared'; claim_fc = 'shared'
   job_names_f1 = '1'; job_names_fc = '1'; job_claims_reused = '2'; fc_edge_onto_f1 = '1'
@@ -168,7 +169,7 @@ $RED = @{
   write_note_no_author = 'saved'; write_clean_hub = 'saved'; write_entity_b1 = 'withheld'; write_entity_f1 = 'saved'; gap_branch_for_b1 = 'dropped'
   r4_job = 'rewritten'; r4_steer = 'rewritten'; r4_event = 'rewritten'
 }
-$GREEN = @{
+$wantGreen = @{
   page_hub = 'absent'; page_index = 'absent'; page_clean_hub = 'present'; page_person_note = 'present'; page_frag = 'absent'
   claim_b1 = 'owner'; claim_m = 'withheld'; claim_f1 = 'owner'; claim_f2 = 'withheld'; claim_fd = 'owner'; claim_fc = 'shared'
   job_names_f1 = '0'; job_names_fc = '1'; job_claims_reused = '1'; fc_edge_onto_f1 = '0'
@@ -250,7 +251,7 @@ try {
   $h570 = Q $hashQ; Save 'hash-570.txt' $h570
   Check ((Q $fnQ) -eq $f570) '570''s guard functions are the ones the chain''s 575 revert restored'
   $red = Probe 'probe-red.txt'
-  Check-Probe $red $RED 'RED (570 alone)'
+  Check-Probe $red $wantRed 'RED (570 alone)'
   $oc = Psql-Lines (Join-Path $oldDir 'check-private-report-claims.sql') 'check-old-570.log'
   Check ($oc -match 'check: OK' -and $oc -match "wiki pages carrying one's text=0") "RED: $OldRef's check script says OK - it misses the hub, the index and the fragments"
   $ou = Psql-Lines (Join-Path $oldDir 'count-private-report-claim-reuse.sql') 'count-old-570.log'
@@ -266,7 +267,7 @@ try {
   $r = Psql-File $init575 '575'
   Check ($r.rc -eq 0 -and $r.msg -match '2 fragment claim\(s\) and 1 claim\(s\) carrying a fragment''s sentence - 2 moved to their owner''s store \(2 edge\(s\) kept for the owner, 2 link\(s\) added\), 1 withheld' -and $r.msg -match '4 edge\(s\) archived and deleted, 1 shared claim\(s\) that lost an edge archived whole, 1 job result\(s\) stripped; 2 notebook hub / index / AI-note page\(s\) withheld, 1 other page\(s\) carrying a fragment withheld') '575 moves f1 and fd to B, withholds f2, strips the job, withholds the hub, the index and the fragment page (counts only)'
   $green = Probe 'probe-green.txt'
-  Check-Probe $green $GREEN 'GREEN (575)'
+  Check-Probe $green $wantGreen 'GREEN (575)'
   $gc = Psql-Lines $checkSql 'check-575.log'
   Check ($gc -match 'check: OK' -and $gc -match "wiki pages carrying one's text=0" -and $gc -match 'or its sentence=0' -and $gc -match 'slot 575 applied=true \(its guard functions in place=true\)') 'GREEN: the check script says OK'
   $gu = Psql-Lines $countSql 'count-575.log'
@@ -296,7 +297,7 @@ try {
   $r = Psql-File $rev575 'revert 575 again'
   Check ($r.rc -eq 0 -and $r.msg -match 'scope revert: nothing to restore') 'a second 575 revert has nothing to restore'
   $back = Probe 'probe-reverted.txt'
-  Check-Probe $back $RED 'after the 575 revert (the RED state again)'
+  Check-Probe $back $wantRed 'after the 575 revert (the RED state again)'
   # ---------------------------------------------------------------- [7] 575, revert 575, revert 570
   Write-Host '[7] 575, revert 575, revert 570 (byte-identical to the plant)'
   $r = Psql-File $init575 '575 once more'

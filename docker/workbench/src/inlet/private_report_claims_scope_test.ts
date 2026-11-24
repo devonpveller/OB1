@@ -108,13 +108,13 @@ Deno.test("the check, count and scope scripts judge as slot 575 does: the same n
   assert(!chk.includes("w.page_class IS DISTINCT FROM 'note'"), "the check no longer skips every note-class page");
   // the fragment rule reads 570's archive as 575 does: the synthesis rows (s), the claim's synthesis_id rows (d), k / x
   const frag = tempFn(chk, "prc_frag");
-  for (const s of ["a.action = 's' AND a.tbl = 'public.sources'", "a.action = 'd' AND a.tbl = 'public.claims' AND a.row_data ->> '_col' = 'synthesis_id'",
+  for (const s of ["a.action = 's' AND a.tbl = 'public.sources'", "a.action = 'd' AND a.tbl IN ('public.claims', 'claims') AND a.row_data ->> '_col' = 'synthesis_id'",
                    "a.action IN ('k', 'x')", "position(cn.n IN sp.n) > 0", "position(f.n IN pg_temp.prc_norm(c.text)) > 0"]) {
     assert(frag.includes(s), `prc_frag: ${s}`);
   }
   const fwd = await read("init-private-report-claims-scope.sql");
   if (fwd) {
-    for (const s of ["a.action = 's' AND a.tbl = 'public.sources'", "a.action = 'd' AND a.tbl = 'public.claims' AND a.row_data ->> '_col' = 'synthesis_id'",
+    for (const s of ["a.action = 's' AND a.tbl = 'public.sources'", "a.action = 'd' AND a.tbl IN ('public.claims', 'claims') AND a.row_data ->> '_col' = 'synthesis_id'",
                      "a.action IN ('k', 'x')", "position(cn.n IN sp.n) > 0", "position(f.n IN public.private_report_claim_norm(c.text)) > 0"]) {
       assert(fwd.includes(s), `575: ${s}`);
     }
