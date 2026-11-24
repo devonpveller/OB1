@@ -79,9 +79,10 @@ for (const [t, path] of TITLES) {
 }
 await go("/");
 await ev(`document.querySelector('[data-testid=card-docs] [data-testid=row-doc]').click()`); await sleep(150);
-ok((await ev(`location.pathname`)) === "/documents/documents%2Falpha-new.md", "a document row opens /documents/<its path>");
+ok((await ev(`location.pathname`)) === "/documents/d/a0000000-0000-4000-8000-0000000000a2", "a document row opens /documents/d/<its opaque id> (never its path or title)");
 ok(!!(await ev(`!!document.querySelector('[data-testid=document]') && !document.querySelector('[data-testid=not-found]')`)), "...and lands on the document screen (not No such screen)");
-await send("Page.navigate", { url: origin + "/documents/documents%2Falpha-new.md" }); await sleep(1500);
+ok(!(await ev(`[...document.querySelectorAll('a[href]')].some(a => /alpha|%2F|\\.md/i.test(a.getAttribute('href')))`)), "no link on the page names a document's path or title");
+await send("Page.navigate", { url: origin + "/documents/d/a0000000-0000-4000-8000-0000000000a2" }); await sleep(1500);
 ok(!!(await ev(`!!document.querySelector('[data-testid=document]') && !document.querySelector('[data-testid=not-found]')`)), "...also when that URL is loaded fresh");
 await go("/");
 await ev(`[...document.querySelectorAll('[data-testid=ask] a')].find(a=>a.textContent==='Start research').click()`); await sleep(150);

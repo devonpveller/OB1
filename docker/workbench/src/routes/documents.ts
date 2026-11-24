@@ -90,6 +90,8 @@ export function documentsRouter(rdeps: DocumentsDeps) {
     return c.json(out, out.listing.ok ? 201 : 207);
   }));
 
+  // an opaque id (the listing row's) to the caller's own document: the app's links carry the id, never the path
+  r.get("/resolve", wrap(async (c, who) => c.json(await docs.documentById(deps, str(c.req.query("id")), who))));
   r.get("/state", wrap(async (c, who) => c.json(await docs.documentState(deps, str(c.req.query("path")), who))));
   // the default identity's pass also repairs the documents written before P2b at the tree's root
   r.post("/reconcile", wrap(async (c, who) =>

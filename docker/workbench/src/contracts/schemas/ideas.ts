@@ -19,6 +19,7 @@ export const DocumentLink = z.strictObject({
 // D12: the listing call returns title, path, updated and outbound links - nothing else, and
 // never a body. Strict: a response carrying any other key is a contract violation (500).
 export const DocumentListing = z.strictObject({
+  id: uuid("e0000000-0000-4000-8000-0000000000e1", "the listing row's opaque id: stable while the row lives (a move, archive or restore keeps it); the app's document links carry it, never the path"),
   title: z.string(),
   path: z.string().openapi({ example: FX.documentPath }),
   updated: Iso,

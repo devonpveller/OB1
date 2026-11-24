@@ -177,7 +177,7 @@ t("C10/C11/C13: a save refreshes the listing's links; the record holds title, pa
   for (const x of l.outbound_links) assertEquals(Object.keys(x).sort(), ["id", "kind", "pin", "reference_id"], "ids, never copies");
   const c = await call("GET", `/workbench/contract/documents`);
   const d = c.json.documents.find((x: any) => x.path === path);
-  assertEquals(Object.keys(d).sort(), ["outbound_links", "path", "title", "updated"]);
+  assertEquals(Object.keys(d).sort(), ["id", "outbound_links", "path", "title", "updated"]);
   assert(!c.text.includes(sentinel));
   // the listing lives in its own table, never wiki_pages
   assert(await noPageRow(path));

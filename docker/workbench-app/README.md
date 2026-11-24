@@ -79,7 +79,7 @@ route through `lib/api.ts` only, caches nothing and writes nothing to the browse
 - `src/screens/documents/`: `Documents.tsx` (screen 2: folders with counts, + Folder, + New document, the table,
   Active / Archived / Trash, Open, Archive, Unarchive, Move to trash, Restore, Delete forever and Empty the trash
   behind the shared `shell/TypedConfirm` with the word `DELETE` and a Lost / Stays summary, the Undo toast),
-  `DocumentScreen.tsx` (the `/documents/:id` frame rwr-doc-editor fills in: active and archived documents open
+  `DocumentScreen.tsx` (the `/documents/d/:ref (an opaque id; the old /documents/<path> address is replaced by it with replaceState)` frame rwr-doc-editor fills in: active and archived documents open
   read-only, archived with Unarchive; a trashed one does not open and offers Restore; someone else's or a missing
   one is the same sentence), `docs-data.ts` (every read and write, through `lib/api.ts`).
 - Routes used: `contract/documents?limit=500`, `documents/folders`, `POST documents`, `documents/folders`,
@@ -92,7 +92,7 @@ route through `lib/api.ts` only, caches nothing and writes nothing to the browse
 
 ## The document screen (item `rwr-doc-editor`)
 
-`/documents/:id` for an active document is the writing surface: `src/screens/document-editor/` (`DocEditor`, `InThisDoc`,
+`/documents/d/:ref` for an active document is the writing surface: `src/screens/document-editor/` (`DocEditor`, `InThisDoc`,
 `SourceDrawer`, `editor-data`) on the CodeMirror editor in `src/editor/` (restored from the old workspace app, last tree
 `99cc465^`). It edits the file's body (the front matter is kept verbatim), autosaves after a pause, makes a version on Save /
 Ctrl+S / Close (the indicator `vN` counts the history, `v30+` at the route's cap), sends the file's hash with every save and

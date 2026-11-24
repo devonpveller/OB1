@@ -4,6 +4,7 @@
 // axe-core. Every check prints PASS/FAIL; exit 1 on any failure.
 // "A second tab" is the driver writing the same file straight at the stub (the same route and the same if_match rule).
 import { readFileSync } from "node:fs";
+import { uid } from "./docs-fake.mjs";
 
 const APP = process.env.APP_IP, CH = process.env.CH || "127.0.0.1";
 const origin = `http://${APP}:8080`;
@@ -62,7 +63,8 @@ async function axe(label) {
   ok(r.v.length === 0, `axe ${label}: ${r.v.length} violations (${r.pass} rules passed, ${r.cc} elements checked for contrast)` + (r.v.length ? " " + JSON.stringify(r.v) : ""));
 }
 const db = () => stub("/__db");
-const H = (p) => "/documents/" + encodeURIComponent(p);
+// a document's address is its opaque id (the fake keeps it through every move: the SEEDED path names it)
+const H = (p) => "/documents/d/" + uid(p);
 const CPU = "documents/k-a/Hardware/cpu.md";
 const SEL_TEXT = `(document.querySelector('[data-testid=doc-editor] .cm-content')?.innerText||'')`;
 const version = () => ev(`document.querySelector('[data-testid=doc-version]')?.textContent||''`);

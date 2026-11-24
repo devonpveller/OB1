@@ -42,7 +42,9 @@ export const VALUE_MAX = 4096;
 export const RECENT_KINDS = ["source", "claim", "topic", "gap", "document", "idea", "run"] as const;
 export type RecentKind = (typeof RECENT_KINDS)[number];
 
-export type DocRef = { id: string; title: string };
+// `id` is the stored path (account-side, never in an address); `ref` is the document's opaque id, in memory only: the
+// shell's slot link is built from it (/documents/d/<ref>), never from the path or the title.
+export type DocRef = { id: string; title: string; ref?: string };
 export interface RecentItem {
   kind: RecentKind;
   id: string;
@@ -203,21 +205,26 @@ export const saveRecent = (items: RecentItem[] | null, version: number) => {
 // Only a 404 / 410 (or listed:false / trashed:true) says the document is gone. A 401 (signed out), 429 (rate
 // limited), any other 4xx or 5xx, or no network says nothing about the document: it is thrown, so the caller
 // keeps what it had and reports the failure instead of showing "no document locked".
-export async function isLiveDocument(path: string): Promise<boolean> {
+export async function liveDocument(path: string): Promise<{ live: boolean; ref?: string }> {
   try {
-    const { data } = await api<{ listed?: boolean; trashed?: boolean }>("GET", `/workbench/documents/state?path=${encodeURIComponent(path)}`);
-    return data.listed === true && data.trashed !== true;
+    const { data } = await api<{ id?: unknown; listed?: boolean; trashed?: boolean }>("GET", `/workbench/documents/state?path=${encodeURIComponent(path)}`);
+    const live = data.listed === true && data.trashed !== true;
+    return live && typeof data.id === "string" && data.id !== "" ? { live, ref: data.id } : { live };
   } catch (e) {
-    if (e instanceof ApiError && (e.status === 404 || e.status === 410)) return false;
+    if (e instanceof ApiError && (e.status === 404 || e.status === 410)) return { live: false };
     throw e;
   }
+}
+export async function isLiveDocument(path: string): Promise<boolean> {
+  return (await liveDocument(path)).live;
 }
 
 const baseTitle = (path: string) => (path.split("/").pop() ?? path).replace(/\.md$/i, "").replace(/[-_]+/g, " ").trim() || path;
 // The shell's DocRef for a stored document id, or null when it is not a live document. The title is read from the
 // document (its front matter) for display and is never stored; if it cannot be read the file name stands in.
 export async function resolveDocument(id: string): Promise<DocRef | null> {
-  if (!(await isLiveDocument(id))) return null;
+  const lv = await liveDocument(id);
+  if (!lv.live) return null;
   let title = baseTitle(id);
   try {
     const { data } = await api<{ content?: string }>("GET", `/workbench/documents/file?path=${encodeURIComponent(id)}`);
@@ -226,7 +233,7 @@ export async function resolveDocument(id: string): Promise<DocRef | null> {
       try { const t = JSON.parse(m[1]); if (typeof t === "string" && t.trim()) title = t.trim().slice(0, 200); } catch { /* keep the file name */ }
     }
   } catch { /* the file name stands in */ }
-  return { id, title };
+  return lv.ref ? { id, title, ref: lv.ref } : { id, title };
 }
 
 // ── the shell seam: the in-memory copy of this person's state ──

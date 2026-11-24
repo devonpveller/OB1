@@ -7,12 +7,12 @@ import type { ComponentType } from "react";
 import type { Route } from "./lib/router";
 import { Home } from "./screens/home/Home";
 import { Documents } from "./screens/documents/Documents";
-import { DocumentScreen } from "./screens/documents/DocumentScreen";
+import { DocumentScreen, LegacyDocument } from "./screens/documents/DocumentScreen";
 import { StartResearch } from "./screens/research-start/StartResearch";
 
 export type Group = "everywhere" | "housekeeping";
-// What every screen is given. `params` holds the route's `:name` segments, decoded (so /documents/:id with
-// /documents/documents%2Fk%2Fa.md gives id = "documents/k/a.md"). `subject` is the signed-in person once the
+// What every screen is given. `params` holds the route's `:name` segments, decoded (so /documents/d/:ref with
+// /documents/d/e0000000-... gives ref = "e0000000-..."; the old /documents/:id form carries a path). `subject` is the signed-in person once the
 // shell knows it (null until then); `whoAnswered` is true once whoami has answered, with a person or without.
 export type ScreenProps = { route: Route; params: Record<string, string>; subject: string | null; whoAnswered: boolean };
 export type RouteDef = {
@@ -38,7 +38,9 @@ export const ROUTES: RouteDef[] = [
   { path: "/cleanup", label: "Cleanup", group: "housekeeping", phase: 5, will: "Sources waiting to be cleaned up.", inMenu: true },
   { path: "/settings", label: "Settings", group: "housekeeping", phase: 6, will: "Your account, privacy and preferences.", inMenu: true },
   // not in the menu
-  { path: "/documents/:id", label: "Document", phase: 1, will: "The writing surface, with its references, topics and history.", inMenu: false, screen: DocumentScreen },
+  { path: "/documents/d/:ref", label: "Document", phase: 1, will: "The writing surface, with its references, topics and history.", inMenu: false, screen: DocumentScreen },
+  // an old /documents/<path> address: resolved to the id form and replaced (no path left in history)
+  { path: "/documents/:id", label: "Document", phase: 1, will: "The writing surface, with its references, topics and history.", inMenu: false, screen: LegacyDocument },
   { path: "/research/start", label: "Start research", phase: 3, will: "Ask a question and choose how deep the run goes.", inMenu: false, screen: StartResearch },
 ];
 export const OVERVIEW_PATH = "/what-moved-where";

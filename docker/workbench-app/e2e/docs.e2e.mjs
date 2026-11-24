@@ -2,6 +2,7 @@
 // --internal lab network with the stub in docs.stub.mjs (the documents back end is docs-fake.mjs). Env: APP_IP, CH
 // (Chrome host), LAB_KEY. /axe/axe.min.js is axe-core. Every check prints PASS/FAIL; exit 1 on any failure.
 import { readFileSync } from "node:fs";
+import { uid } from "./docs-fake.mjs";
 
 const APP = process.env.APP_IP, CH = process.env.CH || "127.0.0.1";
 const origin = `http://${APP}:8080`;
@@ -49,7 +50,8 @@ async function axe(label) {
   ok(r.v.length === 0, `axe ${label}: ${r.v.length} violations (${r.pass} rules passed, ${r.cc} elements checked for contrast)` + (r.v.length ? " " + JSON.stringify(r.v) : ""));
 }
 const db = () => stub("/__db");
-const H = (p) => "/documents/" + encodeURIComponent(p);
+// a document's address is its opaque id (the fake keeps it through every move: the SEEDED path names it)
+const H = (p) => "/documents/d/" + uid(p);
 const CPU = "documents/k-a/Hardware/cpu.md";
 
 await stub("/__reset", "POST");
@@ -99,7 +101,7 @@ ok(!(await ev(`document.querySelector('main').textContent.includes('EDITED')`)),
 for (const sch of ["light", "dark"]) { await scheme(sch); await axe(`${sch} archived document`); }
 await scheme("light");
 await click("[data-testid=doc-unarchive]");
-ok(await until(`location.pathname===${JSON.stringify(H("documents/k-a/Stack/old-wiki.md"))} && document.querySelector('[data-testid=document]')?.dataset.docState==='active'`), "Unarchive: back in its folder (Stack), opened there");
+ok(await until(`location.pathname===${JSON.stringify(H("documents/k-a/.archive/Stack/old-wiki.md"))} && document.querySelector('[data-testid=document]')?.dataset.docState==='active'`), "Unarchive: back in its folder (Stack), opened there, at the same address (the id outlives the move)");
 
 // ---- 4. acceptance 3: trashed: no link, goes by itself in 28 days, its URL does not open it
 await go("/documents"); await tab("trash");
@@ -219,7 +221,28 @@ await go("/documents");
 await click("[data-testid=new-folder]"); await typeIn("[data-testid=folder-name]", "Reading"); await click("[data-testid=folder-ok]");
 ok(await until(`[...document.querySelectorAll('[data-testid=folder]')].some(b=>b.textContent==='Reading0')`), "+ Folder adds Reading (0)");
 await click("[data-testid=new-doc]"); await typeIn("[data-testid=doc-name]", "ALPHA fresh notes"); await click("[data-testid=doc-ok]");
-ok(await until(`location.pathname===${JSON.stringify(H("documents/k-a/Reading/alpha-fresh-notes.md"))} && document.querySelector('h1')?.textContent==='ALPHA fresh notes'`), "+ New document makes it in the selected folder and opens it");
+ok(await until(`/^\\/documents\\/d\\/[0-9a-f-]{36}$/.test(location.pathname) && document.querySelector('h1')?.textContent==='ALPHA fresh notes'`), "+ New document makes it in the selected folder and opens it, at its opaque id");
+
+// ---- 10b. rwr-doc-opaque-urls: no address, history entry, link or page title carries a title, a slug or the owner's folder key
+const LEAK = "/k-a|alpha|upgrading|cpu|gateway|hardware|stack|draft|fresh|%2F|\\.md/i";
+const leaksNow = () => ev(`(()=>{const L=${LEAK}; const out=[]; const t=(w,v)=>{ if(v && L.test(decodeURIComponent(v))) out.push(w+': '+v); };
+  t('location', location.pathname+location.search+location.hash); document.querySelectorAll('a[href]').forEach(a=>t('href', a.getAttribute('href'))); t('document.title', document.title); return JSON.stringify(out); })()`);
+await setMode("alice");
+await go("/documents");
+ok(await leaksNow() === "[]", `the Documents list: no link names a title, a slug or the owner's key ${await leaksNow()}`);
+await inRow("ALPHA Upgrading the CPU", "doc-title");
+ok(await until(`location.pathname===${JSON.stringify(H(CPU))} && !!document.querySelector('[data-testid=doc-editor] .cm-content')`) && await leaksNow() === "[]", `a title opens the writing surface at /documents/d/<id>, and neither the address nor any link nor the page title names it ${await leaksNow()}`);
+ok(await ev(`document.querySelector('[data-testid=doc-slot]').getAttribute('href')`) === H(CPU), "the Last document slot's link is the id too");
+await go("/");
+ok(await until(`document.querySelectorAll('[data-testid=row-doc]').length>=1`) && await leaksNow() === "[]", `Home's Continue writing links are ids ${await leaksNow()}`);
+// an OLD /documents/<path> address: replaced by the id form, and the browser's back button does not go to the path
+await go("/documents");
+await send("Page.navigate", { url: origin + "/documents/" + encodeURIComponent(CPU) }); await until(`location.pathname===${JSON.stringify(H(CPU))}`); await until(settled);
+ok(await ev(`location.pathname`) === H(CPU), "an old /documents/<path> address is swapped for the id form");
+await ev(`history.back()`); await sleep(500);
+ok(await ev(`location.pathname`) === "/documents", `...and Back goes to the page before it: the path was not left as a history entry (${await ev(`location.pathname`)})`);
+await ev(`history.forward()`); await sleep(500);
+ok(await ev(`location.pathname`) === H(CPU), "...and Forward goes to the id form");
 
 // ---- 11. keyboard and narrow screens
 await go("/documents");

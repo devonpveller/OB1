@@ -5,7 +5,6 @@
 // ONE body: the preview and the start are built from the same StartBody; the start adds only approved_question (the
 // exact text the preview showed), so what the person read is what the start sends, or the server refuses (409).
 import { api, ApiError } from "../../lib/api";
-import { docPathProblem } from "../../lib/state";
 import { readDocuments } from "../home/home-data";
 
 export type Depth = "quick" | "standard" | "deep";
@@ -85,7 +84,7 @@ export async function startResearch(body: StartBody, approved: string): Promise<
 }
 
 // ---- the document the dialog is for ----
-export type DocChoice = { path: string; title: string };
+export type DocChoice = { path: string; title: string; ref: string }; // ref: the opaque id (the only thing an address carries)
 const baseTitle = (path: string) => (path.split("/").pop() ?? path).replace(/\.md$/i, "").replace(/[-_]+/g, " ").trim() || path;
 
 // A document the person could research: their own, live (not in the trash or the archive). The listing is the
@@ -93,20 +92,21 @@ const baseTitle = (path: string) => (path.split("/").pop() ?? path).replace(/\.m
 const HIDDEN = /(^|\/)\.(trash|archive)\//;
 export async function readMyDocuments(): Promise<DocChoice[]> {
   const rows = await readDocuments();
-  return rows.filter((r) => r.path && !HIDDEN.test(r.path)).map((r) => ({ path: r.path, title: r.title.trim() || baseTitle(r.path) }));
+  return rows.filter((r) => r.path && !HIDDEN.test(r.path)).map((r) => ({ path: r.path, title: r.title.trim() || baseTitle(r.path), ref: r.ref }));
 }
 
-// The document named in the address (?document=<path>), if it is a path at all. Nothing is read from the address but
-// this one identifier; a malformed one is "no document".
+// The document named in the address (?document=<opaque id>), if it looks like an id at all. Nothing is read from the
+// address but this one identifier; anything else (a path, a title) is "no document": the address never carries one.
+const REF_SHAPE = /^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/;
 export function documentFromSearch(search: string): string | null {
   const v = new URLSearchParams(search).get("document");
-  if (v === null || docPathProblem(v) !== null) return null;
-  return v;
+  return v !== null && REF_SHAPE.test(v) ? v : null;
 }
 
-// "Research this" from a document: the address that opens the dialog for it.
-export const startResearchHref = (documentPath?: string | null) =>
-  documentPath ? `/research/start?document=${encodeURIComponent(documentPath)}` : "/research/start";
+// "Research this" from a document: the address that opens the dialog for it. It takes the document's opaque id (the
+// listing's), never its path.
+export const startResearchHref = (documentRef?: string | null) =>
+  documentRef && REF_SHAPE.test(documentRef) ? `/research/start?document=${encodeURIComponent(documentRef)}` : "/research/start";
 
 // plain words for the boundary's refusal codes; an unknown code is shown as it is, after a plain sentence
 const REFUSALS: Record<string, string> = {

@@ -9,7 +9,10 @@ import { parseRoute, navigate } from "../src/lib/router";
 import { setFetcher, requestLog, clearRequestLog } from "../src/lib/api";
 import { resetState, getLastDocument, setLastDocument } from "../src/lib/state";
 import { daysLeft, folderOf, goesText, linkedText, tabOf, NOT_FOUND } from "../src/screens/documents/docs-data";
-import { createFake, PEOPLE } from "../e2e/docs-fake.mjs";
+import { createFake, PEOPLE, uid } from "../e2e/docs-fake.mjs";
+
+// a document's address: its opaque id (the fake keeps the id through every move, so the SEEDED path names it)
+const dh = (seededPath: string) => "/documents/d/" + uid(seededPath);
 import { KeyedDeleteAsk, type Ask } from "../src/screens/documents/Documents";
 
 const NOW = Date.now();
@@ -98,8 +101,11 @@ describe("the route table's screen field (the shared seam later screens plug int
   it("params are the decoded `:name` segments (an encoded slash stays inside its segment)", () => {
     const r = parseRoute("/documents/documents%2Fk-a%2FStack%2Fa%20b.md");
     const def = matchRoute(r.path) as RouteDef;
-    expect(def.path).toBe("/documents/:id");
+    expect(def.path).toBe("/documents/:id"); // the old address form: resolved and replaced by the id form
     expect(routeParams(def, r)).toEqual({ id: "documents/k-a/Stack/a b.md" });
+    const o = parseRoute("/documents/d/e0000000-0000-4000-8000-0000000000e1");
+    expect((matchRoute(o.path) as RouteDef).path).toBe("/documents/d/:ref");
+    expect(routeParams(matchRoute(o.path) as RouteDef, o)).toEqual({ ref: "e0000000-0000-4000-8000-0000000000e1" });
     expect(routeParams(matchRoute("/documents") as RouteDef, parseRoute("/documents"))).toEqual({});
   });
 });
@@ -146,7 +152,7 @@ describe("the list: folders with counts, the table, the tabs", () => {
     expect(screen.getByTestId("doc-folder").textContent).toMatch(/In the folder: Reading\./);
     fireEvent.change(screen.getByTestId("doc-name"), { target: { value: "ALPHA fresh notes" } });
     fireEvent.click(screen.getByTestId("doc-ok"));
-    await waitFor(() => expect(window.location.pathname).toBe("/documents/" + encodeURIComponent("documents/k-a/Reading/alpha-fresh-notes.md")));
+    await waitFor(() => expect(window.location.pathname).toMatch(/^\/documents\/d\/[0-9a-f-]{36}$/));
     await waitFor(() => expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("ALPHA fresh notes"));
     expect(bodies.find((b) => b.method === "POST" && b.url === "/workbench/documents")?.body).toEqual({ title: "ALPHA fresh notes", folder: "Reading" });
   });
@@ -155,7 +161,7 @@ describe("the list: folders with counts, the table, the tabs", () => {
 describe("acceptance 1: clicking a title always opens the document screen", () => {
   it("open, Close, open again, then after a reload: the same title opens the document every time", async () => {
     await openDocs();
-    const href = "/documents/" + encodeURIComponent("documents/k-a/Hardware/cpu.md");
+    const href = dh("documents/k-a/Hardware/cpu.md");
     for (let i = 0; i < 3; i++) {
       const t = within(row("ALPHA Upgrading the CPU")).getByTestId("doc-title");
       expect(t.getAttribute("href")).toBe(href);
@@ -176,7 +182,7 @@ describe("acceptance 1: clicking a title always opens the document screen", () =
     await waitFor(() => expect(edText()).toMatch(/ALPHA body/));
   });
   it("an active document opens in the writing surface (rwr-doc-editor) and becomes the Last document", async () => {
-    window.history.pushState({}, "", "/documents/" + encodeURIComponent("documents/k-a/Stack/gateway.md"));
+    window.history.pushState({}, "", dh("documents/k-a/Stack/gateway.md"));
     render(<App />);
     await waitFor(() => expect(edText()).toBe("ALPHA gateway notes."));
     expect(screen.getByTestId("document").dataset.docState).toBe("active");
@@ -184,10 +190,11 @@ describe("acceptance 1: clicking a title always opens the document screen", () =
     await waitFor(() => expect(settings.get("ui.last_document")?.value).toBe("documents/k-a/Stack/gateway.md"));
   });
   it("the Last document slot follows a document that is archived, so its title still opens it", async () => {
-    setLastDocument({ id: "documents/k-a/Stack/gateway.md", title: "ALPHA One gateway" });
+    setLastDocument({ id: "documents/k-a/Stack/gateway.md", title: "ALPHA One gateway", ref: uid("documents/k-a/Stack/gateway.md") });
     await openDocs();
     fireEvent.click(within(row("ALPHA One gateway")).getByTestId("act-archive"));
     await waitFor(() => expect(getLastDocument()?.id).toBe("documents/k-a/.archive/Stack/gateway.md"));
+    expect(screen.getByTestId("doc-slot").getAttribute("href")).toBe(dh("documents/k-a/Stack/gateway.md")); // the id outlives the move
     fireEvent.click(screen.getByTestId("doc-slot"));
     await waitFor(() => expect(screen.getByTestId("document").dataset.docState).toBe("archived"));
   });
@@ -204,8 +211,8 @@ describe("acceptance 2: archived documents open read-only with an Unarchive butt
     expect(screen.getByTestId("doc-body").isContentEditable).toBe(false);
     expect(bodies.some((b) => b.method !== "GET" && /\/documents\/file/.test(b.url))).toBe(false);
     fireEvent.click(screen.getByTestId("doc-unarchive"));
-    await waitFor(() => expect(window.location.pathname).toBe("/documents/" + encodeURIComponent("documents/k-a/Stack/old-wiki.md")));
     await waitFor(() => expect(screen.getByTestId("document").dataset.docState).toBe("active"));
+    expect(window.location.pathname).toBe(dh("documents/k-a/.archive/Stack/old-wiki.md")); // the same id: the address did not change
     expect(fake.db().docs.get("documents/k-a/Stack/old-wiki.md")!.history.length).toBe(2);
   });
 });
@@ -224,7 +231,7 @@ describe("acceptance 3: trashed documents do not open until restored and say whe
     expect(goesText("", NOW)).toBe("goes by itself 30 days after it was trashed");
   });
   it("its URL does not open it: the text is never read; Restore brings it back to its folder and then it opens", async () => {
-    window.history.pushState({}, "", "/documents/" + encodeURIComponent("documents/k-a/.trash/Hardware/dup.md"));
+    window.history.pushState({}, "", dh("documents/k-a/.trash/Hardware/dup.md"));
     render(<App />);
     await waitFor(() => expect(screen.getByTestId("doc-trashed").textContent).toMatch(/opens only after you restore it; it goes by itself in 28 days/));
     expect(screen.queryByTestId("doc-body")).toBeNull();
@@ -232,7 +239,7 @@ describe("acceptance 3: trashed documents do not open until restored and say whe
     expect(screen.getByTestId("main").textContent).not.toMatch(/ALPHA trashed text/);
     fireEvent.click(screen.getByTestId("doc-restore"));
     await waitFor(() => expect(edText()).toBe("ALPHA trashed text."));
-    expect(window.location.pathname).toBe("/documents/" + encodeURIComponent("documents/k-a/Hardware/dup.md"));
+    expect(window.location.pathname).toBe(dh("documents/k-a/.trash/Hardware/dup.md"));
   });
   it("Restore from the Trash tab puts it back in Active, in its folder", async () => {
     await openDocs();
@@ -249,7 +256,7 @@ describe("a deleted document's old URL (the real server: 200 listed:false for th
     fake.db().docs.delete("documents/k-a/.trash/Hardware/dup.md"); // as Delete forever leaves it
     const st = fake.handle("alice", "GET", "/workbench/documents/state?path=" + encodeURIComponent("documents/k-a/.trash/Hardware/dup.md"));
     expect(st).toEqual({ status: 200, body: expect.objectContaining({ listed: false, trashed: true }) });
-    window.history.pushState({}, "", "/documents/" + encodeURIComponent("documents/k-a/.trash/Hardware/dup.md"));
+    window.history.pushState({}, "", dh("documents/k-a/.trash/Hardware/dup.md"));
     render(<App />);
     await waitFor(() => expect(screen.getByTestId("doc-gone").textContent).toBe(NOT_FOUND));
     expect(screen.queryByTestId("doc-trashed")).toBeNull();
@@ -293,7 +300,7 @@ describe("acceptance 4: Delete forever needs the typed word and shows what is lo
 });
 
 describe("r2 (review R1): a typed word never carries over to another confirmation", () => {
-  const second = () => fake.db().docs.set("documents/k-a/.trash/second.md", { owner: "u-alice", title: "ALPHA second", body: "", updated: new Date(NOW).toISOString(), links: [], history: [] });
+  const second = () => fake.db().docs.set("documents/k-a/.trash/second.md", { owner: "u-alice", title: "ALPHA second", body: "", updated: new Date(NOW).toISOString(), links: [], history: [], id: uid("x" + Math.random()) });
   // whatever the screen does when another destructive button is pressed with A's word typed (refuse it, or open a
   // fresh confirmation), the result is never an armed button and never a removal
   const notArmed = async (label: string) => {
@@ -342,7 +349,7 @@ describe("r2 (review R1): a typed word never carries over to another confirmatio
 });
 
 describe("r2 round 2 (tester F1, F2, F3): the key, synchronous guards, Undo during a confirmation", () => {
-  const doc = (path: string, title: string) => ({ title, path, updated: new Date(NOW).toISOString(), links: [], tab: "trash" as const, folder: "" });
+  const doc = (path: string, title: string) => ({ title, path, updated: new Date(NOW).toISOString(), ref: "r-" + path, links: [], tab: "trash" as const, folder: "" });
   it("F1: the confirmation is keyed by its target: switching A -> B, or A -> all, starts with an empty word", () => {
     const A: Ask = { kind: "one", doc: doc("documents/k-a/.trash/a.md", "ALPHA A") };
     const B: Ask = { kind: "one", doc: doc("documents/k-a/.trash/b.md", "ALPHA B") };
@@ -412,7 +419,7 @@ describe("r2 (review R2): a new document whose listing write failed (207, listin
 
 describe("acceptance 5: Empty the trash needs a typed word and empties only the caller's trash", () => {
   it("typed DELETE, a body of {confirm: true} only, and bob's trash is untouched", async () => {
-    fake.db().docs.set("documents/k-a/.trash/second.md", { owner: "u-alice", title: "ALPHA second", body: "", updated: new Date(NOW).toISOString(), links: [], history: [] });
+    fake.db().docs.set("documents/k-a/.trash/second.md", { owner: "u-alice", title: "ALPHA second", body: "", updated: new Date(NOW).toISOString(), links: [], history: [], id: uid("x" + Math.random()) });
     await openDocs();
     await tab("trash");
     expect(screen.queryByTestId("empty-trash")).toBeTruthy();
