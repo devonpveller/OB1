@@ -287,6 +287,13 @@ try {
   }
   # ---------------------------------------------------------------- [4] back to the 390 model, plant, hash
   Write-Host '[4] revert the chain''s 570 (the 390 model), plant, hash'
+  # rw-570-hub-note-scope: slot 575 sits on 570 in the chain; its revert goes first (the documented revert order), so this
+  # lab tests 570 alone (run-private-report-claims-scope-lab.ps1 tests 575)
+  $rvScope = Join-Path $dockerDir 'revert-private-report-claims-scope.sql'
+  if (Test-Path $rvScope) {
+    $rv575 = Psql-File $rvScope 'revert the chain''s 575'
+    Check ($rv575.rc -eq 0) "the chain's slot 575 is reverted first (exit $($rv575.rc))"
+  }
   $rv0 = Psql-File (Join-Path $dockerDir 'revert-private-report-claims.sql') 'revert the chain''s 570'
   Check ($rv0.rc -eq 0 -and $rv0.msg -match 'foreign key restored') 'the revert puts the link''s foreign key back (the 390 model)'
   $c0 = Check-Script; Save 'check-before-plant.log' $c0

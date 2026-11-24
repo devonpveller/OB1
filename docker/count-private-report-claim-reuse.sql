@@ -1,5 +1,5 @@
 -- count-private-report-claim-reuse.sql - rw-private-report-claims round 2, the OPERATOR DECISION P2 (tester F6).
--- READ-ONLY (it creates one pg_temp helper, gone with the session). Counts only: never a claim's text, id or title.
+-- READ-ONLY (it creates three pg_temp helpers, gone with the session). Counts only: never a claim's text, id or title.
 --   psql -X -A -t -q -f count-private-report-claim-reuse.sql
 -- Works before slot 570 (the claims are still in public.claims) and after it (in the owner's store).
 -- The question: how many SHARED outputs carry the text of a claim drawn from a PRIVATE report (a "generated series" in
@@ -16,6 +16,11 @@
 --                         about the private sentence);
 --   threads             - (round 2) a thread whose name or description carries one (minted / refreshed from a report);
 --   other shared claims - (round 2) a shared claim, not a private report's own, carrying one (a synthesis filed it).
+--   notebook-tree pages - (slot 575, review r-rprc R1) a wiki page of class 'note' that is not a person's note (its slug
+--                         is not under notes/: a notebook hub, the notebooks index, an AI note) carrying one; 570 left
+--                         them out, 575 withholds them;
+--   fragment claims     - (slot 575, R2) a shared claim a synthesis 570 moved had filed, holding a fragment of a claim that
+--                         synthesis restated, and a shared claim carrying such a fragment's sentence; 575 moves them.
 -- A sentence counts after 570's normalisation (case, whitespace, citation markers, emphasis); sentences under 24
 -- characters are not matched.
 CREATE OR REPLACE FUNCTION pg_temp.prc_norm(p_text TEXT) RETURNS TEXT
@@ -61,6 +66,71 @@ BEGIN
     RETURN regexp_replace(normalize(t, NFKD), '[^[:alpha:]]+', '', 'g');
 END;
 $$;
+-- the texts slot 570 withheld (no single owner): in its archive only, which may not exist yet
+CREATE OR REPLACE FUNCTION pg_temp.prc_withheld() RETURNS TABLE (text TEXT)
+LANGUAGE plpgsql STABLE
+AS $$
+BEGIN
+    IF to_regclass('public.private_report_claims_archive') IS NULL THEN RETURN; END IF;
+    RETURN QUERY EXECUTE $q$SELECT a.row_data ->> 'text' FROM public.private_report_claims_archive a
+                             WHERE a.action = 'x' AND a.restored_at IS NULL$q$;
+END;
+$$;
+-- slot 575 (R2): the FRAGMENT rule, as init-private-report-claims-scope.sql moves them - a SHARED claim a synthesis slot
+-- 570 moved had filed (570's archive: the synthesis's 's' row, the claim's 'd' row for the synthesis_id it set NULL), not
+-- a private report's own, whose skeleton (24+ letters) is inside the skeleton of a private-report claim that synthesis
+-- restated (its text carried it, or it filed it: 570's k / x row); and a shared claim carrying such a fragment's
+-- sentence. Nothing before 570 (no archive). The same text in check-private-report-claims.sql,
+-- count-private-report-claim-reuse.sql and check-private-report-claims-scope.sql.
+CREATE OR REPLACE FUNCTION pg_temp.prc_frag() RETURNS TABLE (id UUID)
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    q TEXT := $q$
+    WITH p AS (
+        SELECT x.id, x.n FROM (
+            SELECT c.id, pg_temp.prc_norm(c.text) AS n FROM public.inlet_private_claims c
+             WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+            UNION ALL
+            SELECT c.id, pg_temp.prc_norm(c.text) FROM public.claims c
+             WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+            UNION ALL
+            SELECT a.ref::uuid, pg_temp.prc_norm(a.row_data ->> 'text') FROM public.private_report_claims_archive a
+             WHERE a.action = 'x' AND a.restored_at IS NULL) x
+         WHERE length(x.n) >= 24),
+    s AS (
+        SELECT DISTINCT ON (a.ref) a.ref AS sid,
+               pg_temp.prc_norm(coalesce(a.row_data ->> 'title', '') || ' ' || coalesce(a.row_data ->> 'content', '')) AS n
+          FROM public.private_report_claims_archive a
+         WHERE a.action = 's' AND a.tbl = 'public.sources' AND a.restored_at IS NULL
+         ORDER BY a.ref, a.id DESC),
+    sp AS (
+        SELECT s.sid, p.n FROM s JOIN p ON position(p.n IN s.n) > 0
+        UNION
+        SELECT a.row_data ->> 'synthesis_id', p.n FROM public.private_report_claims_archive a JOIN p ON p.id::text = a.ref
+         WHERE a.action IN ('k', 'x') AND a.restored_at IS NULL AND a.row_data ->> 'synthesis_id' IN (SELECT sid FROM s)),
+    f AS (
+        SELECT DISTINCT cn.id, cn.n FROM (
+            SELECT c.id, a.ref AS sid, pg_temp.prc_norm(c.text) AS n
+              FROM public.private_report_claims_archive a JOIN public.claims c ON c.id::text = a.row_data ->> 'id'
+             WHERE a.action = 'd' AND a.tbl = 'public.claims' AND a.row_data ->> '_col' = 'synthesis_id' AND a.restored_at IS NULL
+               AND a.ref IN (SELECT sid FROM s)
+               AND NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)) cn
+          JOIN sp ON sp.sid = cn.sid
+         WHERE length(cn.n) >= 24 AND position(cn.n IN sp.n) > 0)
+    $q$;
+BEGIN
+    IF to_regclass('public.private_report_claims_archive') IS NULL THEN RETURN; END IF;
+    RETURN QUERY EXECUTE q || ' SELECT f.id FROM f';
+    IF NOT FOUND THEN RETURN; END IF;
+    -- a shared claim carrying a fragment's sentence (only when there is a fragment: this reads every shared claim)
+    RETURN QUERY EXECUTE q || $d$
+    SELECT c.id FROM public.claims c
+     WHERE c.id NOT IN (SELECT f.id FROM f)
+       AND NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+       AND EXISTS (SELECT 1 FROM f WHERE position(f.n IN pg_temp.prc_norm(c.text)) > 0)$d$;
+END;
+$$;
 WITH
 linked AS (SELECT DISTINCT pc.claim_id AS id FROM public.research_private_report_claims pc),
 mixed AS (SELECT c.id FROM public.claims c JOIN linked l ON l.id = c.id WHERE c.synthesis_id IS NOT NULL),
@@ -100,6 +170,14 @@ curator AS (
 dup_claims AS (
     SELECT DISTINCT c.id FROM public.claims c, texts t
      WHERE c.id NOT IN (SELECT id FROM linked) AND position(t.n IN pg_temp.prc_norm(c.text)) > 0),
+-- slot 575 (R1): the class-'note' pages that are not a person's note, against every private-report claim and every
+-- withheld one (570's page predicate)
+note_pages AS (
+    SELECT DISTINCT w.slug FROM public.wiki_pages w,
+           (SELECT n FROM texts UNION SELECT pg_temp.prc_norm(x.text) FROM pg_temp.prc_withheld() x WHERE length(pg_temp.prc_norm(x.text)) >= 24) t
+     WHERE coalesce(w.page_class, '') = 'note' AND left(coalesce(w.slug, ''), 6) <> 'notes/'
+       AND position(t.n IN pg_temp.prc_norm(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, ''))) > 0),
+frag AS (SELECT DISTINCT f.id FROM pg_temp.prc_frag() f),
 claims_reused AS (
     SELECT DISTINCT t.n FROM texts t
      WHERE EXISTS (SELECT 1 FROM syn s JOIN public.sources x ON x.id = s.id WHERE position(t.n IN pg_temp.prc_norm(coalesce(x.title, '') || ' ' || coalesce(x.content, ''))) > 0)
@@ -115,4 +193,6 @@ SELECT line FROM (
     UNION ALL SELECT 8, 'reuse: other shared claims carrying one (another thread, or a superseded synthesis)=' || (SELECT count(*) FROM dup_claims)
     UNION ALL SELECT 9, 'reuse: shared sources whose notebook label carries one=' || (SELECT count(*) FROM notebooks)
     UNION ALL SELECT 10, 'reuse: job curator answers naming a thread by one=' || (SELECT count(*) FROM curator)
+    UNION ALL SELECT 11, 'reuse: notebook hub / index / AI-note pages (class note, not under notes/) carrying one=' || (SELECT count(*) FROM note_pages)
+    UNION ALL SELECT 12, 'reuse: shared claims holding a fragment of one (filed by a moved synthesis) or its sentence=' || (SELECT count(*) FROM frag)
 ) x ORDER BY o;

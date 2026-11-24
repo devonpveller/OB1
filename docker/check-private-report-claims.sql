@@ -1,5 +1,5 @@
 -- check-private-report-claims.sql - rw-private-report-claims (slot 570): is any private-report claim still on a
--- shared surface? Read-only on the data (it creates two pg_temp helpers, gone with the session); prints counts and
+-- shared surface? Read-only on the data (it creates three pg_temp helpers, gone with the session); prints counts and
 -- names only, never a claim's text or id.
 --   psql -X -A -t -q -f check-private-report-claims.sql
 -- Lines: "check: <what>=<count>" for each surface, then "check: OK" or "check: FAIL". A FAIL names the surface.
@@ -16,6 +16,10 @@
 -- every other (it moves too); the gap work counted is MACHINE rows only (a human steer, its branch and event are never
 -- rewritten, F2); P2 - a SHARED synthesis or a SHARED job report carrying a private-report claim's sentence is a surface;
 -- the derived-question guard sits on research_handbacks (A1).
+-- Slot 575 (rw-570-hub-note-scope, review r-rprc R1 / R2): a wiki page is a person's note only when its class is 'note'
+-- AND its slug is under notes/ - the notebook tree's hub, MOC and AI notes (class 'note' too) are judged like any shared
+-- page; a fragment claim (pg_temp.prc_frag: a shared claim a moved synthesis filed, inside a claim it restated) is a
+-- surface; and once 575 is in, a 570 re-run that put 570's own guard functions back is a FAIL (re-run 575).
 CREATE OR REPLACE FUNCTION pg_temp.prc_norm(p_text TEXT) RETURNS TEXT
 LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
 SET search_path = pg_catalog
@@ -69,6 +73,61 @@ BEGIN
                              WHERE a.action = 'x' AND a.restored_at IS NULL$q$;
 END;
 $$;
+-- slot 575 (R2): the FRAGMENT rule, as init-private-report-claims-scope.sql moves them - a SHARED claim a synthesis slot
+-- 570 moved had filed (570's archive: the synthesis's 's' row, the claim's 'd' row for the synthesis_id it set NULL), not
+-- a private report's own, whose skeleton (24+ letters) is inside the skeleton of a private-report claim that synthesis
+-- restated (its text carried it, or it filed it: 570's k / x row); and a shared claim carrying such a fragment's
+-- sentence. Nothing before 570 (no archive). The same text in check-private-report-claims.sql,
+-- count-private-report-claim-reuse.sql and check-private-report-claims-scope.sql.
+CREATE OR REPLACE FUNCTION pg_temp.prc_frag() RETURNS TABLE (id UUID)
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    q TEXT := $q$
+    WITH p AS (
+        SELECT x.id, x.n FROM (
+            SELECT c.id, pg_temp.prc_norm(c.text) AS n FROM public.inlet_private_claims c
+             WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+            UNION ALL
+            SELECT c.id, pg_temp.prc_norm(c.text) FROM public.claims c
+             WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+            UNION ALL
+            SELECT a.ref::uuid, pg_temp.prc_norm(a.row_data ->> 'text') FROM public.private_report_claims_archive a
+             WHERE a.action = 'x' AND a.restored_at IS NULL) x
+         WHERE length(x.n) >= 24),
+    s AS (
+        SELECT DISTINCT ON (a.ref) a.ref AS sid,
+               pg_temp.prc_norm(coalesce(a.row_data ->> 'title', '') || ' ' || coalesce(a.row_data ->> 'content', '')) AS n
+          FROM public.private_report_claims_archive a
+         WHERE a.action = 's' AND a.tbl = 'public.sources' AND a.restored_at IS NULL
+         ORDER BY a.ref, a.id DESC),
+    sp AS (
+        SELECT s.sid, p.n FROM s JOIN p ON position(p.n IN s.n) > 0
+        UNION
+        SELECT a.row_data ->> 'synthesis_id', p.n FROM public.private_report_claims_archive a JOIN p ON p.id::text = a.ref
+         WHERE a.action IN ('k', 'x') AND a.restored_at IS NULL AND a.row_data ->> 'synthesis_id' IN (SELECT sid FROM s)),
+    f AS (
+        SELECT DISTINCT cn.id, cn.n FROM (
+            SELECT c.id, a.ref AS sid, pg_temp.prc_norm(c.text) AS n
+              FROM public.private_report_claims_archive a JOIN public.claims c ON c.id::text = a.row_data ->> 'id'
+             WHERE a.action = 'd' AND a.tbl = 'public.claims' AND a.row_data ->> '_col' = 'synthesis_id' AND a.restored_at IS NULL
+               AND a.ref IN (SELECT sid FROM s)
+               AND NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)) cn
+          JOIN sp ON sp.sid = cn.sid
+         WHERE length(cn.n) >= 24 AND position(cn.n IN sp.n) > 0)
+    $q$;
+BEGIN
+    IF to_regclass('public.private_report_claims_archive') IS NULL THEN RETURN; END IF;
+    RETURN QUERY EXECUTE q || ' SELECT f.id FROM f';
+    IF NOT FOUND THEN RETURN; END IF;
+    -- a shared claim carrying a fragment's sentence (only when there is a fragment: this reads every shared claim)
+    RETURN QUERY EXECUTE q || $d$
+    SELECT c.id FROM public.claims c
+     WHERE c.id NOT IN (SELECT f.id FROM f)
+       AND NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+       AND EXISTS (SELECT 1 FROM f WHERE position(f.n IN pg_temp.prc_norm(c.text)) > 0)$d$;
+END;
+$$;
 WITH
 slot AS (SELECT to_regclass('public.private_report_claims_archive') IS NOT NULL AS applied),
 -- every claim a private report links, with its single report owner (NULL: none, or several)
@@ -103,8 +162,9 @@ jobs AS (
        AND (p.owner IS NULL OR (SELECT o.owner_sub FROM public.research_job_report_owner(j.id) o LIMIT 1) IS DISTINCT FROM p.owner)),
 page_texts AS (SELECT n FROM texts UNION SELECT pg_temp.prc_norm(w.text) FROM pg_temp.prc_withheld() w WHERE length(pg_temp.prc_norm(w.text)) >= 24),
 pages AS (
-    SELECT DISTINCT w.slug FROM public.wiki_pages w, page_texts t
-     WHERE w.page_class IS DISTINCT FROM 'note'   -- A1: a person's note is judged by its author only (the guard)
+    SELECT DISTINCT w.slug, w.page_class FROM public.wiki_pages w, page_texts t
+     -- A1: a person's note (notes/..., slot 575's rule) is judged by its author only (the guard)
+     WHERE NOT (coalesce(w.page_class, '') = 'note' AND left(coalesce(w.slug, ''), 6) = 'notes/')
        AND position(t.n IN pg_temp.prc_norm(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, ''))) > 0),
 -- the gap work of a tree that is not the claim owner's: a branch's question, a gap / inter-hub steer, a gap / inter-hub
 -- / branch / topic event, the root's tree report
@@ -155,6 +215,13 @@ p2_curator AS (
 p2_claims AS (
     SELECT DISTINCT c.id FROM public.claims c, p2_texts t
      WHERE c.id NOT IN (SELECT id FROM linked) AND position(t.n IN pg_temp.prc_norm(c.text)) > 0),
+-- slot 575 (R2): the fragment claims and the shared claims carrying a fragment's sentence
+frag AS (SELECT DISTINCT f.id FROM pg_temp.prc_frag() f),
+-- slot 575 in place: its helper exists, and the two guard functions are its own (a 570 re-run puts 570's back)
+scope AS (
+    SELECT to_regprocedure('public.private_report_claims_person_note(text,text)') IS NOT NULL AS applied,
+           coalesce((SELECT p.prosrc LIKE '%private_report_claims_person_note(%' FROM pg_proc p WHERE p.oid = to_regprocedure('public.trg_private_report_claims_wiki_guard()')), false)
+           AND coalesce((SELECT p.prosrc LIKE '%coalesce(NEW.branch_kind, '''')%' FROM pg_proc p WHERE p.oid = to_regprocedure('public.trg_private_report_claims_gap_guard()')), false) AS in_place),
 corr AS (
     SELECT sc.id FROM public.source_corroborations sc
      WHERE sc.claim_text NOT LIKE 'private-text:%'
@@ -194,6 +261,10 @@ counts AS (
            (SELECT count(*) FROM wrong_owner) AS wrong_owner,
            (SELECT count(*) FROM jobs) AS job_results,
            (SELECT count(*) FROM pages) AS wiki_pages,
+           (SELECT count(*) FROM pages WHERE page_class = 'note') AS note_class_pages,
+           (SELECT count(*) FROM frag) AS frag_claims,
+           (SELECT applied FROM scope) AS scope_applied,
+           (SELECT in_place FROM scope) AS scope_in_place,
            (SELECT count(*) FROM gap_rows) AS gap_rows,
            (SELECT count(*) FROM corr) AS corr_lines,
            (SELECT count(*) FROM p2_syn) AS p2_syn,
@@ -218,6 +289,8 @@ SELECT line FROM (
     UNION ALL SELECT 5, 'check: in a store not their report owner''s=' || wrong_owner FROM counts
     UNION ALL SELECT 6, 'check: job results naming one for someone else=' || job_results FROM counts
     UNION ALL SELECT 7, 'check: wiki pages carrying one''s text=' || wiki_pages FROM counts
+    UNION ALL SELECT 7, 'check: of those, notebook hub / index / AI-note pages (class note, not under notes/)=' || note_class_pages FROM counts
+    UNION ALL SELECT 7, 'check: shared claims holding a fragment of one (filed by a moved synthesis) or its sentence=' || frag_claims FROM counts
     UNION ALL SELECT 7, 'check: gap-work rows of a shared tree carrying one''s text=' || gap_rows FROM counts
     UNION ALL SELECT 7, 'check: corroboration lines of a private report''s run in the clear=' || corr_lines FROM counts
     UNION ALL SELECT 7, 'check: shared syntheses carrying one''s text=' || p2_syn FROM counts
@@ -231,8 +304,10 @@ SELECT line FROM (
     UNION ALL SELECT 10, 'check: ob_app_memory may execute the slot''s functions=' || app_exec || ' of 3 (role present=' || (app_role > 0) || ')' FROM counts
     UNION ALL SELECT 10, 'check: functions with the caller gate=' || gated || ' of 3' FROM counts
     UNION ALL SELECT 10, 'check: stray EXECUTE grants=' || stray_grants FROM counts
+    UNION ALL SELECT 10, 'check: slot 575 applied=' || scope_applied || ' (its guard functions in place=' || scope_in_place || CASE WHEN scope_applied AND NOT scope_in_place THEN ': a 570 re-run put 570''s back - re-run 575' ELSE '' END || ')' FROM counts
     UNION ALL SELECT 11, 'check: stray grant ' || g FROM grants
     UNION ALL SELECT 12, CASE WHEN shared_linked = 0 AND shared_edges = 0 AND wrong_owner = 0 AND job_results = 0 AND wiki_pages = 0 AND gap_rows = 0
+                               AND frag_claims = 0 AND NOT (scope_applied AND NOT scope_in_place)
                                AND corr_lines = 0 AND p2_syn = 0 AND p2_jobs = 0 AND p2_threads = 0 AND p2_claims = 0 AND p2_notebooks = 0 AND p2_curator = 0
                                AND link_fk = 0 AND guards = want_guards AND app_exec = 3 AND gated = 3 AND stray_grants = 0
                                AND (SELECT applied FROM slot)
