@@ -639,6 +639,16 @@ without `ob_app_memory`. A shared synthesis that restated a private-report claim
 `count-private-report-claim-reuse.sql` counts them, read-only). Check: `check-private-report-claims.sql`; lab: `contract-test/run-private-report-claims-lab.ps1`; revert:
 `revert-private-report-claims.sql` (first, before 480 / 470 / 440 / 390).
 
+**Slot 575 narrows 570's note exemption and adds the fragment rule (rw-570-hub-note-scope; a forward slot, 570 as it ran).**
+A wiki page is a person's note only when its class is `note` AND its slug is under `notes/`: the notebook tree
+(`content/notebooks/...`: the hub, the notebooks index, the AI notes, all stored as `note`) is machine text, withheld when
+it carries any private-report claim's text, and the rows 570 skipped are withheld. A shared claim that a synthesis 570
+moved had filed, holding a fragment of a claim that synthesis restated, moves to that claim's owner (or is withheld), with
+any shared claim carrying the fragment's sentence. 570's gap guard treats a NULL kind as a non-matching kind. The check
+and count scripts judge the same way. Check: `check-private-report-claims-scope.sql`; lab:
+`contract-test/run-private-report-claims-scope-lab.ps1` (database only); revert: `revert-private-report-claims-scope.sql`
+FIRST, then 570's. Re-run 575 after any 570 re-run.
+
 **Existing personal data is its owner's, and private (rw-inlet-owner, plan 08 PD1, slot 440, after 430).** `init-inlet-owner.sql`
 (run with `-v owner_sub=<WORKSPACE_DEFAULT_SUB>`; the subject is recorded once in `inlet_owner`) gives every thought an
 owner (`thoughts.user_id`; only that column changes), moves the email-body sources (url mail.google.com) and the podcast

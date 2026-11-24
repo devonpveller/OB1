@@ -28,8 +28,16 @@ notes.post("/", async (c) => {
   if (!body?.notebook || !body?.title || body?.content == null) {
     return c.json({ error: "notebook, title, content are required" }, 400);
   }
-  const res = await repo.writeStructuredNote(body);
-  return c.json(res, 201);
+  try {
+    // round 2: the writer is the request's verified identity (never a body field) - the row's author
+    const res = await repo.writeStructuredNote({ ...body, authorSub: (await identityOf(c)).sub });
+    return c.json(res, 201);
+  } catch (e) {
+    // rw-570-hub-note-scope R5: a note quoting a private report is refused (422), nothing written; an unanswered
+    // check is a 503, nothing written
+    if (e instanceof repo.StructuredNoteRefused) return c.json({ error: e.message }, e.status);
+    throw e;
+  }
 });
 
 // ── Folder management (MUST be registered before the /:notePath wildcards below
