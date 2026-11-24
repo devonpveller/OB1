@@ -8,6 +8,7 @@ import {
   NOTE_QUOTES_PRIVATE_REPORT,
   StructuredNoteRefused,
   structuredNoteFileSlug,
+  structuredNoteViews,
 } from "./structured-note-check.ts";
 
 const row = { slug: "content/notebooks/nb/a-note", title: "A note", body: "Some text." };
@@ -41,8 +42,8 @@ Deno.test("R5: writeStructuredNote checks BEFORE the vault write and the row syn
   }
   const w = repo.slice(repo.indexOf("export async function writeStructuredNote("));
   const fnBody = w.slice(0, w.indexOf("\n}\n"));
-  const check = fnBody.indexOf("await assertStructuredNoteShareable({ slug: row.slug, title: row.title, body }, askNoteRefused(input.authorSub ?? \"\"));");
-  assert(check > 0, "the check reads the WHOLE file (frontmatter agent / chat / notebook / title and content), with the row's slug and title");
+  const check = fnBody.indexOf("await assertStructuredNoteShareable(structuredNoteViews({ slug: row.slug, title: row.title, body: row.body }, body), askNoteRefused(input.authorSub ?? \"\"));");
+  assert(check > 0, "the check reads the row exactly as the guard judges it AND the whole file");
   assert(fnBody.includes("const fileSlug = structuredNoteFileSlug(nbSlug, slugifyNotebook(input.title) || \"note\");"), "the file slug never takes the hub's");
   assert(check < fnBody.indexOf("await vaultWrite(rel, body);") && check < fnBody.indexOf("await syncNoteRow(rel, body, input.authorSub);"), "before the vault file and the row");
   assert(fnBody.includes("await syncNoteRow(rel, body, input.authorSub);"), "the row names its writer (the guard judges it author-only, as the check)");
@@ -56,4 +57,31 @@ Deno.test("attempt 2: a structured note never takes its notebook's hub path; dec
   assertEquals(structuredNoteFileSlug("my-notebook", "a-note"), "a-note");
   assertEquals(structuredNoteFileSlug("my-notebook", "my-notebook-note"), "my-notebook-note");
   for (const nb of ["x", "notes", "index"]) assert(structuredNoteFileSlug(nb, nb) !== nb, `never ${nb}/${nb}`);
+});
+
+// attempt 3 (tester Case 6): a stand-in for the database's own-sentence predicate - the guard's joining (slug + title,
+// then body) and a letters-only skeleton, as slot 570's normaliser compares
+const skel = (s: string) => s.toLowerCase().replace(/[^a-z]+/g, "");
+const ownOf = (own: string[]) => (slug: string, title: string, body: string) =>
+  Promise.resolve(own.some((o) => skel(`${slug} ${title} ${body}`).includes(skel(o))));
+
+Deno.test("attempt 3: the writer's own sentence split across the title and the content is refused (the row view); another user's is not", async () => {
+  const own = "The prcbx alpha result reproduced in twelve trials across two labs.";
+  const title = "The prcbx alpha result";
+  const content = "reproduced in twelve trials across two labs.";
+  const file = `---\ntitle: ${JSON.stringify(title)}\nsource: user_note\nnotebook: "nb"\ntags: [note, ai]\n---\n${content}\n`;
+  const row = { slug: "content/notebooks/nb/the-prcbx-alpha-result", title, body: `${content}\n` };
+  // the whole-file view alone misses it (the frontmatter lines sit between the title and the content)
+  assertEquals(await ownOf([own])(row.slug, row.title, file), false);
+  const views = structuredNoteViews(row, file);
+  assertEquals(views.map((v) => v.body), [row.body, file], "the row view first, then the whole file");
+  const e = await assertRejects(() => assertStructuredNoteShareable(views, ownOf([own])), StructuredNoteRefused);
+  assertEquals([e.status, e.message], [422, NOTE_QUOTES_PRIVATE_REPORT], "the writer's own split sentence: 422");
+  await assertStructuredNoteShareable(views, ownOf([])); // another user's sentence (not the writer's own): saved
+  // the whole-file view still catches a frontmatter field (F1)
+  const agentFile = `---\ntitle: "t"\nsource: user_note\nagent: ${JSON.stringify(own)}\nnotebook: "nb"\n---\nclean\n`;
+  await assertRejects(() => assertStructuredNoteShareable(structuredNoteViews({ slug: "content/notebooks/nb/t", title: "t", body: "clean\n" }, agentFile), ownOf([own])), StructuredNoteRefused);
+  // a view with no answer refuses 503
+  const e2 = await assertRejects(() => assertStructuredNoteShareable(views, () => Promise.resolve(null)), StructuredNoteRefused);
+  assertEquals(e2.status, 503);
 });

@@ -31,16 +31,29 @@ export function structuredNoteFileSlug(nbSlug: string, titleSlug: string): strin
 }
 export type AskNoteRefused = (slug: string, title: string, body: string) => Promise<boolean | null>;
 
-// Throws StructuredNoteRefused (422 when the row quotes a private report, 503 when the check gives no answer);
-// returns when the note may be written.
-export async function assertStructuredNoteShareable(row: NoteRow, ask: AskNoteRefused): Promise<void> {
-  let refused: boolean | null;
-  try {
-    refused = await ask(row.slug, row.title, row.body);
-  } catch (e) {
-    console.error("[notes] the structured-note check failed (the note is not saved):", (e as Error).message);
-    refused = null;
+// The texts the writer's-own check reads (attempt 3, tester Case 6): the ROW view - exactly the slug, title and body
+// the database's wiki guard judges for the stored row (slug || title, then body: a sentence split between the title
+// and the content is contiguous there) - AND the whole-FILE view (attempt 2, F1: the frontmatter's agent / chat /
+// notebook lines land in the shared vault file too). Refused when EITHER carries the writer's own sentence, so no row
+// the guard would refuse passes the check and the vault file is never written for one.
+export function structuredNoteViews(row: NoteRow, file: string): NoteRow[] {
+  return [row, { slug: row.slug, title: row.title, body: file }];
+}
+
+// Throws StructuredNoteRefused (422 when a view quotes the writer's own private report, 503 when the check gives no
+// answer); returns when the note may be written. One row or several views (every one must pass).
+export async function assertStructuredNoteShareable(rows: NoteRow | NoteRow[], ask: AskNoteRefused): Promise<void> {
+  let unanswered = false;
+  for (const row of Array.isArray(rows) ? rows : [rows]) {
+    let refused: boolean | null;
+    try {
+      refused = await ask(row.slug, row.title, row.body);
+    } catch (e) {
+      console.error("[notes] the structured-note check failed (the note is not saved):", (e as Error).message);
+      refused = null;
+    }
+    if (refused === true) throw new StructuredNoteRefused(422, NOTE_QUOTES_PRIVATE_REPORT);
+    if (refused === null || refused === undefined) unanswered = true;
   }
-  if (refused === null || refused === undefined) throw new StructuredNoteRefused(503, NOTE_CHECK_UNAVAILABLE);
-  if (refused) throw new StructuredNoteRefused(422, NOTE_QUOTES_PRIVATE_REPORT);
+  if (unanswered) throw new StructuredNoteRefused(503, NOTE_CHECK_UNAVAILABLE);
 }

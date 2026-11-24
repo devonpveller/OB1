@@ -415,6 +415,9 @@ try {
       # (name, writer, content, title, agent, chat) - title '@NB' = the notebook's own name (its hub path on the tip),
       # '@NBVAR' = a spelling that slugifies to it (case, punctuation); attempt 2: the tester's hub-path oracle and F1
       $none = 'Notes. The prcznobody zeta finding is in no private report anywhere at all.'
+      # attempt 3 (tester Case 6): B's sentence split - its first words in the title, the rest in the content
+      $wB = Q "SELECT v FROM public.lab_prc_scope WHERE k = 'w'"
+      $splitTitle = "The $wB alpha result"; $splitRest = 'reproduced in twelve trials across two labs.'
       $cases = @(
         @('a_quotes_b', $subA, "Notes from a call. $t_b1 More notes.", '', '', ''),
         @('b_quotes_own', $subB, "My summary. $t_b1", '', '', ''),
@@ -424,7 +427,9 @@ try {
         @('a_hubvar_quotes_b', $subA, "Notes from a call. $t_b1 More notes.", '@NBVAR', '', ''),
         @('a_hubvar_quotes_none', $subA, $none, '@NBVAR', '', ''),
         @('b_own_in_agent', $subB, 'A clean note body.', '', $t_b1, ''),
-        @('b_own_in_chat', $subB, 'A clean note body.', '', '', $t_b1))
+        @('b_own_in_chat', $subB, 'A clean note body.', '', '', $t_b1),
+        @('b_split_own', $subB, $splitRest, $splitTitle, '', ''),
+        @('a_split_b', $subA, $splitRest, $splitTitle, '', ''))
       foreach ($case in $cases) {
         $nb = "prcr5$ph$($case[0] -replace '_', '')"
         $title = switch ($case[3]) { '@NB' { $nb } '@NBVAR' { $nb.ToUpper() + '!' } '' { 'r5 note' } default { $case[3] } }
@@ -472,6 +477,10 @@ try {
       Check ($r5["red_$k"] -eq 'status=201 file=1 row=1') "R5 RED (the tip): B's own sentence in the $f field is SAVED into the shared vault file: $($r5["red_$k"])"
       Check ($r5["green_$k"] -eq 'status=422 file=0 row=0' -and $r5["green_${k}_body"] -match [regex]::Escape($msg)) "R5 GREEN: B's own sentence in the $f field is REFUSED (422, the one message, no file, no row): $($r5["green_$k"])"
     }
+    # attempt 3 (tester Case 6): the writer's own sentence split across the title and the content
+    Check ($r5['red_b_split_own'] -eq 'status=201 file=1 row=1') "R5 RED (the tip): B's own sentence split across title and content is SAVED: $($r5['red_b_split_own'])"
+    Check ($r5['green_b_split_own'] -eq 'status=422 file=0 row=0' -and $r5['green_b_split_own_body'] -match [regex]::Escape($msg)) "R5 GREEN: B's own sentence split across title and content is REFUSED (422, no vault file, no row): $($r5['green_b_split_own'])"
+    Check ($r5['red_a_split_b'] -eq 'status=201 file=1 row=1' -and $r5['green_a_split_b'] -eq 'status=201 file=1 row=1') "R5: A writing B's sentence split the same way is SAVED and served on both (red $($r5['red_a_split_b']); green $($r5['green_a_split_b']))"
     $leak = @($r5.Keys | Where-Object { $_ -like '*_body' } | Where-Object { $r5[$_] -match 'prcb' })
     Check ($leak.Count -eq 0) 'R5: no refusal body carries the claim''s text'
   }

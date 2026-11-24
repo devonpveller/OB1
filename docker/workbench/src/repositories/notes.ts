@@ -7,7 +7,7 @@ import { safeFolderRel, safeJoin, safeRelPath } from "../util/paths.ts";
 // @ts-ignore — plain .mjs from the /recipes bind-mount.
 import { slugifyNotebook } from "@shared/slug";
 import { parseNoteRow } from "../util/notes-parse.ts";
-import { assertStructuredNoteShareable, structuredNoteFileSlug } from "../util/structured-note-check.ts";
+import { assertStructuredNoteShareable, structuredNoteFileSlug, structuredNoteViews } from "../util/structured-note-check.ts";
 export { parseNoteRow };
 import { pool } from "../db/pool.ts";
 import { poolDb } from "../contracts/db.ts";
@@ -200,10 +200,12 @@ export async function writeStructuredNote(input: {
   // Round 2 (the operator's second ruling): only the WRITER's own private-report claims refuse the note; a sentence
   // that is only in another user's report is saved and served (the row names its author, so the guard judges it
   // author-only too - no refusal, no silent withhold, no existence signal).
-  // Attempt 2 (tester F1): the check reads the WHOLE file the vault would hold - the frontmatter's title, agent, chat
-  // and notebook as well as the content - since the vault file is the shared page; the row's slug and title as stored.
+  // Attempt 2 (tester F1) + attempt 3 (tester Case 6): two views, refused when either carries the writer's own
+  // sentence - the ROW exactly as the guard will judge it (slug, title, body: a sentence split across title and
+  // content is caught as the guard would catch it) and the WHOLE file the vault would hold (the frontmatter's agent,
+  // chat and notebook lines too: the vault file is the shared page).
   const row = parseNoteRow(rel, body);
-  await assertStructuredNoteShareable({ slug: row.slug, title: row.title, body }, askNoteRefused(input.authorSub ?? ""));
+  await assertStructuredNoteShareable(structuredNoteViews({ slug: row.slug, title: row.title, body: row.body }, body), askNoteRefused(input.authorSub ?? ""));
   await vaultWrite(rel, body);
   await syncNoteRow(rel, body, input.authorSub);
   await vaultCommit(`ai-note: write ${rel}`);
