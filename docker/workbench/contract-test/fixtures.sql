@@ -67,6 +67,10 @@ INSERT INTO public.wiki_pages (slug, page_class, entity_type, title, body, links
 -- A research session (staging pool) and its job; the idea that triggered it
 INSERT INTO public.ideas (id, title, summary, status, current_revision, thread_root) VALUES
   ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1', 'Fixture idea', 'An idea about the retrieval contract.', 'researched', 1, 'mm-root-fixture');
+-- rwr-idea-archive-api: an idea of its own subject (lab-ideas-0001, as the podcast model's lab-podcaster-0001) for the archive / reopen
+-- examples: archive then reopen runs in that order (the document order) and leaves it as it was
+INSERT INTO public.ideas (id, title, summary, status, current_revision, owner_sub, actor_sub) VALUES
+  ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb4', 'Fixture idea to archive', 'An idea the archive example rests and reopens.', 'engaged', 1, 'lab-ideas-0001', 'lab-ideas-0001');
 INSERT INTO public.sessions (id, origin_tool, query_text, thread_id) VALUES
   ('88888888-8888-4888-8888-888888888888', 'owui', 'fixture question', '0a000000-0000-4000-8000-0000000000a1');
 INSERT INTO public.session_sources (session_id, source_id) VALUES

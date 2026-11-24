@@ -7294,6 +7294,31 @@
           "summary"
         ],
         "additionalProperties": false
+      },
+      "IdeaRest": {
+        "type": "object",
+        "properties": {
+          "idea_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb4",
+            "description": "the idea, the caller's own"
+          },
+          "status": {
+            "type": "string",
+            "example": "archived",
+            "description": "the idea's state after the call: archived, or the state it was archived from (new, engaged, researched, ...) on reopen"
+          },
+          "archived": {
+            "type": "boolean",
+            "description": "true while the idea rests (scheduled research skips it); false once reopened"
+          }
+        },
+        "required": [
+          "idea_id",
+          "status",
+          "archived"
+        ]
       }
     },
     "parameters": {}
@@ -16404,6 +16429,188 @@
                 },
                 "schema": {
                   "$ref": "#/components/schemas/IdeaCaptured"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/ideas/{id}/archive": {
+      "post": {
+        "operationId": "archiveIdea",
+        "tags": [
+          "ideas and the idea refinery (D17)"
+        ],
+        "summary": "archive the caller's idea: it rests until reopened",
+        "description": "Works for an idea with or without a document. Scheduled research skips an archived idea; nothing is deleted. Another user's idea is 404, exactly like an idea that does not exist; an already archived idea is 409.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "idea id (the caller's own)"
+            },
+            "required": true,
+            "description": "idea id (the caller's own)",
+            "name": "id",
+            "in": "path",
+            "example": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb4"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "archive the caller's idea: it rests until reopened",
+            "content": {
+              "application/json": {
+                "example": {
+                  "idea_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb4",
+                  "status": "archived",
+                  "archived": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/IdeaRest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/ideas/{id}/reopen": {
+      "post": {
+        "operationId": "reopenIdea",
+        "tags": [
+          "ideas and the idea refinery (D17)"
+        ],
+        "summary": "reopen the caller's archived idea, in the state it was archived from",
+        "description": "Restores the state the idea was archived from, with its wording, revisions and linked items untouched. An idea that is not archived is 409; another user's idea is 404.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "idea id (the caller's own)"
+            },
+            "required": true,
+            "description": "idea id (the caller's own)",
+            "name": "id",
+            "in": "path",
+            "example": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb4"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "reopen the caller's archived idea, in the state it was archived from",
+            "content": {
+              "application/json": {
+                "example": {
+                  "idea_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb4",
+                  "status": "engaged",
+                  "archived": false
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/IdeaRest"
                 }
               }
             }

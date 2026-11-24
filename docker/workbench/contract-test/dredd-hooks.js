@@ -47,7 +47,15 @@ const PODCAST_MODEL = /\/(podcasts|presenters|teams)(\/|$| )/;
 //    (src/inlet/owner_private_view_integration_test.ts) exercises them as the owner, as other users and per identity mode.
 const PRIVATE_BY_ID = /\/private\/(claims|jobs)\/\{id\}/;
 
+// 8. rwr-idea-archive-api: archive / reopen act on an idea of the caller's own; the fixture idea bbbbbbbb-...-bbb4 is owned
+//    by the lab subject lab-ideas-0001 (fixtures.sql), so these two are called as that subject; they run in document
+//    order (archive, then reopen), which leaves the idea as it was.
+const IDEA_REST = /\/ideas\/\{id\}\/(archive|reopen)/;
+
 hooks.beforeEach((transaction, done) => {
+  if (IDEA_REST.test(String(transaction.name || '')) && transaction.request && transaction.request.headers) {
+    transaction.request.headers['X-Test-Sub'] = 'lab-ideas-0001';
+  }
   if (PODCAST_MODEL.test(String(transaction.name || '')) && transaction.request && transaction.request.headers) {
     transaction.request.headers['X-Test-Sub'] = 'lab-podcaster-0001';
   }
