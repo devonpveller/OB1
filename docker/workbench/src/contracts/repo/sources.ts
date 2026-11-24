@@ -61,16 +61,18 @@ export interface HeldRow {
 // A held source belongs to exactly one refinery, and a refinery (an idea) carries no metadata, so
 // under a filter a held source is out of scope whatever its own metadata says: answering it would
 // name the refinery (rw-p0-contract2 attempt 2). Unfiltered callers read it as before.
-// The held source itself is shared knowledge; WHICH refinery holds it is that refinery owner's
-// (rw-p2b-workspace round 3): refinery_id is selected for the refinery's owner only, null otherwise.
+// A held source is PRIVATE to the owner of its refinery until it is admitted (operator 2026-11-23,
+// rw-held-owner-scope; this supersedes the 10-28 "held is a quality gate, not privacy" ruling): another
+// user's held source is not read at all - it answers exactly like a row that does not exist.
 export async function getHeld(db: Db, id: string, f: MetadataFilter, who: Viewer): Promise<HeldRow | null> {
   if (f) return null;
   const rows = await db.query<HeldRow>(
-    `SELECT h.id, CASE WHEN ${FOREIGN_IDEA("h.refinery_id", "$3")} THEN NULL ELSE h.refinery_id END AS refinery_id, h.url, h.title, h.content_type, h.revision,
+    `SELECT h.id, h.refinery_id, h.url, h.title, h.content_type, h.revision,
             left(h.content, 500) AS excerpt, rus.status, h.metadata
        FROM public.held_sources h
        JOIN public.refinery_user_sources rus ON rus.source_id = h.id
-      WHERE h.id = $1 AND ($2::jsonb IS NULL OR h.metadata @> $2::jsonb)`,
+      WHERE h.id = $1 AND ($2::jsonb IS NULL OR h.metadata @> $2::jsonb)
+        AND NOT ${FOREIGN_IDEA("h.refinery_id", "$3")}`,
     [id, f ? JSON.stringify(f) : null, who.sub],
   );
   return rows[0] ?? null;

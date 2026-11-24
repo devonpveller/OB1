@@ -33,7 +33,7 @@ export function registerReferences(app: ContractApp, deps: ContractDeps) {
       if (holderRef && !(await ownsDocumentPaths(deps.db, documentPathsIn(holderRef), await identityOf(c)))) {
         return c.json({ error: "no such document" }, 404);
       }
-      const out = await refs.createReference(deps.db, deps.registry, { ...b, by: b.by ?? authorOf(c) ?? undefined });
+      const out = await refs.createReference(deps.db, deps.registry, { ...b, by: b.by ?? authorOf(c) ?? undefined, who: await identityOf(c) });
       return send(c, ReferenceCreated, out, 201);
     } catch (e) {
       return fail(c, e);

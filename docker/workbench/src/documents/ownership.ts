@@ -70,6 +70,14 @@ export const FOREIGN_DOC = (p: string, sub: string, key: string) =>
 export const FOREIGN_IDEA = (id: string, sub: string) =>
   `EXISTS (SELECT 1 FROM public.ideas own_i WHERE own_i.id::text = (${id})::text AND own_i.owner_sub <> ${sub})`;
 
+// rw-held-owner-scope round 2: a reference RECORD whose target is another user's HELD source. `src` is the
+// SQL expression of the record's source id. A held row that exists, is not the caller's, and has no admitted
+// source behind it makes the record unreadable: the caller meets it as a MISSING record (never as an erased
+// one). No held row at all (a genuinely erased source) is NOT foreign. One predicate for every record lookup.
+export const FOREIGN_HELD_TARGET = (src: string, sub: string) =>
+  `(EXISTS (SELECT 1 FROM public.held_sources fh WHERE fh.id::text = (${src})::text AND ${FOREIGN_IDEA("fh.refinery_id", sub)})
+    AND NOT EXISTS (SELECT 1 FROM public.sources fs WHERE fs.id::text = (${src})::text))`;
+
 // research job `j` belongs to another user (see the header).
 // rw-report-isolation: ALSO when it is the research of another user's idea by the database's one rule
 // (research_job_report_owner, slot 390: the idea's branch, its refinery, a revision stamped with the job, or the root

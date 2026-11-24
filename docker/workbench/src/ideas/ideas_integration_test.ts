@@ -861,3 +861,230 @@ t("C6 (acceptance 5, two identities): B never learns of A's captured idea - list
   assert(!rb.text.includes(id) && !rb.text.includes(mk));
   assertEquals((await ideaRow(id)).current_revision, 1, "B's attempts changed nothing");
 });
+
+// ── rw-held-owner-scope (operator 2026-11-23): a held source is PRIVATE to its owner until admitted ────────
+// Two real identities (the lab's X-Test-Sub seam), a real database. A holds a source whose title, url and text
+// carry unique tokens; B, signed in as another user, gets exactly the answer a missing id gets on every route that
+// takes a held id (same status, same body, same error text), and nothing B receives anywhere carries A's tokens.
+// The owner's own reads still work, and B adding A's URL never touches A's row.
+const D = "/workbench/documents";
+const uid = rnd;
+t("rw-held-owner-scope: another user's held source answers exactly like a missing one on every route; the owner's reads still work", async () => {
+  const tok = () => uid().replace(/-/g, "");
+  const urlTok = `UrlTok${tok()}`;
+  const T = { title: `HeldTitleTok${tok()}`, url: `https://example.org/heldurl/${urlTok}`, body: `HeldBodyTok${tok()}` };
+  const content = `${T.body} first sentence of A's private held text. Second sentence stays private too.`;
+  const A = { "X-Test-Sub": `held-a-${uid()}` };
+  const Bh = { "X-Test-Sub": `held-b-${uid()}` };
+  const mk = async (h: Record<string, string>, title: string) => {
+    const made = await call("POST", D, { title, body: "", idea: `held scope idea ${uid()}` }, h);
+    assertEquals(made.status, 201, made.text);
+    const st = await call("POST", `${D}/refinery/start`, { path: made.json.path }, h);
+    assertEquals(st.status, 200, st.text);
+    return { path: made.json.path as string, rid: st.json.refinery_id as string };
+  };
+  const a = await mk(A, `Held A ${uid()}`);
+  const b = await mk(Bh, `Held B ${uid()}`);
+  const addA = await call("POST", `${D}/user-sources`, { path: a.path, title: T.title, url: T.url, content }, A);
+  assertEquals(addA.status, 201, addA.text);
+  const hid = addA.json.source.source_id as string;
+  const addB = await call("POST", `${D}/user-sources`, { path: b.path, title: `B own held ${uid()}`, content: "B's own held text to cite." }, Bh);
+  assertEquals(addB.status, 201, addB.text);
+  const bOwn = addB.json.source.source_id as string;
+  const heldRow = async () => (await sql(
+    `SELECT id::text AS id, refinery_id::text AS refinery_id, url, title, content, content_hash, revision, updated_at::text AS updated_at,
+            (SELECT count(*)::int FROM public.held_source_chunks c WHERE c.held_source_id = h.id) AS chunks
+       FROM public.held_sources h WHERE h.id = $1`, [hid],
+  ))[0];
+  const aBefore = JSON.stringify(await heldRow());
+
+  const seen: string[] = []; // every response B gets, searched for A's tokens
+  const hasTok = (s: string) => [T.title, urlTok, T.body].some((x) => s.includes(x));
+  const miss = crypto.randomUUID();
+  const norm = (s: string, id: string) => s.split(id).join("<ID>");
+  // B asks about `id` and about a missing id: the status and the body must be the same, character for character
+  // (the id the caller sent is the only thing allowed to differ)
+  const asMissing = async (label: string, run: (id: string) => Promise<{ status: number; text: string }>) => {
+    const real = await run(hid), none = await run(miss);
+    seen.push(real.text);
+    assertEquals(real.status, none.status, `${label}: status of a foreign held id vs a missing one: ${real.text}`);
+    assertEquals(norm(real.text, hid), norm(none.text, miss), `${label}: body of a foreign held id vs a missing one`);
+    assert(!hasTok(real.text), `${label}: carries A's text: ${real.text}`);
+  };
+  const C = "/workbench/contract";
+  const sel = { quote: { exact: T.body, prefix: "", suffix: " first sentence" }, position: { start: 0, end: T.body.length } };
+  await asMissing("GET /references/{id}", (id) => call("GET", `${C}/references/${id}`, undefined, Bh));
+  await asMissing("GET /chunks/{id}:0/context", (id) => call("GET", `${C}/chunks/${id}:0/context?window=3`, undefined, Bh));
+  await asMissing("GET /sources/{id}/quality", (id) => call("GET", `${C}/sources/${id}/quality`, undefined, Bh));
+  await asMissing("GET /sources/{id}/dependence", (id) => call("GET", `${C}/sources/${id}/dependence`, undefined, Bh));
+  await asMissing("POST /diff-check (bare pin)", (id) => call("POST", `${C}/diff-check`, { references: [{ source_id: id, revision: 1, chunk_idx: 0 }] }, Bh));
+  await asMissing("POST /contract/references (a reference to the held id)", (id) =>
+    call("POST", `${C}/references`, { source_id: id, provenance: "user", selectors: sel, holder: { kind: "user_document", ref: b.path } }, Bh));
+  await asMissing("POST /documents/references (whole source: the quote would come from A's text)", (id) =>
+    call("POST", `${D}/references`, { path: b.path, source_id: id, exact: "", form: "chip" }, Bh));
+  await asMissing("POST /documents/references (a quote: the substring oracle)", (id) =>
+    call("POST", `${D}/references`, { path: b.path, source_id: id, exact: T.body, form: "added" }, Bh));
+  await asMissing("GET /documents/user-sources/{id}/locate", (id) => call("GET", `${D}/user-sources/${id}/locate`, undefined, Bh));
+  await asMissing("POST /documents/user-sources/{id}/replace (a foreign id is never refetched or rewritten)", (id) =>
+    call("POST", `${D}/user-sources/${id}/replace`, { path: b.path, content: "B overwrites A" }, Bh));
+  await asMissing("DELETE /documents/user-sources/{id}", (id) =>
+    call("DELETE", `${D}/user-sources/${id}?refinery_id=${b.rid}`, undefined, Bh));
+  // the jobs list: A's held source is not in B's list (id, title and tokens absent); B's own is
+  const jobs = await call("GET", `${C}/jobs?kinds=held&limit=500`, undefined, Bh);
+  seen.push(jobs.text);
+  assertEquals(jobs.status, 200, jobs.text);
+  assert(!jobs.json.jobs.some((j: any) => j.id === hid), "B's held list names A's held source");
+  assert(jobs.json.jobs.some((j: any) => j.id === bOwn), "B's held list still names B's own");
+  assert(!hasTok(jobs.text) && !jobs.text.includes(hid), "B's held list carries A's id or text");
+  // a document of B's that LINKS A's held id places no reference record (a link to nothing stays a live link)
+  const cur = await call("GET", `${D}/file?path=${encodeURIComponent(b.path)}`, undefined, Bh);
+  const linked = await call("PUT", `${D}/file?path=${encodeURIComponent(b.path)}`,
+    { content: `${cur.json.content}\nLinks to [[source:${hid}|a private source]].\n`, if_match: cur.json.hash }, Bh);
+  assertEquals(linked.status, 200, linked.text);
+  assertEquals((await sql(`SELECT 1 FROM public.reference_records WHERE source_id = $1`, [hid])).length, 0, "a reference record points at A's held source");
+  // a record that predates this fix (planted: B's document holds a record pointing at A's held id) shows nothing of A's
+  const rec = (await sql<{ id: string }>(
+    `INSERT INTO public.reference_records (source_id, scope, selectors, provenance, pinned_revision, chunk_idx, created_by)
+     VALUES ($1, 'source', '{"quote":{"exact":"x","prefix":"","suffix":""},"position":{"start":0,"end":1}}'::jsonb, 'user', 1, 0, 'planted') RETURNING id::text AS id`, [hid],
+  ))[0].id;
+  await sql(`INSERT INTO public.reference_holders (holder_kind, holder_ref, reference_id, cited_ref, origin, seq, number)
+             VALUES ('user_document', $1, $2, $3, 'added', 0, 1)`, [b.path, rec, hid]);
+  try {
+    const viaRec = await call("GET", `${C}/references/${rec}`, undefined, Bh);
+    seen.push(viaRec.text);
+    assert(!hasTok(viaRec.text), `a record pointing at A's held id shows A's text: ${viaRec.text}`);
+    assertEquals(viaRec.json.held ?? null, null, `a record pointing at A's held id carries a held block: ${viaRec.text}`);
+    const diffRec = await call("POST", `${C}/diff-check`, { references: [{ reference_id: rec }] }, Bh);
+    seen.push(diffRec.text);
+    assertEquals(diffRec.json.results?.[0]?.lifecycle ?? null, null, `diff-check of that record names A's source state: ${diffRec.text}`);
+    const panel = await call("GET", `${D}/references?path=${encodeURIComponent(b.path)}`, undefined, Bh);
+    seen.push(panel.text);
+    assertEquals(panel.status, 200, panel.text);
+    assert(!hasTok(panel.text), `the references list titles B's reference with A's title: ${panel.text}`);
+  } finally {
+    await sql(`DELETE FROM public.reference_holders WHERE reference_id = $1`, [rec]);
+    await sql(`DELETE FROM public.reference_records WHERE id = $1`, [rec]);
+  }
+
+  // dedupe: B adds A's URL: B gets a held row of B's own and A's row is untouched, byte for byte
+  // (B sent A's URL itself, so B's own row naturally carries it: this response is not searched for A's tokens)
+  const dup = await call("POST", `${D}/user-sources`, { path: b.path, title: `B's own take ${uid()}`, url: T.url, content: "B's different content for the same link" }, Bh);
+  assertEquals(dup.status, 201, dup.text);
+  assertNotEquals(dup.json.source.source_id, hid, "B was handed A's held id");
+  assert(!dup.json.deduped, "B's add was deduped onto A's row");
+  assertEquals(JSON.stringify(await heldRow()), aBefore, "A's held row changed after B added A's URL with other content");
+  assertEquals((await sql<{ r: string }>(`SELECT refinery_id::text AS r FROM public.held_sources WHERE id = $1`, [dup.json.source.source_id]))[0].r, b.rid, "the new row belongs to B's refinery");
+  // B adds the very same content under the same URL: still a row of B's own, A's untouched
+  const same = await call("POST", `${D}/user-sources`, { path: b.path, title: T.title, url: T.url, content }, Bh);
+  assertEquals(same.status, 201, same.text);
+  assertNotEquals(same.json.source.source_id, hid, "B was handed A's held id for identical content");
+  assertEquals(JSON.stringify(await heldRow()), aBefore, "A's held row changed after B added identical content");
+
+  // nothing B received on the routes above carries A's title, url or text
+  for (const s of seen) assert(!hasTok(s), `a response to B carries A's tokens: ${s.slice(0, 300)}`);
+
+  // the owner: A's own reads, citations and re-add still work
+  const ownRef = await call("GET", `${C}/references/${hid}`, undefined, A);
+  assertEquals(ownRef.status, 200, ownRef.text);
+  assertEquals(ownRef.json.held.title, T.title);
+  assertEquals(ownRef.json.held.url, T.url);
+  assert(ownRef.json.held.excerpt.includes(T.body), "the owner reads the excerpt");
+  assertEquals(ownRef.json.held.refinery_id, a.rid, "the owner reads which idea holds it");
+  const ownChunk = await call("GET", `${C}/chunks/${hid}:0/context`, undefined, A);
+  assertEquals(ownChunk.status, 200, ownChunk.text);
+  assert(ownChunk.json.chunks.some((c: any) => c.content.includes(T.body)), "the owner reads the chunk text");
+  assertEquals((await call("GET", `${C}/sources/${hid}/quality`, undefined, A)).status, 200);
+  const ownDep = await call("GET", `${C}/sources/${hid}/dependence`, undefined, A);
+  assertEquals([ownDep.status, ownDep.json.lifecycle], [200, "held"]);
+  const ownDiff = await call("POST", `${C}/diff-check`, { references: [{ source_id: hid, revision: 1, chunk_idx: 0 }] }, A);
+  assertEquals(ownDiff.json.results[0].lifecycle, "held", ownDiff.text);
+  const ownJobs = await call("GET", `${C}/jobs?kinds=held&limit=500`, undefined, A);
+  assert(ownJobs.json.jobs.some((j: any) => j.id === hid && j.detail.title === T.title), "the owner's held list names the source and its title");
+  const cite = await call("POST", `${D}/references`, { path: a.path, source_id: hid, exact: "", form: "chip" }, A);
+  assertEquals(cite.status, 201, cite.text);
+  const ownPanel = await call("GET", `${D}/references?path=${encodeURIComponent(a.path)}`, undefined, A);
+  assert(ownPanel.json.references.some((r: any) => r.source_id === hid && r.title === T.title), "the owner's panel titles it");
+  const again = await call("POST", `${D}/user-sources`, { path: a.path, title: T.title, url: T.url, content }, A);
+  assertEquals(again.status, 201, again.text);
+  assertEquals(again.json.source.source_id, hid, "the owner adding the same link again reuses the owner's own row");
+  assert(again.json.deduped, "an own re-add is still deduped");
+});
+
+// ── rw-held-owner-scope round 2 (tester F1/F2): a reference RECORD that targets another user's held source ──
+// The record carries the source id and a quote of the held text, so it is part of the held source: for any
+// other user it is a MISSING record on every path (read, diff-check, re-pin), whether the owner placed it through
+// the routes (a) or it predates the fix and was written straight into the table (b). The owner reads it as before (c).
+t("rw-held-owner-scope round 2: a reference record on another user's held source answers exactly like a missing record", async () => {
+  const tok = () => uid().replace(/-/g, "");
+  const body = `RecHeldTok${tok()}`;
+  const content = `${body} is the first private sentence of A's held text. A second private sentence.`;
+  const A = { "X-Test-Sub": `rec-a-${uid()}` };
+  const Bh = { "X-Test-Sub": `rec-b-${uid()}` };
+  const mk = async (h: Record<string, string>, title: string) => {
+    const made = await call("POST", D, { title, body: "", idea: `rec scope idea ${uid()}` }, h);
+    assertEquals(made.status, 201, made.text);
+    const st = await call("POST", `${D}/refinery/start`, { path: made.json.path }, h);
+    assertEquals(st.status, 200, st.text);
+    return { path: made.json.path as string, rid: st.json.refinery_id as string };
+  };
+  const a = await mk(A, `Rec A ${uid()}`);
+  const b = await mk(Bh, `Rec B ${uid()}`);
+  const add = await call("POST", `${D}/user-sources`, { path: a.path, title: `RecHeldTitle${tok()}`, content }, A);
+  assertEquals(add.status, 201, add.text);
+  const hid = add.json.source.source_id as string;
+  const C = "/workbench/contract";
+  const reads = (id: string) => [
+    ["GET /references/{id}", () => call("GET", `${C}/references/${id}`, undefined, Bh)],
+    ["POST /diff-check {reference_id}", () => call("POST", `${C}/diff-check`, { references: [{ reference_id: id }] }, Bh)],
+    ["POST /documents/references/{id}/repin", () => call("POST", `${D}/references/${id}/repin?path=${encodeURIComponent(b.path)}`, undefined, Bh)],
+  ] as [string, () => Promise<{ status: number; text: string }>][];
+  const norm = (s: string, id: string) => s.split(id).join("<ID>");
+  const sameAsMissing = async (what: string, id: string) => {
+    const miss = crypto.randomUUID();
+    const real = reads(id), none = reads(miss);
+    for (let i = 0; i < real.length; i++) {
+      const [label, run] = real[i];
+      const x = await run(), y = await none[i][1]();
+      assertEquals(x.status, y.status, `${what} ${label}: status ${x.status} vs a missing record's ${y.status}: ${x.text}`);
+      assertEquals(norm(x.text, id), norm(y.text, miss), `${what} ${label}: body differs from a missing record's`);
+      assert(!x.text.includes(body) && !x.text.includes(hid), `${what} ${label}: carries A's text or held id: ${x.text}`);
+    }
+  };
+  // (a) A cites A's own held source: a real record R
+  const cite = await call("POST", `${D}/references`, { path: a.path, source_id: hid, exact: body, form: "chip" }, A);
+  assertEquals(cite.status, 201, cite.text);
+  const R = cite.json.record.id as string;
+  assertEquals((await sql<{ e: string }>(`SELECT selectors #>> '{quote,exact}' AS e FROM public.reference_records WHERE id = $1`, [R]))[0].e, body, "the record carries A's quote");
+  await sameAsMissing("(a) A's real record,", R);
+  // (b) a record that predates the fix: B's own document, A's held id, A's text in the selectors
+  const legacy = (await sql<{ id: string }>(
+    `INSERT INTO public.reference_records (source_id, scope, selectors, provenance, pinned_revision, chunk_idx, created_by)
+     VALUES ($1, 'span', $2::jsonb, 'user', 1, 0, 'legacy') RETURNING id::text AS id`,
+    [hid, JSON.stringify({ quote: { exact: body, prefix: "", suffix: " is the first" }, position: { start: 0, end: body.length } })],
+  ))[0].id;
+  await sql(`INSERT INTO public.reference_holders (holder_kind, holder_ref, reference_id, cited_ref, origin, seq, number)
+             VALUES ('user_document', $1, $2, $3, 'added', 0, 1)`, [b.path, legacy, hid]);
+  try {
+    await sameAsMissing("(b) a legacy record in B's document,", legacy);
+    const panel = await call("GET", `${D}/references?path=${encodeURIComponent(b.path)}`, undefined, Bh);
+    assertEquals(panel.status, 200, panel.text);
+    assert(!panel.text.includes(body), `B's panel carries A's text: ${panel.text}`);
+  } finally {
+    await sql(`DELETE FROM public.reference_holders WHERE reference_id = $1`, [legacy]);
+    await sql(`DELETE FROM public.reference_records WHERE id = $1`, [legacy]);
+  }
+  // a chip of A's record pasted into B's document is not held there (the record is missing for B)
+  const cur = await call("GET", `${D}/file?path=${encodeURIComponent(b.path)}`, undefined, Bh);
+  const pasted = await call("PUT", `${D}/file?path=${encodeURIComponent(b.path)}`,
+    { content: `${cur.json.content}\n[@ref:${R}]\n`, if_match: cur.json.hash }, Bh);
+  assert(pasted.status === 200 || pasted.status === 400 || pasted.status === 409, pasted.text);
+  assertEquals((await sql(`SELECT 1 FROM public.reference_holders WHERE reference_id = $1 AND holder_ref = $2`, [R, b.path])).length, 0, "B's document came to hold A's record");
+  // (c) the owner reads R as before
+  const own = await call("GET", `${C}/references/${R}`, undefined, A);
+  assertEquals(own.status, 200, own.text);
+  assertEquals(own.json.record.source_id, hid);
+  assertEquals(own.json.record.selectors.quote.exact, body);
+  assertEquals(own.json.held.refinery_id, a.rid);
+  const ownDiff = await call("POST", `${C}/diff-check`, { references: [{ reference_id: R }] }, A);
+  assertEquals([ownDiff.status, ownDiff.json.results[0].lifecycle], [200, "held"], ownDiff.text);
+});

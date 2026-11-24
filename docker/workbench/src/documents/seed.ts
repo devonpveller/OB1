@@ -89,8 +89,8 @@ async function seedUnderClaim(
     const text = (await db.query<{ content: string }>(`SELECT content FROM public.sources WHERE id = $1`, [idea.dossier.source_id]))[0]?.content ?? "";
     const exact = opening(text);
     const placed = exact
-      ? await placeReference(db, reg, { source_id: idea.dossier.source_id, exact, holder, by: "seed" })
-      : await placeReference(db, reg, { source_id: idea.dossier.source_id, holder, by: "seed" });
+      ? await placeReference(db, reg, { source_id: idea.dossier.source_id, exact, holder, by: "seed", who: null })
+      : await placeReference(db, reg, { source_id: idea.dossier.source_id, holder, by: "seed", who: null });
     parts.push("## Dossier\n", `**${esc(idea.dossier.title)}**`, "", exact ? transclusionText(placed.record.id, exact) : chipText(placed.record.id), "");
   }
   if (idea.sessions.length) {
@@ -107,7 +107,7 @@ async function seedUnderClaim(
       if (report?.synthesis_id) {
         const quoted = (report.content ?? "").includes(c.text);
         const placed = await placeReference(db, reg, {
-          source_id: report.synthesis_id, exact: quoted ? c.text : null, holder, by: "seed",
+          source_id: report.synthesis_id, exact: quoted ? c.text : null, holder, by: "seed", who: null,
         });
         chip = ` ${chipText(placed.record.id)}`;
       }
