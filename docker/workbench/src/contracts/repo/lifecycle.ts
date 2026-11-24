@@ -9,7 +9,7 @@ import { type AdmissionScorer, decideReopen } from "../logic/reopen.ts";
 import type { MetadataFilter } from "../logic/scope.ts";
 import type { RegistryReader } from "../registry.ts";
 import { tombstoneById, tombstoneForUrl, tombstoneOut } from "./sources.ts";
-import { FOREIGN_DOC, FOREIGN_IDEA, type Viewer } from "../../documents/ownership.ts";
+import { FOREIGN_DOC, FOREIGN_HELD_TARGET, FOREIGN_IDEA, type Viewer } from "../../documents/ownership.ts";
 import { mayLiftTombstone } from "../logic/lift.ts";
 import type { Identity } from "../../middleware/identity.ts";
 import { ownsRef } from "./actions.ts";
@@ -66,6 +66,10 @@ const SCOPED_DEPENDENCE = `
 // document_link, or a reference_record held by it - is still counted (it blocks erasure for everyone)
 // but its ref and detail are not selected: the SQL answers "another user's document" and nothing of
 // the path or title. `who` null is the internal view (sever / erase decide on it; never returned).
+// rw-held-record-residuals (F5b, the sibling of F5): a held source is private to its owner until admitted, so a
+// document_link from a document whose owner cannot see it (another user's [[source:<held id>]], a link to nothing
+// for that user) is not a connection at all - not counted, not shown. The same rule as locateLinks; a link to an
+// admitted source still counts from every user's document.
 const OWNED_DEPENDENCE = `
   SELECT d.kind,
          CASE WHEN o.others THEN 'another-user-document:' || (row_number() OVER (ORDER BY d.ref))::text ELSE d.ref END AS ref,
@@ -74,6 +78,8 @@ const OWNED_DEPENDENCE = `
     CROSS JOIN LATERAL (SELECT $3::text IS NOT NULL AND (
         (d.kind = 'document_link' AND ${FOREIGN_DOC("d.ref", "$3", "$4")})
      OR (d.kind = 'reference_record' AND ${FOREIGN_DOC("d.detail ->> 'holder_ref'", "$3", "$4")})) AS others) o
+   WHERE NOT ($3::text IS NOT NULL AND d.kind = 'document_link' AND EXISTS (
+           SELECT 1 FROM public.user_document_listings hl WHERE hl.path = d.ref AND ${FOREIGN_HELD_TARGET("$1::uuid", "hl.owner_sub")}))
    ORDER BY d.n`;
 
 export async function dependence(db: Db, reg: RegistryReader, id: string, f: MetadataFilter = null, who: Viewer | null = null) {
