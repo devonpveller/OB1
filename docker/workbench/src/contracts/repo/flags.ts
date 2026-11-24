@@ -11,7 +11,7 @@ import { type RegistryReader, requireRegistered, REGISTRY } from "../registry.ts
 import { BadRequest } from "../logic/scope.ts";
 import { NotFound } from "./lifecycle.ts";
 import type { Identity } from "../../middleware/identity.ts";
-import { documentPathsIn, ownsDocumentPaths } from "../../documents/ownership.ts";
+import { documentPathsIn, FOREIGN_HELD_TARGET, ownsDocumentPaths } from "../../documents/ownership.ts";
 
 export interface FlagRow {
   id: string;
@@ -75,7 +75,14 @@ export async function createFlag(db: Db, reg: RegistryReader, who: Identity, b: 
   const table = ITEM_TABLE[b.item_kind];
   if (!table) throw new BadRequest(`'${b.item_kind}' cannot be flagged`);
   await checkFrom(db, who, b.from);
-  const found = await db.query<{ ok: boolean }>(`SELECT EXISTS (SELECT 1 FROM ${table} WHERE id = $1) AS ok`, [b.item_id]);
+  // rw-held-record-residuals (F4): a reference record whose target is another user's held source is part of that
+  // held source - for the flagger it is a MISSING record (the same 404 'no such reference'), never an existence oracle
+  const found = b.item_kind === "reference"
+    ? await db.query<{ ok: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM ${table} r WHERE r.id = $1 AND NOT ${FOREIGN_HELD_TARGET("r.source_id", "$2")}) AS ok`,
+      [b.item_id, who.sub],
+    )
+    : await db.query<{ ok: boolean }>(`SELECT EXISTS (SELECT 1 FROM ${table} WHERE id = $1) AS ok`, [b.item_id]);
   if (!found[0]?.ok) throw new NotFound(`no such ${b.item_kind}`);
   const r = await db.query<Raw>(
     `INSERT INTO public.user_flags (owner_sub, actor_sub, item_kind, item_id, reason, note, from_kind, from_ref)

@@ -1253,3 +1253,118 @@ t("XR5 (race, natural): archive racing reopen never leaves a state the idea was 
   console.log("XR5", seen.join(" "));
   assertEquals(bad, 0, "a status the idea was never in");
 });
+
+// ── rw-held-record-residuals (reviewer F4-F6 of rw-held-owner-scope): what is left of a held source's privacy ─────
+// F4: the flag route is no existence oracle on a record of another user's held source (it answers like a missing
+// record). F5: another user's [[source:<A's held id>]] is a link to nothing for that user - it does not block A's
+// remove (no other_users_documents count) - while a link to an ADMITTED source still counts from every document.
+// F6: removing a held source takes its reference records with it, so none is read afterwards as "erased" with the
+// owner's quote by whoever holds the record id (A's own record, and a legacy record in B's document).
+async function residualSetup() {
+  const tok = () => uid().replace(/-/g, "");
+  const A = { "X-Test-Sub": `res-a-${uid()}` };
+  const Bh = { "X-Test-Sub": `res-b-${uid()}` };
+  const C = "/workbench/contract";
+  const mk = async (h: Record<string, string>, title: string) => {
+    const made = await call("POST", D, { title, body: "", idea: `residual idea ${uid()}` }, h);
+    assertEquals(made.status, 201, made.text);
+    const st = await call("POST", `${D}/refinery/start`, { path: made.json.path }, h);
+    assertEquals(st.status, 200, st.text);
+    return { path: made.json.path as string, rid: st.json.refinery_id as string };
+  };
+  const a = await mk(A, `Residual A ${uid()}`);
+  const b = await mk(Bh, `Residual B ${uid()}`);
+  const plant = async (label: string) => {
+    const T = { title: `ResTitle${label}${tok()}`, url: `https://example.org/res/ResUrl${label}${tok()}`, body: `ResBody${label}${tok()}` };
+    const add = await call("POST", `${D}/user-sources`, { path: a.path, title: T.title, url: T.url, content: `${T.body} opens A's private held text. More private text.` }, A);
+    assertEquals(add.status, 201, add.text);
+    const hid = add.json.source.source_id as string;
+    // A cites it (a chip): a real record whose selectors quote A's text
+    const cite = await call("POST", `${D}/references`, { path: a.path, source_id: hid, exact: T.body, form: "chip" }, A);
+    assertEquals(cite.status, 201, cite.text);
+    return { T, hid, R: cite.json.record.id as string };
+  };
+  const one = await plant("One"), two = await plant("Two");
+  const toks = [one, two].flatMap((x) => [x.T.title, x.T.url, x.T.body]);
+  const hasTok = (s: string) => toks.some((x) => s.includes(x));
+  const norm = (s: string, id: string) => s.split(id).join("<ID>");
+  const sameAsMissing = async (label: string, id: string, run: (id: string) => Promise<{ status: number; text: string }>) => {
+    const miss = crypto.randomUUID();
+    const x = await run(id), y = await run(miss);
+    assertEquals(x.status, y.status, `${label}: status ${x.status} vs a missing id's ${y.status}: ${x.text}`);
+    assertEquals(norm(x.text, id), norm(y.text, miss), `${label}: body differs from a missing id's`);
+    assert(!hasTok(x.text), `${label}: carries A's text: ${x.text}`);
+  };
+  const flag = (h: Record<string, string>, from: string) => (id: string) =>
+    call("POST", `${C}/flags`, { item_kind: "reference", item_id: id, reason: "wrong_claim", from: { kind: "document", ref: from } }, h);
+
+  return { A, Bh, C, a, b, one, two, hasTok, sameAsMissing, flag };
+}
+
+t("rw-held-record-residuals F4: flagging a record of another user's held source answers like a missing record", async () => {
+  const { A, Bh, a, b, one, sameAsMissing, flag } = await residualSetup();
+  // F4: B flags A's record: the answer a missing record gets, and no flag row is written for it
+  await sameAsMissing("F4 POST /contract/flags item_kind=reference (A's record, as B)", one.R, flag(Bh, b.path));
+  assertEquals((await sql(`SELECT 1 FROM public.user_flags WHERE item_id = $1 AND owner_sub = $2`, [one.R, sub(Bh)])).length, 0, "B's flag on A's record was written");
+  // the owner flags their own record as before
+  const ownFlag = await flag(A, a.path)(one.R);
+  assertEquals(ownFlag.status, 201, ownFlag.text);
+});
+
+t("rw-held-record-residuals F5: another user's link to a held source does not block the owner's remove; a link to an admitted source still counts", async () => {
+  const { A, Bh, a, b, one } = await residualSetup();
+  // F5: B links A's held id in B's document; A's remove is not blocked by it and names nothing of B's
+  const cur = await call("GET", `${D}/file?path=${encodeURIComponent(b.path)}`, undefined, Bh);
+  const linked = await call("PUT", `${D}/file?path=${encodeURIComponent(b.path)}`,
+    { content: `${cur.json.content}\nB links [[source:${one.hid}|a private source]] and [[source:${FX.active}|a shared one]].\n`, if_match: cur.json.hash }, Bh);
+  assertEquals(linked.status, 200, linked.text);
+  const loc = await call("GET", `${D}/user-sources/${one.hid}/locate`, undefined, A);
+  assertEquals(loc.status, 200, loc.text);
+  assertEquals(loc.json.others, 0, `B's link to A's held source counts against A: ${loc.text}`);
+  // F5b (the sibling on the dependence route): A's own dependence read counts no connection from B's foreign link
+  const foreignLinks = (j: any) => (j.connections ?? []).filter((c: any) => c.kind === "document_link" && String(c.ref).startsWith("another-user-document")).length;
+  const dep = await call("GET", `/workbench/contract/sources/${one.hid}/dependence`, undefined, A);
+  assertEquals(dep.status, 200, dep.text);
+  assertEquals([dep.json.counts?.document_link ?? 0, foreignLinks(dep.json)], [0, 0], `F5b: B's link to A's held source is a connection in A's dependence: ${dep.text}`);
+  assert(!dep.text.includes(b.path), `A's dependence names B's document: ${dep.text}`);
+  // the control: B's link to an ADMITTED source is still a connection in A's dependence read
+  const depShared = await call("GET", `/workbench/contract/sources/${FX.active}/dependence`, undefined, A);
+  assertEquals(depShared.status, 200, depShared.text);
+  assert(foreignLinks(depShared.json) >= 1, `F5b control: B's link to a shared source is no longer a connection: ${depShared.text}`);
+  const rm1 = await call("DELETE", `${D}/user-sources/${one.hid}?refinery_id=${a.rid}`, undefined, A);
+  assertEquals(rm1.status, 200, `F5: A's remove is blocked by B's link to A's held source: ${rm1.text}`);
+  assert(!rm1.text.includes(b.path) && !rm1.text.includes("other_users_documents"), `A's remove names B's document: ${rm1.text}`);
+  // the control: a link to an ADMITTED source still counts from another user's document (B's link above)
+  const shared = await call("GET", `${D}/user-sources/${FX.active}/locate`, undefined, A);
+  assertEquals(shared.status, 200, shared.text);
+  assert(shared.json.others >= 1, `B's link to a shared source is no longer counted: ${shared.text}`);
+});
+
+t("rw-held-record-residuals F6: removing a held source leaves no record of it to be read as 'erased' with the owner's quote", async () => {
+  const { A, Bh, C, a, b, two, hasTok, sameAsMissing, flag } = await residualSetup();
+  // F6: a legacy record in B's document quoting A's second held source, written before rw-held-owner-scope
+  const legacy = (await sql<{ id: string }>(
+    `INSERT INTO public.reference_records (source_id, scope, selectors, provenance, pinned_revision, chunk_idx, created_by)
+     VALUES ($1, 'span', $2::jsonb, 'user', 1, 0, 'legacy') RETURNING id::text AS id`,
+    [two.hid, JSON.stringify({ quote: { exact: two.T.body, prefix: "", suffix: " opens" }, position: { start: 0, end: two.T.body.length } })],
+  ))[0].id;
+  await sql(`INSERT INTO public.reference_holders (holder_kind, holder_ref, reference_id, cited_ref, origin, seq, number)
+             VALUES ('user_document', $1, $2, $3, 'added', 0, 1)`, [b.path, legacy, two.hid]);
+  const rm2 = await call("DELETE", `${D}/user-sources/${two.hid}?refinery_id=${a.rid}`, undefined, A);
+  assertEquals(rm2.status, 200, rm2.text);
+  for (const [what, id] of [["A's own record", two.R], ["the legacy record in B's document", legacy]]) {
+    await sameAsMissing(`F6 GET /contract/references/{${what}} after the remove, as B`, id, (x) => call("GET", `${C}/references/${x}`, undefined, Bh));
+    await sameAsMissing(`F6 POST /contract/diff-check {${what}} after the remove, as B`, id, (x) => call("POST", `${C}/diff-check`, { references: [{ reference_id: x }] }, Bh));
+    await sameAsMissing(`F6 POST /contract/flags {${what}} after the remove, as B`, id, flag(Bh, b.path));
+    // the owner removed it outright (no tombstone): for the owner too the record is gone, not an "erased" quote
+    await sameAsMissing(`F6 GET /contract/references/{${what}} after the remove, as the owner`, id, (x) => call("GET", `${C}/references/${x}`, undefined, A));
+  }
+  assertEquals((await sql(`SELECT 1 FROM public.reference_records WHERE source_id = ANY($1::uuid[])`, [[two.hid]])).length, 0, "a record of a removed held source survives");
+  // B's holder row keeps its place with no reference (the "resolved to no source" state); B's panel shows nothing of A's
+  const kept = await sql<{ r: string | null }>(`SELECT reference_id::text AS r FROM public.reference_holders WHERE holder_ref = $1 AND cited_ref = $2`, [b.path, two.hid]);
+  assertEquals(kept.map((k) => k.r), [null], "B's legacy holder row");
+  const panel = await call("GET", `${D}/references?path=${encodeURIComponent(b.path)}`, undefined, Bh);
+  assertEquals(panel.status, 200, panel.text);
+  assert(!hasTok(panel.text), `B's panel carries A's text: ${panel.text}`);
+  await sql(`DELETE FROM public.reference_holders WHERE holder_ref = $1 AND cited_ref = $2`, [b.path, two.hid]);
+});

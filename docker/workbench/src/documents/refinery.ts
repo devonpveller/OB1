@@ -27,7 +27,7 @@ import { Conflict } from "../contracts/repo/lifecycle.ts";
 import type { Identity } from "../middleware/identity.ts";
 import { vaultExists, vaultRead } from "../util/vault.ts";
 import { parseDocument } from "./grammar.ts";
-import { FOREIGN_IDEA } from "./ownership.ts";
+import { FOREIGN_HELD_TARGET, FOREIGN_IDEA } from "./ownership.ts";
 import { listingRow, type OutboundLink, syncListing } from "./listing.ts";
 import { DocError, ownedPath, readDocument } from "./repo.ts";
 import { HOLDER_KIND } from "./paths.ts";
@@ -166,10 +166,15 @@ export async function locateLinks(db: Db, sourceId: string, who: Identity) {
     [sourceId, who.sub],
   );
   if (!known.length) throw new DocError("no source or held source with this id", 404);
+  // rw-held-record-residuals (F5): only a document whose owner can SEE the source links it. Another user's
+  // [[source:<id>]] to a held source is a link to nothing for that user (held sources are private to their
+  // owner until admitted): it is neither located nor counted, so it never blocks the owner's remove. A link
+  // to an admitted (shared) source counts from every user's document, as before.
   const docs = await db.query<{ path: string; owner_sub: string }>(
-    `SELECT d.ref AS path, l.owner_sub FROM public.source_dependence($1::uuid) d
+    `SELECT d.ref AS path, l.owner_sub FROM (SELECT $1::uuid AS sid) s
+       CROSS JOIN LATERAL public.source_dependence(s.sid) d
        JOIN public.user_document_listings l ON l.path = d.ref
-      WHERE d.kind = 'document_link' ORDER BY d.ref`,
+      WHERE d.kind = 'document_link' AND NOT ${FOREIGN_HELD_TARGET("s.sid", "l.owner_sub")} ORDER BY d.ref`,
     [sourceId],
   );
   const refs = new Set((await db.query<{ id: string }>(

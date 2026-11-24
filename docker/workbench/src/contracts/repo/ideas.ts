@@ -10,7 +10,7 @@
 import type { Db } from "../db.ts";
 import { Conflict, NotFound } from "./lifecycle.ts";
 import { tombstoneForUrl, tombstoneOut } from "./sources.ts";
-import { adminSeesOwnerless, FOREIGN_IDEA, FOREIGN_JOB } from "../../documents/ownership.ts";
+import { adminSeesOwnerless, FOREIGN_HELD_TARGET, FOREIGN_IDEA, FOREIGN_JOB } from "../../documents/ownership.ts";
 import type { Who } from "../../sessions/repo.ts";
 
 // review RV1 (rw-p8a4-ideas): who is reading. A bare owner subject is a viewer with no documents key - stricter, never
@@ -504,6 +504,12 @@ export async function reviseHeld(
 
 // Remove a held source: outright, no tombstone (D5's erasure begins at active). Refused while a
 // user document links it - the user resolves that in the document, by hand.
+// rw-held-record-residuals: only a document whose owner can SEE the held source counts (F5) - another user's
+// [[source:<id>]] is a link to nothing for that user (held sources are private to their owner until admitted), so
+// it neither blocks nor is reported. And the source goes with every reference record that points at it (F6):
+// a record is part of its held source (its selectors quote the owner's text), so none outlives it to be read as
+// "erased" with that quote by whoever holds the record id. A holder row left on such a record (another user's
+// legacy row, a note) keeps its place and number with no reference - the "resolved to no source" state.
 export async function removeHeld(db: Db, refineryId: string, sourceId: string, owner: string) {
   await requireIdea(db, refineryId, owner);
   return await db.tx(async (t) => {
@@ -518,8 +524,10 @@ export async function removeHeld(db: Db, refineryId: string, sourceId: string, o
       throw new NotFound("no held source with this id in this refinery");
     }
     const docs = await t.query<{ path: string }>(
-      `SELECT path FROM public.user_document_listings
-        WHERE outbound_links @> jsonb_build_array(jsonb_build_object('id', $1::text)) ORDER BY path`,
+      // qualified: inside the predicate an unqualified owner_sub would bind to its own ideas row
+      `SELECT udl.path FROM public.user_document_listings udl
+        WHERE udl.outbound_links @> jsonb_build_array(jsonb_build_object('id', $1::text))
+          AND NOT ${FOREIGN_HELD_TARGET("$1::text", "udl.owner_sub")} ORDER BY udl.path`,
       [sourceId],
     );
     if (docs.length) {
@@ -528,6 +536,11 @@ export async function removeHeld(db: Db, refineryId: string, sourceId: string, o
       });
     }
     await t.query(`DELETE FROM public.refinery_user_sources WHERE source_id = $1 AND refinery_id = $2`, [sourceId, refineryId]);
+    // the same uuid in public.sources is an admitted source (P3a): its records are shared and stay
+    const recs = `SELECT r.id FROM public.reference_records r WHERE r.source_id = $1
+                     AND NOT EXISTS (SELECT 1 FROM public.sources s WHERE s.id = $1)`;
+    await t.query(`UPDATE public.reference_holders SET reference_id = NULL WHERE reference_id IN (${recs})`, [sourceId]);
+    await t.query(`DELETE FROM public.reference_records WHERE id IN (${recs})`, [sourceId]);
     await t.query(`DELETE FROM public.held_sources WHERE id = $1`, [sourceId]);
     return { source_id: sourceId, removed: true, tombstoned: false };
   });
