@@ -13,6 +13,7 @@ import type { RegistryReader } from "../contracts/registry.ts";
 import { placeReference, targetHead } from "../contracts/repo/references.ts";
 import { type ParsedDocument, parseDocument, referenceIdsOf } from "./grammar.ts";
 import { HOLDER_KIND } from "./paths.ts";
+import { FOREIGN_HELD_TARGET } from "./ownership.ts";
 
 export interface OutboundLink {
   kind: string;
@@ -52,7 +53,7 @@ async function dropHolder(db: Db, h: HolderRow) {
 }
 
 // Bring the holder rows in line with the text. Returns the links the listing records.
-export async function syncHolders(db: Db, reg: RegistryReader, rel: string, doc: ParsedDocument, by: string | null) {
+export async function syncHolders(db: Db, reg: RegistryReader, rel: string, doc: ParsedDocument, by: string | null, who: { sub: string }) {
   const textRefs = referenceIdsOf(doc);
   const linkSources = [...new Set(doc.links.filter((l) => l.kind === "source").map((l) => l.id))];
   const rows = await holderRows(db, rel);
@@ -69,7 +70,7 @@ export async function syncHolders(db: Db, reg: RegistryReader, rel: string, doc:
   for (const id of textRefs) {
     if (held.has(id)) continue;
     // a chip pasted from another document: the record exists - hold it here too
-    const rec = (await db.query<{ source_id: string }>(`SELECT source_id::text FROM public.reference_records WHERE id = $1`, [id]))[0];
+    const rec = (await db.query<{ source_id: string }>(`SELECT source_id::text FROM public.reference_records r WHERE r.id = $1 AND NOT ${FOREIGN_HELD_TARGET("r.source_id", "$2")}`, [id, who.sub]))[0];
     if (!rec) continue;
     await db.query(
       `INSERT INTO public.reference_holders (holder_kind, holder_ref, reference_id, cited_ref, origin, seq, number)
@@ -80,9 +81,9 @@ export async function syncHolders(db: Db, reg: RegistryReader, rel: string, doc:
     );
   }
   for (const sid of linkSources) {
-    if (linkRecord.has(sid) || !(await targetHead(db, sid))) continue; // a link to nothing stays a live link
+    if (linkRecord.has(sid) || !(await targetHead(db, sid, who))) continue; // a link to nothing stays a live link
     const out = await placeReference(db, reg, {
-      source_id: sid, holder: { kind: HOLDER_KIND, ref: rel, origin: "cited" }, by: by ?? "document",
+      source_id: sid, holder: { kind: HOLDER_KIND, ref: rel, origin: "cited" }, by: by ?? "document", who,
     });
     linkRecord.set(sid, out.record.id);
   }
@@ -126,7 +127,7 @@ export async function syncListing(
   const doc = parseDocument(md, rel);
   return await db.tx(async (t) => {
     await t.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`user-document:${rel}`]);
-    const links = await syncHolders(t, reg, rel, doc, by);
+    const links = await syncHolders(t, reg, rel, doc, by, { sub: who.sub });
     const row = (await t.query<{ id: string; refinery_id: string | null }>(
       `INSERT INTO public.user_document_listings (path, title, outbound_links, updated_at, owner_sub, actor_sub)
        VALUES ($1, $2, $3::jsonb, now(), $4, $5)
@@ -184,6 +185,17 @@ export interface ListingRow {
   updated_at: string;
   refinery_id: string | null;
   owner_sub: string;
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// The row with this id (rw opaque document links). A value that is not a uuid is simply no row.
+export async function listingById(db: Db, id: string): Promise<ListingRow | null> {
+  if (!UUID.test(id)) return null;
+  return (await db.query<ListingRow>(
+    `SELECT id::text AS id, path, title, updated_at, refinery_id::text AS refinery_id, owner_sub
+       FROM public.user_document_listings WHERE id = $1`, [id],
+  ))[0] ?? null;
 }
 
 export async function listingRow(db: Db, rel: string): Promise<ListingRow | null> {

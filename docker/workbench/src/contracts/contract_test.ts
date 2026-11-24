@@ -74,7 +74,8 @@ Deno.test("every registry in registry.ts is seeded by the migrations (when the m
     sql = await Deno.readTextFile(new URL("../../../init-research-contract.sql", import.meta.url)) +
       await Deno.readTextFile(new URL("../../../init-references.sql", import.meta.url)) +
       await Deno.readTextFile(new URL("../../../init-research-credibility.sql", import.meta.url)) +
-      await Deno.readTextFile(new URL("../../../init-flags.sql", import.meta.url)); // rwr-flags-api
+      await Deno.readTextFile(new URL("../../../init-flags.sql", import.meta.url)) + // rwr-flags-api
+      await Deno.readTextFile(new URL("../../../init-cast.sql", import.meta.url)); // rwr-cast-edit-api
   } catch {
     return; // inside the image the migrations are not in the build context
   }
@@ -158,9 +159,9 @@ Deno.test("calls whose backing lands later answer a typed not_implemented that v
   assert(!ops().some((o) => o.op.operationId === "steer" && (o.op.responses as J)["501"]), "steer documents no 501");
 });
 
-Deno.test("D12: the document listing is exactly title, path, updated, outbound links - a body cannot pass", () => {
-  assertEquals(Object.keys(DocumentListing.shape).sort(), ["outbound_links", "path", "title", "updated"]);
-  const row = { title: "t", path: "documents/x.md", updated: "2026-10-17T12:00:00.000Z", outbound_links: [] };
+Deno.test("D12: the document listing is exactly id, title, path, updated, outbound links - a body cannot pass", () => {
+  assertEquals(Object.keys(DocumentListing.shape).sort(), ["id", "outbound_links", "path", "title", "updated"]);
+  const row = { id: "e0000000-0000-4000-8000-0000000000e1", title: "t", path: "documents/x.md", updated: "2026-10-17T12:00:00.000Z", outbound_links: [] };
   assert(DocumentListing.safeParse(row).success);
   assertEquals(DocumentListing.safeParse({ ...row, body: "the user's text" }).success, false);
   const s = JSON.stringify((doc.components as J).schemas);

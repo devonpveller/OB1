@@ -4,13 +4,14 @@
 // screen. A read that fails says so (state "failed"); it never shows an invented number.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../lib/api";
+import { docHref } from "../documents/docs-data";
 
 export type CardState<T> = { state: "loading" } | { state: "failed" } | { state: "ok"; data: T };
 
 export const SHOW = 5; // rows a card lists; the card title opens the screen with the rest
 export const WEEK_MS = 7 * 24 * 3600 * 1000;
 
-export type DocRow = { title: string; path: string; href: string; updated: string; refs: number };
+export type DocRow = { ref: string; title: string; path: string; href: string; updated: string; refs: number };
 export type SessionRow = { id: string; query: string; status: string; waiting: string; waitKind: string; branches: number; at: string };
 export type PodcastRow = { id: string; title: string; kind: "episode" | "request"; label: string; detail: string; at: string };
 export type IdeaRow = { id: string; title: string; status: string; at: string };
@@ -39,8 +40,8 @@ export async function readDocuments(): Promise<DocRow[]> {
   const { data } = await api("GET", "/workbench/contract/documents?limit=100");
   return listOf(data, "documents")
     .filter((d) => isActiveDocPath(String(d.path ?? "")))
-    // the row link is built HERE: a path that cannot be encoded fails this read (the card says so), never the render
-    .map((d) => ({ title: String(d.title ?? ""), path: String(d.path ?? ""), href: "/documents/" + encodeURIComponent(String(d.path ?? "")), updated: String(d.updated ?? ""), refs: arr(d.outbound_links).length }))
+    // the row link is built HERE, from the listing's opaque id: never the path, the owner's folder key or the title
+    .map((d) => ({ ref: typeof d.id === "string" ? d.id : "", title: String(d.title ?? ""), path: String(d.path ?? ""), href: docHref(typeof d.id === "string" ? d.id : ""), updated: String(d.updated ?? ""), refs: arr(d.outbound_links).length }))
     .sort((a, b) => time(b.updated) - time(a.updated));
 }
 

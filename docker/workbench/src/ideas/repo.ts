@@ -167,3 +167,60 @@ export async function archivedState(db: Db, id: string, owner: string): Promise<
   const r = await db.query<{ status: string }>(`SELECT status FROM public.ideas WHERE id = $1::uuid AND owner_sub = $2`, [id, owner]);
   return r.length ? r[0].status === "archived" : null;
 }
+
+// rwr-idea-archive-api: archive and reopen an idea by its own id (a captured idea has no document, so the document-path
+// routes of documents/refinery.ts cannot reach it). The SAME writes as archiveRefinery / reopenRefinery - the
+// refinery_state archived_at / archived_from stamp and ideas.status - keyed on ideas.id and the seam's subject. An idea
+// that is not the caller's answers exactly like one that does not exist (404, the one NOT_FOUND body). The idea row is
+// locked, so two requests cannot both archive it (archived_from would then record "archived").
+export const ALREADY_ARCHIVED = "this idea is already archived";
+export const NOT_ARCHIVED = "this idea is not archived";
+export const CANNOT_REOPEN = "this idea cannot be reopened: the document it was promoted to is no longer its own";
+
+export interface ArchiveState { idea_id: string; status: string; archived: boolean }
+
+export async function archiveIdea(db: Db, id: string, who: Identity): Promise<ArchiveState> {
+  return await db.tx(async (t) => {
+    const own = await t.query<{ status: string }>(
+      `SELECT status FROM public.ideas WHERE id = $1::uuid AND owner_sub = $2 FOR UPDATE`, [id, who.sub]);
+    if (!own.length) throw new IdeaError(404, NOT_FOUND);
+    if (own[0].status === "archived") throw new IdeaError(409, ALREADY_ARCHIVED, { code: "already-archived" });
+    await t.query(
+      `INSERT INTO public.refinery_state (refinery_id, archived_at, archived_from) VALUES ($1::uuid, now(), $2)
+       ON CONFLICT (refinery_id) DO UPDATE SET archived_at = now(), archived_from = EXCLUDED.archived_from`,
+      [id, own[0].status]);
+    await t.query(`UPDATE public.ideas SET status = 'archived', updated_at = now() WHERE id = $1::uuid`, [id]);
+    return { idea_id: id, status: "archived", archived: true };
+  });
+}
+
+export async function reopenIdea(db: Db, id: string, who: Identity): Promise<ArchiveState> {
+  return await db.tx(async (t) => {
+    // Lock the idea row ALONE. A statement that waited on a lock re-checks only the rows it locked (READ COMMITTED), so
+    // a join to refinery_state here would keep that table's pre-wait snapshot: a reopen queued behind an archive in
+    // flight would read archived_from as NULL and restore "engaged", a state the idea never had. The stamp is read in
+    // the NEXT statement, which sees what the archive committed.
+    const own = await t.query<{ status: string }>(
+      `SELECT status FROM public.ideas WHERE id = $1::uuid AND owner_sub = $2 FOR UPDATE`, [id, who.sub]);
+    if (!own.length) throw new IdeaError(404, NOT_FOUND);
+    if (own[0].status !== "archived") throw new IdeaError(409, NOT_ARCHIVED, { code: "not-archived" });
+    const stamp = await t.query<{ archived_from: string | null }>(
+      `SELECT archived_from FROM public.refinery_state WHERE refinery_id = $1::uuid`, [id]);
+    // the state the idea was archived from; "engaged" (as reopenRefinery) for an archive that left no stamp
+    const from = stamp[0]?.archived_from ?? null;
+    const was = from && from !== "archived" ? from : "engaged";
+    await t.query(`UPDATE public.refinery_state SET archived_at = NULL, archived_from = NULL WHERE refinery_id = $1::uuid`, [id]);
+    try {
+      await t.query(`UPDATE public.ideas SET status = $2, updated_at = now() WHERE id = $1::uuid`, [id, was]);
+    } catch (e) {
+      // the write guard lets a promoted idea come back only while its document is still the refinery's: that refusal
+      // (and only that one: this statement, SQLSTATE 42501, the guard's own sentence) is the caller's 409
+      const f = (e as { fields?: { code?: string; message?: string } })?.fields;
+      if (f?.code === "42501" && /idea_promote\(\)/.test(String(f.message ?? (e as Error).message))) {
+        throw new IdeaError(409, CANNOT_REOPEN, { code: "cannot-reopen" });
+      }
+      throw e;
+    }
+    return { idea_id: id, status: was, archived: false };
+  });
+}

@@ -8,7 +8,8 @@
 --   * slot 570's two guard functions come back byte for byte (trg_private_report_claims_wiki_guard: every 'note' row is
 --     a person's note; trg_private_report_claims_gap_guard: the NOT IN without coalesce) - while 570's wiki guard is
 --     installed; when 570 was reverted already they are not left behind;
---   * the person-note helper (private_report_claims_person_note) goes.
+--   * the person-note helper (private_report_claims_person_note) and the structured-note check
+--     (private_report_claims_note_refused, R5) go.
 -- Counts only (NOTICE). A second run has nothing to restore. Revert ORDER: this file FIRST, then (if ever)
 -- revert-private-report-claims.sql (570's revert run alone restores this slot's batches too, the newest first, and
 -- drops the two guard functions; only the helper is then left, harmless, and this file drops it).
@@ -234,6 +235,7 @@ BEGIN
         DROP FUNCTION IF EXISTS public.trg_private_report_claims_gap_guard();
     END IF;
 END $$;
+DROP FUNCTION IF EXISTS public.private_report_claims_note_refused(TEXT, TEXT, TEXT);
 DROP FUNCTION IF EXISTS public.private_report_claims_person_note(TEXT, TEXT);
 
 NOTIFY pgrst, 'reload schema';

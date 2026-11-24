@@ -36,6 +36,7 @@ const ACCOUNT = {
 const TOMBS = { alice: new Map(), bob: new Map(), default: new Map(), header: new Map() };
 const UI_KEYS = ["ui.locked_document", "ui.last_document", "ui.start_screen", "library.recent"];
 const ver = (m, k) => ACCOUNT[m].get(k)?.version ?? TOMBS[m].get(k) ?? 0;
+const PLAN_ID = "e0000000-0000-4000-8000-0000000000e1";
 const DOCS = { "documents/k-7f3a/plan.md": "Alice plan" };
 let mode = "alice";
 const log = [];
@@ -74,7 +75,11 @@ http.createServer((req, res) => {
   if (p === "/workbench/documents/folders") return json({ root: "documents/k-7f3a", folders: [""] });
   if (p === "/workbench/documents/state") {
     const path = new URL(req.url, "http://x").searchParams.get("path");
-    return DOCS[path] && mode === "alice" ? json({ path, listed: true, trashed: false }) : json({ error: "no such document" }, 404);
+    return DOCS[path] && mode === "alice" ? json({ id: PLAN_ID, path, listed: true, trashed: false }) : json({ error: "no such document" }, 404);
+  }
+  if (p === "/workbench/documents/resolve") { // the owner's document by its opaque id; any other id is the one 404
+    const id = new URL(req.url, "http://x").searchParams.get("id");
+    return id === PLAN_ID && mode === "alice" ? json({ id, path: "documents/k-7f3a/plan.md", listed: true, trashed: false, archived: false }) : json({ error: "no such document" }, 404);
   }
   if (p === "/workbench/documents/file") {
     const path = new URL(req.url, "http://x").searchParams.get("path");

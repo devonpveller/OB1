@@ -14,7 +14,7 @@ import { resetState, getLockedDocument, setLockedDocument } from "../src/lib/sta
 import { NOT_FOUND } from "../src/screens/documents/docs-data";
 import { DOC_TABS } from "../src/screens/document-editor/InThisDoc";
 import { cspNonce } from "../src/editor";
-import { createFake, PEOPLE, REF_A, REF_C } from "../e2e/docs-fake.mjs";
+import { createFake, PEOPLE, REF_A, REF_C, uid } from "../e2e/docs-fake.mjs";
 
 // a parallel full run loads the machine: the default 1 s wait is too short for a screen that reads three routes
 configure({ asyncUtilTimeout: 5000 });
@@ -29,7 +29,7 @@ let gate: Promise<void> | null = null;
 let release: () => void = () => {};
 const settings = new Map<string, { value: unknown; version: number }>();
 const CPU = "documents/k-a/Hardware/cpu.md";
-const href = (p: string) => "/documents/" + encodeURIComponent(p);
+const href = (p: string) => "/documents/d/" + uid(p);
 
 function stub() {
   bodies = [];
@@ -455,7 +455,7 @@ describe("acceptance 7: two identities - bob never sees alice's text, titles, lo
   });
   it("alice's unsent draft is gone when the person changes without a reload, and nothing of it is sent under bob", async () => {
     window.history.pushState({}, "", href(CPU));
-    const route = () => ({ route: parseRoute(window.location.pathname), params: { id: CPU }, whoAnswered: true });
+    const route = () => ({ route: parseRoute(window.location.pathname), params: { ref: uid(CPU) }, whoAnswered: true });
     const ui = (subject: string) => <ToastProvider><DocumentScreen {...route()} subject={subject} /></ToastProvider>;
     const r = render(ui("u-alice"));
     await waitFor(() => expect(screen.getByTestId("doc-editor").querySelector(".cm-content")).toBeTruthy());

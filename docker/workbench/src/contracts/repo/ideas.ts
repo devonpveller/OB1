@@ -10,7 +10,7 @@
 import type { Db } from "../db.ts";
 import { Conflict, NotFound } from "./lifecycle.ts";
 import { tombstoneForUrl, tombstoneOut } from "./sources.ts";
-import { adminSeesOwnerless, FOREIGN_JOB } from "../../documents/ownership.ts";
+import { adminSeesOwnerless, FOREIGN_IDEA, FOREIGN_JOB } from "../../documents/ownership.ts";
 import type { Who } from "../../sessions/repo.ts";
 
 // review RV1 (rw-p8a4-ideas): who is reading. A bare owner subject is a viewer with no documents key - stricter, never
@@ -408,7 +408,7 @@ export async function addHeld(
   // the held source it matches (same URL, or for an upload the same title and type), validated like
   // any candidate (the tombstone check above); when the contents differ the match gets a new
   // revision. Another refinery lists the match as a member, never a second copy.
-  const match = opts.dedupe === false ? null : await sameHeld(db, req);
+  const match = opts.dedupe === false ? null : await sameHeld(db, req, opts.owner);
   if (match) return await dedupe(db, refineryId, match, req, chunk, embed, opts.viewer ?? opts.owner);
   const chunks = chunk(req.content);
   const vec = (v: number[]) => `[${v.join(",")}]`;
@@ -437,19 +437,23 @@ export async function addHeld(
   });
 }
 
-// "The same file added again ANYWHERE" (operator 20:09): held sources are shared knowledge in waiting
-// (held is a quality gate, not privacy - operator 2026-10-28), so the match is across every refinery.
-async function sameHeld(db: Db, req: HeldInput) {
+// "The same file added again" (operator 20:09): matched across the OWNER'S refineries only. A held source
+// is private to its owner until admitted (operator 2026-11-23, rw-held-owner-scope; this supersedes the
+// 10-28 "held is a quality gate, not privacy" ruling): another user's held row is never matched, so it is
+// never handed out as the answer and never rewritten - the second user gets a held row of their own.
+async function sameHeld(db: Db, req: HeldInput, owner: string) {
   const rows = req.url
     ? await db.query<{ id: string; refinery_id: string; content_hash: string | null }>(
       `SELECT id::text AS id, refinery_id::text AS refinery_id, content_hash FROM public.held_sources
-        WHERE url IS NOT NULL AND public.contract_url_norm(url) = public.contract_url_norm($1) ORDER BY created_at LIMIT 1`,
-      [req.url],
+        WHERE url IS NOT NULL AND public.contract_url_norm(url) = public.contract_url_norm($1)
+          AND NOT ${FOREIGN_IDEA("refinery_id", "$2")} ORDER BY created_at LIMIT 1`,
+      [req.url, owner],
     )
     : await db.query<{ id: string; refinery_id: string; content_hash: string | null }>(
       `SELECT id::text AS id, refinery_id::text AS refinery_id, content_hash FROM public.held_sources
-        WHERE url IS NULL AND lower(btrim(title)) = lower(btrim($1)) AND content_type = $2 ORDER BY created_at LIMIT 1`,
-      [req.title, req.content_type ?? "manual"],
+        WHERE url IS NULL AND lower(btrim(title)) = lower(btrim($1)) AND content_type = $2
+          AND NOT ${FOREIGN_IDEA("refinery_id", "$3")} ORDER BY created_at LIMIT 1`,
+      [req.title, req.content_type ?? "manual", owner],
     );
   return rows[0] ?? null;
 }
@@ -529,17 +533,17 @@ export async function removeHeld(db: Db, refineryId: string, sourceId: string, o
   });
 }
 
-// D12: title, path, updated, outbound links. Nothing else is selected, so nothing else can leak.
+// D12: id, title, path, updated, outbound links. Nothing else is selected, so nothing else can leak.
 // User documents are per user (rw-p2b-workspace): only the requesting identity's are listed.
 export async function documents(db: Db, limit: number, owner: string) {
-  const rows = await db.query<{ title: string; path: string; updated: string; outbound_links: Link[] }>(
-    `SELECT d.title, d.path, d.updated_at AS updated, ${RESOLVED_LINKS("d")} AS outbound_links
+  const rows = await db.query<{ id: string; title: string; path: string; updated: string; outbound_links: Link[] }>(
+    `SELECT d.id::text AS id, d.title, d.path, d.updated_at AS updated, ${RESOLVED_LINKS("d")} AS outbound_links
        FROM public.user_document_listings d WHERE d.owner_sub = $2 ORDER BY d.updated_at DESC LIMIT $1`,
     [limit, owner],
   );
   return {
     documents: rows.map((r) => ({
-      title: r.title, path: r.path, updated: r.updated,
+      id: r.id, title: r.title, path: r.path, updated: r.updated,
       outbound_links: (r.outbound_links ?? []).map((l) => ({
         kind: l.kind, id: l.id, pin: l.pin ?? null, reference_id: l.reference_id ?? null,
       })),

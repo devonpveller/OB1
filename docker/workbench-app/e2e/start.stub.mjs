@@ -14,11 +14,11 @@ const MARK = "PERSONAL-MARKER-7731";
 const ago = (ms) => new Date(Date.now() - ms).toISOString();
 const DOCS = {
   alice: [
-    { title: "ALPHA Upgrading the workstation CPU", path: "documents/alice/alpha-cpu.md", text: `---\ntitle: "ALPHA Upgrading the workstation CPU"\n---\nPrivate body with ${MARK} and a link https://example.org/public-board` },
-    { title: "ALPHA second note", path: "documents/alice/alpha-two.md", text: `---\ntitle: "ALPHA second note"\n---\nsecond` },
-    { title: "ALPHA trashed note", path: "documents/alice/.trash/alpha-gone.md", text: "x" },
+    { id: "c0000000-0000-4000-8000-000000000001", title: "ALPHA Upgrading the workstation CPU", path: "documents/alice/alpha-cpu.md", text: `---\ntitle: "ALPHA Upgrading the workstation CPU"\n---\nPrivate body with ${MARK} and a link https://example.org/public-board` },
+    { id: "c0000000-0000-4000-8000-000000000002", title: "ALPHA second note", path: "documents/alice/alpha-two.md", text: `---\ntitle: "ALPHA second note"\n---\nsecond` },
+    { id: "c0000000-0000-4000-8000-000000000003", title: "ALPHA trashed note", path: "documents/alice/.trash/alpha-gone.md", text: "x" },
   ],
-  bob: [{ title: "BRAVO plan", path: "documents/bob/bravo.md", text: `---\ntitle: "BRAVO plan"\n---\nplan` }],
+  bob: [{ id: "c0000000-0000-4000-8000-000000000005", title: "BRAVO plan", path: "documents/bob/bravo.md", text: `---\ntitle: "BRAVO plan"\n---\nplan` }],
 };
 const NAME = { alice: "Alice Lab", bob: "Bob Builder" };
 const SUB = { alice: "u-alice", bob: "u-bob" };
@@ -61,12 +61,16 @@ http.createServer((req, res) => {
     if (p === "/workbench/contract/sessions") return json({ sessions: [] });
     if (p === "/workbench/contract/library/recent") return json({ days: 7, sources_total: 0, claims_total: 0, sources: [] });
     if (p === "/workbench/contract/library/waiting-claims") return json({ total: 0, claims: [] });
-    if (p === "/workbench/contract/documents") return json({ documents: mine.map((d) => ({ title: d.title, path: d.path, updated: ago(3600000), outbound_links: [] })) });
+    if (p === "/workbench/contract/documents") return json({ documents: mine.map((d) => ({ id: d.id, title: d.title, path: d.path, updated: ago(3600000), outbound_links: [] })) });
     if (p === "/workbench/documents/state") {
       const path = u.searchParams.get("path") ?? "";
       const d = mine.find((x) => x.path === path);
       if (!d) return json({ error: "not found" }, 404);
-      return json({ path, listed: true, trashed: /\/\.trash\//.test(path), archived: false });
+      return json({ id: d.id, path, listed: true, trashed: /\/\.trash\//.test(path), archived: false });
+    }
+    if (p === "/workbench/documents/resolve") { // the owner's document by its opaque id; another person's or a made-up id is the one 404
+      const d = mine.find((x) => x.id === u.searchParams.get("id"));
+      return d ? json({ id: d.id, path: d.path, listed: true, trashed: /\/\.trash\//.test(d.path), archived: false }) : json({ error: "no such document" }, 404);
     }
     if (p === "/workbench/documents/file") {
       const d = mine.find((x) => x.path === u.searchParams.get("path"));

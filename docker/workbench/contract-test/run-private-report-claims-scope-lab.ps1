@@ -24,6 +24,9 @@
 #   [6] revert 575: byte-identical to [4]'s post-570 hashes, 570's guard functions back byte for byte; again: nothing
 #   [7] 575, revert 575, revert 570: byte-identical to the planted hashes
 #   [8] 570, 575, then 570's revert ALONE: byte-identical to the planted hashes; then 575's revert leaves no function
+#   [5e] (with -EquivDir) R6's equivalence: the earlier 575 on the same state gives the same fingerprint and counts
+#   [9] R5: 570 + 575 again, then POST /workbench/notes on the tip image (RED: a note quoting a private-report sentence
+#       is saved) and on the fix (GREEN: refused 422, no vault file, no row; a clean note saves on both)
 # Exit 0 = every check passed. Counts and states only - never a claim's text. Never the live stack.
 param(
   [string]$Id = 'wt-rw-570-hub-note-scope',
@@ -31,7 +34,17 @@ param(
   [string]$Evidence = '',
   [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
   # the base whose 570 / check / count scripts are the RED (OB1 912b3f1: slot 570 as merged)
-  [string]$OldRef = '912b3f18'
+  [string]$OldRef = '912b3f18',
+  # R5 (the structured-note refusal, an HTTP door): the workbench images, built beforehand with plain docker build under
+  # this run's tags - the fix (-WorkbenchTag) and the tip before it (-BaseWorkbenchTag, the RED). Without them [5w] is
+  # skipped and the lab says so (a FAIL unless -NoWorkbench).
+  [string]$WorkbenchTag = '',
+  [string]$BaseWorkbenchTag = '',
+  [switch]$NoWorkbench,
+  # R6 equivalence: a directory with an EARLIER 575's init + revert (3a01e11's: git show 3a01e112:docker/<file>). Before the
+  # tree's 575 runs in [5], the earlier one runs on the same post-570 state, is fingerprinted and reverted; the tree's
+  # must give the same fingerprint (data, owner stores, the archive rows in insert order) and the same NOTICE counts.
+  [string]$EquivDir = ''
 )
 $ErrorActionPreference = 'Continue'
 if ($Id -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "bad -Id '$Id'" }
@@ -60,6 +73,8 @@ $stage = Join-Path $env:TEMP "$P-initdb"
 $oldDir = Join-Path $env:TEMP "$P-old"
 $script:fail = 0
 $script:made = @{ net = $false; containers = @() }
+$key = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
+$vault = Join-Path $env:TEMP "$P-vault"
 function Pass([string]$m) { Write-Host "  PASS  $m" }
 function Fail([string]$m) { Write-Host "  FAIL  $m"; $script:fail++ }
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
@@ -158,6 +173,25 @@ SELECT string_agg(t || '=' || h, ' ' ORDER BY t) FROM (
 ) s
 "@
 $hashQ = ($hashQ -split "`r?`n") -join ' '
+# R6: the equivalence fingerprint - every table 575 touches (masked: claims.updated_at, which the edge delete's confidence
+# trigger sets to now(); the owner stores' batch uuids) and 575's own unrestored batch in the archive, in insert order
+$fpQ = @"
+SELECT string_agg(x, ' ' ORDER BY o) FROM (
+  SELECT 1 AS o, 'claims=' || md5(coalesce(string_agg((to_jsonb(c) - 'updated_at')::text, '|' ORDER BY c.id), '')) AS x FROM public.claims c
+  UNION ALL SELECT 2, 'claim_sources=' || md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.claim_sources x
+  UNION ALL SELECT 3, 'links=' || md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.report_id, x.claim_id), '')) FROM public.research_private_report_claims x
+  UNION ALL SELECT 4, 'jobs=' || md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.id), '')) FROM public.research_jobs x
+  UNION ALL SELECT 5, 'wiki_pages=' || md5(coalesce(string_agg(to_jsonb(x)::text, '|' ORDER BY x.slug), '')) FROM public.wiki_pages x
+  UNION ALL SELECT 6, 'private_claims=' || md5(coalesce(string_agg((to_jsonb(x) - 'inlet_batch' - 'updated_at')::text, '|' ORDER BY x.id), '')) FROM public.inlet_private_claims x
+  UNION ALL SELECT 7, 'private_edges=' || md5(coalesce(string_agg((to_jsonb(x) - 'batch')::text, '|' ORDER BY x.claim_id, x.edge_ref), '')) FROM public.inlet_private_claim_sources x
+  UNION ALL SELECT 8, 'archive_rows=' || count(*) || ' archive=' || md5(coalesce(string_agg(a.tbl || '|' || a.action || '|' || coalesce(a.ref, '') || '|' || (a.row_data - 'updated_at')::text, E'
+' ORDER BY a.id), ''))
+    FROM public.private_report_claims_archive a
+   WHERE a.restored_at IS NULL AND a.action <> 'z'
+     AND a.batch IN (SELECT z.batch FROM public.private_report_claims_archive z WHERE z.action = 'z' AND z.tbl = 'slot 575' AND z.restored_at IS NULL)
+) s
+"@
+$fpQ = ($fpQ -split "`r?`n") -join ' '
 # the two guard functions 575 replaces, as installed (source + config + ACL): 570's must come back byte for byte. The
 # source is compared without CRs: a Windows checkout (core.autocrlf) feeds psql CRLF files, git holds LF
 $fnQ = "SELECT coalesce(string_agg(p.proname || ':' || md5(replace(p.prosrc, chr(13), '') || '|' || coalesce(p.proconfig::text, '') || '|' || coalesce(p.proacl::text, '') || '|' || p.prosecdef::text), ' ' ORDER BY p.proname), 'none') FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.proname IN ('trg_private_report_claims_wiki_guard', 'trg_private_report_claims_gap_guard')"
@@ -263,8 +297,27 @@ try {
   $ns = Psql-Lines $scopeSql 'scope-570.log'
   Check ($ns -match 'scope: FAIL' -and $ns -match "carrying a private-report claim's text=2" -and $ns -match 'or its sentence=3') 'RED: the scope check counts them and FAILS'
   # ---------------------------------------------------------------- [5] GREEN: 575
+  $eq = $null
+  if ($EquivDir) {
+    Write-Host "[5e] R6 equivalence: the earlier 575 ($EquivDir) on the same post-570 state"
+    $eq = Psql-File (Join-Path $EquivDir 'init-private-report-claims-scope.sql') 'the earlier 575'
+    Check ($eq.rc -eq 0) "the earlier 575 applies (exit $($eq.rc))"
+    $fpOld = Q $fpQ; Save 'fingerprint-earlier-575.txt' ($fpOld -replace ' ', "`n")
+    $pOld = Probe 'probe-earlier-575.txt'
+    $r = Psql-File (Join-Path $EquivDir 'revert-private-report-claims-scope.sql') 'the earlier 575 revert'
+    Check ($r.rc -eq 0 -and (Q $hashQ) -eq $h570) 'the earlier 575''s revert: byte-identical to 570 alone again'
+  }
   Write-Host '[5] GREEN: slot 575'
   $r = Psql-File $init575 '575'
+  if ($EquivDir) {
+    $fpNew = Q $fpQ; Save 'fingerprint-575.txt' ($fpNew -replace ' ', "`n")
+    $pNew = Probe 'probe-575-equiv.txt'
+    Check ($fpNew -eq $fpOld) "[equiv] the fingerprint equals the earlier 575's (data, owner stores, archive rows in insert order)$(if ($fpNew -ne $fpOld) { ': ' + (Compare-Object ($fpOld -split ' ') ($fpNew -split ' ') | ForEach-Object { $_.InputObject + $_.SideIndicator }) -join '; ' })"
+    $counts = { param($m) (($m -split ' \| ') | Where-Object { $_ -match 'private report claims scope: [0-9]+ (fragment|edge)' }) -join ' | ' }
+    Check ((& $counts $r.msg) -eq (& $counts $eq.msg) -and (& $counts $r.msg)) "[equiv] the NOTICE counts equal the earlier 575's"
+    $pd = @($pNew.Keys | Where-Object { $_ -notlike 'write_*' -and "$($pNew[$_])" -ne "$($pOld[$_])" })
+    Check ($pd.Count -eq 0) "[equiv] every state probe equals the earlier 575's$(if ($pd.Count) { ': ' + ($pd -join ', ') })"
+  }
   Check ($r.rc -eq 0 -and $r.msg -match '2 fragment claim\(s\) and 1 claim\(s\) carrying a fragment''s sentence - 2 moved to their owner''s store \(2 edge\(s\) kept for the owner, 2 link\(s\) added\), 1 withheld' -and $r.msg -match '4 edge\(s\) archived and deleted, 1 shared claim\(s\) that lost an edge archived whole, 1 job result\(s\) stripped; 2 notebook hub / index / AI-note page\(s\) withheld, 1 other page\(s\) carrying a fragment withheld') '575 moves f1 and fd to B, withholds f2, strips the job, withholds the hub, the index and the fragment page (counts only)'
   $green = Probe 'probe-green.txt'
   Check-Probe $green $wantGreen 'GREEN (575)'
@@ -321,13 +374,72 @@ try {
   Check ($r.rc -eq 0 -and $r.msg -match 'scope revert: nothing to restore') '575''s revert after 570''s: nothing to restore'
   $left = Q "SELECT count(*) FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname IN ('private_report_claims_person_note', 'trg_private_report_claims_wiki_guard', 'trg_private_report_claims_gap_guard')"
   Check ($left -eq '0') "no slot 570 / 575 guard function or helper is left behind ($left)"
+  # ---------------------------------------------------------------- [9] R5: the structured-note door
+  # (575 applied, B's b1 in B's store) POST /workbench/notes as A quoting B's claim, as B quoting B's own, and a clean note
+  # by A: on the tip image the quoting notes are SAVED (201, the vault file written; 575's guard then withholds the row
+  # silently); on the fix they are REFUSED (422, the one message, no vault file, no row); the clean note saves on both.
+  Write-Host '[9] R5: the structured-note door (workbench images), on 570 + 575 applied again'
+  if (-not $WorkbenchTag -or -not $BaseWorkbenchTag) {
+    if ($NoWorkbench) { Write-Host '    (skipped: -NoWorkbench)' } else { Fail 'R5 needs -WorkbenchTag and -BaseWorkbenchTag (or -NoWorkbench to skip it)' }
+  } else {
+    $r = Psql-File $init570 '570 for R5'; Check ($r.rc -eq 0 -and $r.msg -match '2 claim\(s\) moved') '570 again (R5 runs on the migrated state)'
+    $r = Psql-File $init575 '575 for R5'; Check ($r.rc -eq 0 -and $r.msg -match '2 moved') '575 again'
+    . (Join-Path $PSScriptRoot 'ob-workbench-role.ps1'); $wbDb = Use-ObWorkbenchRole $appPw
+    Check ($wbDb.role -eq 'ob_workbench') 'the lab workbench logs in as ob_workbench (slot 480), as compose runs it'
+    $t_b1 = Q "SELECT v FROM public.lab_prc_scope WHERE k = 't_b1'"
+    $r5 = @{}
+    foreach ($phase in @(@('red', $BaseWorkbenchTag), @('green', $WorkbenchTag))) {
+      $ph = $phase[0]; $tag = $phase[1]
+      $null = Dk image inspect $tag
+      Check ($script:rc -eq 0) "${ph}: the image $tag is present"
+      if ($script:rc -ne 0) { continue }
+      if (Test-Path $vault) { Remove-Item -Recurse -Force $vault }
+      New-Item -ItemType Directory -Force $vault | Out-Null
+      $wbName = "$P-wb-$ph"
+      $o = Dk run -d --name $wbName --label $label --network $net --network-alias $wbName -e 'PORT=8000' -e "WORKBENCH_KEY=$key" -e "DB_HOST=$db" `
+        -e "DB_USER=$($wbDb.role)" -e "DB_PASSWORD=$($wbDb.pw)" -e 'OPEN_BRAIN_URL=http://unreachable.invalid' -e 'EMBEDDING_API_BASE=http://unreachable.invalid/v1' `
+        -e 'EXTRACT_URL=http://unreachable.invalid' -e 'WIKI_GIT_DIR=/wiki' -e 'WIKI_ASSETS_DIR=/wiki/assets' -e 'CONTRACT_MOUNTS_ROOT=/mounts' `
+        -e 'RESEARCH_URL=http://unreachable.invalid' -e 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub' -v "${vault}:/wiki" -v "$(Join-Path $ob1 'recipes'):/recipes:ro" $tag
+      if ($script:rc -ne 0) { Fail "${ph}: the workbench did not start: $o"; continue }
+      $script:made.containers += $wbName
+      $up = $false
+      for ($i = 0; $i -lt 60; $i++) {
+        $null = Dk run --rm --label $label --network $net --entrypoint deno $tag eval "const r = await fetch('http://${wbName}:8000/health').catch(() => null); Deno.exit(r && r.status < 500 ? 0 : 1)"
+        if ($script:rc -eq 0) { $up = $true; break }
+        Start-Sleep -Seconds 2
+      }
+      Check $up "${ph}: the workbench is up"
+      if (-not $up) { Save "wb-$ph.log" ((Dk logs $wbName) | Out-String); continue }
+      foreach ($case in @(@('a_quotes_b', $subA, "Notes from a call. $t_b1 More notes."), @('b_quotes_own', $subB, "My summary. $t_b1"), @('a_clean', $subA, 'A clean note about zebra crossings and nothing private.'))) {
+        $nb = "prcr5$ph$($case[0] -replace '_', '')"
+        $js = "const r = await fetch('http://${wbName}:8000/workbench/notes', { method: 'POST', headers: { 'content-type': 'application/json', 'x-brain-key': Deno.env.get('R5_KEY'), 'X-Test-Sub': Deno.env.get('R5_SUB') }, body: JSON.stringify({ notebook: Deno.env.get('R5_NB'), title: 'r5 note', content: Deno.env.get('R5_CONTENT'), source: 'user_note' }) }); const t = await r.text(); console.log('R5STATUS=' + r.status); console.log('R5BODY=' + t.slice(0, 300));"
+        $out = Dk run --rm --label $label --network $net -e "R5_KEY=$key" -e "R5_SUB=$($case[1])" -e "R5_NB=$nb" -e "R5_CONTENT=$($case[2])" --entrypoint deno $tag eval $js
+        $st = ([regex]'R5STATUS=(\d+)').Match($out).Groups[1].Value
+        $bd = ([regex]'R5BODY=(.*)').Match($out).Groups[1].Value
+        $files = @(Get-ChildItem -Recurse -File -Path (Join-Path $vault 'content\notebooks') -Filter '*.md' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match [regex]::Escape($nb) }).Count
+        $rows = Q "SELECT count(*) FROM public.wiki_pages WHERE slug LIKE 'content/notebooks/$nb/%'"
+        $r5["${ph}_$($case[0])"] = "status=$st file=$files row=$rows"
+        $r5["${ph}_$($case[0])_body"] = $bd
+        Write-Host "    [$ph] $($case[0]): status=$st file=$files row=$rows $(if ($st -ne '201') { $bd })"
+      }
+      Save "wb-$ph.log" ((Dk logs $wbName) | Out-String)
+      $null = Dk rm -f $wbName
+    }
+    Save 'r5.txt' (($r5.Keys | Sort-Object | ForEach-Object { "$_ $($r5[$_])" }) -join "`n")
+    $msg = 'this note quotes a private report; remove that sentence, or share the report first'
+    Check ($r5['red_a_quotes_b'] -eq 'status=201 file=1 row=0' -and $r5['red_b_quotes_own'] -eq 'status=201 file=1 row=0') "R5 RED (the tip): a structured note quoting a private-report sentence is SAVED (201, the vault file written; the row withheld by the guard) - A quoting B's: $($r5['red_a_quotes_b']); B quoting B's own: $($r5['red_b_quotes_own'])"
+    Check ($r5['green_a_quotes_b'] -eq 'status=422 file=0 row=0' -and $r5['green_b_quotes_own'] -eq 'status=422 file=0 row=0' -and $r5['green_a_quotes_b_body'] -match [regex]::Escape($msg) -and $r5['green_b_quotes_own_body'] -match [regex]::Escape($msg)) "R5 GREEN: both are REFUSED, 422 with the one message, no vault file, no row - A: $($r5['green_a_quotes_b']); B: $($r5['green_b_quotes_own'])"
+    Check ($r5['red_a_clean'] -eq 'status=201 file=1 row=1' -and $r5['green_a_clean'] -eq 'status=201 file=1 row=1') "R5: a note with no such sentence saves as before on both (red $($r5['red_a_clean']); green $($r5['green_a_clean']))"
+    $leak = @($r5.Keys | Where-Object { $_ -like '*_body' } | Where-Object { $r5[$_] -match 'prcb' })
+    Check ($leak.Count -eq 0) 'R5: no refusal body carries the claim''s text'
+  }
 } catch {
   Fail "aborted: $($_.Exception.Message)"
 } finally {
   Save 'psql.log' ($script:log -join "`n")
   foreach ($c in $script:made.containers) { $null = Dk rm -f $c }
   if ($script:made.net) { $null = Dk network rm $net }
-  foreach ($d in @($stage, $oldDir)) { if (Test-Path $d) { Remove-Item -Recurse -Force $d } }
+  foreach ($d in @($stage, $oldDir, $vault)) { if (Test-Path $d) { Remove-Item -Recurse -Force $d } }
   $left = (Dk ps -a --filter "label=$label" --format '{{.Names}}' | Out-String).Trim()
   Check (-not $left) "nothing labelled $label is left running ($left)"
 }

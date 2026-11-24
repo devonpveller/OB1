@@ -93,6 +93,242 @@ export type CardBranch = {
   created_at: string;
 };
 
+export type CastDeleted = {
+  id: string;
+  deleted: boolean;
+};
+
+export type CastFormat = {
+  id: string;
+  name: string;
+  description: string;
+  team_id: string;
+  team_name: string;
+  briefing: string;
+  segments: number;
+  language: string;
+  script_route: string;
+  kind: string; /** registry: podcast_format_kinds */
+  use_for: Array<string>;
+  is_default: boolean;
+  shared: boolean;
+  mine: boolean;
+  copied_from: string | null;
+  origin: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CastFormatCreate = {
+  name: string;
+  team_id: string;
+  description?: string;
+  briefing?: string;
+  segments?: number;
+  language?: string;
+  script_route?: string;
+  kind?: string; /** registry: podcast_format_kinds */
+  use_for?: Array<string>;
+  is_default?: boolean;
+};
+
+export type CastFormatUpdate = {
+  name?: string;
+  team_id?: string;
+  description?: string;
+  briefing?: string;
+  segments?: number;
+  language?: string;
+  script_route?: string;
+  kind?: string; /** registry: podcast_format_kinds */
+  use_for?: Array<string>;
+  is_default?: boolean;
+  shared?: boolean;
+  share_digest?: string;
+};
+
+export type CastFormats = {
+  formats: Array<CastFormat>;
+  total: number;
+};
+
+export type CastGrounding = {
+  kind: string; /** registry: podcast_grounding_kinds */
+  ref: string;
+  label: string;
+  private: boolean;
+};
+
+export type CastGroundingIn = {
+  kind: string; /** registry: podcast_grounding_kinds */
+  ref: string;
+};
+
+export type CastPresenter = {
+  id: string;
+  name: string;
+  personality: string;
+  backstory: string;
+  language: string;
+  role: string;
+  focus: string;
+  stance: string;
+  tone: string;
+  speaking_style: string;
+  system_prompt: string;
+  system_prompt_mode: string; /** registry: podcast_prompt_modes */
+  notes: string | null;
+  voice: {
+    id: string;
+    route: string;
+    voice: string;
+    speed: number;
+  };
+  grounded_in: Array<CastGrounding>;
+  teams: Array<{
+    id: string;
+    name: string;
+  }>;
+  shared: boolean;
+  mine: boolean;
+  copied_from: string | null;
+  origin: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CastPresenterCreate = {
+  name: string;
+  voice_id: string;
+  personality?: string;
+  backstory?: string;
+  language?: string;
+  role?: string;
+  focus?: string;
+  stance?: string;
+  tone?: string;
+  speaking_style?: string;
+  system_prompt?: string;
+  system_prompt_mode?: string; /** registry: podcast_prompt_modes */
+  notes?: string;
+  grounded_in?: Array<CastGroundingIn>;
+};
+
+export type CastPresenterUpdate = {
+  name?: string;
+  voice_id?: string;
+  personality?: string;
+  backstory?: string;
+  language?: string;
+  role?: string;
+  focus?: string;
+  stance?: string;
+  tone?: string;
+  speaking_style?: string;
+  system_prompt?: string;
+  system_prompt_mode?: string; /** registry: podcast_prompt_modes */
+  notes?: string;
+  grounded_in?: Array<CastGroundingIn>;
+  shared?: boolean;
+  share_digest?: string;
+};
+
+export type CastPresenters = {
+  presenters: Array<CastPresenter>;
+  total: number;
+};
+
+export type CastSharePreview = {
+  id: string;
+  already_shared: boolean;
+  shareable: boolean;
+  would_share: Array<{
+    label: string;
+    detail: string;
+  }>;
+  blocked_by: Array<{
+    ref: string;
+    label: string;
+    detail: string;
+  }>;
+  never_shared: Array<string>;
+  share_digest: string;
+};
+
+export type CastTeam = {
+  id: string;
+  name: string;
+  description: string;
+  members: Array<{
+    position: number;
+    presenter_id: string;
+    name: string;
+  }>;
+  user_seat: number;
+  seats: number;
+  formats: Array<{
+    id: string;
+    name: string;
+  }>;
+  shared: boolean;
+  mine: boolean;
+  copied_from: string | null;
+  origin: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CastTeamCreate = {
+  name: string;
+  description?: string;
+  members: Array<string>;
+  user_seat?: number;
+};
+
+export type CastTeamUpdate = {
+  name?: string;
+  description?: string;
+  members?: Array<string>;
+  user_seat?: number;
+  shared?: boolean;
+  share_digest?: string;
+};
+
+export type CastTeams = {
+  teams: Array<CastTeam>;
+  total: number;
+};
+
+export type CastVoice = {
+  id: string;
+  route: string;
+  voice: string;
+  speed: number;
+  used_by: Array<{
+    id: string;
+    name: string;
+  }>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CastVoiceCreate = {
+  route: string;
+  voice: string;
+  speed?: number;
+};
+
+export type CastVoiceUpdate = {
+  route?: string;
+  voice?: string;
+  speed?: number;
+};
+
+export type CastVoices = {
+  voices: Array<CastVoice>;
+  total: number;
+};
+
 export type ChunkContext = {
   chunk_id: string;
   source_id: string;
@@ -313,6 +549,7 @@ export type DocumentLink = {
 };
 
 export type DocumentListing = {
+  id: string;
   title: string;
   path: string;
   updated: string;
@@ -543,6 +780,12 @@ export type IdeaDraft = {
   updated_at: string | null;
 };
 
+export type IdeaRest = {
+  idea_id: string;
+  status: string;
+  archived: boolean;
+};
+
 export type IdeaRevision = {
   revision: number;
   summary: string;
@@ -575,6 +818,16 @@ export type IdeaSummary = {
 
 export type Ideas = {
   ideas: Array<IdeaSummary>;
+};
+
+export type InletConnection = {
+  kind: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type InletConnections = {
+  connections: Array<InletConnection>;
 };
 
 export type Job = {

@@ -12,7 +12,9 @@
 //                         proposal (P5b's mechanism), never outside a refinery
 //          -> held        (or failed with a fixed reason; or cancelled while queued / fetching / extracting)
 // The job row is the subject's (owner_sub = the identity seam's subject_sub); the source it holds is
-// shared knowledge in waiting (held is a quality gate, not privacy - 07-MULTI-USER).
+// PRIVATE to that user's idea until it is admitted (operator 2026-11-23, rw-held-owner-scope - this
+// supersedes the 10-28 "held is a quality gate, not privacy" ruling): no other user lists, reads, cites
+// or overwrites it, and an id that is not theirs answers exactly like one that does not exist.
 import type { Db } from "../contracts/db.ts";
 import type { RefineryDeps } from "../documents/refinery.ts";
 import * as refinery from "../documents/refinery.ts";

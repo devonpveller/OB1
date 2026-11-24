@@ -130,6 +130,9 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const M = {
     title: `TitleSecret${rnd()}X`, body: `BodySecret${rnd()}`, idea: `IdeaSecret${rnd()}`, prompt: `PromptSecret${rnd()}`,
     steer: `SteerSecret${rnd()}`,
+    // rw-held-owner-scope (operator 2026-11-23): B's held source is B's alone until admitted - its title, its url and
+    // its text are markers A must never read, anywhere (the held id too: A must not even be told it exists)
+    heldTitle: `HeldTitleSecret${rnd()}`, heldUrl: `HeldUrlSecret${rnd()}`, heldBody: `HeldBodySecret${rnd()}`,
   };
   const wb = (m: string, p: string, b?: unknown, h: Record<string, string> = {}) => call(BASE, m, p, b, h);
   // ── B plants ─────────────────────────────────────────────────────────────────────────────────
@@ -181,9 +184,13 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   await sql(`UPDATE public.research_jobs SET anchor = $2, result = COALESCE(result, '{}'::jsonb) || jsonb_build_object(
       'needs_status', jsonb_build_array(jsonb_build_object('need', $2::text, 'status', 'open')), 'gaps', jsonb_build_array($2::text))
     WHERE id = $1::uuid`, [bJob, M.prompt]);
-  const held = await wb("POST", "/workbench/documents/user-sources", { refinery_id: bRefinery, title: "sweep held source", content: "shared held text for the sweep" }, B);
+  const held = await wb("POST", "/workbench/documents/user-sources", {
+    refinery_id: bRefinery, title: M.heldTitle, url: `https://example.org/sweep/${M.heldUrl}`,
+    content: `${M.heldBody} - B's private held text for the sweep. A second sentence, also private.`,
+  }, B);
   assert(held.status < 300, held.text);
-  const bHeld: string = held.json.source_id ?? held.json.id ?? held.json.held?.id ?? "";
+  const bHeld: string = held.json.source?.source_id ?? held.json.source_id ?? held.json.id ?? held.json.held?.id ?? "";
+  assert(bHeld, `B's held source id (the sweep must know it, not only harvest it): ${held.text}`);
   // a listing that cannot be updated: B's notification (entity document:<B path>)
   await sql(`CREATE OR REPLACE FUNCTION public.p2b_sweep_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'sweep fault'; END $$`);
   await sql(`CREATE TRIGGER p2b_sweep_fault BEFORE INSERT OR UPDATE ON public.user_document_listings FOR EACH ROW EXECUTE FUNCTION public.p2b_sweep_fault()`);
@@ -219,6 +226,13 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // the reconcile repairs B's listing when B's workspace next connects; B's file as it now stands
   await wb("GET", `/workbench/contract/documents`, undefined, B);
   const before = await Deno.readTextFile(`${VAULT}/${bPath}`);
+  // rw-held-owner-scope: B's held row as it stands before A's calls (A's replace / add-same-url / delete calls must change nothing)
+  const heldSnap = () => sql(
+    `SELECT id::text AS id, refinery_id::text AS refinery_id, url, title, content, content_hash, revision, updated_at::text AS updated_at,
+            (SELECT count(*)::int FROM public.held_source_chunks c WHERE c.held_source_id = h.id) AS chunks
+       FROM public.held_sources h WHERE h.id = $1`, [bHeld]);
+  const bHeldBefore = await heldSnap();
+  assertEquals(bHeldBefore.length, 1, "B's held row is planted");
   // rwr-docs-lifecycle-api round 2 (F6): B's TRASHED document - the irreversible routes (delete-forever,
   // empty-trash) are called below WITH confirm: true, so they reach their ownership checks; B's trashed
   // document must still be there at the end
@@ -261,6 +275,21 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const podReq = await wb("POST", "/workbench/contract/podcasts/requests",
     { team_id: pod.team, title: pod.request, refinery_id: bRefinery, transcript: { title: pod.request, turns: [{ presenterId: `${pod.team}-p`, text: pod.turn }] } }, B);
   assertEquals(podReq.status, 202, podReq.text);
+  // rwr-cast-edit-api (slot 560): B's cast through its own routes - a voice, a presenter with the new fields, notes and a
+  // topic link, a team and a format, none shared. A must see none of it (by id, in a list, a total or an error).
+  const castMk = { stance: `CastStanceSecret${rnd()}`, notes: `CastNotesSecret${rnd()}`, topic: `CastTopicSecret${rnd()}`,
+    team: `CastTeamSecret${rnd()}`, briefing: `CastBriefingSecret${rnd()}` };
+  const castV = await wb("POST", "/workbench/contract/cast/voices", { route: "local-tts", voice: "af_bella" }, B);
+  assertEquals(castV.status, 201, castV.text);
+  const castP = await wb("POST", "/workbench/contract/cast/presenters", { name: "Sweep caster", voice_id: castV.json.id, stance: castMk.stance,
+    notes: castMk.notes, grounded_in: [{ kind: "topic", ref: castMk.topic }] }, B);
+  assertEquals(castP.status, 201, castP.text);
+  const castT = await wb("POST", "/workbench/contract/cast/teams", { name: castMk.team, members: [castP.json.id] }, B);
+  assertEquals(castT.status, 201, castT.text);
+  const castF = await wb("POST", "/workbench/contract/cast/formats", { name: `sweep-format-${rnd()}`, team_id: castT.json.id, briefing: castMk.briefing }, B);
+  assertEquals(castF.status, 201, castF.text);
+  const bCast = { castVoice: String(castV.json.id), castPresenter: String(castP.json.id), castTeamId: String(castT.json.id), castFormat: String(castF.json.id) };
+  console.log("sweep: B's cast planted (a voice, a presenter with stance / notes / a topic, a team, a format)");
   // rw-settings-store: B's own settings - B's team as B's podcast.team (so the podTeam marker covers it) and a
   // refinery dormancy. No route names an owner: A must never read them, and A's calls must not change them.
   const bSet = await wb("PUT", "/workbench/settings/podcast.team", { value: pod.team }, B);
@@ -431,7 +460,9 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const markers: Record<string, string> = { ...M, ...(pv.pvMarker ? { pvMarker: pv.pvMarker } : {}), path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret, viaSecret,
     ...(bIntake.add ? { intakeUrl: intakeMk.url, intakeAdd: bIntake.add } : {}), ...(bIntake.import ? { intakeFile: intakeMk.file, intakeImport: bIntake.import } : {}),
     podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id,
+    castStance: castMk.stance, castNotes: castMk.notes, castTopic: castMk.topic, castTeam: castMk.team, castBriefing: castMk.briefing, ...bCast,
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
+    heldId: bHeld,
     exportSecret, leadSecret, ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])),
     privReport: privMk.text, privTitle: privMk.title, privKey: privMk.key, privReportId: bReport, privClaim: privMk.claim, privClaimId: bReportClaim,
     ...(bHandback ? { handbackInlet: bnd.inlet, handbackIdeaTitle: bnd.ideaTitle, handbackDeliver: bnd.deliver, handbackView: bnd.view, handbackId: bHandback } : {}),
@@ -476,7 +507,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // 1. TEMPLATED: B's ids and paths in every parameter, query and body field (the request gate)
   const LIFECYCLE_IRREVERSIBLE = ["/workbench/documents/delete-forever", "/workbench/documents/empty-trash"];
   let lifecycleTrashCalls = 0;
-  const ids = [bPath, bTrashed, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob].filter(Boolean);
+  const ids = [bPath, bTrashed, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob, ...Object.values(bCast)].filter(Boolean);
   const query = (v: string) => new URLSearchParams({
     path: bPath, ref: bPath, from: bPath, id: v, idea_id: bRefinery, refinery_id: bRefinery, job_id: bJob,
     source_id: bHeld || v, kind: "user_document", holder_kind: "user_document", format: "md", limit: "500", q: "fixture",
@@ -649,6 +680,9 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   }
   // B's document is B's: unchanged by A's calls, and B still reads it
   assertEquals(await Deno.readTextFile(`${VAULT}/${bPath}`), before, "user A's calls left B's document unchanged");
+  assertEquals(await heldSnap(), bHeldBefore, "user A's calls left B's held source (title, url, text, revision, chunks) byte-identical");
+  const bHeldJobs = await wb("GET", "/workbench/contract/jobs?kinds=held&limit=500", undefined, B);
+  assert(bHeldJobs.json.jobs?.some((j: any) => j.id === bHeld && j.detail?.title === M.heldTitle), `B still lists its own held source: ${bHeldJobs.status}`);
   assert(await Deno.stat(`${VAULT}/${bTrashed}`).then(() => true, () => false), "user A's confirmed delete-forever / empty-trash calls left B's trashed document in B's trash");
   assertEquals((await wb("GET", "/workbench/documents/trail", undefined, B)).json.total, 0, "nothing of B's was removed: B's trail is empty");
   assertEquals((await wb("GET", `/workbench/documents/file?path=${encodeURIComponent(bPath)}`, undefined, B)).status, 200);

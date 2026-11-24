@@ -7,6 +7,7 @@ const APP = process.env.APP_IP, CH = process.env.CH || "127.0.0.1";
 const origin = `http://${APP}:8080`;
 const MARK = "PERSONAL-MARKER-7731";
 const DOC_A = "documents/alice/alpha-cpu.md";
+const ID_A = "c0000000-0000-4000-8000-000000000001"; // its opaque id: the only thing an address carries
 const enc = encodeURIComponent;
 let fails = 0;
 const ok = (c, m) => { console.log((c ? "PASS " : "FAIL ") + m); if (!c) fails++; };
@@ -68,12 +69,12 @@ const cleaned = (s) => "clean: " + s.toLowerCase();
 
 // ---- 1. from a document: prefilled, the amber bar, focus in the question
 await scheme("light"); await setMode("alice"); await behave("ok");
-await go(`/research/start?document=${enc(DOC_A)}`);
+await go(`/research/start?document=${ID_A}`);
 ok((await text("h1")) === "Start research", "the dialog heading is Start research");
 ok((await text("[data-testid=for-document-title]")) === "ALPHA Upgrading the workstation CPU", "from a document: the bar names it");
 ok(/For document/.test(await text("[data-testid=for-document]") ?? "") && (await ev(`getComputedStyle(document.querySelector('[data-testid=for-document]')).backgroundColor`)) !== "rgba(0, 0, 0, 0)", "the amber For document bar is shown");
 ok((await ev(`document.querySelector('[data-testid=attach-doc]').getAttribute('aria-pressed')`)) === "true", "the attach choice is A document");
-ok((await ev(`document.querySelector('[data-testid=for-document-back]').getAttribute('href')`)) === "/documents/" + enc(DOC_A), "Back to the document goes to the document");
+ok((await ev(`document.querySelector('[data-testid=for-document-back]').getAttribute('href')`)) === "/documents/d/" + ID_A, "Back to the document goes to the document (by its id)");
 ok((await ev(`document.activeElement?.dataset?.testid`)) === "start-question", "focus starts in the question box");
 ok((await ev(`document.title`)) === "Start research - Research workbench", "the page title is the screen's, naming no document");
 await axeBoth("Start research (from a document, empty question)");
@@ -153,7 +154,7 @@ await behave("ok");
 
 // ---- 7. two identities: bob after alice, same browser
 await setMode("bob");
-await go(`/research/start?document=${enc(DOC_A)}`);
+await go(`/research/start?document=${ID_A}`);
 ok((await text("[data-testid=doc-gone]")) === "That document is not available." && !(await has("[data-testid=for-document]")), "bob opening alice's document: one plain sentence, no bar");
 ok(!/ALPHA|alice|Alice/.test(await ev(`document.body.innerText`)), "bob's page shows no ALPHA text and no 'alice'");
 ok(!(await ev(`document.documentElement.outerHTML`)).includes("ALPHA"), "bob's page source holds no ALPHA text at all");
@@ -161,11 +162,11 @@ await click("[data-testid=attach-doc]");
 await waitFor(`!!document.querySelector('[data-testid=doc-chooser]')`);
 ok(JSON.stringify(JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('[data-testid=doc-choice]')].map(e=>e.textContent))`))) === JSON.stringify(["BRAVO plan"]), "bob can attach only his own document");
 await axeBoth("Start research as bob (alice's document asked for)");
-const bobDocReads = (await stub("/__log")).filter((x) => x.mode === "bob" && /documents\/(state|file)/.test(x.url));
+const bobDocReads = (await stub("/__log")).filter((x) => x.mode === "bob" && /documents\/(state|file|resolve)/.test(x.url));
 ok(bobDocReads.length >= 1 && bobDocReads.every((x) => x.keyOk), "bob's read of alice's document was made and answered 404 (the same as a missing one)");
 // a live switch: alice's dialog is open with her question and document; the person changes; the shell's refresh shows bob
 await setMode("alice");
-await go(`/research/start?document=${enc(DOC_A)}`);
+await go(`/research/start?document=${ID_A}`);
 await typeInto("[data-testid=start-question]", "ALPHA secret question");
 await waitFor(`!!document.querySelector('[data-testid=leaves-question]')`);
 await setMode("bob");
@@ -179,7 +180,7 @@ await axeBoth("Start research after a live switch to bob");
 await setMode("alice");
 
 // ---- 8. keyboard: Tab reaches everything, rings visible, buttons work with Enter and Space, Esc leaves
-await go(`/research/start?document=${enc(DOC_A)}`);
+await go(`/research/start?document=${ID_A}`);
 await ev(`document.activeElement.blur()`);
 const stops = [];
 for (let i = 0; i < 40; i++) {
@@ -198,9 +199,9 @@ await waitFor(`document.querySelector('[data-testid=start-go]').disabled===false
 ok((await startPosts()).length === 1, "Enter or typing in the question never starts anything by itself");
 await ev(`document.querySelector('[data-testid=start-go]').focus()`); await enter();
 ok(await waitFor(`location.pathname==='/research'`), "Enter on Start starts, from the keyboard alone");
-await go(`/research/start?document=${enc(DOC_A)}`);
+await go(`/research/start?document=${ID_A}`);
 await ev(`document.querySelector('[data-testid=start-question]').focus()`); await esc();
-ok(await waitFor(`location.pathname==='/documents/${enc(DOC_A)}'`), "Esc leaves the dialog and goes back to the document it was opened for");
+ok(await waitFor(`location.pathname==='/documents/d/${ID_A}'`), "Esc leaves the dialog and goes back to the document it was opened for");
 await go("/research/start");
 await ev(`document.querySelector('[data-testid=start-question]').focus()`); await esc();
 ok(await waitFor(`location.pathname==='/'`), "Esc from + Start research goes home");
@@ -226,12 +227,12 @@ await viewport(1440, 900);
 
 // ---- 10. quality of the run: no console problems, nothing kept in the browser, nothing from the cache
 ok(problems().length === 0, `no console errors/warnings/exceptions (${problems().length})` + JSON.stringify(problems().map((e) => (e.params?.entry?.text || e.params?.exceptionDetails?.text) + " " + (e.params?.entry?.url || ""))));
-await setMode("alice"); await go(`/research/start?document=${enc(DOC_A)}`);
+await setMode("alice"); await go(`/research/start?document=${ID_A}`);
 await typeInto("[data-testid=start-question]", "something to leave a trace");
 await waitFor(`!!document.querySelector('[data-testid=leaves-question]')`);
 const keep = JSON.parse(await ev(`(async()=>JSON.stringify({ls:Object.keys(localStorage).filter(k=>k!=='workbench.theme'),ss:sessionStorage.length,ck:document.cookie,caches:(typeof caches!=='undefined'?await caches.keys():[]).length,idb:(indexedDB.databases?await indexedDB.databases():[]).length}))()`));
 ok(keep.ls.length === 0 && keep.ss === 0 && keep.ck === "" && keep.caches === 0 && keep.idb === 0, `storage, cookies, caches and IndexedDB hold nothing beyond workbench.theme: ${JSON.stringify(keep)}`);
-ok((await ev(`location.search`)) === `?document=${enc(DOC_A)}`, "the address holds the document's path only: not the question");
+ok((await ev(`location.search`)) === `?document=${ID_A}`, "the address holds the document's opaque id only: not the question, not the path");
 const fromCache = events.filter((e) => e.method === "Network.responseReceived" && /\/workbench\//.test(e.params.response.url) && (e.params.response.fromDiskCache || e.params.response.fromServiceWorker));
 ok(fromCache.length === 0, "no /workbench/ read was answered from the browser's cache");
 

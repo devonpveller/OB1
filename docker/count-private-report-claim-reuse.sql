@@ -124,11 +124,12 @@ BEGIN
     RETURN QUERY EXECUTE q || ' SELECT f.id FROM f';
     IF NOT FOUND THEN RETURN; END IF;
     -- a shared claim carrying a fragment's sentence (only when there is a fragment: this reads every shared claim)
-    RETURN QUERY EXECUTE q || $d$
-    SELECT c.id FROM public.claims c
-     WHERE c.id NOT IN (SELECT f.id FROM f)
-       AND NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
-       AND EXISTS (SELECT 1 FROM f WHERE position(f.n IN pg_temp.prc_norm(c.text)) > 0)$d$;
+    RETURN QUERY EXECUTE q || $d$,
+    cn AS MATERIALIZED (
+        SELECT c.id, pg_temp.prc_norm(c.text) AS n FROM public.claims c
+         WHERE c.id NOT IN (SELECT f.id FROM f)
+           AND NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id))
+    SELECT cn.id FROM cn WHERE EXISTS (SELECT 1 FROM f WHERE position(f.n IN cn.n) > 0)$d$;
 END;
 $$;
 WITH
@@ -140,11 +141,14 @@ texts AS (
         UNION ALL
         SELECT c.text FROM public.inlet_private_claims c JOIN linked l ON l.id = c.id) x
      WHERE length(pg_temp.prc_norm(x.text)) >= 24),
+-- rw-570-perf: each row's skeleton is computed ONCE (a MATERIALIZED step), then compared with every text; the counts
+-- are the same as when the skeleton was recomputed for every (row, text) pair (936 s on the live-size rehearsal)
+syn_n AS MATERIALIZED (
+    SELECT s.id, pg_temp.prc_norm(coalesce(s.title, '') || ' ' || coalesce(s.content, '')) AS n
+      FROM public.sources s WHERE s.content_type = 'research_synthesis'),
 syn AS (
-    SELECT DISTINCT s.id FROM public.sources s, texts t
-     WHERE s.content_type = 'research_synthesis'
-       AND position(t.n IN pg_temp.prc_norm(coalesce(s.title, '') || ' ' || coalesce(s.content, ''))) > 0),
-shared_jobs AS (
+    SELECT DISTINCT s.id FROM syn_n s, texts t WHERE position(t.n IN s.n) > 0),
+shared_jobs AS MATERIALIZED (
     SELECT j.id, j.gap_ref,
            pg_temp.prc_norm(coalesce(j.result ->> 'synthesis', '') || ' ' || coalesce(j.result ->> 'prose', '') || ' '
                             || coalesce(j.result -> 'line_credibility', '[]'::jsonb)::text) AS body
@@ -154,33 +158,41 @@ shared_jobs AS (
 jobs AS (SELECT DISTINCT j.id, j.gap_ref FROM shared_jobs j, texts t WHERE position(t.n IN j.body) > 0),
 -- fix item round 2: threads whose name / description carries one, and other shared claims (not a private report's
 -- own) carrying one (a synthesis filed its sentence into another thread)
+threads_n AS MATERIALIZED (
+    SELECT th.id, pg_temp.prc_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, '') || ' ' || coalesce(th.slug, '')) AS n
+      FROM public.threads th),
 threads AS (
-    SELECT DISTINCT th.id FROM public.threads th, texts t
-     WHERE position(t.n IN pg_temp.prc_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, '') || ' ' || coalesce(th.slug, ''))) > 0),
+    SELECT DISTINCT th.id FROM threads_n th, texts t WHERE position(t.n IN th.n) > 0),
 -- round 3: notebook labels (a thread's name on each filed source) and the thread names in job curator answers
+notebooks_n AS MATERIALIZED (
+    SELECT s.id, pg_temp.prc_norm(s.notebook) AS n FROM public.sources s WHERE coalesce(s.notebook, '') <> ''),
 notebooks AS (
-    SELECT DISTINCT s.id FROM public.sources s, texts t
-     WHERE coalesce(s.notebook, '') <> '' AND position(t.n IN pg_temp.prc_norm(s.notebook)) > 0),
-curator AS (
-    SELECT DISTINCT j.id FROM public.research_jobs j, texts t
-     WHERE jsonb_typeof(j.result -> 'curator') = 'object'
-       AND position(t.n IN pg_temp.prc_norm(coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((
+    SELECT DISTINCT s.id FROM notebooks_n s, texts t WHERE position(t.n IN s.n) > 0),
+curator_n AS MATERIALIZED (
+    SELECT j.id, pg_temp.prc_norm(coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((
                SELECT string_agg(x ->> 'name', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'shortlist') = 'array'
-                                                                                  THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), ''))) > 0),
+                                                                                  THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), '')) AS n
+      FROM public.research_jobs j WHERE jsonb_typeof(j.result -> 'curator') = 'object'),
+curator AS (
+    SELECT DISTINCT j.id FROM curator_n j, texts t WHERE position(t.n IN j.n) > 0),
+dup_n AS MATERIALIZED (
+    SELECT c.id, pg_temp.prc_norm(c.text) AS n FROM public.claims c WHERE c.id NOT IN (SELECT id FROM linked)),
 dup_claims AS (
-    SELECT DISTINCT c.id FROM public.claims c, texts t
-     WHERE c.id NOT IN (SELECT id FROM linked) AND position(t.n IN pg_temp.prc_norm(c.text)) > 0),
+    SELECT DISTINCT c.id FROM dup_n c, texts t WHERE position(t.n IN c.n) > 0),
 -- slot 575 (R1): the class-'note' pages that are not a person's note, against every private-report claim and every
--- withheld one (570's page predicate)
+-- withheld one (570's page predicate); each page's skeleton once (rw-570-perf)
+note_pages_n AS MATERIALIZED (
+    SELECT w.slug, pg_temp.prc_norm(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '')) AS n
+      FROM public.wiki_pages w
+     WHERE coalesce(w.page_class, '') = 'note' AND left(coalesce(w.slug, ''), 6) <> 'notes/'),
+note_texts AS MATERIALIZED (
+    SELECT n FROM texts UNION SELECT pg_temp.prc_norm(x.text) FROM pg_temp.prc_withheld() x WHERE length(pg_temp.prc_norm(x.text)) >= 24),
 note_pages AS (
-    SELECT DISTINCT w.slug FROM public.wiki_pages w,
-           (SELECT n FROM texts UNION SELECT pg_temp.prc_norm(x.text) FROM pg_temp.prc_withheld() x WHERE length(pg_temp.prc_norm(x.text)) >= 24) t
-     WHERE coalesce(w.page_class, '') = 'note' AND left(coalesce(w.slug, ''), 6) <> 'notes/'
-       AND position(t.n IN pg_temp.prc_norm(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, ''))) > 0),
+    SELECT DISTINCT w.slug FROM note_pages_n w, note_texts t WHERE position(t.n IN w.n) > 0),
 frag AS (SELECT DISTINCT f.id FROM pg_temp.prc_frag() f),
 claims_reused AS (
     SELECT DISTINCT t.n FROM texts t
-     WHERE EXISTS (SELECT 1 FROM syn s JOIN public.sources x ON x.id = s.id WHERE position(t.n IN pg_temp.prc_norm(coalesce(x.title, '') || ' ' || coalesce(x.content, ''))) > 0)
+     WHERE EXISTS (SELECT 1 FROM syn s JOIN syn_n x ON x.id = s.id WHERE position(t.n IN x.n) > 0)
         OR EXISTS (SELECT 1 FROM jobs j JOIN shared_jobs b ON b.id = j.id WHERE position(t.n IN b.body) > 0))
 SELECT line FROM (
     SELECT 1 AS o, 'reuse: private-report claims (any store)=' || (SELECT count(*) FROM linked) AS line

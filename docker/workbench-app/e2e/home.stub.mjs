@@ -17,9 +17,9 @@ const FOREIGN = card("s1", "running", "", false, 3, { kind: "branches", detail: 
 const PEOPLE = {
   alice: {
     documents: [
-      { title: "ALPHA older note", path: "documents/alpha-old.md", updated: ago(3 * D), outbound_links: [] },
-      { title: "ALPHA newest draft", path: "documents/alpha-new.md", updated: ago(2 * H), outbound_links: [{}, {}] },
-      { title: "ALPHA middle", path: "documents/alpha-mid.md", updated: ago(D), outbound_links: [{}] },
+      { id: "a0000000-0000-4000-8000-0000000000a1", title: "ALPHA older note", path: "documents/alpha-old.md", updated: ago(3 * D), outbound_links: [] },
+      { id: "a0000000-0000-4000-8000-0000000000a2", title: "ALPHA newest draft", path: "documents/alpha-new.md", updated: ago(2 * H), outbound_links: [{}, {}] },
+      { id: "a0000000-0000-4000-8000-0000000000a3", title: "ALPHA middle", path: "documents/alpha-mid.md", updated: ago(D), outbound_links: [{}] },
     ],
     ideas: [{ id: "i1", title: "ALPHA pantry idea", status: "researched", updated_at: ago(D) }],
     episodes: [{ id: "e1", title: "ALPHA digest episode", seconds: 840, shared: false, mine: true, created_at: ago(H) }],
@@ -33,7 +33,7 @@ const PEOPLE = {
     ],
   },
   bob: {
-    documents: [{ title: "BRAVO plan", path: "documents/bravo.md", updated: ago(H), outbound_links: [] }],
+    documents: [{ id: "b0000000-0000-4000-8000-0000000000b1", title: "BRAVO plan", path: "documents/bravo.md", updated: ago(H), outbound_links: [] }],
     ideas: [], episodes: [], requests: [],
     sessions: [card("s9", "running", "BRAVO own question", true, 1, { kind: "stage", detail: "plan" }), FOREIGN],
   },

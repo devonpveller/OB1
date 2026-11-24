@@ -40,6 +40,11 @@ const isResearchStart = (t) => !!(t && t.request && String(t.request.method || '
 
 const PODCAST_MODEL = /\/(podcasts|presenters|teams)(\/|$| )/;
 
+// 8. rwr-cast-edit-api (slot 560): the cast routes' fixtures (schemas/cast.ts CX) belong to their own lab subject,
+//    lab-caster-0001 (lab-caster-0002 owns the shared pool's rows the copy examples use); every /cast/ operation is
+//    called as lab-caster-0001. Every one of them is checked (none is skipped): the DELETE examples remove *-del rows.
+const CAST = /\/workbench\/contract\/cast\//;
+
 // 7. rw-owner-private-view (slot 480): the owner's private views answer the signed-in owner only (or the configured
 //    default identity while sign-in is off). The Dredd workbench has neither (no WORKSPACE_DEFAULT_SUB), so the three
 //    list / search ops are checked on their (empty) 200 shape here, and the two by-id reads - an owner's row or the
@@ -47,9 +52,20 @@ const PODCAST_MODEL = /\/(podcasts|presenters|teams)(\/|$| )/;
 //    (src/inlet/owner_private_view_integration_test.ts) exercises them as the owner, as other users and per identity mode.
 const PRIVATE_BY_ID = /\/private\/(claims|jobs)\/\{id\}/;
 
+// 8. rwr-idea-archive-api: archive / reopen act on an idea of the caller's own; the fixture idea bbbbbbbb-...-bbb4 is owned
+//    by the lab subject lab-ideas-0001 (fixtures.sql), so these two are called as that subject; they run in document
+//    order (archive, then reopen), which leaves the idea as it was.
+const IDEA_REST = /\/ideas\/\{id\}\/(archive|reopen)/;
+
 hooks.beforeEach((transaction, done) => {
+  if (IDEA_REST.test(String(transaction.name || '')) && transaction.request && transaction.request.headers) {
+    transaction.request.headers['X-Test-Sub'] = 'lab-ideas-0001';
+  }
   if (PODCAST_MODEL.test(String(transaction.name || '')) && transaction.request && transaction.request.headers) {
     transaction.request.headers['X-Test-Sub'] = 'lab-podcaster-0001';
+  }
+  if (CAST.test(String(transaction.name || '')) && transaction.request && transaction.request.headers) {
+    transaction.request.headers['X-Test-Sub'] = 'lab-caster-0001';
   }
   const code = String(transaction.expected && transaction.expected.statusCode);
   transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || FLAG_BY_ID.test(String(transaction.name || '')) || PRIVATE_BY_ID.test(String(transaction.name || '')) || isResearchStart(transaction);

@@ -56,6 +56,80 @@ BEGIN
         RAISE EXCEPTION 'private report claims scope: refused, nothing changed - slot 570 (init-private-report-claims.sql) must be applied first' USING ERRCODE = '55000';
     END IF;
 END $$;
+-- -- R6: the skeleton memo (rw-570-perf's pattern), BEFORE the locks -------------------------------------------------
+-- Every text this run compares is normalised ONCE into a per-transaction memo keyed by SHA-256 of the exact text;
+-- pg_temp.sc_n(t) returns the memo's skeleton, or private_report_claim_norm(t) for a text not memoised (one that
+-- changed after the memo is simply normalised again), so sc_n(t) = private_report_claim_norm(t) for every t. Filled
+-- here, before the locks (writers go on meanwhile): the private-report claim texts, the moved syntheses, the fragment
+-- candidates, the class-'note' pages that are not a person's note; and only when a fragment candidate is found here,
+-- every other text a fragment is compared with (every page, claim, synthesis, job report, thread, notebook label,
+-- curator answer). The memo and its three functions go with the transaction.
+CREATE OR REPLACE FUNCTION pg_temp.private_report_claims_person_note_pre(p_slug TEXT, p_class TEXT) RETURNS BOOLEAN
+LANGUAGE sql IMMUTABLE
+AS $$
+    SELECT coalesce(p_class, '') = 'note' AND left(coalesce(p_slug, ''), 6) = 'notes/'
+$$;
+CREATE TEMP TABLE _sc_memo (h BYTEA PRIMARY KEY, n TEXT NOT NULL) ON COMMIT DROP;
+CREATE OR REPLACE FUNCTION pg_temp.sc_n(p_text TEXT) RETURNS TEXT
+LANGUAGE sql STABLE
+AS $$
+    SELECT coalesce((SELECT m.n FROM pg_temp._sc_memo m WHERE m.h = sha256(convert_to(coalesce(p_text, ''), 'UTF8'))),
+                    public.private_report_claim_norm(p_text))
+$$;
+CREATE OR REPLACE FUNCTION pg_temp.sc_memo(p_texts TEXT[]) RETURNS BIGINT
+LANGUAGE sql VOLATILE
+AS $$
+    WITH ins AS (
+        INSERT INTO pg_temp._sc_memo (h, n)
+        SELECT sha256(convert_to(x.t, 'UTF8')), public.private_report_claim_norm(x.t)
+          FROM (SELECT DISTINCT coalesce(u, '') AS t FROM unnest(p_texts) u) x
+        ON CONFLICT (h) DO NOTHING RETURNING 1)
+    SELECT count(*) FROM ins
+$$;
+DO $$
+DECLARE v_pre BOOLEAN;
+BEGIN
+    PERFORM pg_temp.sc_memo(ARRAY(SELECT c.text FROM public.inlet_private_claims c
+                                   WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)));
+    PERFORM pg_temp.sc_memo(ARRAY(SELECT a.row_data ->> 'text' FROM public.private_report_claims_archive a WHERE a.action = 'x' AND a.restored_at IS NULL));
+    PERFORM pg_temp.sc_memo(ARRAY(SELECT coalesce(a.row_data ->> 'title', '') || ' ' || coalesce(a.row_data ->> 'content', '')
+                                    FROM public.private_report_claims_archive a WHERE a.action = 's' AND a.tbl = 'public.sources' AND a.restored_at IS NULL));
+    PERFORM pg_temp.sc_memo(ARRAY(SELECT c.text FROM public.private_report_claims_archive a JOIN public.claims c ON c.id::text = a.row_data ->> 'id'
+                                   WHERE a.action = 'd' AND a.tbl IN ('public.claims', 'claims') AND a.row_data ->> '_col' = 'synthesis_id' AND a.restored_at IS NULL));
+    PERFORM pg_temp.sc_memo(ARRAY(SELECT coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '') FROM public.wiki_pages w WHERE w.page_class = 'note' AND NOT pg_temp.private_report_claims_person_note_pre(w.slug, w.page_class)));
+    -- is there a fragment candidate now? (a superset of the move's rule: a 'd' claim inside a private-report claim the
+    -- synthesis restated or filed; the move decides exactly, under the locks)
+    WITH p AS MATERIALIZED (
+        SELECT x.id, x.n FROM (
+            SELECT c.id, pg_temp.sc_n(c.text) AS n FROM public.inlet_private_claims c
+             WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+            UNION ALL
+            SELECT a.ref::uuid, pg_temp.sc_n(a.row_data ->> 'text') FROM public.private_report_claims_archive a WHERE a.action = 'x' AND a.restored_at IS NULL) x
+         WHERE length(x.n) >= 24),
+    s AS MATERIALIZED (
+        SELECT a.ref AS sid, pg_temp.sc_n(coalesce(a.row_data ->> 'title', '') || ' ' || coalesce(a.row_data ->> 'content', '')) AS n
+          FROM public.private_report_claims_archive a WHERE a.action = 's' AND a.tbl = 'public.sources' AND a.restored_at IS NULL),
+    cn AS MATERIALIZED (
+        SELECT a.ref AS sid, pg_temp.sc_n(c.text) AS n
+          FROM public.private_report_claims_archive a JOIN public.claims c ON c.id::text = a.row_data ->> 'id'
+         WHERE a.action = 'd' AND a.tbl IN ('public.claims', 'claims') AND a.row_data ->> '_col' = 'synthesis_id' AND a.restored_at IS NULL)
+    SELECT EXISTS (SELECT 1 FROM cn JOIN s ON s.sid = cn.sid, p
+                    WHERE length(cn.n) >= 24 AND position(cn.n IN p.n) > 0
+                      AND (position(p.n IN s.n) > 0
+                           OR EXISTS (SELECT 1 FROM public.private_report_claims_archive k
+                                       WHERE k.action IN ('k', 'x') AND k.restored_at IS NULL AND k.ref = p.id::text AND k.row_data ->> 'synthesis_id' = cn.sid)))
+      INTO v_pre;
+    IF v_pre THEN
+        PERFORM pg_temp.sc_memo(ARRAY(SELECT c.text FROM public.claims c));
+        PERFORM pg_temp.sc_memo(ARRAY(SELECT coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '') FROM public.wiki_pages w WHERE NOT pg_temp.private_report_claims_person_note_pre(w.slug, w.page_class)));
+        PERFORM pg_temp.sc_memo(ARRAY(SELECT coalesce(s.title, '') || ' ' || coalesce(s.content, '') FROM public.sources s WHERE s.content_type = 'research_synthesis'));
+        PERFORM pg_temp.sc_memo(ARRAY(SELECT (SELECT string_agg(v #>> '{}', ' ') FROM jsonb_path_query(j.result - 'reuse_claims' - 'claims', 'strict $.**') v WHERE jsonb_typeof(v) = 'string') FROM public.research_jobs j WHERE jsonb_typeof(j.result) = 'object'));
+        PERFORM pg_temp.sc_memo(ARRAY(SELECT coalesce(th.name, '') || ' ' || coalesce(th.description, '') || ' ' || coalesce(th.slug, '') FROM public.threads th));
+        PERFORM pg_temp.sc_memo(ARRAY(SELECT s.notebook FROM public.sources s WHERE coalesce(s.notebook, '') <> ''));
+        PERFORM pg_temp.sc_memo(ARRAY(SELECT coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((SELECT string_agg(x ->> 'name', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'shortlist') = 'array' THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), '') FROM public.research_jobs j WHERE jsonb_typeof(j.result -> 'curator') = 'object'));
+    END IF;
+    RAISE NOTICE 'private report claims scope: % text skeleton(s) memoised before the locks (a fragment candidate: %)', (SELECT count(*) FROM pg_temp._sc_memo), v_pre;
+END $$;
 LOCK TABLE public.wiki_pages, public.claims, public.claim_sources, public.research_private_report_claims,
            public.inlet_private_claims, public.inlet_private_claim_sources, public.research_jobs
     IN SHARE ROW EXCLUSIVE MODE;
@@ -109,6 +183,47 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+-- -- R5 (operator decision 2026-11-24): the structured-note check -------------------------------------------------
+-- The workbench's structured / AI-note hand-off (POST /workbench/notes, writeStructuredNote) writes into the SHARED
+-- wiki (content/notebooks/..., class 'note', no author). It asks this BEFORE it writes anything - the vault file or the
+-- row - and refuses the note (422) when the answer is true: the wiki guard's own decision for the row it would store
+-- (a person's note: its author's own claims, as the guard; any other row: any private-report claim's text, the
+-- writer's own included). Note: a refusal tells the writer that SOME private report holds the sentence (the operator's
+-- choice; the guard withheld such a row silently before). Callable by the workbench's login (ob_workbench), the
+-- services' login (ob_app_memory) or a superuser session, never through PostgREST (570's reader gate).
+CREATE OR REPLACE FUNCTION public.private_report_claims_note_refused(p_slug TEXT, p_title TEXT, p_body TEXT) RETURNS BOOLEAN
+LANGUAGE plpgsql STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF NOT public.private_report_claims_reader_ok() THEN
+        RAISE EXCEPTION 'private report claims: not for this caller' USING ERRCODE = '42501';
+    END IF;
+    IF public.private_report_claims_person_note(p_slug, 'note') THEN
+        RETURN public.private_report_claims_own_text_shows(nullif(current_setting('ob.page_author', true), ''), coalesce(p_slug, '') || ' ' || coalesce(p_title, ''), p_body);
+    END IF;
+    RETURN public.private_report_claims_page_shows(coalesce(p_slug, '') || ' ' || coalesce(p_title, ''), p_body);
+END;
+$$;
+REVOKE ALL ON FUNCTION public.private_report_claims_note_refused(TEXT, TEXT, TEXT) FROM PUBLIC;
+DO $$
+DECLARE r RECORD;
+BEGIN
+    FOR r IN SELECT DISTINCT ro.rolname AS grantee
+               FROM pg_proc p, aclexplode(p.proacl) a JOIN pg_roles ro ON ro.oid = a.grantee
+              WHERE p.oid = 'public.private_report_claims_note_refused(text,text,text)'::regprocedure AND NOT ro.rolsuper AND ro.oid <> p.proowner LOOP
+        EXECUTE format('REVOKE ALL ON FUNCTION public.private_report_claims_note_refused(text,text,text) FROM %I', r.grantee);
+    END LOOP;
+    GRANT EXECUTE ON FUNCTION public.private_report_claims_note_refused(TEXT, TEXT, TEXT) TO service_role;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') THEN
+        GRANT EXECUTE ON FUNCTION public.private_report_claims_note_refused(TEXT, TEXT, TEXT) TO ob_app_memory;
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_workbench') THEN
+        GRANT EXECUTE ON FUNCTION public.private_report_claims_note_refused(TEXT, TEXT, TEXT) TO ob_workbench;
+    END IF;
+END $$;
 
 -- ── R4: the gap guard, 570's with a NULL kind treated as a non-matching kind (slot 575) ─────────────────────────────
 -- (byte for byte 570's function but for the three coalesce(.., '') tests at the top)
@@ -230,17 +345,17 @@ BEGIN
     -- the private-report claims (an owner store row a private report links; a claim 570 withheld: nobody's), skeletons
     CREATE TEMP TABLE _sc_p ON COMMIT DROP AS
     SELECT x.id, x.owner, x.n FROM (
-        SELECT c.id, c.inlet_owner_sub AS owner, public.private_report_claim_norm(c.text) AS n
+        SELECT c.id, c.inlet_owner_sub AS owner, pg_temp.sc_n(c.text) AS n
           FROM public.inlet_private_claims c
          WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
         UNION ALL
-        SELECT a.ref::uuid, NULL, public.private_report_claim_norm(a.row_data ->> 'text')
+        SELECT a.ref::uuid, NULL, pg_temp.sc_n(a.row_data ->> 'text')
           FROM public.private_report_claims_archive a WHERE a.action = 'x' AND a.restored_at IS NULL) x
      WHERE length(x.n) >= 24;
     -- the syntheses 570 moved or withheld (its 's' rows), skeletons of their title + content
     CREATE TEMP TABLE _sc_s ON COMMIT DROP AS
     SELECT DISTINCT ON (a.ref) a.ref AS sid,
-           public.private_report_claim_norm(coalesce(a.row_data ->> 'title', '') || ' ' || coalesce(a.row_data ->> 'content', '')) AS n
+           pg_temp.sc_n(coalesce(a.row_data ->> 'title', '') || ' ' || coalesce(a.row_data ->> 'content', '')) AS n
       FROM public.private_report_claims_archive a
      WHERE a.action = 's' AND a.tbl = 'public.sources' AND a.restored_at IS NULL
      ORDER BY a.ref, a.id DESC;
@@ -255,7 +370,7 @@ BEGIN
     -- private report's own, whose skeleton (24+ letters) is inside the skeleton of a claim that synthesis restated
     CREATE TEMP TABLE _sc_f ON COMMIT DROP AS
     WITH cn AS (
-        SELECT DISTINCT c.id, a.ref AS sid, public.private_report_claim_norm(c.text) AS n
+        SELECT DISTINCT c.id, a.ref AS sid, pg_temp.sc_n(c.text) AS n
           FROM public.private_report_claims_archive a JOIN public.claims c ON c.id::text = a.row_data ->> 'id'
          WHERE a.action = 'd' AND a.tbl IN ('public.claims', 'claims') AND a.row_data ->> '_col' = 'synthesis_id' AND a.restored_at IS NULL
            AND a.ref IN (SELECT sid FROM _sc_s)
@@ -268,15 +383,16 @@ BEGIN
     SELECT count(*) INTO n_frag FROM _sc_f;
     CREATE TEMP TABLE _sc_fn (id UUID, n TEXT, text TEXT, jtext TEXT) ON COMMIT DROP;
     IF n_frag > 0 THEN
-        INSERT INTO _sc_fn SELECT f.id, public.private_report_claim_norm(c.text), c.text, substr(to_jsonb(c.text)::text, 2, length(to_jsonb(c.text)::text) - 2)
+        INSERT INTO _sc_fn SELECT f.id, pg_temp.sc_n(c.text), c.text, substr(to_jsonb(c.text)::text, 2, length(to_jsonb(c.text)::text) - 2)
           FROM _sc_f f JOIN public.claims c ON c.id = f.id;
         -- a SHARED claim carrying a fragment's sentence follows it (570's duplicate rule, applied to the fragment): its
         -- owners are the fragments' owners, withheld when one of them is
         CREATE TEMP TABLE _sc_dhit ON COMMIT DROP AS
-        SELECT c.id, f.id AS fid
-          FROM public.claims c JOIN _sc_fn f ON position(f.n IN public.private_report_claim_norm(c.text)) > 0
-         WHERE c.id NOT IN (SELECT id FROM _sc_f)
-           AND NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id);
+        WITH cn AS MATERIALIZED (
+            SELECT c.id, pg_temp.sc_n(c.text) AS n FROM public.claims c
+             WHERE c.id NOT IN (SELECT id FROM _sc_f)
+               AND NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id))
+        SELECT cn.id, f.id AS fid FROM cn JOIN _sc_fn f ON position(f.n IN cn.n) > 0;
         INSERT INTO _sc_f (id, owners, nobody, restates)
         SELECT h.id, array_agg(DISTINCT o.v) FILTER (WHERE o.v IS NOT NULL), bool_or(f.nobody), array_agg(DISTINCT rs.v) FILTER (WHERE rs.v IS NOT NULL)
           FROM _sc_dhit h JOIN _sc_f f ON f.id = h.fid
@@ -284,7 +400,7 @@ BEGIN
           LEFT JOIN LATERAL unnest(f.restates) rs(v) ON true
          GROUP BY h.id;
         GET DIAGNOSTICS n_fdup = ROW_COUNT;
-        INSERT INTO _sc_fn SELECT f.id, public.private_report_claim_norm(c.text), c.text, substr(to_jsonb(c.text)::text, 2, length(to_jsonb(c.text)::text) - 2)
+        INSERT INTO _sc_fn SELECT f.id, pg_temp.sc_n(c.text), c.text, substr(to_jsonb(c.text)::text, 2, length(to_jsonb(c.text)::text) - 2)
           FROM _sc_f f JOIN public.claims c ON c.id = f.id WHERE f.id NOT IN (SELECT id FROM _sc_fn);
     END IF;
     ALTER TABLE _sc_f ADD COLUMN owner TEXT;
@@ -313,24 +429,25 @@ BEGIN
             RAISE EXCEPTION 'private report claims scope: refused, nothing changed - public.claims has a column the owner store lacks (re-run slot 570 first)' USING ERRCODE = '55000';
         END IF;
         v_surface := CASE
-            WHEN EXISTS (SELECT 1 FROM public.sources s, _sc_fn t WHERE s.content_type = 'research_synthesis'
-                          AND position(t.n IN public.private_report_claim_norm(coalesce(s.title, '') || ' ' || coalesce(s.content, ''))) > 0)
+            WHEN EXISTS (WITH r AS MATERIALIZED (SELECT pg_temp.sc_n(coalesce(s.title, '') || ' ' || coalesce(s.content, '')) AS n
+                                                   FROM public.sources s WHERE s.content_type = 'research_synthesis')
+                         SELECT 1 FROM r, _sc_fn t WHERE position(t.n IN r.n) > 0)
                 THEN 'a shared synthesis'
-            WHEN EXISTS (SELECT 1 FROM public.research_jobs j, _sc_fn t
-                          WHERE jsonb_typeof(j.result) = 'object' AND NOT EXISTS (SELECT 1 FROM public.research_job_report_owner(j.id))
-                            AND position(t.n IN public.private_report_claim_norm((SELECT string_agg(v #>> '{}', ' ') FROM jsonb_path_query(j.result - 'reuse_claims' - 'claims', 'strict $.**') v
-                                                                                   WHERE jsonb_typeof(v) = 'string'))) > 0)
+            WHEN EXISTS (WITH r AS MATERIALIZED (SELECT pg_temp.sc_n((SELECT string_agg(v #>> '{}', ' ') FROM jsonb_path_query(j.result - 'reuse_claims' - 'claims', 'strict $.**') v WHERE jsonb_typeof(v) = 'string')) AS n
+                                                   FROM public.research_jobs j
+                                                  WHERE jsonb_typeof(j.result) = 'object' AND NOT EXISTS (SELECT 1 FROM public.research_job_report_owner(j.id)))
+                         SELECT 1 FROM r, _sc_fn t WHERE position(t.n IN r.n) > 0)
                 THEN 'a shared job report'
-            WHEN EXISTS (SELECT 1 FROM public.threads th, _sc_fn t
-                          WHERE position(t.n IN public.private_report_claim_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, '') || ' ' || coalesce(th.slug, ''))) > 0)
+            WHEN EXISTS (WITH r AS MATERIALIZED (SELECT pg_temp.sc_n(coalesce(th.name, '') || ' ' || coalesce(th.description, '') || ' ' || coalesce(th.slug, '')) AS n
+                                                   FROM public.threads th)
+                         SELECT 1 FROM r, _sc_fn t WHERE position(t.n IN r.n) > 0)
                 THEN 'a thread'
-            WHEN EXISTS (SELECT 1 FROM public.sources s, _sc_fn t WHERE coalesce(s.notebook, '') <> '' AND position(t.n IN public.private_report_claim_norm(s.notebook)) > 0)
+            WHEN EXISTS (WITH r AS MATERIALIZED (SELECT pg_temp.sc_n(s.notebook) AS n FROM public.sources s WHERE coalesce(s.notebook, '') <> '')
+                         SELECT 1 FROM r, _sc_fn t WHERE position(t.n IN r.n) > 0)
                 THEN 'a notebook label'
-            WHEN EXISTS (SELECT 1 FROM public.research_jobs j, _sc_fn t
-                          WHERE jsonb_typeof(j.result -> 'curator') = 'object'
-                            AND position(t.n IN public.private_report_claim_norm(coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((
-                                  SELECT string_agg(x ->> 'name', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'shortlist') = 'array'
-                                                                                                     THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), ''))) > 0)
+            WHEN EXISTS (WITH r AS MATERIALIZED (SELECT pg_temp.sc_n(coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((SELECT string_agg(x ->> 'name', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'shortlist') = 'array' THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), '')) AS n
+                                                   FROM public.research_jobs j WHERE jsonb_typeof(j.result -> 'curator') = 'object')
+                         SELECT 1 FROM r, _sc_fn t WHERE position(t.n IN r.n) > 0)
                 THEN 'a curator answer'
             WHEN EXISTS (SELECT 1 FROM public.research_jobs j JOIN _sc_fn t
                             ON (j.branch_kind IN ('gap', 'interhub') AND position(t.text IN coalesce(j.query, '')) > 0)
@@ -436,24 +553,38 @@ BEGIN
     -- ── R1: the notebook-tree rows 570 skipped (class 'note', not a person's note) ─────────────────────────────────
     -- judged by 570's own predicate (it reads the owner stores and every withheld claim - this batch's included), archived
     -- and withheld
+    -- (R6: the text set private_report_claims_page_shows reads at this point - every owner-store claim a private report
+    --  links and every withheld one, this batch's included - each skeleton once; each page's skeleton once, through the
+    --  memo: the same page set as calling page_shows(slug || ' ' || title, body) on each page)
+    CREATE TEMP TABLE _sc_txt ON COMMIT DROP AS
+    SELECT DISTINCT x.n FROM (
+        SELECT pg_temp.sc_n(c.text) AS n FROM public.inlet_private_claims c
+         WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+        UNION ALL
+        SELECT pg_temp.sc_n(a.row_data ->> 'text') FROM public.private_report_claims_archive a WHERE a.action = 'x' AND a.restored_at IS NULL) x
+     WHERE length(x.n) >= 24;
     CREATE TEMP TABLE _sc_hub ON COMMIT DROP AS
-    SELECT w.slug FROM public.wiki_pages w
-     WHERE w.page_class = 'note' AND NOT public.private_report_claims_person_note(w.slug, w.page_class)
-       AND public.private_report_claims_page_shows(coalesce(w.slug, '') || ' ' || coalesce(w.title, ''), w.body);
+    WITH pn AS MATERIALIZED (
+        SELECT w.slug, pg_temp.sc_n(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '')) AS n FROM public.wiki_pages w
+         WHERE w.page_class = 'note' AND NOT public.private_report_claims_person_note(w.slug, w.page_class))
+    SELECT pn.slug FROM pn WHERE EXISTS (SELECT 1 FROM _sc_txt t WHERE position(t.n IN pn.n) > 0);
+    -- (archived in the table's own order, ctid: deterministic archive ids - rw-570-perf attempt 2)
     INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
-    SELECT v_batch, 'public.wiki_pages', 'w', w.slug, to_jsonb(w) FROM public.wiki_pages w WHERE w.slug IN (SELECT slug FROM _sc_hub);
+    SELECT v_batch, 'public.wiki_pages', 'w', w.slug, to_jsonb(w) FROM public.wiki_pages w
+     WHERE EXISTS (SELECT 1 FROM _sc_hub h WHERE h.slug = w.slug) ORDER BY w.ctid;
     GET DIAGNOSTICS n_hub = ROW_COUNT;
     -- R2: every other page 570 judged (not a person's note) that carries a moved fragment's sentence - only when one moved
     CREATE TEMP TABLE _sc_fpage (slug TEXT) ON COMMIT DROP;
     IF n_own + n_held > 0 THEN
         INSERT INTO _sc_fpage
-        SELECT w.slug FROM public.wiki_pages w
-         WHERE w.slug NOT IN (SELECT slug FROM _sc_hub)
-           AND NOT public.private_report_claims_person_note(w.slug, w.page_class)
-           AND EXISTS (SELECT 1 FROM _sc_fn t
-                        WHERE position(t.n IN public.private_report_claim_norm(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, ''))) > 0);
+        WITH pn AS MATERIALIZED (
+            SELECT w.slug, pg_temp.sc_n(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '')) AS n FROM public.wiki_pages w
+             WHERE w.slug NOT IN (SELECT slug FROM _sc_hub)
+               AND NOT public.private_report_claims_person_note(w.slug, w.page_class))
+        SELECT pn.slug FROM pn WHERE EXISTS (SELECT 1 FROM _sc_fn t WHERE position(t.n IN pn.n) > 0);
         INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
-        SELECT v_batch, 'public.wiki_pages', 'w', w.slug, to_jsonb(w) FROM public.wiki_pages w WHERE w.slug IN (SELECT slug FROM _sc_fpage);
+        SELECT v_batch, 'public.wiki_pages', 'w', w.slug, to_jsonb(w) FROM public.wiki_pages w
+         WHERE EXISTS (SELECT 1 FROM _sc_fpage h WHERE h.slug = w.slug) ORDER BY w.ctid;
         GET DIAGNOSTICS n_fpages = ROW_COUNT;
     END IF;
     DELETE FROM public.wiki_pages w USING public.private_report_claims_archive a
@@ -463,9 +594,16 @@ BEGIN
     IF EXISTS (SELECT 1 FROM public.claims c WHERE c.id IN (SELECT id FROM _sc_f))
        OR EXISTS (SELECT 1 FROM public.claim_sources cs WHERE cs.claim_id IN (SELECT id FROM _sc_f) OR cs.parent_claim_id IN (SELECT id FROM _sc_f))
        OR EXISTS (SELECT 1 FROM public.wiki_pages w WHERE w.slug IN (SELECT slug FROM _sc_fpage))
-       OR EXISTS (SELECT 1 FROM public.wiki_pages w
-                   WHERE w.page_class = 'note' AND NOT public.private_report_claims_person_note(w.slug, w.page_class)
-                     AND public.private_report_claims_page_shows(coalesce(w.slug, '') || ' ' || coalesce(w.title, ''), w.body)) THEN
+       OR EXISTS (WITH tx AS MATERIALIZED (SELECT DISTINCT x.n FROM (
+        SELECT pg_temp.sc_n(c.text) AS n FROM public.inlet_private_claims c
+         WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+        UNION ALL
+        SELECT pg_temp.sc_n(a.row_data ->> 'text') FROM public.private_report_claims_archive a WHERE a.action = 'x' AND a.restored_at IS NULL) x
+     WHERE length(x.n) >= 24),
+                  pn AS MATERIALIZED (
+                      SELECT pg_temp.sc_n(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '')) AS n FROM public.wiki_pages w
+                       WHERE w.page_class = 'note' AND NOT public.private_report_claims_person_note(w.slug, w.page_class))
+                  SELECT 1 FROM pn, tx WHERE position(tx.n IN pn.n) > 0) THEN
         RAISE EXCEPTION 'private report claims scope: refused, nothing changed - a moved claim is still on a shared surface after the move' USING ERRCODE = '55000';
     END IF;
 
@@ -481,6 +619,10 @@ BEGIN
             n_edges, n_touched, n_jobs, n_hub, n_fpages;
     END IF;
 END $$;
+
+DROP FUNCTION pg_temp.sc_n(TEXT);
+DROP FUNCTION pg_temp.sc_memo(TEXT[]);
+DROP FUNCTION pg_temp.private_report_claims_person_note_pre(TEXT, TEXT);
 
 NOTIFY pgrst, 'reload schema';
 COMMIT;

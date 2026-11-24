@@ -108,11 +108,12 @@ BEGIN
     RETURN QUERY EXECUTE q || ' SELECT f.id FROM f';
     IF NOT FOUND THEN RETURN; END IF;
     -- a shared claim carrying a fragment's sentence (only when there is a fragment: this reads every shared claim)
-    RETURN QUERY EXECUTE q || $d$
-    SELECT c.id FROM public.claims c
-     WHERE c.id NOT IN (SELECT f.id FROM f)
-       AND NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
-       AND EXISTS (SELECT 1 FROM f WHERE position(f.n IN pg_temp.prc_norm(c.text)) > 0)$d$;
+    RETURN QUERY EXECUTE q || $d$,
+    cn AS MATERIALIZED (
+        SELECT c.id, pg_temp.prc_norm(c.text) AS n FROM public.claims c
+         WHERE c.id NOT IN (SELECT f.id FROM f)
+           AND NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id))
+    SELECT cn.id FROM cn WHERE EXISTS (SELECT 1 FROM f WHERE position(f.n IN cn.n) > 0)$d$;
 END;
 $$;
 WITH
@@ -122,8 +123,12 @@ scope AS (
            coalesce((SELECT p.prosrc LIKE '%private_report_claims_person_note(%' FROM pg_proc p WHERE p.oid = to_regprocedure('public.trg_private_report_claims_wiki_guard()')), false) AS wiki_in_place,
            coalesce((SELECT p.prosrc LIKE '%coalesce(NEW.branch_kind, '''')%' AND p.prosrc LIKE '%coalesce(NEW.steer_kind, '''')%' AND p.prosrc LIKE '%coalesce(NEW.type, '''')%'
                        FROM pg_proc p WHERE p.oid = to_regprocedure('public.trg_private_report_claims_gap_guard()')), false) AS gap_in_place,
-           (SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_private_report_claims_wiki_guard', 'trg_private_report_claims_gap_guard') AND NOT tgisinternal AND tgenabled <> 'D') AS triggers),
-texts AS (
+           (SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_private_report_claims_wiki_guard', 'trg_private_report_claims_gap_guard') AND NOT tgisinternal AND tgenabled <> 'D') AS triggers,
+           -- R5: the structured-note check, executable by the workbench's login where it exists
+           to_regprocedure('public.private_report_claims_note_refused(text,text,text)') IS NOT NULL
+           AND (NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_workbench')
+                OR has_function_privilege('ob_workbench', 'public.private_report_claims_note_refused(text,text,text)', 'EXECUTE')) AS note_fn),
+texts AS MATERIALIZED (
     SELECT DISTINCT x.n FROM (
         SELECT pg_temp.prc_norm(c.text) AS n FROM public.inlet_private_claims c
          WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
@@ -133,15 +138,17 @@ texts AS (
         UNION ALL
         SELECT pg_temp.prc_norm(w.text) FROM pg_temp.prc_withheld() w) x
      WHERE length(x.n) >= 24),
+note_pages_n AS MATERIALIZED (
+    SELECT w.slug, pg_temp.prc_norm(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '')) AS n
+      FROM public.wiki_pages w
+     WHERE coalesce(w.page_class, '') = 'note' AND left(coalesce(w.slug, ''), 6) <> 'notes/'),
 note_pages AS (
-    SELECT DISTINCT w.slug FROM public.wiki_pages w, texts t
-     WHERE coalesce(w.page_class, '') = 'note' AND left(coalesce(w.slug, ''), 6) <> 'notes/'
-       AND position(t.n IN pg_temp.prc_norm(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, ''))) > 0),
+    SELECT DISTINCT w.slug FROM note_pages_n w, texts t WHERE position(t.n IN w.n) > 0),
 frag AS (SELECT DISTINCT f.id FROM pg_temp.prc_frag() f),
 counts AS (
     SELECT (SELECT applied FROM s570) AS s570, (SELECT applied FROM scope) AS s575,
            (SELECT wiki_in_place FROM scope) AS wiki_in_place, (SELECT gap_in_place FROM scope) AS gap_in_place,
-           (SELECT triggers FROM scope) AS triggers,
+           (SELECT triggers FROM scope) AS triggers, (SELECT note_fn FROM scope) AS note_fn,
            (SELECT count(*) FROM note_pages) AS note_pages, (SELECT count(*) FROM frag) AS frag,
            (SELECT count(*) FROM public.wiki_pages w WHERE coalesce(w.page_class, '') = 'note' AND left(coalesce(w.slug, ''), 6) = 'notes/') AS person_notes)
 SELECT line FROM (
@@ -150,9 +157,10 @@ SELECT line FROM (
     UNION ALL SELECT 3, 'scope: the wiki guard judges only notes/... as a person''s note=' || wiki_in_place FROM counts
     UNION ALL SELECT 4, 'scope: the gap guard treats a NULL kind as a non-matching kind=' || gap_in_place FROM counts
     UNION ALL SELECT 5, 'scope: the wiki and gap guard triggers on=' || triggers || ' (4 once applied)' FROM counts
+    UNION ALL SELECT 5, 'scope: the structured-note check is installed for the workbench=' || note_fn FROM counts
     UNION ALL SELECT 6, 'scope: notebook hub / index / AI-note pages (class note, not under notes/) carrying a private-report claim''s text=' || note_pages FROM counts
     UNION ALL SELECT 7, 'scope: shared claims holding a fragment of one (filed by a moved synthesis) or its sentence=' || frag FROM counts
     UNION ALL SELECT 8, 'scope: person notes (notes/..., judged by their author only)=' || person_notes FROM counts
-    UNION ALL SELECT 9, CASE WHEN s570 AND s575 AND wiki_in_place AND gap_in_place AND triggers = 4 AND note_pages = 0 AND frag = 0
+    UNION ALL SELECT 9, CASE WHEN s570 AND s575 AND note_fn AND wiki_in_place AND gap_in_place AND triggers = 4 AND note_pages = 0 AND frag = 0
                              THEN 'scope: OK' ELSE 'scope: FAIL' END FROM counts
 ) x ORDER BY o;

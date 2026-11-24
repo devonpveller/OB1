@@ -109,17 +109,46 @@ Deno.test("the check, count and scope scripts judge as slot 575 does: the same n
   // the fragment rule reads 570's archive as 575 does: the synthesis rows (s), the claim's synthesis_id rows (d), k / x
   const frag = tempFn(chk, "prc_frag");
   for (const s of ["a.action = 's' AND a.tbl = 'public.sources'", "a.action = 'd' AND a.tbl IN ('public.claims', 'claims') AND a.row_data ->> '_col' = 'synthesis_id'",
-                   "a.action IN ('k', 'x')", "position(cn.n IN sp.n) > 0", "position(f.n IN pg_temp.prc_norm(c.text)) > 0"]) {
+                   "a.action IN ('k', 'x')", "position(cn.n IN sp.n) > 0", "position(f.n IN cn.n) > 0"]) {
     assert(frag.includes(s), `prc_frag: ${s}`);
   }
   const fwd = await read("init-private-report-claims-scope.sql");
   if (fwd) {
     for (const s of ["a.action = 's' AND a.tbl = 'public.sources'", "a.action = 'd' AND a.tbl IN ('public.claims', 'claims') AND a.row_data ->> '_col' = 'synthesis_id'",
-                     "a.action IN ('k', 'x')", "position(cn.n IN sp.n) > 0", "position(f.n IN public.private_report_claim_norm(c.text)) > 0"]) {
+                     "a.action IN ('k', 'x')", "position(cn.n IN sp.n) > 0", "position(f.n IN cn.n) > 0"]) {
       assert(fwd.includes(s), `575: ${s}`);
     }
   }
   // the check fails a 570 re-run that undid 575 (and the scope check names it)
   assert(chk.includes("NOT (scope_applied AND NOT scope_in_place)") && chk.includes("re-run 575"));
   assert(scp.includes("THEN 'scope: OK' ELSE 'scope: FAIL'"));
+});
+
+// round 2 (R6): the wiki pass normalises each page once (the memo) and never calls 570's per-page predicate; the
+// withheld pages are archived in ctid order (rw-570-perf attempt 2); the memo is filled before the locks
+Deno.test("slot 575 (R6): one skeleton per text through the memo, filled before the locks; no per-page page_shows; archive in ctid order", async () => {
+  const fwd = await read("init-private-report-claims-scope.sql");
+  if (fwd === null) return;
+  const code = fwd.split("\n").filter((l) => !l.trim().startsWith("--")).join("\n");
+  const move = code.slice(code.indexOf("DECLARE\n    v_batch"));
+  assert(!/private_report_claims_page_shows\(/.test(move), "the move never calls page_shows per page");
+  assert(!/public\.private_report_claim_norm\(/.test(move), "the move normalises only through the memo (pg_temp.sc_n)");
+  assert(code.indexOf("CREATE TEMP TABLE _sc_memo") < code.indexOf("LOCK TABLE public.wiki_pages"), "the memo is created before the locks");
+  assert(code.indexOf("PERFORM pg_temp.sc_memo(") < code.indexOf("LOCK TABLE public.wiki_pages"), "and filled before them");
+  assertEquals((move.match(/'public\.wiki_pages', 'w'[\s\S]*?ORDER BY w\.ctid;/g) ?? []).length, 2, "both page archive inserts are in ctid order");
+  assert(/DROP FUNCTION pg_temp\.sc_n\(TEXT\);/.test(code), "the memo function goes with the run");
+});
+
+// round 2 (R5): the structured-note check function, its grants and its revert
+Deno.test("slot 575 (R5): private_report_claims_note_refused is the guard's predicate, gated to the workbench / services, dropped by the revert", async () => {
+  const fwd = await read("init-private-report-claims-scope.sql");
+  const rev = await read("revert-private-report-claims-scope.sql");
+  if (fwd === null || rev === null) return;
+  const f = fn(fwd, "public.private_report_claims_note_refused(");
+  assert(f.includes("IF NOT public.private_report_claims_reader_ok() THEN"), "gated: ob_workbench, ob_app_memory or a superuser session, never PostgREST");
+  assert(f.includes("RETURN public.private_report_claims_page_shows(coalesce(p_slug, '') || ' ' || coalesce(p_title, ''), p_body);"), "the guard's machine-path predicate");
+  assert(f.includes("public.private_report_claims_own_text_shows("), "a person's note: its author's own (as the guard)");
+  assert(/GRANT EXECUTE ON FUNCTION public\.private_report_claims_note_refused\(TEXT, TEXT, TEXT\) TO ob_workbench;/.test(fwd));
+  assert(/REVOKE ALL ON FUNCTION public\.private_report_claims_note_refused\(TEXT, TEXT, TEXT\) FROM PUBLIC;/.test(fwd));
+  assert(/DROP FUNCTION IF EXISTS public\.private_report_claims_note_refused\(TEXT, TEXT, TEXT\);/.test(rev));
 });
