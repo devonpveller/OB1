@@ -275,6 +275,21 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const podReq = await wb("POST", "/workbench/contract/podcasts/requests",
     { team_id: pod.team, title: pod.request, refinery_id: bRefinery, transcript: { title: pod.request, turns: [{ presenterId: `${pod.team}-p`, text: pod.turn }] } }, B);
   assertEquals(podReq.status, 202, podReq.text);
+  // rwr-cast-edit-api (slot 560): B's cast through its own routes - a voice, a presenter with the new fields, notes and a
+  // topic link, a team and a format, none shared. A must see none of it (by id, in a list, a total or an error).
+  const castMk = { stance: `CastStanceSecret${rnd()}`, notes: `CastNotesSecret${rnd()}`, topic: `CastTopicSecret${rnd()}`,
+    team: `CastTeamSecret${rnd()}`, briefing: `CastBriefingSecret${rnd()}` };
+  const castV = await wb("POST", "/workbench/contract/cast/voices", { route: "local-tts", voice: "af_bella" }, B);
+  assertEquals(castV.status, 201, castV.text);
+  const castP = await wb("POST", "/workbench/contract/cast/presenters", { name: "Sweep caster", voice_id: castV.json.id, stance: castMk.stance,
+    notes: castMk.notes, grounded_in: [{ kind: "topic", ref: castMk.topic }] }, B);
+  assertEquals(castP.status, 201, castP.text);
+  const castT = await wb("POST", "/workbench/contract/cast/teams", { name: castMk.team, members: [castP.json.id] }, B);
+  assertEquals(castT.status, 201, castT.text);
+  const castF = await wb("POST", "/workbench/contract/cast/formats", { name: `sweep-format-${rnd()}`, team_id: castT.json.id, briefing: castMk.briefing }, B);
+  assertEquals(castF.status, 201, castF.text);
+  const bCast = { castVoice: String(castV.json.id), castPresenter: String(castP.json.id), castTeamId: String(castT.json.id), castFormat: String(castF.json.id) };
+  console.log("sweep: B's cast planted (a voice, a presenter with stance / notes / a topic, a team, a format)");
   // rw-settings-store: B's own settings - B's team as B's podcast.team (so the podTeam marker covers it) and a
   // refinery dormancy. No route names an owner: A must never read them, and A's calls must not change them.
   const bSet = await wb("PUT", "/workbench/settings/podcast.team", { value: pod.team }, B);
@@ -445,6 +460,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const markers: Record<string, string> = { ...M, ...(pv.pvMarker ? { pvMarker: pv.pvMarker } : {}), path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret, viaSecret,
     ...(bIntake.add ? { intakeUrl: intakeMk.url, intakeAdd: bIntake.add } : {}), ...(bIntake.import ? { intakeFile: intakeMk.file, intakeImport: bIntake.import } : {}),
     podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id,
+    castStance: castMk.stance, castNotes: castMk.notes, castTopic: castMk.topic, castTeam: castMk.team, castBriefing: castMk.briefing, ...bCast,
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
     heldId: bHeld,
     exportSecret, leadSecret, ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])),
@@ -491,7 +507,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // 1. TEMPLATED: B's ids and paths in every parameter, query and body field (the request gate)
   const LIFECYCLE_IRREVERSIBLE = ["/workbench/documents/delete-forever", "/workbench/documents/empty-trash"];
   let lifecycleTrashCalls = 0;
-  const ids = [bPath, bTrashed, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob].filter(Boolean);
+  const ids = [bPath, bTrashed, bRefinery, bJob, bHeld, bRefId, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob, ...Object.values(bCast)].filter(Boolean);
   const query = (v: string) => new URLSearchParams({
     path: bPath, ref: bPath, from: bPath, id: v, idea_id: bRefinery, refinery_id: bRefinery, job_id: bJob,
     source_id: bHeld || v, kind: "user_document", holder_kind: "user_document", format: "md", limit: "500", q: "fixture",

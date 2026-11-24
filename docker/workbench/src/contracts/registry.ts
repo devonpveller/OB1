@@ -53,6 +53,11 @@ export const REGISTRY = {
   flagItemKinds: "flag_item_kinds",
   flagFromKinds: "flag_from_kinds",
   flagStates: "flag_states",
+  // rwr-cast-edit-api (init-cast.sql, slot 560): the cast model's new fields
+  podcastFormatKinds: "podcast_format_kinds",
+  podcastFormatUses: "podcast_format_uses",
+  podcastPromptModes: "podcast_prompt_modes",
+  podcastGroundingKinds: "podcast_grounding_kinds",
 } as const;
 export type RegistryName = typeof REGISTRY[keyof typeof REGISTRY];
 

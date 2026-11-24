@@ -218,4 +218,39 @@ INSERT INTO public.podcast_render_requests (id, requester_sub, actor_sub, team_i
    '{"transcript": {"title": "Fixture request", "turns": [{"presenterId": "pod-fx-presenter-a", "text": "Hello."}, {"presenterId": "pod-fx-presenter-b", "text": "Hi."}]}}',
    'queued', '2026-10-17T12:00:00Z', '2026-10-17T12:00:00Z');
 
+-- rwr-cast-edit-api (init-cast.sql, slot 560): the Dredd examples of the cast routes (schemas/cast.ts CX), owned by a
+-- lab subject of their own, lab-caster-0001 (dredd-hooks.js calls /cast/* as it), so the P7a rows above stay exactly
+-- what integration_test.ts expects. lab-caster-0002 owns the shared pool's rows the copy examples use. The *-del rows
+-- are what the DELETE examples remove (nothing depends on them).
+INSERT INTO public.podcast_voice_links (id, owner_sub, route, voice, speed, origin) VALUES
+  ('cast-fx-voice', 'lab-caster-0001', 'local-tts', 'bm_george', 1.0, 'operator'),
+  ('cast-fx-voice-del', 'lab-caster-0001', 'local-tts', 'af_heart', 1.0, 'operator'),
+  ('cast-fx-voice-s', 'lab-caster-0002', 'local-tts', 'bf_emma', 1.0, 'operator');
+INSERT INTO public.podcast_presenters (id, owner_sub, name, personality, backstory, language, voice_link_id, origin,
+                                       role, focus, stance, tone, speaking_style, notes, shared) VALUES
+  ('cast-fx-presenter', 'lab-caster-0001', 'Fixture Morgan', 'Calm and precise', 'A fixture researcher', 'en-US', 'cast-fx-voice', 'operator',
+   'host', 'retrieval contracts', 'sceptical of unsourced claims', 'warm', 'short sentences', 'fixture notes', false),
+  ('cast-fx-presenter-del', 'lab-caster-0001', 'Fixture Riley', 'Brief', 'A fixture presenter to delete', 'en-US', 'cast-fx-voice', 'operator',
+   '', '', '', '', '', '', false),
+  ('cast-fx-shared-presenter', 'lab-caster-0002', 'Fixture Sam', 'Cheerful', 'A shared fixture presenter', 'en-US', 'cast-fx-voice-s', 'operator',
+   'guest', 'podcasts', 'curious', 'bright', 'asks questions', 'the owner''s own notes', true);
+INSERT INTO public.podcast_presenter_grounding (presenter_id, owner_sub, position, kind, ref) VALUES
+  ('cast-fx-presenter', 'lab-caster-0001', 0, 'source', '11111111-1111-4111-8111-111111111111'),
+  ('cast-fx-presenter', 'lab-caster-0001', 1, 'topic', 'retrieval'),
+  ('cast-fx-shared-presenter', 'lab-caster-0002', 0, 'topic', 'podcasts');
+INSERT INTO public.podcast_teams (id, owner_sub, name, description, origin, user_seat, shared) VALUES
+  ('cast-fx-team', 'lab-caster-0001', 'Fixture cast team', 'One fixture presenter and the user', 'operator', 1, false),
+  ('cast-fx-team-del', 'lab-caster-0001', 'Fixture cast team to delete', 'Nothing uses it', 'operator', NULL, false),
+  ('cast-fx-shared-team', 'lab-caster-0002', 'Shared fixture team', 'A shared fixture team', 'operator', 0, true);
+INSERT INTO public.podcast_team_members (team_id, position, presenter_id) VALUES
+  ('cast-fx-team', 0, 'cast-fx-presenter'), ('cast-fx-team-del', 0, 'cast-fx-presenter'), ('cast-fx-shared-team', 0, 'cast-fx-shared-presenter');
+INSERT INTO public.podcast_formats (id, owner_sub, name, description, team_id, briefing, segments, language, script_route, origin,
+                                    kind, use_for, is_default, shared) VALUES
+  ('cast-fx-format', 'lab-caster-0001', 'Fixture cast format', 'A fixture format', 'cast-fx-team', 'Discuss the fixture.', 3, 'en-US', 'local-large:nothink', 'operator',
+   'conversation', '{daily}', true, false),
+  ('cast-fx-format-del', 'lab-caster-0001', 'Fixture cast format to delete', 'Nothing uses it', 'cast-fx-team', '', 2, 'en-US', 'local-large', 'operator',
+   'briefing', '{}', false, false),
+  ('cast-fx-shared-format', 'lab-caster-0002', 'Shared fixture format', 'A shared fixture format', 'cast-fx-shared-team', 'Talk it through.', 2, 'en-US',
+   'local-large', 'operator', 'interview', '{research}', false, true);
+
 COMMIT;
