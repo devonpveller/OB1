@@ -524,9 +524,10 @@ export async function removeHeld(db: Db, refineryId: string, sourceId: string, o
       throw new NotFound("no held source with this id in this refinery");
     }
     const docs = await t.query<{ path: string }>(
-      `SELECT path FROM public.user_document_listings
-        WHERE outbound_links @> jsonb_build_array(jsonb_build_object('id', $1::text))
-          AND NOT ${FOREIGN_HELD_TARGET("$1::text", "owner_sub")} ORDER BY path`,
+      // qualified: inside the predicate an unqualified owner_sub would bind to its own ideas row
+      `SELECT udl.path FROM public.user_document_listings udl
+        WHERE udl.outbound_links @> jsonb_build_array(jsonb_build_object('id', $1::text))
+          AND NOT ${FOREIGN_HELD_TARGET("$1::text", "udl.owner_sub")} ORDER BY udl.path`,
       [sourceId],
     );
     if (docs.length) {
