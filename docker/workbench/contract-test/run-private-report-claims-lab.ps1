@@ -36,6 +36,17 @@
 # [fix2] cases; -OldSql <999107d's init file> -OldTag fix2 requires every [fix2] case to fail on the round-1 fix.
 # Round 3 (tester attempt 2): the thread's slug / hub page / notebook labels / curator answers, the entity bump and a
 # claim left by a superseded synthesis are [fix3] cases (-OldSql <63c92c2's init file> -OldTag fix3).
+# rw-570-perf (the speed-up, same results): -EquivDir <a directory holding an earlier slot 570's four files
+# (init-, revert-, check-private-report-claims.sql, count-private-report-claim-reuse.sql)> is the equivalence run:
+# after [4] it applies the EARLIER init and then this tree's init on the same plant, each followed by its revert (each
+# revert byte-identical to the plant), and requires the two inits' NOTICE counts, their fingerprints
+# (prc-570-fingerprint.sql: every table 570 touches, the archive, the moved / withheld sets - the per-run batch ids,
+# copy ids and timestamps masked) and the earlier and this tree's check and count scripts' output on every state
+# (planted, after each init) to be identical; then it stops (no RED / green: run the lab again without it).
+# Tester attempt 1: -EquivDir also lays prc-570-equiv-plant.sql over the plant (14 withheld pages and more of every row
+# kind 570 archives, in an order unrelated to their keys) and the fingerprint compares the archive IDS (relative to the
+# run's first); the EquivDir files must have the same line endings as this tree's (a CRLF checkout vs `git show`'s LF
+# changes every function's prosrc) - refused otherwise.
 param(
   [string]$Id = 'wt-rw-private-report-claims',
   [string]$Subnet = '',
@@ -46,6 +57,7 @@ param(
   [switch]$KeepImages,
   [string]$OldSql = '',
   [string]$OldTag = 'fix',
+  [string]$EquivDir = '',
   # -Prebuilt: use openbrain-workbench:wt-<id> and its -test tag already built under this run's tags (plain docker build,
   # no timeout, when Docker Desktop stalls the lab's 40-minute build); removed at the end unless -KeepImages
   [switch]$Prebuilt
@@ -303,6 +315,54 @@ try {
   $p2a = ((Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/prcreuse.sql) | Out-String).Trim(); Save 'p2-count-before-570.log' $p2a
   Write-Host ($p2a -replace "`n", ' | ')
   Check ($p2a -match 'mixed claims \(a shared synthesis also filed them, still in the shared table\)=1' -and $p2a -match "shared syntheses carrying a private-report claim's sentence=3" -and $p2a -match 'shared job reports carrying one=2' -and $p2a -match 'threads whose name, description or slug carries one=1' -and $p2a -match 'other shared claims carrying one \(another thread, or a superseded synthesis\)=2' -and $p2a -match 'shared sources whose notebook label carries one=1' -and $p2a -match 'job curator answers naming a thread by one=1') 'P2 count before 570: 1 mixed claim, 3 shared syntheses, 2 shared job reports, 1 thread, 2 other shared claims, 1 notebook label, 1 curator answer (the plant)'
+  if ($EquivDir) {
+    # ---------------------------------------------------------------- rw-570-perf: the earlier 570 and this tree's
+    Write-Host "[equiv] the earlier slot 570 ($EquivDir) and this tree's, each on the plant and reverted"
+    foreach ($f in @('init-private-report-claims.sql', 'revert-private-report-claims.sql', 'check-private-report-claims.sql', 'count-private-report-claim-reuse.sql')) {
+      $a = [System.IO.File]::ReadAllText((Join-Path $EquivDir $f)).Contains("`r`n"); $b = [System.IO.File]::ReadAllText((Join-Path $dockerDir $f)).Contains("`r`n")
+      if ($a -ne $b) { Fail "[equiv] $f`: the EquivDir copy and this tree's differ in line endings (CRLF $a vs $b) - build EquivDir from a checkout of the same kind"; throw 'STOP-EQUIV' }
+    }
+    $ep = Psql-File (Join-Path $ct 'prc-570-equiv-plant.sql') 'equiv plant'
+    $epn = Q "SELECT (SELECT count(*) FROM public.wiki_pages WHERE slug LIKE 'content/topic/prc-eq-%') || '/' || (SELECT count(*) FROM public.sources WHERE research_key LIKE 'prc-eq-syn-%') || '/' || (SELECT count(*) FROM public.research_jobs WHERE query LIKE 'eq shared question %')"
+    Check ($ep.rc -eq 0 -and $epn -eq '17/4/4') "[equiv] the extra plant landed (pages / syntheses / jobs = $epn, want 17/4/4)"
+    $h0 = Q $hashQ; Save 'hash-planted-equiv.txt' $h0
+    $null = Dk cp (Join-Path $ct 'prc-570-fingerprint.sql') "${db}:/tmp/prcfp.sql"
+    $null = Dk cp (Join-Path $EquivDir 'count-private-report-claim-reuse.sql') "${db}:/tmp/prcreuse-old.sql"
+    $null = Dk cp (Join-Path $EquivDir 'check-private-report-claims.sql') "${db}:/tmp/prccheck-old.sql"
+    $null = Dk cp (Join-Path $dockerDir 'check-private-report-claims.sql') "${db}:/tmp/prccheck.sql"
+    function Read-Scripts([string]$state) {
+      $o = @{}
+      foreach ($f in @('prcreuse', 'prcreuse-old', 'prccheck', 'prccheck-old')) {
+        $o[$f] = ((Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f "/tmp/$f.sql") | Out-String).Trim()
+        Save "equiv-$state-$f.txt" $o[$f]
+      }
+      Check ($o['prcreuse'] -eq $o['prcreuse-old']) "[equiv] $state`: this tree's count script prints exactly the earlier one's lines"
+      Check ($o['prccheck'] -eq $o['prccheck-old']) "[equiv] $state`: this tree's check script prints exactly the earlier one's lines"
+    }
+    Read-Scripts 'planted'
+    $runs = @{}
+    foreach ($pair in @(@('earlier', (Join-Path $EquivDir 'init-private-report-claims.sql'), (Join-Path $EquivDir 'revert-private-report-claims.sql')),
+                        @('tree', (Join-Path $dockerDir 'init-private-report-claims.sql'), (Join-Path $dockerDir 'revert-private-report-claims.sql')))) {
+      $ie = Psql-File $pair[1] "570 ($($pair[0]))"
+      $ie2 = Psql-File $pair[1] "570 again ($($pair[0]))"
+      $fp = ((Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/prcfp.sql) | Out-String).Trim()
+      Save "equiv-fingerprint-$($pair[0]).txt" $fp
+      Read-Scripts "after-$($pair[0])-570"
+      $rv = Psql-File $pair[2] "revert ($($pair[0]))"
+      $hr = Q $hashQ
+      Check ($ie.rc -eq 0 -and $ie2.rc -eq 0 -and $ie2.msg -match 'nothing to move' -and $rv.rc -eq 0 -and $hr -eq $h0) "[equiv] the $($pair[0]) 570 applies, a second run has nothing to move, and its revert is byte-identical to the plant"
+      $runs[$pair[0]] = @{ msg = $ie.msg; msg2 = $ie2.msg; fp = $fp; rv = $rv.msg }
+    }
+    Save 'equiv-notices.txt' ("earlier: $($runs['earlier'].msg)`ntree:    $($runs['tree'].msg)`nearlier again: $($runs['earlier'].msg2)`ntree again:    $($runs['tree'].msg2)`nearlier revert: $($runs['earlier'].rv)`ntree revert:    $($runs['tree'].rv)")
+    Check ($runs['earlier'].msg -eq $runs['tree'].msg -and $runs['earlier'].msg2 -eq $runs['tree'].msg2) "[equiv] the two inits print the same NOTICE counts, in the same order (first run and re-run)"
+    Check ($runs['earlier'].rv -eq $runs['tree'].rv) "[equiv] the two reverts print the same NOTICE counts"
+    Check ($runs['earlier'].fp -eq $runs['tree'].fp -and $runs['tree'].fp -match 'archive_set n=[1-9]') "[equiv] the fingerprints are identical: every touched table, the archive (as a set and in order), the moved / withheld / page / synthesis / job sets"
+    if ($runs['earlier'].fp -ne $runs['tree'].fp) {
+      $a = $runs['earlier'].fp -split "`n"; $b = $runs['tree'].fp -split "`n"
+      Save 'equiv-fingerprint-diff.txt' ((Compare-Object $a $b | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join "`n")
+    }
+    throw 'STOP-EQUIV'
+  }
   if ($OldSql) {
     # ---------------------------------------------------------------- the fix's RED: the earlier 570 on the same plant
     Write-Host "[fix RED] the earlier slot 570 ($OldSql) on the plant; every [fix] case must fail"
@@ -392,7 +452,7 @@ try {
   $fk = Q "SELECT count(*) FROM pg_constraint WHERE conrelid = 'public.research_private_report_claims'::regclass AND contype = 'f' AND confrelid = 'public.claims'::regclass"
   Check ($fk -eq '1') "the link's foreign key onto claims is back ($fk)"
 } catch {
-  if ($_.Exception.Message -ne 'STOP-OLDSQL') { Fail "aborted: $($_.Exception.Message)" }
+  if ($_.Exception.Message -notin @('STOP-OLDSQL', 'STOP-EQUIV')) { Fail "aborted: $($_.Exception.Message)" }
 } finally {
   Save 'psql.log' ($script:log -join "`n")
   foreach ($c in $script:made.containers) { $null = Dk rm -f $c }
