@@ -184,7 +184,7 @@ dup_claims AS (
 note_pages_n AS MATERIALIZED (
     SELECT w.slug, pg_temp.prc_norm(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '')) AS n
       FROM public.wiki_pages w
-     WHERE coalesce(w.page_class, '') = 'note' AND left(coalesce(w.slug, ''), 6) <> 'notes/'),
+     WHERE coalesce(w.page_class, '') = 'note' AND NOT (coalesce(w.page_class, '') = 'note' AND (left(coalesce(w.slug, ''), 6) = 'notes/' OR (left(coalesce(w.slug, ''), 18) = 'content/notebooks/' AND split_part(w.slug, '/', 4) <> '' AND NOT (split_part(w.slug, '/', 5) = '' AND split_part(w.slug, '/', 4) = split_part(w.slug, '/', 3)))))),
 note_texts AS MATERIALIZED (
     SELECT n FROM texts UNION SELECT pg_temp.prc_norm(x.text) FROM pg_temp.prc_withheld() x WHERE length(pg_temp.prc_norm(x.text)) >= 24),
 note_pages AS (
@@ -205,6 +205,6 @@ SELECT line FROM (
     UNION ALL SELECT 8, 'reuse: other shared claims carrying one (another thread, or a superseded synthesis)=' || (SELECT count(*) FROM dup_claims)
     UNION ALL SELECT 9, 'reuse: shared sources whose notebook label carries one=' || (SELECT count(*) FROM notebooks)
     UNION ALL SELECT 10, 'reuse: job curator answers naming a thread by one=' || (SELECT count(*) FROM curator)
-    UNION ALL SELECT 11, 'reuse: notebook hub / index / AI-note pages (class note, not under notes/) carrying one=' || (SELECT count(*) FROM note_pages)
+    UNION ALL SELECT 11, 'reuse: notebook hub / index pages (class note, not a person''s or structured note) carrying one=' || (SELECT count(*) FROM note_pages)
     UNION ALL SELECT 12, 'reuse: shared claims holding a fragment of one (filed by a moved synthesis) or its sentence=' || (SELECT count(*) FROM frag)
 ) x ORDER BY o;

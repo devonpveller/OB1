@@ -64,7 +64,7 @@ Deno.test("slot 575's revert puts slot 570's two guard functions back byte for b
   const wg = fn(fwd, "public.trg_private_report_claims_wiki_guard()");
   assert(wg.includes("IF public.private_report_claims_person_note(NEW.slug, NEW.page_class) THEN") && !wg.includes("NEW.page_class = 'note'"));
   assert(fn(s570, "public.trg_private_report_claims_wiki_guard()").includes("IF NEW.page_class = 'note' THEN"), "570's guard (the RED)");
-  assert(fwd.includes("SELECT coalesce(p_class, '') = 'note' AND left(coalesce(p_slug, ''), 6) = 'notes/'"), "a person's note: class note AND under notes/");
+  assert(fwd.includes("SELECT (coalesce(p_class, '') = 'note' AND (left(coalesce(p_slug, ''), 6) = 'notes/' OR (left(coalesce(p_slug, ''), 18) = 'content/notebooks/' AND split_part(p_slug, '/', 4) <> '' AND NOT (split_part(p_slug, '/', 5) = '' AND split_part(p_slug, '/', 4) = split_part(p_slug, '/', 3)))))"), "a person's note: notes/..., or a structured note (content/notebooks/<nb>/<note>, not the hub or index)");
   assert(/DROP FUNCTION IF EXISTS public\.private_report_claims_person_note\(TEXT, TEXT\);/.test(rev), "the revert drops the helper");
 });
 
@@ -103,7 +103,7 @@ Deno.test("the check, count and scope scripts judge as slot 575 does: the same n
     assertEquals(tempFn(t, "prc_frag"), tempFn(chk, "prc_frag"), `${name}: the fragment rule is the check script's`);
     assertEquals(tempFn(t, "prc_withheld"), tempFn(chk, "prc_withheld"), `${name}: the withheld texts are the check script's`);
   }
-  const rule = "coalesce(w.page_class, '') = 'note' AND left(coalesce(w.slug, ''), 6)";
+  const rule = "(coalesce(w.page_class, '') = 'note' AND (left(coalesce(w.slug, ''), 6) = 'notes/' OR (left(coalesce(w.slug, ''), 18) = 'content/notebooks/' AND split_part(w.slug, '/', 4) <> '' AND NOT (split_part(w.slug, '/', 5) = '' AND split_part(w.slug, '/', 4) = split_part(w.slug, '/', 3)))))";
   for (const [name, t] of [["check", chk], ["count", cnt], ["scope", scp]] as const) assert(t.includes(rule), `${name}: a person's note is class note under notes/`);
   assert(!chk.includes("w.page_class IS DISTINCT FROM 'note'"), "the check no longer skips every note-class page");
   // the fragment rule reads 570's archive as 575 does: the synthesis rows (s), the claim's synthesis_id rows (d), k / x
@@ -147,8 +147,8 @@ Deno.test("slot 575 (R5): private_report_claims_note_refused is the guard's pred
   const f = fn(fwd, "public.private_report_claims_note_refused(");
   assert(f.includes("IF NOT public.private_report_claims_reader_ok() THEN"), "gated: ob_workbench, ob_app_memory or a superuser session, never PostgREST");
   assert(f.includes("RETURN public.private_report_claims_page_shows(coalesce(p_slug, '') || ' ' || coalesce(p_title, ''), p_body);"), "the guard's machine-path predicate");
-  assert(f.includes("public.private_report_claims_own_text_shows("), "a person's note: its author's own (as the guard)");
-  assert(/GRANT EXECUTE ON FUNCTION public\.private_report_claims_note_refused\(TEXT, TEXT, TEXT\) TO ob_workbench;/.test(fwd));
-  assert(/REVOKE ALL ON FUNCTION public\.private_report_claims_note_refused\(TEXT, TEXT, TEXT\) FROM PUBLIC;/.test(fwd));
-  assert(/DROP FUNCTION IF EXISTS public\.private_report_claims_note_refused\(TEXT, TEXT, TEXT\);/.test(rev));
+  assert(f.includes("RETURN public.private_report_claims_own_text_shows(nullif(btrim(coalesce(p_author, '')), ''),"), "a person's / structured note: the WRITER's own (as the guard with the same author)");
+  assert(/GRANT EXECUTE ON FUNCTION public\.private_report_claims_note_refused\(TEXT, TEXT, TEXT, TEXT\) TO ob_workbench;/.test(fwd));
+  assert(/REVOKE ALL ON FUNCTION public\.private_report_claims_note_refused\(TEXT, TEXT, TEXT, TEXT\) FROM PUBLIC;/.test(fwd));
+  assert(/DROP FUNCTION IF EXISTS public\.private_report_claims_note_refused\(TEXT, TEXT, TEXT, TEXT\);/.test(rev));
 });

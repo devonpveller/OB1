@@ -4,11 +4,13 @@
 -- A FORWARD migration on top of slot 570 (init-private-report-claims.sql): 570 is applied live before this slot, so
 -- 570's files stay as they ran and this slot changes what 570 left. It runs after 570 on a fresh volume too (575 sorts
 -- after 570 in initdb; 580 is independent of both).
---   * R1 - a wiki page is a PERSON's note only when page_class = 'note' AND its slug is under notes/ (the workbench's
---     note tree). The notebook tree (content/notebooks/...) is stored as 'note' too (recipes/_shared/page-classes.mjs,
---     notebook-tree): the hub content/notebooks/<s>/<s>, the MOC content/notebooks/index and the AI notes beside them
---     are machine text (the notebook synthesis, the AI-note hand-off; no author is named for them), so they take the
---     machine path of 570's guard: a page carrying ANY private-report claim's text is withheld. 570's guard sent every
+--   * R1 - the notebook tree (content/notebooks/...) is stored as 'note' too (recipes/_shared/page-classes.mjs,
+--     notebook-tree). Its REGENERABLE pages - the hub content/notebooks/<s>/<s> and the MOC content/notebooks/index,
+--     the notebook synthesis's machine text - are not a person's note: they take the machine path of 570's guard (a page
+--     carrying ANY private-report claim's text is withheld). A person's note is notes/... (the workbench's note tree)
+--     and, round 2 (operator's second ruling 2026-11-24, R5), a structured note: content/notebooks/<nb>/<note> (the
+--     workbench's writeStructuredNote, which names its writer as the row's author): judged by its AUTHOR's own claims
+--     only (A1), so neither a refusal nor a page's absence tells anyone that another user holds a sentence. 570's guard sent every
 --     'note' row to the author-only branch and its migration skipped them; this slot replaces the guard's function
 --     (same name, same trigger: no trigger is dropped or created) and withholds the notebook-tree rows 570 skipped.
 --     A person's note (notes/...) keeps 570's treatment exactly: refused only for its AUTHOR's own claims.
@@ -67,7 +69,7 @@ END $$;
 CREATE OR REPLACE FUNCTION pg_temp.private_report_claims_person_note_pre(p_slug TEXT, p_class TEXT) RETURNS BOOLEAN
 LANGUAGE sql IMMUTABLE
 AS $$
-    SELECT coalesce(p_class, '') = 'note' AND left(coalesce(p_slug, ''), 6) = 'notes/'
+    SELECT (coalesce(p_class, '') = 'note' AND (left(coalesce(p_slug, ''), 6) = 'notes/' OR (left(coalesce(p_slug, ''), 18) = 'content/notebooks/' AND split_part(p_slug, '/', 4) <> '' AND NOT (split_part(p_slug, '/', 5) = '' AND split_part(p_slug, '/', 4) = split_part(p_slug, '/', 3)))))
 $$;
 CREATE TEMP TABLE _sc_memo (h BYTEA PRIMARY KEY, n TEXT NOT NULL) ON COMMIT DROP;
 CREATE OR REPLACE FUNCTION pg_temp.sc_n(p_text TEXT) RETURNS TEXT
@@ -144,7 +146,7 @@ CREATE OR REPLACE FUNCTION public.private_report_claims_person_note(p_slug TEXT,
 LANGUAGE sql IMMUTABLE PARALLEL SAFE
 SET search_path = pg_catalog
 AS $$
-    SELECT coalesce(p_class, '') = 'note' AND left(coalesce(p_slug, ''), 6) = 'notes/'
+    SELECT (coalesce(p_class, '') = 'note' AND (left(coalesce(p_slug, ''), 6) = 'notes/' OR (left(coalesce(p_slug, ''), 18) = 'content/notebooks/' AND split_part(p_slug, '/', 4) <> '' AND NOT (split_part(p_slug, '/', 5) = '' AND split_part(p_slug, '/', 4) = split_part(p_slug, '/', 3)))))
 $$;
 REVOKE ALL ON FUNCTION public.private_report_claims_person_note(TEXT, TEXT) FROM PUBLIC;
 DO $$
@@ -192,7 +194,7 @@ $$;
 -- writer's own included). Note: a refusal tells the writer that SOME private report holds the sentence (the operator's
 -- choice; the guard withheld such a row silently before). Callable by the workbench's login (ob_workbench), the
 -- services' login (ob_app_memory) or a superuser session, never through PostgREST (570's reader gate).
-CREATE OR REPLACE FUNCTION public.private_report_claims_note_refused(p_slug TEXT, p_title TEXT, p_body TEXT) RETURNS BOOLEAN
+CREATE OR REPLACE FUNCTION public.private_report_claims_note_refused(p_author TEXT, p_slug TEXT, p_title TEXT, p_body TEXT) RETURNS BOOLEAN
 LANGUAGE plpgsql STABLE
 SECURITY DEFINER
 SET search_path = public, pg_temp
@@ -201,27 +203,29 @@ BEGIN
     IF NOT public.private_report_claims_reader_ok() THEN
         RAISE EXCEPTION 'private report claims: not for this caller' USING ERRCODE = '42501';
     END IF;
+    -- the guard's branch for this row: a person's / structured note is judged by its AUTHOR's own claims only (the
+    -- workbench names the same author on the row's write: ob.page_author), any other row by every claim
     IF public.private_report_claims_person_note(p_slug, 'note') THEN
-        RETURN public.private_report_claims_own_text_shows(nullif(current_setting('ob.page_author', true), ''), coalesce(p_slug, '') || ' ' || coalesce(p_title, ''), p_body);
+        RETURN public.private_report_claims_own_text_shows(nullif(btrim(coalesce(p_author, '')), ''), coalesce(p_slug, '') || ' ' || coalesce(p_title, ''), p_body);
     END IF;
     RETURN public.private_report_claims_page_shows(coalesce(p_slug, '') || ' ' || coalesce(p_title, ''), p_body);
 END;
 $$;
-REVOKE ALL ON FUNCTION public.private_report_claims_note_refused(TEXT, TEXT, TEXT) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.private_report_claims_note_refused(TEXT, TEXT, TEXT, TEXT) FROM PUBLIC;
 DO $$
 DECLARE r RECORD;
 BEGIN
     FOR r IN SELECT DISTINCT ro.rolname AS grantee
                FROM pg_proc p, aclexplode(p.proacl) a JOIN pg_roles ro ON ro.oid = a.grantee
-              WHERE p.oid = 'public.private_report_claims_note_refused(text,text,text)'::regprocedure AND NOT ro.rolsuper AND ro.oid <> p.proowner LOOP
-        EXECUTE format('REVOKE ALL ON FUNCTION public.private_report_claims_note_refused(text,text,text) FROM %I', r.grantee);
+              WHERE p.oid = 'public.private_report_claims_note_refused(text,text,text,text)'::regprocedure AND NOT ro.rolsuper AND ro.oid <> p.proowner LOOP
+        EXECUTE format('REVOKE ALL ON FUNCTION public.private_report_claims_note_refused(text,text,text,text) FROM %I', r.grantee);
     END LOOP;
-    GRANT EXECUTE ON FUNCTION public.private_report_claims_note_refused(TEXT, TEXT, TEXT) TO service_role;
+    GRANT EXECUTE ON FUNCTION public.private_report_claims_note_refused(TEXT, TEXT, TEXT, TEXT) TO service_role;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_app_memory') THEN
-        GRANT EXECUTE ON FUNCTION public.private_report_claims_note_refused(TEXT, TEXT, TEXT) TO ob_app_memory;
+        GRANT EXECUTE ON FUNCTION public.private_report_claims_note_refused(TEXT, TEXT, TEXT, TEXT) TO ob_app_memory;
     END IF;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_workbench') THEN
-        GRANT EXECUTE ON FUNCTION public.private_report_claims_note_refused(TEXT, TEXT, TEXT) TO ob_workbench;
+        GRANT EXECUTE ON FUNCTION public.private_report_claims_note_refused(TEXT, TEXT, TEXT, TEXT) TO ob_workbench;
     END IF;
 END $$;
 

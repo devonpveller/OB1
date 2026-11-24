@@ -101,6 +101,9 @@ SELECT line FROM (
     UNION ALL SELECT 20, 'write_hub=' || pg_temp.try_page('content/notebooks/' || pg_temp.v('nb') || '-2/' || pg_temp.v('nb') || '-2', 'note', 'Hub. ' || pg_temp.v('t_b1'), NULL)
     UNION ALL SELECT 21, 'write_index=' || pg_temp.try_page('content/notebooks/index-probe', 'note', 'Index. ' || pg_temp.v('t_b2'), NULL)
     UNION ALL SELECT 22, 'write_ai_note=' || pg_temp.try_page('content/notebooks/' || pg_temp.v('nb') || '/prc-ai-note', 'note', 'AI note. ' || pg_temp.v('t_b2'), NULL)
+    -- round 2 (operator's second ruling): a structured note in the notebook tree is judged by its AUTHOR only
+    UNION ALL SELECT 22, 'write_ai_note_b_own=' || pg_temp.try_page('content/notebooks/' || pg_temp.v('nb') || '/prc-ai-note-b', 'note', 'AI note. ' || pg_temp.v('t_b1'), current_setting('lab.b'))
+    UNION ALL SELECT 22, 'write_ai_note_a_with_b=' || pg_temp.try_page('content/notebooks/' || pg_temp.v('nb') || '/prc-ai-note-a', 'note', 'AI note. ' || pg_temp.v('t_b1'), current_setting('lab.a'))
     UNION ALL SELECT 23, 'write_note_a_with_b=' || pg_temp.try_page('notes/prc-probe-a-' || pg_temp.v('r'), 'note', 'My note. ' || pg_temp.v('t_b1'), current_setting('lab.a'))
     UNION ALL SELECT 24, 'write_note_b_own=' || pg_temp.try_page('notes/prc-probe-b-' || pg_temp.v('r'), 'note', 'My note. ' || pg_temp.v('t_b1'), current_setting('lab.b'))
     UNION ALL SELECT 25, 'write_note_no_author=' || pg_temp.try_page('notes/prc-probe-n-' || pg_temp.v('r'), 'note', 'A note. ' || pg_temp.v('t_b1'), NULL)

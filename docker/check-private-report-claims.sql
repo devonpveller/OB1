@@ -168,7 +168,7 @@ pages_n AS MATERIALIZED (
     SELECT w.slug, w.page_class, pg_temp.prc_norm(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '')) AS n
       FROM public.wiki_pages w
      -- A1: a person's note (notes/..., slot 575's rule) is judged by its author only (the guard)
-     WHERE NOT (coalesce(w.page_class, '') = 'note' AND left(coalesce(w.slug, ''), 6) = 'notes/')),
+     WHERE NOT (coalesce(w.page_class, '') = 'note' AND (left(coalesce(w.slug, ''), 6) = 'notes/' OR (left(coalesce(w.slug, ''), 18) = 'content/notebooks/' AND split_part(w.slug, '/', 4) <> '' AND NOT (split_part(w.slug, '/', 5) = '' AND split_part(w.slug, '/', 4) = split_part(w.slug, '/', 3)))))),
 pages AS (
     SELECT DISTINCT w.slug, w.page_class FROM pages_n w, page_texts t WHERE position(t.n IN w.n) > 0),
 -- the gap work of a tree that is not the claim owner's: a branch's question, a gap / inter-hub steer, a gap / inter-hub
@@ -302,7 +302,7 @@ SELECT line FROM (
     UNION ALL SELECT 5, 'check: in a store not their report owner''s=' || wrong_owner FROM counts
     UNION ALL SELECT 6, 'check: job results naming one for someone else=' || job_results FROM counts
     UNION ALL SELECT 7, 'check: wiki pages carrying one''s text=' || wiki_pages FROM counts
-    UNION ALL SELECT 7, 'check: of those, notebook hub / index / AI-note pages (class note, not under notes/)=' || note_class_pages FROM counts
+    UNION ALL SELECT 7, 'check: of those, notebook hub / index pages (class note, not a person''s or structured note)=' || note_class_pages FROM counts
     UNION ALL SELECT 7, 'check: shared claims holding a fragment of one (filed by a moved synthesis) or its sentence=' || frag_claims FROM counts
     UNION ALL SELECT 7, 'check: gap-work rows of a shared tree carrying one''s text=' || gap_rows FROM counts
     UNION ALL SELECT 7, 'check: corroboration lines of a private report''s run in the clear=' || corr_lines FROM counts

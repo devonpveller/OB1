@@ -18,7 +18,7 @@
 #       fragments shared; -OldRef's check script says OK and its count script has no line for them (they MISS them);
 #       the new check / count / scope scripts count them and FAIL; 570's gap guard rewrites a NULL-kind row (R4)
 #   [5] GREEN: 575 withholds the hub, the index and the fragment page, moves f1 and fd to B and withholds f2, strips the
-#       job's reuse list; a new hub / index / AI note carrying a private claim is withheld; person notes keep the
+#       job's reuse list; a new hub / index carrying a private claim is withheld; person and structured notes keep the
 #       author-only rule; a NULL-kind row is stored as typed; every check says OK; 575 again: nothing to move; a 570
 #       re-run is a check FAIL until 575 runs again
 #   [6] revert 575: byte-identical to [4]'s post-570 hashes, 570's guard functions back byte for byte; again: nothing
@@ -199,7 +199,7 @@ $wantRed = @{
   page_hub = 'present'; page_index = 'present'; page_clean_hub = 'present'; page_person_note = 'present'; page_frag = 'present'
   claim_b1 = 'owner'; claim_m = 'withheld'; claim_f1 = 'shared'; claim_f2 = 'shared'; claim_fd = 'shared'; claim_fc = 'shared'
   job_names_f1 = '1'; job_names_fc = '1'; job_claims_reused = '2'; fc_edge_onto_f1 = '1'
-  write_hub = 'saved'; write_index = 'saved'; write_ai_note = 'saved'; write_note_a_with_b = 'saved'; write_note_b_own = 'refused'
+  write_hub = 'saved'; write_index = 'saved'; write_ai_note = 'saved'; write_ai_note_b_own = 'refused'; write_ai_note_a_with_b = 'saved'; write_note_a_with_b = 'saved'; write_note_b_own = 'refused'
   write_note_no_author = 'saved'; write_clean_hub = 'saved'; write_entity_b1 = 'withheld'; write_entity_f1 = 'saved'; gap_branch_for_b1 = 'dropped'
   r4_job = 'rewritten'; r4_steer = 'rewritten'; r4_event = 'rewritten'
 }
@@ -207,7 +207,7 @@ $wantGreen = @{
   page_hub = 'absent'; page_index = 'absent'; page_clean_hub = 'present'; page_person_note = 'present'; page_frag = 'absent'
   claim_b1 = 'owner'; claim_m = 'withheld'; claim_f1 = 'owner'; claim_f2 = 'withheld'; claim_fd = 'owner'; claim_fc = 'shared'
   job_names_f1 = '0'; job_names_fc = '1'; job_claims_reused = '1'; fc_edge_onto_f1 = '0'
-  write_hub = 'withheld'; write_index = 'withheld'; write_ai_note = 'withheld'; write_note_a_with_b = 'saved'; write_note_b_own = 'refused'
+  write_hub = 'withheld'; write_index = 'withheld'; write_ai_note = 'saved'; write_ai_note_b_own = 'refused'; write_ai_note_a_with_b = 'saved'; write_note_a_with_b = 'saved'; write_note_b_own = 'refused'
   write_note_no_author = 'saved'; write_clean_hub = 'saved'; write_entity_b1 = 'withheld'; write_entity_f1 = 'withheld'; gap_branch_for_b1 = 'dropped'
   r4_job = 'as-typed'; r4_steer = 'as-typed'; r4_event = 'as-typed'
 }
@@ -291,9 +291,9 @@ try {
   $ou = Psql-Lines (Join-Path $oldDir 'count-private-report-claim-reuse.sql') 'count-old-570.log'
   Check ($ou -notmatch 'notebook hub' -and $ou -notmatch 'fragment' -and $ou -match "shared syntheses carrying a private-report claim's sentence=0" -and $ou -match 'other shared claims carrying one \(another thread, or a superseded synthesis\)=0') "RED: $OldRef's count script counts none of them (no hub line, no fragment line, the other lines 0)"
   $nc = Psql-Lines $checkSql 'check-new-570.log'
-  Check ($nc -match 'check: FAIL' -and $nc -match "wiki pages carrying one's text=2" -and $nc -match 'not under notes/\)=2' -and $nc -match 'or its sentence=3' -and $nc -match 'slot 575 applied=false') 'RED: the new check script counts the 2 notebook pages and the 3 fragment claims and FAILS'
+  Check ($nc -match 'check: FAIL' -and $nc -match "wiki pages carrying one's text=2" -and $nc -match 'or structured note\)=2' -and $nc -match 'or its sentence=3' -and $nc -match 'slot 575 applied=false') 'RED: the new check script counts the 2 notebook pages and the 3 fragment claims and FAILS'
   $nu = Psql-Lines $countSql 'count-new-570.log'
-  Check ($nu -match 'not under notes/\) carrying one=2' -and $nu -match 'or its sentence=3') 'RED: the new count script counts the 2 notebook pages and the 3 fragment claims'
+  Check ($nu -match 'or structured note\) carrying one=2' -and $nu -match 'or its sentence=3') 'RED: the new count script counts the 2 notebook pages and the 3 fragment claims'
   $ns = Psql-Lines $scopeSql 'scope-570.log'
   Check ($ns -match 'scope: FAIL' -and $ns -match "carrying a private-report claim's text=2" -and $ns -match 'or its sentence=3') 'RED: the scope check counts them and FAILS'
   # ---------------------------------------------------------------- [5] GREEN: 575
@@ -324,9 +324,9 @@ try {
   $gc = Psql-Lines $checkSql 'check-575.log'
   Check ($gc -match 'check: OK' -and $gc -match "wiki pages carrying one's text=0" -and $gc -match 'or its sentence=0' -and $gc -match 'slot 575 applied=true \(its guard functions in place=true\)') 'GREEN: the check script says OK'
   $gu = Psql-Lines $countSql 'count-575.log'
-  Check ($gu -match 'not under notes/\) carrying one=0' -and $gu -match 'or its sentence=0' -and $gu -match 'other shared claims carrying one \(another thread, or a superseded synthesis\)=0') 'GREEN: the count script counts 0 of them'
+  Check ($gu -match 'or structured note\) carrying one=0' -and $gu -match 'or its sentence=0' -and $gu -match 'other shared claims carrying one \(another thread, or a superseded synthesis\)=0') 'GREEN: the count script counts 0 of them'
   $gs = Psql-Lines $scopeSql 'scope-575.log'
-  Check ($gs -match 'scope: OK' -and $gs -match 'person notes \(notes/\.\.\., judged by their author only\)=1') 'GREEN: the scope check says OK; the person''s note is still there'
+  Check ($gs -match 'scope: OK' -and $gs -match 'person and structured notes \(notes/\.\.\., content/notebooks/<nb>/<note>: judged by their author only\)=1') 'GREEN: the scope check says OK; the person''s note is still there'
   $r = Psql-File $init575 '575 again'
   Check ($r.rc -eq 0 -and $r.msg -match 'scope: nothing to move') '575 a second time: nothing to move'
   $h575 = Q $hashQ; Save 'hash-575.txt' $h575
@@ -420,6 +420,10 @@ try {
         $rows = Q "SELECT count(*) FROM public.wiki_pages WHERE slug LIKE 'content/notebooks/$nb/%'"
         $r5["${ph}_$($case[0])"] = "status=$st file=$files row=$rows"
         $r5["${ph}_$($case[0])_body"] = $bd
+        if ($case[0] -eq 'a_quotes_b') {
+          # served: an author-less re-sync of the same row (the viewer's reconcile) keeps it (UPDATE ... RETURNING)
+          $r5["${ph}_$($case[0])_served"] = Q "WITH u AS (UPDATE public.wiki_pages SET body = body WHERE slug LIKE 'content/notebooks/$nb/%' RETURNING 1) SELECT count(*) FROM u"
+        }
         Write-Host "    [$ph] $($case[0]): status=$st file=$files row=$rows $(if ($st -ne '201') { $bd })"
       }
       Save "wb-$ph.log" ((Dk logs $wbName) | Out-String)
@@ -427,8 +431,10 @@ try {
     }
     Save 'r5.txt' (($r5.Keys | Sort-Object | ForEach-Object { "$_ $($r5[$_])" }) -join "`n")
     $msg = 'this note quotes a private report; remove that sentence, or share the report first'
-    Check ($r5['red_a_quotes_b'] -eq 'status=201 file=1 row=0' -and $r5['red_b_quotes_own'] -eq 'status=201 file=1 row=0') "R5 RED (the tip): a structured note quoting a private-report sentence is SAVED (201, the vault file written; the row withheld by the guard) - A quoting B's: $($r5['red_a_quotes_b']); B quoting B's own: $($r5['red_b_quotes_own'])"
-    Check ($r5['green_a_quotes_b'] -eq 'status=422 file=0 row=0' -and $r5['green_b_quotes_own'] -eq 'status=422 file=0 row=0' -and $r5['green_a_quotes_b_body'] -match [regex]::Escape($msg) -and $r5['green_b_quotes_own_body'] -match [regex]::Escape($msg)) "R5 GREEN: both are REFUSED, 422 with the one message, no vault file, no row - A: $($r5['green_a_quotes_b']); B: $($r5['green_b_quotes_own'])"
+    Check ($r5['red_b_quotes_own'] -eq 'status=201 file=1 row=1') "R5 RED (the tip): B's structured note quoting B's OWN private-report sentence is SAVED and served (201, file, row): $($r5['red_b_quotes_own'])"
+    Check ($r5['green_b_quotes_own'] -eq 'status=422 file=0 row=0' -and $r5['green_b_quotes_own_body'] -match [regex]::Escape($msg)) "R5 GREEN: B's note quoting B's OWN sentence is REFUSED, 422 with the one message, no vault file, no row: $($r5['green_b_quotes_own'])"
+    Check ($r5['green_a_quotes_b'] -eq 'status=201 file=1 row=1' -and $r5['green_a_quotes_b_served'] -eq '1') "R5 GREEN: A's note quoting only B's sentence is SAVED and SERVED like any note (201, file, row; still there after an author-less re-sync): $($r5['green_a_quotes_b']) served=$($r5['green_a_quotes_b_served'])"
+    Check ($r5['red_a_quotes_b'] -eq 'status=201 file=1 row=1') "R5: on the tip too, A's note quoting B's sentence is saved (the fix changes nothing there): $($r5['red_a_quotes_b'])"
     Check ($r5['red_a_clean'] -eq 'status=201 file=1 row=1' -and $r5['green_a_clean'] -eq 'status=201 file=1 row=1') "R5: a note with no such sentence saves as before on both (red $($r5['red_a_clean']); green $($r5['green_a_clean']))"
     $leak = @($r5.Keys | Where-Object { $_ -like '*_body' } | Where-Object { $r5[$_] -match 'prcb' })
     Check ($leak.Count -eq 0) 'R5: no refusal body carries the claim''s text'

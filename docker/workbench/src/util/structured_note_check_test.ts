@@ -40,9 +40,11 @@ Deno.test("R5: writeStructuredNote checks BEFORE the vault write and the row syn
   }
   const w = repo.slice(repo.indexOf("export async function writeStructuredNote("));
   const fnBody = w.slice(0, w.indexOf("\n}\n"));
-  const check = fnBody.indexOf("await assertStructuredNoteShareable(parseNoteRow(rel, body), askNoteRefused);");
+  const check = fnBody.indexOf("await assertStructuredNoteShareable(parseNoteRow(rel, body), askNoteRefused(input.authorSub ?? \"\"));");
   assert(check > 0, "the check runs on the row parseNoteRow makes of the file");
-  assert(check < fnBody.indexOf("await vaultWrite(rel, body);") && check < fnBody.indexOf("await syncNoteRow(rel, body);"), "before the vault file and the row");
-  assert(repo.includes("SELECT public.private_report_claims_note_refused($1, $2, $3) AS refused"), "the database's answer (slot 575)");
+  assert(check < fnBody.indexOf("await vaultWrite(rel, body);") && check < fnBody.indexOf("await syncNoteRow(rel, body, input.authorSub);"), "before the vault file and the row");
+  assert(fnBody.includes("await syncNoteRow(rel, body, input.authorSub);"), "the row names its writer (the guard judges it author-only, as the check)");
+  assert(repo.includes("SELECT public.private_report_claims_note_refused($1, $2, $3, $4) AS refused") && repo.includes("[authorSub, slug, title, body]"), "the database's answer for THIS writer (slot 575)");
+  assert(route.includes("repo.writeStructuredNote({ ...body, authorSub: (await identityOf(c)).sub })"), "the writer is the verified identity, not a body field");
   assert(route.includes("if (e instanceof repo.StructuredNoteRefused) return c.json({ error: e.message }, e.status);"), "the route answers the refusal's status");
 });

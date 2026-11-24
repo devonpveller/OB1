@@ -125,9 +125,9 @@ scope AS (
                        FROM pg_proc p WHERE p.oid = to_regprocedure('public.trg_private_report_claims_gap_guard()')), false) AS gap_in_place,
            (SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_private_report_claims_wiki_guard', 'trg_private_report_claims_gap_guard') AND NOT tgisinternal AND tgenabled <> 'D') AS triggers,
            -- R5: the structured-note check, executable by the workbench's login where it exists
-           to_regprocedure('public.private_report_claims_note_refused(text,text,text)') IS NOT NULL
+           to_regprocedure('public.private_report_claims_note_refused(text,text,text,text)') IS NOT NULL
            AND (NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ob_workbench')
-                OR has_function_privilege('ob_workbench', 'public.private_report_claims_note_refused(text,text,text)', 'EXECUTE')) AS note_fn),
+                OR has_function_privilege('ob_workbench', 'public.private_report_claims_note_refused(text,text,text,text)', 'EXECUTE')) AS note_fn),
 texts AS MATERIALIZED (
     SELECT DISTINCT x.n FROM (
         SELECT pg_temp.prc_norm(c.text) AS n FROM public.inlet_private_claims c
@@ -141,7 +141,7 @@ texts AS MATERIALIZED (
 note_pages_n AS MATERIALIZED (
     SELECT w.slug, pg_temp.prc_norm(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '')) AS n
       FROM public.wiki_pages w
-     WHERE coalesce(w.page_class, '') = 'note' AND left(coalesce(w.slug, ''), 6) <> 'notes/'),
+     WHERE coalesce(w.page_class, '') = 'note' AND NOT (coalesce(w.page_class, '') = 'note' AND (left(coalesce(w.slug, ''), 6) = 'notes/' OR (left(coalesce(w.slug, ''), 18) = 'content/notebooks/' AND split_part(w.slug, '/', 4) <> '' AND NOT (split_part(w.slug, '/', 5) = '' AND split_part(w.slug, '/', 4) = split_part(w.slug, '/', 3)))))),
 note_pages AS (
     SELECT DISTINCT w.slug FROM note_pages_n w, texts t WHERE position(t.n IN w.n) > 0),
 frag AS (SELECT DISTINCT f.id FROM pg_temp.prc_frag() f),
@@ -150,17 +150,17 @@ counts AS (
            (SELECT wiki_in_place FROM scope) AS wiki_in_place, (SELECT gap_in_place FROM scope) AS gap_in_place,
            (SELECT triggers FROM scope) AS triggers, (SELECT note_fn FROM scope) AS note_fn,
            (SELECT count(*) FROM note_pages) AS note_pages, (SELECT count(*) FROM frag) AS frag,
-           (SELECT count(*) FROM public.wiki_pages w WHERE coalesce(w.page_class, '') = 'note' AND left(coalesce(w.slug, ''), 6) = 'notes/') AS person_notes)
+           (SELECT count(*) FROM public.wiki_pages w WHERE (coalesce(w.page_class, '') = 'note' AND (left(coalesce(w.slug, ''), 6) = 'notes/' OR (left(coalesce(w.slug, ''), 18) = 'content/notebooks/' AND split_part(w.slug, '/', 4) <> '' AND NOT (split_part(w.slug, '/', 5) = '' AND split_part(w.slug, '/', 4) = split_part(w.slug, '/', 3)))))) AS person_notes)
 SELECT line FROM (
     SELECT 1 AS o, 'scope: slot 570 applied=' || s570 AS line FROM counts
     UNION ALL SELECT 2, 'scope: slot 575 applied=' || s575 FROM counts
-    UNION ALL SELECT 3, 'scope: the wiki guard judges only notes/... as a person''s note=' || wiki_in_place FROM counts
+    UNION ALL SELECT 3, 'scope: the wiki guard judges person / structured notes by their author and hub / index pages as shared=' || wiki_in_place FROM counts
     UNION ALL SELECT 4, 'scope: the gap guard treats a NULL kind as a non-matching kind=' || gap_in_place FROM counts
     UNION ALL SELECT 5, 'scope: the wiki and gap guard triggers on=' || triggers || ' (4 once applied)' FROM counts
     UNION ALL SELECT 5, 'scope: the structured-note check is installed for the workbench=' || note_fn FROM counts
-    UNION ALL SELECT 6, 'scope: notebook hub / index / AI-note pages (class note, not under notes/) carrying a private-report claim''s text=' || note_pages FROM counts
+    UNION ALL SELECT 6, 'scope: notebook hub / index pages (class note, not a person''s or structured note) carrying a private-report claim''s text=' || note_pages FROM counts
     UNION ALL SELECT 7, 'scope: shared claims holding a fragment of one (filed by a moved synthesis) or its sentence=' || frag FROM counts
-    UNION ALL SELECT 8, 'scope: person notes (notes/..., judged by their author only)=' || person_notes FROM counts
+    UNION ALL SELECT 8, 'scope: person and structured notes (notes/..., content/notebooks/<nb>/<note>: judged by their author only)=' || person_notes FROM counts
     UNION ALL SELECT 9, CASE WHEN s570 AND s575 AND note_fn AND wiki_in_place AND gap_in_place AND triggers = 4 AND note_pages = 0 AND frag = 0
                              THEN 'scope: OK' ELSE 'scope: FAIL' END FROM counts
 ) x ORDER BY o;

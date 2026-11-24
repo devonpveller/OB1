@@ -146,12 +146,14 @@ export async function writeNote(
 // rw-570-hub-note-scope R5: the structured-note check (util/structured-note-check.ts) asks the database this - the
 // wiki guard's predicate on the row the write would store.
 export { StructuredNoteRefused } from "../util/structured-note-check.ts";
-async function askNoteRefused(slug: string, title: string, body: string): Promise<boolean | null> {
-  const r = await query<{ refused: boolean | null }>(
-    `SELECT public.private_report_claims_note_refused($1, $2, $3) AS refused`,
-    [slug, title, body],
-  );
-  return r[0]?.refused ?? null;
+function askNoteRefused(authorSub: string): (slug: string, title: string, body: string) => Promise<boolean | null> {
+  return async (slug, title, body) => {
+    const r = await query<{ refused: boolean | null }>(
+      `SELECT public.private_report_claims_note_refused($1, $2, $3, $4) AS refused`,
+      [authorSub, slug, title, body],
+    );
+    return r[0]?.refused ?? null;
+  };
 }
 
 // Structured / AI-note hand-off (3.3/3.4): write into notes/<notebook-slug>/ with
@@ -164,6 +166,8 @@ export async function writeStructuredNote(input: {
   source?: "user_note" | "ai_note";
   agent?: string;
   chat?: string;
+  // round 2 (operator 2026-11-24): the writer (the request's verified identity) - the row's author for the wiki guard
+  authorSub?: string | null;
 }): Promise<{ path: string; hash: string }> {
   const nbSlug = slugifyNotebook(input.notebook);
   const fileSlug = slugifyNotebook(input.title) || "note";
@@ -184,14 +188,16 @@ export async function writeStructuredNote(input: {
     "",
   ].join("\n");
   const body = fm + input.content + "\n";
-  // rw-570-hub-note-scope R5 (operator 2026-11-24): this note goes to the SHARED wiki (content/notebooks/..., no
-  // author), so one whose text carries a private-report claim's sentence - the writer's own included - is refused
-  // BEFORE anything is written (no vault file, no wiki_pages row). The database judges the row exactly as slot 570's
-  // wiki guard does (slot 575's private_report_claims_note_refused: the guard's predicate on the row this write would
-  // store); an unanswered check refuses too (fail closed).
-  await assertStructuredNoteShareable(parseNoteRow(rel, body), askNoteRefused);
+  // rw-570-hub-note-scope R5 (operator 2026-11-24): this note goes to the SHARED wiki (content/notebooks/...), so one
+  // whose text carries one of its WRITER's own private-report claim sentences is refused BEFORE anything is written (no
+  // vault file, no wiki_pages row). The database judges the row exactly as slot 570's wiki guard does with the same
+  // author (slot 575's private_report_claims_note_refused); an unanswered check refuses too (fail closed).
+  // Round 2 (the operator's second ruling): only the WRITER's own private-report claims refuse the note; a sentence
+  // that is only in another user's report is saved and served (the row names its author, so the guard judges it
+  // author-only too - no refusal, no silent withhold, no existence signal).
+  await assertStructuredNoteShareable(parseNoteRow(rel, body), askNoteRefused(input.authorSub ?? ""));
   await vaultWrite(rel, body);
-  await syncNoteRow(rel, body);
+  await syncNoteRow(rel, body, input.authorSub);
   await vaultCommit(`ai-note: write ${rel}`);
   return { path: rel, hash: await sha256(body) };
 }

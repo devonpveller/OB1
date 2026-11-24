@@ -235,7 +235,7 @@ BEGIN
         DROP FUNCTION IF EXISTS public.trg_private_report_claims_gap_guard();
     END IF;
 END $$;
-DROP FUNCTION IF EXISTS public.private_report_claims_note_refused(TEXT, TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.private_report_claims_note_refused(TEXT, TEXT, TEXT, TEXT);
 DROP FUNCTION IF EXISTS public.private_report_claims_person_note(TEXT, TEXT);
 
 NOTIFY pgrst, 'reload schema';
