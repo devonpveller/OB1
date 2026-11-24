@@ -1257,9 +1257,12 @@ BEGIN
     UNION
     SELECT rd.slug FROM redo rd
      WHERE EXISTS (SELECT 1 FROM tx WHERE position(tx.n IN rd.n) > 0 AND (rd.fresh OR tx.n IN (SELECT n FROM extra)));
+    -- (tester attempt 1: in the table's own order, as the per-page predicate's scan inserted them - the archive ids of
+    -- the w rows are 912b3f1's, not a hash join's order)
     INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
     SELECT v_batch, 'public.wiki_pages', 'w', w.slug, to_jsonb(w)
-      FROM public.wiki_pages w WHERE w.page_class IS DISTINCT FROM 'note' AND w.slug IN (SELECT h.slug FROM _prc_whit h);
+      FROM public.wiki_pages w WHERE w.page_class IS DISTINCT FROM 'note' AND EXISTS (SELECT 1 FROM _prc_whit h WHERE h.slug = w.slug)
+     ORDER BY w.ctid;
     -- (fix item round 2, A1: a person's note is never withheld for another user's claim - see the wiki guard)
     GET DIAGNOSTICS n_pages = ROW_COUNT;
     DELETE FROM public.wiki_pages w USING public.private_report_claims_archive a

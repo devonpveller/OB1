@@ -67,6 +67,10 @@ BEGIN
       FROM (SELECT a.id AS o, pg_temp.fp_mask(jsonb_build_object('b', a.batch, 'tbl', a.tbl, 'act', a.action, 'ref', a.ref,
                   'row', CASE WHEN a.action = 'u' THEN a.row_data - 'bumped_to' ELSE a.row_data END)::text) AS r
               FROM public.private_report_claims_archive a WHERE a.restored_at IS NULL) z;
+    -- the ids themselves, relative to this run's first (tester attempt 1: the order of one action's rows is in the ids)
+    INSERT INTO _fp SELECT 23, 'archive_ids', count(*), md5(coalesce(string_agg(z.r, '|' ORDER BY z.o), ''))
+      FROM (SELECT a.id AS o, (a.id - min(a.id) OVER ())::text || ':' || a.action || ':' || pg_temp.fp_mask(coalesce(a.ref, '')) AS r
+              FROM public.private_report_claims_archive a WHERE a.restored_at IS NULL) z;
     INSERT INTO _fp SELECT 22, 'archive_order_by_action', count(*), md5(coalesce(string_agg(z.r, '|' ORDER BY z.o), ''))
       FROM (SELECT a.id AS o, pg_temp.fp_mask(a.batch::text) || ':' || a.tbl || ':' || a.action AS r FROM public.private_report_claims_archive a WHERE a.restored_at IS NULL) z;
     -- the moved (k) and withheld (x) claim sets, the withheld pages (w), the moved / withheld syntheses (s), job reports (p)

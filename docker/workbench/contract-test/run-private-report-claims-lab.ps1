@@ -43,6 +43,10 @@
 # (prc-570-fingerprint.sql: every table 570 touches, the archive, the moved / withheld sets - the per-run batch ids,
 # copy ids and timestamps masked) and the earlier and this tree's check and count scripts' output on every state
 # (planted, after each init) to be identical; then it stops (no RED / green: run the lab again without it).
+# Tester attempt 1: -EquivDir also lays prc-570-equiv-plant.sql over the plant (14 withheld pages and more of every row
+# kind 570 archives, in an order unrelated to their keys) and the fingerprint compares the archive IDS (relative to the
+# run's first); the EquivDir files must have the same line endings as this tree's (a CRLF checkout vs `git show`'s LF
+# changes every function's prosrc) - refused otherwise.
 param(
   [string]$Id = 'wt-rw-private-report-claims',
   [string]$Subnet = '',
@@ -314,6 +318,14 @@ try {
   if ($EquivDir) {
     # ---------------------------------------------------------------- rw-570-perf: the earlier 570 and this tree's
     Write-Host "[equiv] the earlier slot 570 ($EquivDir) and this tree's, each on the plant and reverted"
+    foreach ($f in @('init-private-report-claims.sql', 'revert-private-report-claims.sql', 'check-private-report-claims.sql', 'count-private-report-claim-reuse.sql')) {
+      $a = [System.IO.File]::ReadAllText((Join-Path $EquivDir $f)).Contains("`r`n"); $b = [System.IO.File]::ReadAllText((Join-Path $dockerDir $f)).Contains("`r`n")
+      if ($a -ne $b) { Fail "[equiv] $f`: the EquivDir copy and this tree's differ in line endings (CRLF $a vs $b) - build EquivDir from a checkout of the same kind"; throw 'STOP-EQUIV' }
+    }
+    $ep = Psql-File (Join-Path $ct 'prc-570-equiv-plant.sql') 'equiv plant'
+    $epn = Q "SELECT (SELECT count(*) FROM public.wiki_pages WHERE slug LIKE 'content/topic/prc-eq-%') || '/' || (SELECT count(*) FROM public.sources WHERE research_key LIKE 'prc-eq-syn-%') || '/' || (SELECT count(*) FROM public.research_jobs WHERE query LIKE 'eq shared question %')"
+    Check ($ep.rc -eq 0 -and $epn -eq '17/4/4') "[equiv] the extra plant landed (pages / syntheses / jobs = $epn, want 17/4/4)"
+    $h0 = Q $hashQ; Save 'hash-planted-equiv.txt' $h0
     $null = Dk cp (Join-Path $ct 'prc-570-fingerprint.sql') "${db}:/tmp/prcfp.sql"
     $null = Dk cp (Join-Path $EquivDir 'count-private-report-claim-reuse.sql') "${db}:/tmp/prcreuse-old.sql"
     $null = Dk cp (Join-Path $EquivDir 'check-private-report-claims.sql') "${db}:/tmp/prccheck-old.sql"
