@@ -1156,6 +1156,16 @@ t("rw-held-record-residuals F5: another user's link to a held source does not bl
   const loc = await call("GET", `${D}/user-sources/${one.hid}/locate`, undefined, A);
   assertEquals(loc.status, 200, loc.text);
   assertEquals(loc.json.others, 0, `B's link to A's held source counts against A: ${loc.text}`);
+  // F5b (the sibling on the dependence route): A's own dependence read counts no connection from B's foreign link
+  const foreignLinks = (j: any) => (j.connections ?? []).filter((c: any) => c.kind === "document_link" && String(c.ref).startsWith("another-user-document")).length;
+  const dep = await call("GET", `/workbench/contract/sources/${one.hid}/dependence`, undefined, A);
+  assertEquals(dep.status, 200, dep.text);
+  assertEquals([dep.json.counts?.document_link ?? 0, foreignLinks(dep.json)], [0, 0], `F5b: B's link to A's held source is a connection in A's dependence: ${dep.text}`);
+  assert(!dep.text.includes(b.path), `A's dependence names B's document: ${dep.text}`);
+  // the control: B's link to an ADMITTED source is still a connection in A's dependence read
+  const depShared = await call("GET", `/workbench/contract/sources/${FX.active}/dependence`, undefined, A);
+  assertEquals(depShared.status, 200, depShared.text);
+  assert(foreignLinks(depShared.json) >= 1, `F5b control: B's link to a shared source is no longer a connection: ${depShared.text}`);
   const rm1 = await call("DELETE", `${D}/user-sources/${one.hid}?refinery_id=${a.rid}`, undefined, A);
   assertEquals(rm1.status, 200, `F5: A's remove is blocked by B's link to A's held source: ${rm1.text}`);
   assert(!rm1.text.includes(b.path) && !rm1.text.includes("other_users_documents"), `A's remove names B's document: ${rm1.text}`);
