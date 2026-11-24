@@ -98,6 +98,103 @@ BEGIN
         RAISE NOTICE 'private report claims: fresh volume - ob_app_memory is created after initdb; it executes this slot''s functions through service_role once it exists';
     END IF;
 END $$;
+-- the SKELETON a page match compares, on BOTH sides (the claim and the page). Final round (tester attempt 2, the
+-- coordinator's stopping rule): no format list to keep up - HTML entities decoded; the text inside [[...]] and [..](..)
+-- link labels kept; footnote / citation markers, <sup>/<ref> and every tag dropped; then LETTERS only (digits too go), lower
+-- case, accents removed, so all spacing, punctuation and hyphenation is gone. A claim matches when its skeleton (24+
+-- LETTERS) is a substring of the page's. check-private-report-claims.sql and count-private-report-claim-reuse.sql
+-- repeat it verbatim. Residual (accepted): a claim-id-only link (ids, no text); a paraphrase or synonyms.
+CREATE OR REPLACE FUNCTION public.private_report_claim_norm(p_text TEXT) RETURNS TEXT
+LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    t TEXT := coalesce(p_text, '');
+    m TEXT[];
+    v INT;
+    n INT := 0;
+BEGIN
+    -- 1. HTML entities: numeric (&#233; &#xE9;) decoded; a named letter entity (&eacute; &Ouml;) to its letter;
+    --    &szlig; to ss; every other named one (&nbsp; &amp; ...) to a space
+    LOOP
+        m := regexp_match(t, '&#([xX][0-9a-fA-F]{1,6}|[0-9]{1,7});');
+        EXIT WHEN m IS NULL OR n > 500;
+        n := n + 1;
+        v := CASE WHEN lower(left(m[1], 1)) = 'x' THEN ('x' || lpad(substr(m[1], 2), 8, '0'))::bit(32)::int ELSE m[1]::int END;
+        t := replace(t, '&#' || m[1] || ';', CASE WHEN v BETWEEN 1 AND 1114111 AND v NOT BETWEEN 55296 AND 57343 THEN chr(v) ELSE ' ' END);
+    END LOOP;
+    t := regexp_replace(t, '&([A-Za-z])(acute|grave|circ|uml|tilde|cedil|ring|slash|caron);', '\1', 'g');
+    t := regexp_replace(t, '&szlig;', 'ss', 'g');
+    t := regexp_replace(t, '&[A-Za-z][A-Za-z0-9]{1,31};', ' ', 'g');
+    -- 2. links: the text a reader sees - [[target|label]] -> label, [[target]] -> target, [label](url) -> label
+    t := regexp_replace(t, '\[\[(?:[^]|]*\|)?([^]]*)\]\]', '\1', 'g');
+    t := regexp_replace(t, '\[([^]\[]*)\]\([^)]*\)', '\1', 'g');
+    -- 3. markers and tags: footnotes ([^1] [^note-a], mid-word too), numeric / named citations ([3] [Source 2] [1, 2]),
+    --    <sup>..</sup> and <ref>..</ref> with their content, every other tag (its content kept)
+    t := regexp_replace(t, '\[\^[^]]*\]', '', 'g');
+    t := regexp_replace(t, '\[\s*((source|src|ref|cite|citation|note)\s*)?[0-9]+([\s,;-]+[0-9]+)*\s*\]', '', 'gi');
+    t := regexp_replace(t, '<sup([\s/][^>]*)?>.*?</sup\s*>', '', 'gi');
+    t := regexp_replace(t, '<ref([\s/][^>]*)?>.*?</ref\s*>', '', 'gi');
+    t := regexp_replace(t, '<[^>]*>', '', 'g');
+    -- 4. the skeleton: NFKC (full-width / compatibility forms folded), lower case, accents removed (NFKD, the marks
+    --    dropped), LETTERS ONLY - every digit, space, punctuation and hyphen gone (attempt 3: a citation number such as
+    --    ^1^ or (1) mid-sentence, or a full-width digit, split the substring while digits were kept). A shared page that
+    --    happens to carry a private claim's letters with other numbers is withheld too: conservative, accepted.
+    t := lower(normalize(t, NFKC));
+    t := replace(replace(replace(replace(t, 'ß', 'ss'), 'æ', 'ae'), 'œ', 'oe'), 'ø', 'o');
+    t := translate(t, 'àáâãäåçèéêëìíîïñòóôõöùúûüýÿāăąćĉčďđēĕėęěĝğġģĥĩīĭįıĵķĺļľłńņňōŏőŕŗřśŝşšţťũūŭůűųŵŷźżž',
+                      'aaaaaaceeeeiiiinooooouuuuyyaaacccddeeeeegggghiiiiijkllllnnnooorrrssssttuuuuuuwyzzz');
+    RETURN regexp_replace(normalize(t, NFKD), '[^[:alpha:]]+', '', 'g');
+END;
+$$;
+REVOKE ALL ON FUNCTION public.private_report_claim_norm(TEXT) FROM PUBLIC;
+-- rw-570-perf: the SKELETON memo. The match below compares skeletons (private_report_claim_norm, just above: moved up
+-- here, its text unchanged) of every wiki page, synthesis, job result, thread, notebook label, curator answer and claim;
+-- the slot used to normalise the same text once per claim it was compared with (68,558 pages x 76 claims at live
+-- size: hours, most of it under the locks). Each distinct text is normalised ONCE here, BEFORE any lock is taken (read-only), keyed by the
+-- SHA-256 of the exact text; pg_temp.prc570_n(t) returns the memo's skeleton when t is a memoised text and
+-- private_report_claim_norm(t) otherwise, so prc570_n(t) = private_report_claim_norm(t) for every t (a text that
+-- changes after this point is simply normalised again where it is read). Nothing outside this transaction sees it.
+CREATE TEMP TABLE _prc_memo (h BYTEA PRIMARY KEY, n TEXT NOT NULL) ON COMMIT DROP;
+CREATE OR REPLACE FUNCTION pg_temp.prc570_n(p_text TEXT) RETURNS TEXT
+LANGUAGE plpgsql STABLE
+AS $$
+DECLARE
+    v TEXT;
+BEGIN
+    SELECT m.n INTO v FROM pg_temp._prc_memo m WHERE m.h = sha256(convert_to(coalesce(p_text, ''), 'UTF8'));
+    IF v IS NULL THEN
+        v := public.private_report_claim_norm(p_text);
+    END IF;
+    RETURN v;
+END;
+$$;
+-- every text the move, the wiki pass and its fail-closed checks normalise, in the exact form they normalise it
+INSERT INTO pg_temp._prc_memo (h, n)
+SELECT sha256(convert_to(x.t, 'UTF8')), public.private_report_claim_norm(x.t)
+  FROM (SELECT coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '') AS t
+          FROM public.wiki_pages w WHERE w.page_class IS DISTINCT FROM 'note'
+        UNION ALL
+        SELECT coalesce(s.title, '') || ' ' || coalesce(s.content, '') FROM public.sources s WHERE s.content_type = 'research_synthesis'
+        UNION ALL
+        SELECT coalesce((SELECT string_agg(v #>> '{}', ' ') FROM jsonb_path_query(j.result - 'reuse_claims' - 'claims', 'strict $.**') v
+                          WHERE jsonb_typeof(v) = 'string'), '')
+          FROM public.research_jobs j WHERE jsonb_typeof(j.result) = 'object'
+        UNION ALL
+        SELECT coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((
+                   SELECT string_agg(x ->> 'name', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'shortlist') = 'array'
+                                                                                      THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), '')
+          FROM public.research_jobs j WHERE jsonb_typeof(j.result -> 'curator') = 'object'
+        UNION ALL
+        SELECT DISTINCT y.t FROM public.threads th
+          CROSS JOIN LATERAL (VALUES (coalesce(th.name, '') || ' ' || coalesce(th.description, '') || ' ' || coalesce(th.slug, '')),
+                                     (coalesce(th.name, '') || ' ' || coalesce(th.description, '')), (coalesce(th.slug, '')),
+                                     (coalesce(th.name, '')), (coalesce(th.name || ' ' || th.slug, ''))) y(t)
+        UNION ALL
+        SELECT DISTINCT s.notebook FROM public.sources s WHERE coalesce(s.notebook, '') <> ''
+        UNION ALL
+        SELECT coalesce(c.text, '') FROM public.claims c) x
+ON CONFLICT (h) DO NOTHING;
 -- every table the run writes, at once, under the 10 s lock_timeout: SHARE ROW EXCLUSIVE blocks writers, lets readers through
 LOCK TABLE public.claims, public.claim_sources, public.research_private_report_claims, public.research_private_reports,
            public.research_jobs, public.wiki_pages, public.inlet_private_claims, public.inlet_private_claim_sources,
@@ -171,56 +268,6 @@ REVOKE ALL ON FUNCTION public.private_report_claim_subject_ok(TEXT) FROM PUBLIC;
 CREATE OR REPLACE FUNCTION public.private_report_claims_filed_batch() RETURNS UUID
 LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT '00000000-0000-4570-8000-000000000570'::uuid $$;
 REVOKE ALL ON FUNCTION public.private_report_claims_filed_batch() FROM PUBLIC;
--- the SKELETON a page match compares, on BOTH sides (the claim and the page). Final round (tester attempt 2, the
--- coordinator's stopping rule): no format list to keep up - HTML entities decoded; the text inside [[...]] and [..](..)
--- link labels kept; footnote / citation markers, <sup>/<ref> and every tag dropped; then LETTERS only (digits too go), lower
--- case, accents removed, so all spacing, punctuation and hyphenation is gone. A claim matches when its skeleton (24+
--- LETTERS) is a substring of the page's. check-private-report-claims.sql and count-private-report-claim-reuse.sql
--- repeat it verbatim. Residual (accepted): a claim-id-only link (ids, no text); a paraphrase or synonyms.
-CREATE OR REPLACE FUNCTION public.private_report_claim_norm(p_text TEXT) RETURNS TEXT
-LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE
-SET search_path = pg_catalog
-AS $$
-DECLARE
-    t TEXT := coalesce(p_text, '');
-    m TEXT[];
-    v INT;
-    n INT := 0;
-BEGIN
-    -- 1. HTML entities: numeric (&#233; &#xE9;) decoded; a named letter entity (&eacute; &Ouml;) to its letter;
-    --    &szlig; to ss; every other named one (&nbsp; &amp; ...) to a space
-    LOOP
-        m := regexp_match(t, '&#([xX][0-9a-fA-F]{1,6}|[0-9]{1,7});');
-        EXIT WHEN m IS NULL OR n > 500;
-        n := n + 1;
-        v := CASE WHEN lower(left(m[1], 1)) = 'x' THEN ('x' || lpad(substr(m[1], 2), 8, '0'))::bit(32)::int ELSE m[1]::int END;
-        t := replace(t, '&#' || m[1] || ';', CASE WHEN v BETWEEN 1 AND 1114111 AND v NOT BETWEEN 55296 AND 57343 THEN chr(v) ELSE ' ' END);
-    END LOOP;
-    t := regexp_replace(t, '&([A-Za-z])(acute|grave|circ|uml|tilde|cedil|ring|slash|caron);', '\1', 'g');
-    t := regexp_replace(t, '&szlig;', 'ss', 'g');
-    t := regexp_replace(t, '&[A-Za-z][A-Za-z0-9]{1,31};', ' ', 'g');
-    -- 2. links: the text a reader sees - [[target|label]] -> label, [[target]] -> target, [label](url) -> label
-    t := regexp_replace(t, '\[\[(?:[^]|]*\|)?([^]]*)\]\]', '\1', 'g');
-    t := regexp_replace(t, '\[([^]\[]*)\]\([^)]*\)', '\1', 'g');
-    -- 3. markers and tags: footnotes ([^1] [^note-a], mid-word too), numeric / named citations ([3] [Source 2] [1, 2]),
-    --    <sup>..</sup> and <ref>..</ref> with their content, every other tag (its content kept)
-    t := regexp_replace(t, '\[\^[^]]*\]', '', 'g');
-    t := regexp_replace(t, '\[\s*((source|src|ref|cite|citation|note)\s*)?[0-9]+([\s,;-]+[0-9]+)*\s*\]', '', 'gi');
-    t := regexp_replace(t, '<sup([\s/][^>]*)?>.*?</sup\s*>', '', 'gi');
-    t := regexp_replace(t, '<ref([\s/][^>]*)?>.*?</ref\s*>', '', 'gi');
-    t := regexp_replace(t, '<[^>]*>', '', 'g');
-    -- 4. the skeleton: NFKC (full-width / compatibility forms folded), lower case, accents removed (NFKD, the marks
-    --    dropped), LETTERS ONLY - every digit, space, punctuation and hyphen gone (attempt 3: a citation number such as
-    --    ^1^ or (1) mid-sentence, or a full-width digit, split the substring while digits were kept). A shared page that
-    --    happens to carry a private claim's letters with other numbers is withheld too: conservative, accepted.
-    t := lower(normalize(t, NFKC));
-    t := replace(replace(replace(replace(t, 'ß', 'ss'), 'æ', 'ae'), 'œ', 'oe'), 'ø', 'o');
-    t := translate(t, 'àáâãäåçèéêëìíîïñòóôõöùúûüýÿāăąćĉčďđēĕėęěĝğġģĥĩīĭįıĵķĺļľłńņňōŏőŕŗřśŝşšţťũūŭůűųŵŷźżž',
-                      'aaaaaaceeeeiiiinooooouuuuyyaaacccddeeeeegggghiiiiijkllllnnnooorrrssssttuuuuuuwyzzz');
-    RETURN regexp_replace(normalize(t, NFKD), '[^[:alpha:]]+', '', 'g');
-END;
-$$;
-REVOKE ALL ON FUNCTION public.private_report_claim_norm(TEXT) FROM PUBLIC;
 
 -- who may call the slot's three functions (round 2, tester F2): they are granted to service_role so the services' role
 -- reaches them in any creation order; this keeps everyone else out. A PostgREST request (it sets request.method /
@@ -557,16 +604,20 @@ DECLARE
     n_ent     BIGINT := 0;
     v_sids    UUID[];
     d         RECORD;
+    v_fks     TEXT[] := '{}';
+    v_fk      TEXT;
 BEGIN
-    -- the foreign key onto public.claims goes first (a link names a private claim from now on): its definition archived
+    -- the foreign key onto public.claims: its definition archived first (a link names a private claim from now on).
+    -- rw-570-perf: the constraint itself is dropped later, right before the first claim leaves the shared table (below):
+    -- DROP CONSTRAINT takes ACCESS EXCLUSIVE on public.claims and the link table until COMMIT (readers block), so
+    -- everything up to that point runs under the SHARE ROW EXCLUSIVE locks only (readers through)
     FOR r IN SELECT con.conname, pg_get_constraintdef(con.oid) AS def
                FROM pg_constraint con
               WHERE con.conrelid = 'public.research_private_report_claims'::regclass AND con.contype = 'f'
                 AND con.confrelid = 'public.claims'::regclass LOOP
         INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
         VALUES (v_batch, 'public.research_private_report_claims', 'f', r.conname, jsonb_build_object('name', r.conname, 'def', r.def));
-        EXECUTE format('ALTER TABLE public.research_private_report_claims DROP CONSTRAINT %I', r.conname);
-        RAISE NOTICE 'private report claims: the link''s foreign key onto public.claims dropped (archived)';
+        v_fks := v_fks || r.conname::text;
     END LOOP;
 
     -- the claims to move: linked to a private report, in the shared table. Fix item (P2): a claim a shared synthesis
@@ -587,15 +638,15 @@ BEGIN
     -- P2 (fix item, operator 2026-11-22): the SHARED outputs that restated one of these claims. Each claim's skeleton
     -- (private_report_claim_norm, 24+ letters, as the wiki match).
     CREATE TEMP TABLE _prc_n ON COMMIT DROP AS
-    SELECT x.id, x.owner, public.private_report_claim_norm(c.text) AS n
+    SELECT x.id, x.owner, pg_temp.prc570_n(c.text) AS n
       FROM _prc x JOIN public.claims c ON c.id = x.id
-     WHERE length(public.private_report_claim_norm(c.text)) >= 24;
+     WHERE length(pg_temp.prc570_n(c.text)) >= 24;
     -- a shared job report (no private report owns the job or its tree): its result names one (reuse_claims /
     -- claims) or any text of its result carries one's sentence. owners: the claims' owners; nobody: a withheld one
     CREATE TEMP TABLE _p2j ON COMMIT DROP AS
     WITH jb AS (
         SELECT j.id, j.result,
-               public.private_report_claim_norm((SELECT string_agg(v #>> '{}', ' ')
+               pg_temp.prc570_n((SELECT string_agg(v #>> '{}', ' ')
                                                    FROM jsonb_path_query(j.result - 'reuse_claims' - 'claims', 'strict $.**') v
                                                   WHERE jsonb_typeof(v) = 'string')) AS n
           FROM public.research_jobs j
@@ -625,7 +676,7 @@ BEGIN
     -- one's sentence, or one of those jobs filed it (its curator answer, its typed 'filed' event)
     CREATE TEMP TABLE _p2s ON COMMIT DROP AS
     WITH sn AS (
-        SELECT s.id, public.private_report_claim_norm(coalesce(s.title, '') || ' ' || coalesce(s.content, '')) AS n
+        SELECT s.id, pg_temp.prc570_n(coalesce(s.title, '') || ' ' || coalesce(s.content, '')) AS n
           FROM public.sources s WHERE s.content_type = 'research_synthesis'),
     filed AS (
         SELECT t.id AS job_id, x.sid FROM _p2j t
@@ -655,8 +706,8 @@ BEGIN
     -- text behind, filed by a synthesis that no longer restates them. The match is the check script's (the claim's
     -- skeleton contains the private claim's), so a successful run and its check agree.
     CREATE TEMP TABLE _prc_dup ON COMMIT DROP AS
-    WITH cn AS (
-        SELECT c.id, public.private_report_claim_norm(c.text) AS n FROM public.claims c
+    WITH cn AS MATERIALIZED (
+        SELECT c.id, pg_temp.prc570_n(c.text) AS n FROM public.claims c
          WHERE c.id NOT IN (SELECT id FROM _prc) AND EXISTS (SELECT 1 FROM _prc_n))
     SELECT cn.id, array_agg(DISTINCT t.owner) FILTER (WHERE t.owner IS NOT NULL) AS owners, bool_or(t.owner IS NULL) AS nobody,
            array_agg(DISTINCT t.id) AS restates
@@ -670,7 +721,7 @@ BEGIN
       JOIN public.research_private_report_claims pc ON pc.claim_id = ANY(dp.restates)
       JOIN public.research_private_reports p ON p.id = pc.report_id AND p.owner_sub = x.owner;
     INSERT INTO _prc_n (id, owner, n)
-    SELECT x.id, x.owner, public.private_report_claim_norm(c.text) FROM _prc_dup dp JOIN _prc x ON x.id = dp.id JOIN public.claims c ON c.id = dp.id;
+    SELECT x.id, x.owner, pg_temp.prc570_n(c.text) FROM _prc_dup dp JOIN _prc x ON x.id = dp.id JOIN public.claims c ON c.id = dp.id;
     SELECT count(*) INTO n_dup FROM _prc_dup;
     SELECT count(*) FILTER (WHERE owner IS NOT NULL), count(*) FILTER (WHERE owner IS NULL) INTO n_own, n_held FROM _prc;
     -- fix item round 2 (P2 #4): a synthesis copy keeps its title / research_query only when the question was public (a
@@ -693,7 +744,9 @@ BEGIN
     CREATE TEMP TABLE _prc_threads ON COMMIT DROP AS
     SELECT DISTINCT th.id
       FROM public.threads th
-     WHERE EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN public.private_report_claim_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, '') || ' ' || coalesce(th.slug, ''))) > 0)
+     WHERE th.id IN (WITH tn AS MATERIALIZED (SELECT t2.id, pg_temp.prc570_n(coalesce(t2.name, '') || ' ' || coalesce(t2.description, '') || ' ' || coalesce(t2.slug, '')) AS n
+                                                FROM public.threads t2)
+                     SELECT tn.id FROM tn WHERE EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN tn.n) > 0))
         OR th.id IN (SELECT ts.thread_id FROM public.thread_sources ts WHERE ts.source_id IN (SELECT id FROM _p2s))
         OR th.id::text IN (SELECT j.result -> 'curator' ->> 'thread_id' FROM public.research_jobs j WHERE j.id IN (SELECT id FROM _p2j)
                            UNION SELECT e.payload ->> 'thread_id' FROM public.research_job_events e WHERE e.type = 'filed' AND e.job_id IN (SELECT id FROM _p2j)
@@ -705,6 +758,30 @@ BEGIN
         EXECUTE 'INSERT INTO _prc_ents SELECT DISTINCT se.entity_id FROM public.source_entities se WHERE se.source_id IN (SELECT id FROM _p2s)';
     END IF;
 
+
+    -- rw-570-perf: the wiki candidates, computed here, before the key goes (readers through). The wiki pass below
+    -- withholds every non-note page whose skeleton carries a text private_report_claims_page_shows reads at that point
+    -- (the store's claims a private report links, and the withheld x claims - this run's included). Every such text is
+    -- one read here (the store's and the withheld claims of today, and each claim this run moves or withholds), so
+    -- each page's skeleton is matched against these once, now; the pass keeps the pairs whose text it reads, and
+    -- matches from scratch any page whose row changed since (a row version not seen here) and any text it reads that
+    -- is not here.
+    CREATE TEMP TABLE _prc_wcand ON COMMIT DROP AS
+    SELECT x.n FROM (
+        SELECT pg_temp.prc570_n(c.text) AS n FROM public.inlet_private_claims c
+         WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+        UNION
+        SELECT pg_temp.prc570_n(a.row_data ->> 'text') FROM public.private_report_claims_archive a WHERE a.action = 'x' AND a.restored_at IS NULL
+        UNION
+        SELECT pg_temp.prc570_n(c.text) FROM public.claims c JOIN _prc x ON x.id = c.id) x
+     WHERE length(x.n) >= 24;
+    CREATE TEMP TABLE _prc_wseen ON COMMIT DROP AS
+    SELECT w.slug, w.ctid AS row_ctid, w.xmin::text AS row_xmin,
+           pg_temp.prc570_n(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '')) AS n
+      FROM public.wiki_pages w WHERE w.page_class IS DISTINCT FROM 'note';
+    CREATE TEMP TABLE _prc_wpair ON COMMIT DROP AS
+    SELECT p.slug, t.n FROM _prc_wseen p JOIN _prc_wcand t ON position(t.n IN p.n) > 0;
+    ALTER TABLE _prc_wseen DROP COLUMN n;
 
     -- a dependent this move cannot archive stops it, nothing changed: any other foreign key onto claims with a row on a
     -- moved claim (claim_sources is archived below; the link's key is gone)
@@ -850,6 +927,13 @@ BEGIN
 
         -- the shared rows go, with ordinary triggers off for the job rows (their touch timestamps do not move: the revert is
         -- byte-identical); the edge deletes recompute the shared claims archived whole above
+        -- rw-570-perf: the link's foreign key goes here (archived above): from now on to COMMIT readers of public.claims
+        -- and the link table wait, so everything below reads the memo and the candidates computed before
+        FOREACH v_fk IN ARRAY v_fks LOOP
+            EXECUTE format('ALTER TABLE public.research_private_report_claims DROP CONSTRAINT %I', v_fk);
+            RAISE NOTICE 'private report claims: the link''s foreign key onto public.claims dropped (archived)';
+        END LOOP;
+        v_fks := '{}';
         DELETE FROM public.claim_sources cs WHERE cs.claim_id IN (SELECT id FROM _prc) OR cs.parent_claim_id IN (SELECT id FROM _prc);
         DELETE FROM public.claims c WHERE c.id IN (SELECT id FROM _prc);
         -- fix item round 2: a moved duplicate is linked to its owner's reports (a private-report claim like the rest);
@@ -1036,20 +1120,22 @@ BEGIN
                SET description = (SELECT 'Shared sources: ' || string_agg(x.title, '; ' ORDER BY x.title)
                                     FROM (SELECT DISTINCT s.title FROM public.thread_sources ts JOIN public.sources s ON s.id = ts.source_id
                                            WHERE ts.thread_id = th.id AND coalesce(s.title, '') <> ''
-                                             AND NOT EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN public.private_report_claim_norm(s.title)) > 0)
+                                             AND NOT EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN pg_temp.prc570_n(s.title)) > 0)
                                            ORDER BY s.title LIMIT 8) x),
                    embedding = NULL,
-                   name = CASE WHEN EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN public.private_report_claim_norm(th.name)) > 0)
+                   name = CASE WHEN EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN pg_temp.prc570_n(th.name)) > 0)
                                THEN 'Research thread ' || left(th.id::text, 8) ELSE th.name END,
                    -- round 3 (tester attempt 2, P2 #1): the slug is slugifyBase(name) in full - the wiki hub page's path
                    slug = CASE WHEN th.slug IS NOT NULL
-                                    AND EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN public.private_report_claim_norm(th.name || ' ' || th.slug)) > 0)
+                                    AND EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN pg_temp.prc570_n(th.name || ' ' || th.slug)) > 0)
                                THEN 'research-thread-' || left(th.id::text, 8) ELSE th.slug END
              WHERE th.id IN (SELECT id FROM _prc_threads);
             PERFORM set_config('session_replication_role', 'origin', true);
         END IF;
-        IF EXISTS (SELECT 1 FROM public.threads th, _prc_n t
-                    WHERE position(t.n IN public.private_report_claim_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, ''))) > 0)
+        -- (rw-570-perf: in this and the checks below each row's skeleton is computed once - a MATERIALIZED step - and
+        -- then compared with every claim, not recomputed per (row, claim) pair: the same predicate)
+        IF EXISTS (WITH th AS MATERIALIZED (SELECT pg_temp.prc570_n(coalesce(th.name, '') || ' ' || coalesce(th.description, '')) AS n FROM public.threads th)
+                   SELECT 1 FROM th, _prc_n t WHERE position(t.n IN th.n) > 0)
            OR EXISTS (SELECT 1 FROM public.claims c WHERE c.id IN (SELECT id FROM _prc_dup)) THEN
             RAISE EXCEPTION 'private report claims: refused, nothing changed - a thread or a shared claim still restates a moved claim' USING ERRCODE = '55000';
         END IF;
@@ -1068,7 +1154,9 @@ BEGIN
                  ORDER BY th.id LIMIT 1) AS new_label
           FROM public.sources s
          WHERE coalesce(s.notebook, '') <> ''
-           AND (EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN public.private_report_claim_norm(s.notebook)) > 0)
+           AND (s.notebook IN (WITH nb AS MATERIALIZED (SELECT DISTINCT s2.notebook FROM public.sources s2 WHERE coalesce(s2.notebook, '') <> ''),
+                                    nbn AS MATERIALIZED (SELECT nb.notebook, pg_temp.prc570_n(nb.notebook) AS n FROM nb)
+                               SELECT nbn.notebook FROM nbn WHERE EXISTS (SELECT 1 FROM _prc_n t WHERE position(t.n IN nbn.n) > 0))
                 OR s.notebook IN (SELECT a.row_data ->> 'name' FROM public.private_report_claims_archive a JOIN public.threads th ON th.id::text = a.ref
                                    WHERE a.batch = v_batch AND a.action = 't' AND (a.row_data ->> 'name') IS DISTINCT FROM th.name));
         INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
@@ -1112,30 +1200,66 @@ BEGIN
               FROM public.private_report_claims_archive a WHERE a.batch = v_batch AND a.action = 'u' AND a.ref = e.id::text;
             PERFORM set_config('session_replication_role', 'origin', true);
         END IF;
-        IF EXISTS (SELECT 1 FROM public.threads th, _prc_n t WHERE position(t.n IN public.private_report_claim_norm(coalesce(th.slug, ''))) > 0)
-           OR EXISTS (SELECT 1 FROM public.sources s, _prc_n t WHERE coalesce(s.notebook, '') <> '' AND position(t.n IN public.private_report_claim_norm(s.notebook)) > 0)
-           OR EXISTS (SELECT 1 FROM public.research_jobs j, _prc_n t
-                       WHERE jsonb_typeof(j.result -> 'curator') = 'object'
-                         AND position(t.n IN public.private_report_claim_norm(coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((
-                               SELECT string_agg(x ->> 'name', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'shortlist') = 'array'
-                                                                                                  THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), ''))) > 0) THEN
+        IF EXISTS (WITH th AS MATERIALIZED (SELECT pg_temp.prc570_n(coalesce(th.slug, '')) AS n FROM public.threads th)
+                   SELECT 1 FROM th, _prc_n t WHERE position(t.n IN th.n) > 0)
+           OR EXISTS (WITH nb AS MATERIALIZED (SELECT DISTINCT s.notebook FROM public.sources s WHERE coalesce(s.notebook, '') <> ''),
+                           nbn AS MATERIALIZED (SELECT pg_temp.prc570_n(nb.notebook) AS n FROM nb)
+                      SELECT 1 FROM nbn, _prc_n t WHERE position(t.n IN nbn.n) > 0)
+           OR EXISTS (WITH jc AS MATERIALIZED (
+                           SELECT pg_temp.prc570_n(coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((
+                                      SELECT string_agg(x ->> 'name', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'shortlist') = 'array'
+                                                                                                                THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), '')) AS n
+                             FROM public.research_jobs j WHERE jsonb_typeof(j.result -> 'curator') = 'object')
+                      SELECT 1 FROM jc, _prc_n t WHERE position(t.n IN jc.n) > 0) THEN
             RAISE EXCEPTION 'private report claims: refused, nothing changed - a thread slug, a notebook label or a curator answer still restates a moved claim' USING ERRCODE = '55000';
         END IF;
         IF EXISTS (SELECT 1 FROM public.sources s WHERE s.id = ANY(coalesce(v_sids, '{}')))
-           OR EXISTS (SELECT 1 FROM public.sources s, _prc_n t
-                       WHERE s.content_type = 'research_synthesis'
-                         AND position(t.n IN public.private_report_claim_norm(coalesce(s.title, '') || ' ' || coalesce(s.content, ''))) > 0)
+           OR EXISTS (WITH sn AS MATERIALIZED (SELECT pg_temp.prc570_n(coalesce(s.title, '') || ' ' || coalesce(s.content, '')) AS n
+                                                 FROM public.sources s WHERE s.content_type = 'research_synthesis')
+                      SELECT 1 FROM sn, _prc_n t WHERE position(t.n IN sn.n) > 0)
            OR EXISTS (SELECT 1 FROM public.research_jobs j JOIN _p2j t ON t.id = j.id
                        WHERE coalesce(j.result ->> 'synthesis', '') <> '' OR j.result ? 'prose' OR j.result ? 'rendered') THEN
             RAISE EXCEPTION 'private report claims: refused, nothing changed - a shared synthesis or job report still restates a moved claim' USING ERRCODE = '55000';
         END IF;
     END IF;
+    -- (nothing to move: the key, if still there, goes now)
+    FOREACH v_fk IN ARRAY v_fks LOOP
+        EXECUTE format('ALTER TABLE public.research_private_report_claims DROP CONSTRAINT %I', v_fk);
+        RAISE NOTICE 'private report claims: the link''s foreign key onto public.claims dropped (archived)';
+    END LOOP;
 
     -- the wiki: every page carrying a private-report claim's text (the predicate reads the store and this batch's archive),
     -- archived and withheld - whatever this run moved, a later page included
+    -- (rw-570-perf: the pages private_report_claims_page_shows(slug || ' ' || title, body) is true for, from the
+    -- candidates above - the same set, the predicate's texts read once)
+    CREATE TEMP TABLE _prc_whit ON COMMIT DROP AS
+    WITH tx AS MATERIALIZED (
+             SELECT DISTINCT x.n FROM (
+                 SELECT pg_temp.prc570_n(c.text) AS n FROM public.inlet_private_claims c
+                  WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+                 UNION ALL
+                 SELECT pg_temp.prc570_n(a.row_data ->> 'text') FROM public.private_report_claims_archive a
+                  WHERE a.action = 'x' AND a.restored_at IS NULL) x
+              WHERE length(x.n) >= 24),
+         extra AS MATERIALIZED (SELECT tx.n FROM tx WHERE tx.n NOT IN (SELECT n FROM _prc_wcand)),
+         cur AS MATERIALIZED (
+             SELECT w.slug, s.slug IS NOT NULL AS seen
+               FROM public.wiki_pages w
+               LEFT JOIN _prc_wseen s ON s.slug = w.slug AND s.row_ctid = w.ctid AND s.row_xmin = w.xmin::text
+              WHERE w.page_class IS DISTINCT FROM 'note'),
+         redo AS MATERIALIZED (
+             SELECT c.slug, NOT c.seen AS fresh,
+                    pg_temp.prc570_n(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '')) AS n
+               FROM cur c JOIN public.wiki_pages w ON w.slug = c.slug
+              WHERE NOT c.seen OR EXISTS (SELECT 1 FROM extra))
+    SELECT c.slug FROM cur c JOIN _prc_wpair p ON p.slug = c.slug JOIN tx ON tx.n = p.n
+     WHERE c.seen
+    UNION
+    SELECT rd.slug FROM redo rd
+     WHERE EXISTS (SELECT 1 FROM tx WHERE position(tx.n IN rd.n) > 0 AND (rd.fresh OR tx.n IN (SELECT n FROM extra)));
     INSERT INTO public.private_report_claims_archive (batch, tbl, action, ref, row_data)
     SELECT v_batch, 'public.wiki_pages', 'w', w.slug, to_jsonb(w)
-      FROM public.wiki_pages w WHERE w.page_class IS DISTINCT FROM 'note' AND public.private_report_claims_page_shows(coalesce(w.slug, '') || ' ' || coalesce(w.title, ''), w.body);
+      FROM public.wiki_pages w WHERE w.page_class IS DISTINCT FROM 'note' AND w.slug IN (SELECT h.slug FROM _prc_whit h);
     -- (fix item round 2, A1: a person's note is never withheld for another user's claim - see the wiki guard)
     GET DIAGNOSTICS n_pages = ROW_COUNT;
     DELETE FROM public.wiki_pages w USING public.private_report_claims_archive a
@@ -1144,7 +1268,30 @@ BEGIN
     -- fail closed: nothing of what moved is left on a shared surface
     IF EXISTS (SELECT 1 FROM public.claims c WHERE c.id IN (SELECT id FROM _prc))
        OR EXISTS (SELECT 1 FROM public.claim_sources cs WHERE cs.claim_id IN (SELECT id FROM _prc) OR cs.parent_claim_id IN (SELECT id FROM _prc))
-       OR EXISTS (SELECT 1 FROM public.wiki_pages w WHERE w.page_class IS DISTINCT FROM 'note' AND public.private_report_claims_page_shows(coalesce(w.slug, '') || ' ' || coalesce(w.title, ''), w.body)) THEN
+       OR EXISTS (WITH tx AS MATERIALIZED (
+                       SELECT DISTINCT x.n FROM (
+                           SELECT pg_temp.prc570_n(c.text) AS n FROM public.inlet_private_claims c
+                            WHERE EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)
+                           UNION ALL
+                           SELECT pg_temp.prc570_n(a.row_data ->> 'text') FROM public.private_report_claims_archive a
+                            WHERE a.action = 'x' AND a.restored_at IS NULL) x
+                        WHERE length(x.n) >= 24),
+                   extra AS MATERIALIZED (SELECT tx.n FROM tx WHERE tx.n NOT IN (SELECT n FROM _prc_wcand)),
+                   cur AS MATERIALIZED (
+                       SELECT w.slug, s.slug IS NOT NULL AS seen
+                         FROM public.wiki_pages w
+                         LEFT JOIN _prc_wseen s ON s.slug = w.slug AND s.row_ctid = w.ctid AND s.row_xmin = w.xmin::text
+                        WHERE w.page_class IS DISTINCT FROM 'note'),
+                   redo AS MATERIALIZED (
+                       SELECT c.slug, NOT c.seen AS fresh,
+                              pg_temp.prc570_n(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '')) AS n
+                         FROM cur c JOIN public.wiki_pages w ON w.slug = c.slug
+                        WHERE NOT c.seen OR EXISTS (SELECT 1 FROM extra))
+              SELECT c.slug FROM cur c JOIN _prc_wpair p ON p.slug = c.slug JOIN tx ON tx.n = p.n
+               WHERE c.seen
+              UNION
+              SELECT rd.slug FROM redo rd
+               WHERE EXISTS (SELECT 1 FROM tx WHERE position(tx.n IN rd.n) > 0 AND (rd.fresh OR tx.n IN (SELECT n FROM extra)))) THEN
         RAISE EXCEPTION 'private report claims: refused, nothing changed - a moved claim is still on a shared surface after the move' USING ERRCODE = '55000';
     END IF;
 
@@ -1461,5 +1608,7 @@ COMMENT ON FUNCTION public.private_report_claim_file(TEXT, UUID, TEXT, UUID, TEX
 COMMENT ON FUNCTION public.private_report_claims_of_idea(UUID, TEXT) IS
   'rw-private-report-claims (slot 570): the subject''s claims drawn from their idea''s private reports; nothing for any other subject. Granted to service_role; callable by the ob_app_memory login or a superuser session only, never through PostgREST.';
 
+-- (rw-570-perf: the memo's lookup goes with the session's temp schema; drop it now, the memo itself goes at COMMIT)
+DROP FUNCTION pg_temp.prc570_n(TEXT);
 NOTIFY pgrst, 'reload schema';
 COMMIT;

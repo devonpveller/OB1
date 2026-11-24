@@ -102,10 +102,14 @@ jobs AS (
      WHERE jsonb_typeof(j.result) = 'object'
        AND (p.owner IS NULL OR (SELECT o.owner_sub FROM public.research_job_report_owner(j.id) o LIMIT 1) IS DISTINCT FROM p.owner)),
 page_texts AS (SELECT n FROM texts UNION SELECT pg_temp.prc_norm(w.text) FROM pg_temp.prc_withheld() w WHERE length(pg_temp.prc_norm(w.text)) >= 24),
+-- rw-570-perf: each row's skeleton is computed ONCE (a MATERIALIZED step), then compared with every text; the counts
+-- are the same as when the skeleton was recomputed for every (row, text) pair (hours on the live-size rehearsal)
+pages_n AS MATERIALIZED (
+    SELECT w.slug, pg_temp.prc_norm(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, '')) AS n
+      FROM public.wiki_pages w
+     WHERE w.page_class IS DISTINCT FROM 'note'),  -- A1: a person's note is judged by its author only (the guard)
 pages AS (
-    SELECT DISTINCT w.slug FROM public.wiki_pages w, page_texts t
-     WHERE w.page_class IS DISTINCT FROM 'note'   -- A1: a person's note is judged by its author only (the guard)
-       AND position(t.n IN pg_temp.prc_norm(coalesce(w.slug, '') || ' ' || coalesce(w.title, '') || ' ' || coalesce(w.body, ''))) > 0),
+    SELECT DISTINCT w.slug FROM pages_n w, page_texts t WHERE position(t.n IN w.n) > 0),
 -- the gap work of a tree that is not the claim owner's: a branch's question, a gap / inter-hub steer, a gap / inter-hub
 -- / branch / topic event, the root's tree report
 gap_rows AS (
@@ -125,36 +129,44 @@ gap_rows AS (
        AND (t.owner IS NULL OR (SELECT o.owner_sub FROM public.research_job_report_owner(e.root_job_id) o LIMIT 1) IS DISTINCT FROM t.owner)),
 -- P2: a SHARED synthesis, or a SHARED job report (no private report owns the job's tree), carrying one's sentence
 p2_texts AS (SELECT n FROM page_texts),
+p2_syn_n AS MATERIALIZED (
+    SELECT s.id, pg_temp.prc_norm(coalesce(s.title, '') || ' ' || coalesce(s.content, '')) AS n
+      FROM public.sources s WHERE s.content_type = 'research_synthesis'),
 p2_syn AS (
-    SELECT DISTINCT s.id FROM public.sources s, p2_texts t
-     WHERE s.content_type = 'research_synthesis'
-       AND position(t.n IN pg_temp.prc_norm(coalesce(s.title, '') || ' ' || coalesce(s.content, ''))) > 0),
-p2_jobs AS (
-    SELECT DISTINCT j.id FROM public.research_jobs j, p2_texts t
+    SELECT DISTINCT s.id FROM p2_syn_n s, p2_texts t WHERE position(t.n IN s.n) > 0),
+p2_jobs_n AS MATERIALIZED (
+    SELECT j.id, pg_temp.prc_norm((SELECT string_agg(v #>> '{}', ' ') FROM jsonb_path_query(j.result - 'reuse_claims' - 'claims', 'strict $.**') v
+                                    WHERE jsonb_typeof(v) = 'string')) AS n
+      FROM public.research_jobs j
      WHERE jsonb_typeof(j.result) = 'object'
-       AND NOT EXISTS (SELECT 1 FROM public.research_job_report_owner(j.id))
-       AND position(t.n IN pg_temp.prc_norm((SELECT string_agg(v #>> '{}', ' ') FROM jsonb_path_query(j.result - 'reuse_claims' - 'claims', 'strict $.**') v
-                                              WHERE jsonb_typeof(v) = 'string'))) > 0),
+       AND NOT EXISTS (SELECT 1 FROM public.research_job_report_owner(j.id))),
+p2_jobs AS (
+    SELECT DISTINCT j.id FROM p2_jobs_n j, p2_texts t WHERE position(t.n IN j.n) > 0),
 -- fix item round 2 (tester attempt 1): a THREAD whose name / description carries one's sentence (the curator mints and
 -- refreshes descriptions from reports; threads are shared), and a SHARED claim that is not a private report's own but
 -- carries one's sentence (a synthesis filed it into another thread)
+p2_threads_n AS MATERIALIZED (
+    SELECT th.id, pg_temp.prc_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, '') || ' ' || coalesce(th.slug, '')) AS n
+      FROM public.threads th),
 p2_threads AS (
-    SELECT DISTINCT th.id FROM public.threads th, p2_texts t
-     WHERE position(t.n IN pg_temp.prc_norm(coalesce(th.name, '') || ' ' || coalesce(th.description, '') || ' ' || coalesce(th.slug, ''))) > 0),
+    SELECT DISTINCT th.id FROM p2_threads_n th, p2_texts t WHERE position(t.n IN th.n) > 0),
 -- round 3: a shared source's notebook label (a thread's name; the notebook backfill mints threads from labels), and the
 -- thread names a curator answer keeps in a job's result
+p2_notebooks_n AS MATERIALIZED (
+    SELECT s.id, pg_temp.prc_norm(s.notebook) AS n FROM public.sources s WHERE coalesce(s.notebook, '') <> ''),
 p2_notebooks AS (
-    SELECT DISTINCT s.id FROM public.sources s, p2_texts t
-     WHERE coalesce(s.notebook, '') <> '' AND position(t.n IN pg_temp.prc_norm(s.notebook)) > 0),
-p2_curator AS (
-    SELECT DISTINCT j.id FROM public.research_jobs j, p2_texts t
-     WHERE jsonb_typeof(j.result -> 'curator') = 'object'
-       AND position(t.n IN pg_temp.prc_norm(coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((
+    SELECT DISTINCT s.id FROM p2_notebooks_n s, p2_texts t WHERE position(t.n IN s.n) > 0),
+p2_curator_n AS MATERIALIZED (
+    SELECT j.id, pg_temp.prc_norm(coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((
                SELECT string_agg(x ->> 'name', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'shortlist') = 'array'
-                                                                                  THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), ''))) > 0),
+                                                                                  THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), '')) AS n
+      FROM public.research_jobs j WHERE jsonb_typeof(j.result -> 'curator') = 'object'),
+p2_curator AS (
+    SELECT DISTINCT j.id FROM p2_curator_n j, p2_texts t WHERE position(t.n IN j.n) > 0),
+p2_claims_n AS MATERIALIZED (
+    SELECT c.id, pg_temp.prc_norm(c.text) AS n FROM public.claims c WHERE c.id NOT IN (SELECT id FROM linked)),
 p2_claims AS (
-    SELECT DISTINCT c.id FROM public.claims c, p2_texts t
-     WHERE c.id NOT IN (SELECT id FROM linked) AND position(t.n IN pg_temp.prc_norm(c.text)) > 0),
+    SELECT DISTINCT c.id FROM p2_claims_n c, p2_texts t WHERE position(t.n IN c.n) > 0),
 corr AS (
     SELECT sc.id FROM public.source_corroborations sc
      WHERE sc.claim_text NOT LIKE 'private-text:%'
