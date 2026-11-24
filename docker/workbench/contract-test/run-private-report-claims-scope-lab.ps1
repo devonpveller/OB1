@@ -35,6 +35,8 @@ param(
   [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
   # the base whose 570 / check / count scripts are the RED (OB1 912b3f1: slot 570 as merged)
   [string]$OldRef = '912b3f18',
+  # the 570 the tree carries (development's, rw-570-perf: the one applied live); 575 must leave its files unchanged
+  [string]$Base570Ref = '1ee773f6',
   # R5 (the structured-note refusal, an HTTP door): the workbench images, built beforehand with plain docker build under
   # this run's tags - the fix (-WorkbenchTag) and the tip before it (-BaseWorkbenchTag, the RED). Without them [5w] is
   # skipped and the lab says so (a FAIL unless -NoWorkbench).
@@ -267,8 +269,8 @@ try {
   $h0 = Q $hashQ; Save 'hash-planted.txt' $h0
   # ---------------------------------------------------------------- [4] RED: 570 alone
   Write-Host "[4] RED: slot 570 alone (= $OldRef's)"
-  $null = (& git -C $ob1 diff --quiet $OldRef -- docker/init-private-report-claims.sql docker/revert-private-report-claims.sql); $sameRc = $LASTEXITCODE
-  Check ($sameRc -eq 0) "the tree's slot 570 files are $OldRef's, unchanged (575 is a separate slot)"
+  $null = (& git -C $ob1 diff --quiet $Base570Ref -- docker/init-private-report-claims.sql docker/revert-private-report-claims.sql); $sameRc = $LASTEXITCODE
+  Check ($sameRc -eq 0) "the tree's slot 570 files are $Base570Ref's (development, live), unchanged (575 is a separate slot)"
   New-Item -ItemType Directory -Force $oldDir | Out-Null
   # (the scripts carry non-ASCII letters in their normaliser: read git's output as UTF-8, not the console code page)
   $enc0 = [Console]::OutputEncoding

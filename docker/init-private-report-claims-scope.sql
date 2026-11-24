@@ -433,25 +433,25 @@ BEGIN
             RAISE EXCEPTION 'private report claims scope: refused, nothing changed - public.claims has a column the owner store lacks (re-run slot 570 first)' USING ERRCODE = '55000';
         END IF;
         v_surface := CASE
-            WHEN EXISTS (WITH r AS MATERIALIZED (SELECT pg_temp.sc_n(coalesce(s.title, '') || ' ' || coalesce(s.content, '')) AS n
+            WHEN EXISTS (WITH rw AS MATERIALIZED (SELECT pg_temp.sc_n(coalesce(s.title, '') || ' ' || coalesce(s.content, '')) AS n
                                                    FROM public.sources s WHERE s.content_type = 'research_synthesis')
-                         SELECT 1 FROM r, _sc_fn t WHERE position(t.n IN r.n) > 0)
+                         SELECT 1 FROM rw, _sc_fn t WHERE position(t.n IN rw.n) > 0)
                 THEN 'a shared synthesis'
-            WHEN EXISTS (WITH r AS MATERIALIZED (SELECT pg_temp.sc_n((SELECT string_agg(v #>> '{}', ' ') FROM jsonb_path_query(j.result - 'reuse_claims' - 'claims', 'strict $.**') v WHERE jsonb_typeof(v) = 'string')) AS n
+            WHEN EXISTS (WITH rw AS MATERIALIZED (SELECT pg_temp.sc_n((SELECT string_agg(v #>> '{}', ' ') FROM jsonb_path_query(j.result - 'reuse_claims' - 'claims', 'strict $.**') v WHERE jsonb_typeof(v) = 'string')) AS n
                                                    FROM public.research_jobs j
                                                   WHERE jsonb_typeof(j.result) = 'object' AND NOT EXISTS (SELECT 1 FROM public.research_job_report_owner(j.id)))
-                         SELECT 1 FROM r, _sc_fn t WHERE position(t.n IN r.n) > 0)
+                         SELECT 1 FROM rw, _sc_fn t WHERE position(t.n IN rw.n) > 0)
                 THEN 'a shared job report'
-            WHEN EXISTS (WITH r AS MATERIALIZED (SELECT pg_temp.sc_n(coalesce(th.name, '') || ' ' || coalesce(th.description, '') || ' ' || coalesce(th.slug, '')) AS n
+            WHEN EXISTS (WITH rw AS MATERIALIZED (SELECT pg_temp.sc_n(coalesce(th.name, '') || ' ' || coalesce(th.description, '') || ' ' || coalesce(th.slug, '')) AS n
                                                    FROM public.threads th)
-                         SELECT 1 FROM r, _sc_fn t WHERE position(t.n IN r.n) > 0)
+                         SELECT 1 FROM rw, _sc_fn t WHERE position(t.n IN rw.n) > 0)
                 THEN 'a thread'
-            WHEN EXISTS (WITH r AS MATERIALIZED (SELECT pg_temp.sc_n(s.notebook) AS n FROM public.sources s WHERE coalesce(s.notebook, '') <> '')
-                         SELECT 1 FROM r, _sc_fn t WHERE position(t.n IN r.n) > 0)
+            WHEN EXISTS (WITH rw AS MATERIALIZED (SELECT pg_temp.sc_n(s.notebook) AS n FROM public.sources s WHERE coalesce(s.notebook, '') <> '')
+                         SELECT 1 FROM rw, _sc_fn t WHERE position(t.n IN rw.n) > 0)
                 THEN 'a notebook label'
-            WHEN EXISTS (WITH r AS MATERIALIZED (SELECT pg_temp.sc_n(coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((SELECT string_agg(x ->> 'name', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'shortlist') = 'array' THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), '')) AS n
+            WHEN EXISTS (WITH rw AS MATERIALIZED (SELECT pg_temp.sc_n(coalesce(j.result -> 'curator' ->> 'thread_name', '') || ' ' || coalesce((SELECT string_agg(x ->> 'name', ' ') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(j.result -> 'curator' -> 'shortlist') = 'array' THEN j.result -> 'curator' -> 'shortlist' ELSE '[]'::jsonb END) x), '')) AS n
                                                    FROM public.research_jobs j WHERE jsonb_typeof(j.result -> 'curator') = 'object')
-                         SELECT 1 FROM r, _sc_fn t WHERE position(t.n IN r.n) > 0)
+                         SELECT 1 FROM rw, _sc_fn t WHERE position(t.n IN rw.n) > 0)
                 THEN 'a curator answer'
             WHEN EXISTS (SELECT 1 FROM public.research_jobs j JOIN _sc_fn t
                             ON (j.branch_kind IN ('gap', 'interhub') AND position(t.text IN coalesce(j.query, '')) > 0)
