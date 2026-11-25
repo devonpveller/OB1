@@ -7,7 +7,7 @@ import { safeFolderRel, safeJoin, safeRelPath } from "../util/paths.ts";
 // @ts-ignore — plain .mjs from the /recipes bind-mount.
 import { slugifyNotebook } from "@shared/slug";
 import { parseNoteRow } from "../util/notes-parse.ts";
-import { assertNoteNamesFit, structuredNoteFileSlug, structuredNoteViews, writeGuardedStructuredNote } from "../util/structured-note-check.ts";
+import { assertNoteNamesFit, assertRawNoteNamesFit, structuredNoteFileSlug, structuredNoteViews, withPathLock, writeGuardedStructuredNote } from "../util/structured-note-check.ts";
 export { parseNoteRow };
 import { pool } from "../db/pool.ts";
 import { poolDb } from "../contracts/db.ts";
@@ -180,6 +180,8 @@ export async function writeStructuredNote(input: {
   // round 2 (operator 2026-11-24): the writer (the request's verified identity) - the row's author for the wiki guard
   authorSub?: string | null;
 }): Promise<{ path: string; hash: string }> {
+  // attempt 1 (tester): a 200,000-letter name took 85-118 s to refuse; the raw length is capped before any slug work
+  assertRawNoteNamesFit(input.notebook, input.title);
   const nbSlug = slugifyNotebook(input.notebook);
   // rw-570-hub-note-scope attempt 2 (tester defect): a structured note is NEVER stored at a shared regenerable path.
   // content/notebooks/<nb>/<nb> is the notebook's HUB (the notebook synthesis owns it; the wiki guard judges it as shared
@@ -222,21 +224,33 @@ export async function writeStructuredNote(input: {
   // rw-note-write-guard (1)+(2): the views now include agent beside the content; the check is made again at the row
   // write (never the test seam) and a refusal there - or the guard's own 42501 - removes the vault file (the path's
   // previous content is put back when it had one) and fails the request 422 / 503: no row, no commit.
-  const views = structuredNoteViews({ slug: row.slug, title: row.title, body: row.body }, body, input.agent);
-  const had = await vaultExists(rel);
-  const before = had ? await vaultRead(rel) : null;
-  await writeGuardedStructuredNote({
-    views,
-    ask: askNoteRefusedPre(input.authorSub ?? ""),
-    askAtWrite: askNoteRefused(input.authorSub ?? ""),
-    writeFile: async () => { await vaultWrite(rel, body); },
-    writeRow: () => syncNoteRow(rel, body, input.authorSub, true),
-    undoFile: async () => {
-      if (before !== null) await vaultWrite(rel, before);
-      else await vaultDelete(rel);
-    },
+  const views = structuredNoteViews({ slug: row.slug, title: row.title, body: row.body }, body, {
+    title: input.title,
+    agent: input.agent,
+    chat: input.chat,
+    notebook: input.notebook,
+    content: input.content,
   });
-  await vaultCommit(`ai-note: write ${rel}`);
+  // attempt 1 (tester, race R2): one writer at a time per path - read-previous, write, re-check, row, undo and commit are
+  // one critical section, so a refused write's undo can never take another request's saved file out; and the undo is
+  // compare-and-restore (it touches the path only while it still holds THIS request's bytes).
+  await withPathLock(rel, async () => {
+    const had = await vaultExists(rel);
+    const before = had ? await vaultRead(rel) : null;
+    await writeGuardedStructuredNote({
+      views,
+      ask: askNoteRefusedPre(input.authorSub ?? ""),
+      askAtWrite: askNoteRefused(input.authorSub ?? ""),
+      writeFile: async () => { await vaultWrite(rel, body); },
+      writeRow: () => syncNoteRow(rel, body, input.authorSub, true),
+      undoFile: async () => {
+        if (!(await vaultExists(rel)) || (await vaultRead(rel)) !== body) return; // not ours any more: leave it
+        if (before !== null) await vaultWrite(rel, before);
+        else await vaultDelete(rel);
+      },
+    });
+    await vaultCommit(`ai-note: write ${rel}`);
+  });
   return { path: rel, hash: await sha256(body) };
 }
 

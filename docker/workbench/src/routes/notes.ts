@@ -28,6 +28,14 @@ notes.post("/", async (c) => {
   if (!body?.notebook || !body?.title || body?.content == null) {
     return c.json({ error: "notebook, title, content are required" }, 400);
   }
+  // attempt 1 (tester): every field the shared vault file carries is a STRING; an array, number or object used to reach
+  // the check and answer 500 (or be written as text). Optional fields may be absent or null.
+  for (const k of ["notebook", "title", "content"] as const) {
+    if (typeof body[k] !== "string") return c.json({ error: `${k} must be a string` }, 400);
+  }
+  for (const k of ["agent", "chat", "source"] as const) {
+    if (body[k] != null && typeof body[k] !== "string") return c.json({ error: `${k} must be a string` }, 400);
+  }
   try {
     // round 2: the writer is the request's verified identity (never a body field) - the row's author
     const res = await repo.writeStructuredNote({ ...body, authorSub: (await identityOf(c)).sub });

@@ -4,6 +4,9 @@
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert@1";
 import {
   assertNoteNamesFit,
+  assertRawNoteNamesFit,
+  MAX_RAW_NAME_LEN,
+  withPathLock,
   assertStructuredNoteShareable,
   MAX_SLUG_LEN,
   NOTE_NAME_TOO_LONG,
@@ -48,7 +51,10 @@ Deno.test("R5: writeStructuredNote checks BEFORE the vault write and the row syn
   const fnBody = w.slice(0, w.indexOf("\n}\n"));
   const check = fnBody.indexOf("ask: askNoteRefusedPre(input.authorSub ?? \"\"),");
   assert(check > 0, "the pre-check reads the views (row, whole file, agent)");
-  assert(fnBody.includes("structuredNoteViews({ slug: row.slug, title: row.title, body: row.body }, body, input.agent)"), "the agent line is judged with the content");
+  assert(/structuredNoteViews\(\{ slug: row\.slug, title: row\.title, body: row\.body \}, body, \{\s*title: input\.title,\s*agent: input\.agent,\s*chat: input\.chat,\s*notebook: input\.notebook,\s*content: input\.content,\s*\}\)/.test(fnBody), "every field the file carries is judged with the content");
+  assert(fnBody.includes("await withPathLock(rel, async () => {") && fnBody.indexOf("withPathLock(") < fnBody.indexOf("await vaultExists(rel)") && fnBody.indexOf("await vaultCommit(") > fnBody.indexOf("withPathLock("), "one writer per path: read-previous .. commit inside the lock");
+  assert(fnBody.includes("(await vaultRead(rel)) !== body) return;"), "the undo restores only while the path still holds this request's bytes");
+  assert(fnBody.includes("assertRawNoteNamesFit(input.notebook, input.title);") && fnBody.indexOf("assertRawNoteNamesFit(") < fnBody.indexOf("slugifyNotebook(input.notebook)"), "the raw-length cap runs before any slug work");
   assert(fnBody.includes("askAtWrite: askNoteRefused(input.authorSub ?? \"\"),"), "the check is made again at the row write, never the seam");
   assert(fnBody.includes("writeRow: () => syncNoteRow(rel, body, input.authorSub, true),"), "the row write is strict: a refusal is thrown, not swallowed");
   assert(fnBody.includes("else await vaultDelete(rel);"), "a refusal at the row write takes the vault file back out");
@@ -60,6 +66,7 @@ Deno.test("R5: writeStructuredNote checks BEFORE the vault write and the row syn
   assert(!fnBody.replace("writeFile: async () => { await vaultWrite(rel, body); },", "").includes("vaultWrite(rel, body)") && !/\bawait syncNoteRow\(/.test(fnBody), "no unguarded vault write or row write");
   assert(fnBody.indexOf("await vaultCommit(") > check, "the commit comes after the guarded write");
   assert(repo.includes("SELECT public.private_report_claims_note_refused($1, $2, $3, $4) AS refused") && repo.includes("[authorSub, slug, title, body]"), "the database's answer for THIS writer (slot 575)");
+  assert(route.includes("body[k] != null && typeof body[k] !== \"string\"") && route.includes("typeof body[k] !== \"string\") return c.json({ error: `${k} must be a string` }, 400)") && route.indexOf("must be a string") < route.indexOf("repo.writeStructuredNote("), "a non-string field is a 400 before anything runs");
   assert(route.includes("repo.writeStructuredNote({ ...body, authorSub: (await identityOf(c)).sub })"), "the writer is the verified identity, not a body field");
   assert(route.includes("if (e instanceof repo.StructuredNoteRefused) return c.json({ error: e.message }, e.status);"), "the route answers the refusal's status");
 });
@@ -122,6 +129,7 @@ Deno.test("write-guard split: A's own sentence split across agent and content is
   await assertRejects(() => assertStructuredNoteShareable(t2Views, ownOf([A_OWN])), StructuredNoteRefused);
   // no agent: the views are exactly the two as before
   assertEquals(structuredNoteViews(r, file, "  ").length, 2);
+  assertEquals(structuredNoteViews(r, file).length, 2);
 });
 
 function throwsSync(f: () => void): unknown {
@@ -192,4 +200,77 @@ Deno.test("write-guard: a refusal at the row write puts back what the path held;
   const p = harness({ pre: true, atWrite: true });
   await assertRejects(() => p.run(), StructuredNoteRefused);
   assertEquals(p.st.calls, [], "no file, no row, no undo");
+});
+
+// ── rw-note-write-guard, after tester attempt 1 ──
+// the guard's judging of fields: the file renders title, agent, chat, notebook, content on separate lines; the stand-in
+// (skel) is a letters-only skeleton like the database's normaliser, so a tab is a separator there
+const OWN = "The prcbx alpha result reproduced in twelve trials across two labs.";
+const rowOf = (title: string, body: string) => ({ slug: "content/notebooks/nb/r", title, body: body + "\n" });
+const refused = async (fields: Record<string, string>, own = [OWN]) => {
+  const title = fields.title ?? "r";
+  const content = fields.content ?? "clean";
+  const file = [`title: ${JSON.stringify(title)}`, ...(fields.agent ? [`agent: ${JSON.stringify(fields.agent)}`] : []),
+    ...(fields.chat ? [`chat: ${JSON.stringify(fields.chat)}`] : []), `notebook: ${JSON.stringify(fields.notebook ?? "nb")}`, "", content].join("\n");
+  const views = structuredNoteViews(rowOf(title, content), file, { title, agent: fields.agent, chat: fields.chat, notebook: fields.notebook ?? "nb", content });
+  try {
+    await assertStructuredNoteShareable(views, ownOf(own));
+    return false;
+  } catch (e) {
+    if (e instanceof StructuredNoteRefused && e.status === 422) return true;
+    throw e;
+  }
+};
+
+Deno.test("attempt 1 defect 3: the writer's own sentence split across ANY of the file's fields is refused; another user's saves", async () => {
+  const w = "The prcbx alpha result";
+  const rest = "reproduced in twelve trials across two labs.";
+  assert(await refused({ chat: w, content: rest }), "chat + content");
+  assert(await refused({ agent: "The prcbx", chat: `alpha result ${rest}` }), "agent + chat");
+  assert(await refused({ notebook: w, content: rest }), "notebook + content");
+  assert(await refused({ title: w, agent: "reproduced in twelve", content: "trials across two labs." }), "title + agent + content");
+  assert(await refused({ agent: "The prcbx alpha", chat: "result reproduced in", notebook: "twelve trials across", content: "two labs." }), "a run over four fields");
+  // another user's sentence (the writer's own list does not hold it): the same splits save
+  for (const f of [{ chat: w, content: rest }, { agent: "The prcbx", chat: `alpha result ${rest}` }, { notebook: w, content: rest }]) {
+    assertEquals(await refused(f, ["A completely different quillan sentence of the writer."]), false);
+  }
+});
+
+Deno.test("attempt 1 defect 3: a tab inside chat or title does not hide the sentence (the DECODED values are judged, not JSON.stringify's backslash-t)", async () => {
+  const tabbed = OWN.replace(/ /g, "\t");
+  // the file view alone: JSON.stringify writes backslash-t, and the letter t joins the words
+  const file = `title: "r"\nchat: ${JSON.stringify(tabbed)}\nnotebook: "nb"\n\nclean`;
+  assertEquals(await ownOf([OWN])("content/notebooks/nb/r", "r", file), false, "RED: the file view misses it");
+  assert(await refused({ chat: tabbed }), "whole sentence in chat with tabs");
+  assert(await refused({ title: "The\tprcbx\talpha result", content: "reproduced in twelve trials across two labs." }), "title split with tabs");
+});
+
+Deno.test("attempt 1 defect 3: the runs are bounded (no explosion) and a non-string field is ignored, never thrown", () => {
+  const v = structuredNoteViews(rowOf("t", "c"), "f", { title: "t", agent: "a", chat: "c", notebook: "n", content: "k" });
+  assert(v.length <= 2 + 31 + 8, `views ${v.length}`);
+  const odd = structuredNoteViews(rowOf("t", "c"), "f", { title: "t", agent: ["x"], chat: 5, notebook: { a: 1 }, content: "k" });
+  assert(odd.length >= 2);
+});
+
+Deno.test("attempt 1 defect 2: writes to one path run one at a time; different paths do not wait for each other", async () => {
+  const order: string[] = [];
+  const gate = Promise.withResolvers<void>();
+  const a = withPathLock("p", async () => { order.push("a1"); await gate.promise; order.push("a2"); });
+  const b = withPathLock("p", () => { order.push("b"); return Promise.resolve(); });
+  const c = withPathLock("q", () => { order.push("c"); return Promise.resolve(); });
+  await c;
+  assertEquals(order, ["a1", "c"], "b waits for a; q does not");
+  gate.resolve();
+  await Promise.all([a, b]);
+  assertEquals(order, ["a1", "c", "a2", "b"]);
+  // a throwing holder releases the path
+  await assertRejects(() => withPathLock("p", () => Promise.reject(new Error("x"))));
+  await withPathLock("p", () => Promise.resolve());
+});
+
+Deno.test("attempt 1: the raw name cap refuses an absurd name at once, the same for every caller; a 300-letter name is left to the slug cap", () => {
+  const e = throwsSync(() => assertRawNoteNamesFit("x".repeat(200000), "t"));
+  assert(e instanceof StructuredNoteRefused && e.status === 422 && e.message === NOTE_NAME_TOO_LONG);
+  assert(throwsSync(() => assertRawNoteNamesFit("n", "t".repeat(MAX_RAW_NAME_LEN + 1))) instanceof StructuredNoteRefused);
+  assertEquals(throwsSync(() => assertRawNoteNamesFit("x".repeat(300), "t")), undefined);
 });

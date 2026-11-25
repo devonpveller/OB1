@@ -42,6 +42,9 @@ param(
   # skipped and the lab says so (a FAIL unless -NoWorkbench).
   [string]$WorkbenchTag = '',
   [string]$BaseWorkbenchTag = '',
+  # rw-note-write-guard attempt 2: the tip BEFORE the attempt-1 fixes (OB1 5bc136d), run with the same cases as the fix to show
+  # the tester's defects RED (non-string field 500, the split / tab rule gaps, the same-path race). Optional.
+  [string]$PrevWorkbenchTag = '',
   [switch]$NoWorkbench,
   # R6 equivalence: a directory with an EARLIER 575's init + revert (3a01e11's: git show 3a01e112:docker/<file>). Before the
   # tree's 575 runs in [5], the earlier one runs on the same post-570 state, is fingerprinted and reverted; the tree's
@@ -392,7 +395,9 @@ try {
     $t_b1 = Q "SELECT v FROM public.lab_prc_scope WHERE k = 't_b1'"
     $r5 = @{}
     # rw-note-write-guard: a third run, 'race', is the fix image with the pre-check forced to answer false (the test seam)
-    foreach ($phase in @(@('red', $BaseWorkbenchTag, ''), @('green', $WorkbenchTag, ''), @('race', $WorkbenchTag, '1'))) {
+    $phases = @(@('red', $BaseWorkbenchTag, ''), @('green', $WorkbenchTag, ''), @('race', $WorkbenchTag, '1'))
+    if ($PrevWorkbenchTag) { $phases += , @('prev', $PrevWorkbenchTag, '1') }
+    foreach ($phase in $phases) {
       $ph = $phase[0]; $tag = $phase[1]; $force = $phase[2]
       $null = Dk image inspect $tag
       Check ($script:rc -eq 0) "${ph}: the image $tag is present"
@@ -438,34 +443,75 @@ try {
         # (3): a 300-letter notebook name (A and B alike) and a long but normal one
         @('a_longnb', $subA, 'A clean note.', '', '', ''),
         @('b_longnb', $subB, 'A clean note.', '', '', ''),
-        @('a_longnb_ok', $subA, 'A clean note.', '', '', ''))
+        @('a_longnb_ok', $subA, 'A clean note.', '', '', ''),
+        # attempt 2 defect 3: B's own sentence split across the file's OTHER fields (chat + content, agent + chat, notebook
+        # + content) and with tabs (a whole sentence in chat, a title split) - B refused, A writing B's sentence saves.
+        # (name, writer, content, title, agent, chat, notebook-suffix, extra JSON)
+        @('b_split_chat_own', $subB, $splitRest, '', '', "The $wB alpha result"),
+        @('a_split_chat_b', $subA, $splitRest, '', '', "The $wB alpha result"),
+        @('b_split_agentchat_own', $subB, 'A clean note body.', '', "The $wB", "alpha result $splitRest"),
+        @('a_split_agentchat_b', $subA, 'A clean note body.', '', "The $wB", "alpha result $splitRest"),
+        @('b_split_nb_own', $subB, $splitRest, '', '', '', "The $wB alpha result"),
+        @('a_split_nb_b', $subA, $splitRest, '', '', '', "The $wB alpha result"),
+        @('b_tab_chat_own', $subB, 'A clean note body.', '', '', ($t_b1 -replace ' ', "`t")),
+        @('a_tab_chat_b', $subA, 'A clean note body.', '', '', ($t_b1 -replace ' ', "`t")),
+        @('b_tab_title_own', $subB, $splitRest, "The`t$wB`talpha result", '', ''),
+        @('a_tab_title_b', $subA, $splitRest, "The`t$wB`talpha result", '', ''),
+        # attempt 2 defect 1: a non-string field is a 400 (it was a 500), for A and B alike, nothing written
+        @('a_ns_agent_arr', $subA, 'A clean note.', '', '', '', '', '{"agent":["x"]}'),
+        @('b_ns_agent_arr', $subB, 'A clean note.', '', '', '', '', '{"agent":["x"]}'),
+        @('a_ns_agent_num', $subA, 'A clean note.', '', '', '', '', '{"agent":5}'),
+        @('a_ns_agent_obj', $subA, 'A clean note.', '', '', '', '', '{"agent":{"a":1}}'),
+        @('a_ns_chat_arr', $subA, 'A clean note.', '', '', '', '', '{"chat":["x"]}'),
+        @('a_ns_nb_arr', $subA, 'A clean note.', '', '', '', '', '{"notebook":["x"]}'),
+        @('a_ns_title_obj', $subA, 'A clean note.', '', '', '', '', '{"title":{"a":1}}'),
+        @('a_ns_content_num', $subA, 'A clean note.', '', '', '', '', '{"content":5}'),
+        @('a_ns_agent_null_ok', $subA, 'A clean note.', '', '', '', '', '{"agent":null}'))
       # the race run asks only the two that matter: the writer's own sentence (B) and another user's (A)
       if ($ph -eq 'race') { $cases = @($cases | Where-Object { $_[0] -in @('b_quotes_own', 'a_quotes_b') }) }
       foreach ($case in $cases) {
         $nb = "prcr5$ph$($case[0] -replace '_', '')"
         if ($case[0] -in @('a_longnb', 'b_longnb')) { $nb += ('x' * 300) } elseif ($case[0] -eq 'a_longnb_ok') { $nb += ('x' * 50) }
+        $tok = $nb
+        # (7th element) text after the unique token in the notebook name: the notebook field carries the sentence's first words
+        if ($case.Count -gt 6 -and $case[6]) { $nb = "$tok $($case[6])" }
         $title = switch ($case[3]) { '@NB' { $nb } '@NBVAR' { $nb.ToUpper() + '!' } '' { 'r5 note' } default { $case[3] } }
-        $js = "const o = { notebook: Deno.env.get('R5_NB'), title: Deno.env.get('R5_TITLE'), content: Deno.env.get('R5_CONTENT'), source: 'user_note' }; if (Deno.env.get('R5_AGENT')) o.agent = Deno.env.get('R5_AGENT'); if (Deno.env.get('R5_CHAT')) o.chat = Deno.env.get('R5_CHAT'); const r = await fetch('http://${wbName}:8000/workbench/notes', { method: 'POST', headers: { 'content-type': 'application/json', 'x-brain-key': Deno.env.get('R5_KEY'), 'X-Test-Sub': Deno.env.get('R5_SUB') }, body: JSON.stringify(o) }); const t = await r.text(); console.log('R5STATUS=' + r.status); console.log('R5BODY=' + t.slice(0, 300));"
+        $js = "const o = { notebook: Deno.env.get('R5_NB'), title: Deno.env.get('R5_TITLE'), content: Deno.env.get('R5_CONTENT'), source: 'user_note' }; if (Deno.env.get('R5_AGENT')) o.agent = Deno.env.get('R5_AGENT'); if (Deno.env.get('R5_CHAT')) o.chat = Deno.env.get('R5_CHAT'); if (Deno.env.get('R5_EXTRA')) Object.assign(o, JSON.parse(Deno.env.get('R5_EXTRA'))); const r = await fetch('http://${wbName}:8000/workbench/notes', { method: 'POST', headers: { 'content-type': 'application/json', 'x-brain-key': Deno.env.get('R5_KEY'), 'X-Test-Sub': Deno.env.get('R5_SUB') }, body: JSON.stringify(o) }); const t = await r.text(); console.log('R5STATUS=' + r.status); console.log('R5BODY=' + t.slice(0, 300));"
         $envs = @('-e', "R5_KEY=$key", '-e', "R5_SUB=$($case[1])", '-e', "R5_NB=$nb", '-e', "R5_TITLE=$title", '-e', "R5_CONTENT=$($case[2])")
         if ($case[4]) { $envs += @('-e', "R5_AGENT=$($case[4])") }
         if ($case[5]) { $envs += @('-e', "R5_CHAT=$($case[5])") }
+        if ($case.Count -gt 7 -and $case[7]) { $envs += @('-e', "R5_EXTRA=$($case[7])") }
         $out = Lab-Docker 600 (@('run', '--rm', '--label', $label, '--network', $net) + $envs + @('--entrypoint', 'deno', $tag, 'eval', $js))
         $st = ([regex]'R5STATUS=(\d+)').Match($out).Groups[1].Value
         $bd = ([regex]'R5BODY=(.*)').Match($out).Groups[1].Value
-        $files = @(Get-ChildItem -Recurse -File -Path (Join-Path $vault 'content\notebooks') -Filter '*.md' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match [regex]::Escape($nb) }).Count
-        $rows = Q "SELECT count(*) FROM public.wiki_pages WHERE slug LIKE 'content/notebooks/$nb/%'"
+        $files = @(Get-ChildItem -Recurse -File -Path (Join-Path $vault 'content\notebooks') -Filter '*.md' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match [regex]::Escape($tok) }).Count
+        $rows = Q "SELECT count(*) FROM public.wiki_pages WHERE slug LIKE 'content/notebooks/$tok/%' OR slug LIKE 'content/notebooks/$tok-%/%'"
         $r5["${ph}_$($case[0])"] = "status=$st file=$files row=$rows"
         $r5["${ph}_$($case[0])_body"] = $bd
         # the body's shape: its keys, and the stored path with this case's notebook slug masked
         $shape = (([regex]'"([a-z_]+)":').Matches($bd) | ForEach-Object { $_.Groups[1].Value }) -join ','
         $pm = ([regex]'"path":"([^"]*)"').Match($bd)
-        if ($pm.Success) { $shape += ' path=' + ($pm.Groups[1].Value -replace [regex]::Escape($nb), 'NB') }
+        if ($pm.Success) { $shape += ' path=' + ($pm.Groups[1].Value -replace [regex]::Escape($tok), 'NB') }
         $r5["${ph}_$($case[0])_shape"] = $shape
         if ($case[0] -eq 'a_quotes_b') {
           # served: an author-less re-sync of the same row (the viewer's reconcile) keeps it (UPDATE ... RETURNING)
-          $r5["${ph}_$($case[0])_served"] = Q "WITH u AS (UPDATE public.wiki_pages SET body = body WHERE slug LIKE 'content/notebooks/$nb/%' RETURNING 1) SELECT count(*) FROM u"
+          $r5["${ph}_$($case[0])_served"] = Q "WITH u AS (UPDATE public.wiki_pages SET body = body WHERE slug LIKE 'content/notebooks/$tok/%' RETURNING 1) SELECT count(*) FROM u"
         }
         Write-Host "    [$ph] $($case[0]): status=$st file=$files row=$rows $(if ($st -ne '201') { $bd })"
+      }
+      # attempt 2 defect 2 (the tester's race R2): B's OWN-sentence note and B's CLEAN note at the SAME path, at once, with the
+      # pre-check forced false (race and prev phases). The refused write's undo must not take the clean note's file out.
+      if ($ph -in @('race', 'prev')) {
+        for ($k = 1; $k -le 4; $k++) {
+          $tok = "prcr5${ph}r2k$k"
+          $js2 = "const mk = (c) => fetch('http://${wbName}:8000/workbench/notes', { method: 'POST', headers: { 'content-type': 'application/json', 'x-brain-key': Deno.env.get('R5_KEY'), 'X-Test-Sub': Deno.env.get('R5_SUB') }, body: JSON.stringify({ notebook: Deno.env.get('R5_NB'), title: 'r2 same path', content: c, source: 'user_note' }) }).then((r) => r.status); const [own, clean] = await Promise.all([mk(Deno.env.get('R5_OWN')), mk('A clean note about zebra crossings and nothing private.')]); console.log('R5R2=own:' + own + ' clean:' + clean);"
+          $out = Lab-Docker 600 @('run', '--rm', '--label', $label, '--network', $net, '-e', "R5_KEY=$key", '-e', "R5_SUB=$subB", '-e', "R5_NB=$tok", '-e', "R5_OWN=My summary. $t_b1", '--entrypoint', 'deno', $tag, 'eval', $js2)
+          $st2 = ([regex]'R5R2=(own:\d+ clean:\d+)').Match($out).Groups[1].Value
+          $files = @(Get-ChildItem -Recurse -File -Path (Join-Path $vault 'content\notebooks') -Filter '*.md' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match [regex]::Escape($tok) }).Count
+          $rows = Q "SELECT count(*) FROM public.wiki_pages WHERE slug LIKE 'content/notebooks/$tok/%'"
+          $r5["${ph}_r2_$k"] = "$st2 file=$files row=$rows"
+          Write-Host "    [$ph] r2 round ${k}: $st2 file=$files row=$rows"
+        }
       }
       Save "wb-$ph.log" ((Dk logs $wbName) | Out-String)
       $null = Dk rm -f $wbName
@@ -504,6 +550,27 @@ try {
     # the race: pre-check forced false, the claim present at the row write
     Check ($r5['race_b_quotes_own'] -match '^status=(422|503) file=0 row=0$') "R5 RACE: the writer's own sentence with the pre-check forced false ends 422/503, no vault file, no row: $($r5['race_b_quotes_own'])"
     Check ($r5['race_a_quotes_b'] -eq 'status=201 file=1 row=1') "R5 RACE: another user's sentence with the pre-check forced false still saves (201, file, row): $($r5['race_a_quotes_b'])"
+    # attempt 2 defect 3: the writer's own sentence split across the file's other fields, and tabs
+    foreach ($x in @('split_chat', 'split_agentchat', 'split_nb', 'tab_chat', 'tab_title')) {
+      $kb = "b_${x}_own"; $ka = "a_${x}_b"
+      Check ($r5["green_$kb"] -eq 'status=422 file=0 row=0' -and $r5["green_${kb}_body"] -match [regex]::Escape($msg)) "R5 GREEN ($x): B's own sentence is REFUSED (422, the one message, no file, no row): $($r5["green_$kb"])"
+      Check ($r5["green_$ka"] -eq 'status=201 file=1 row=1') "R5 GREEN ($x): A writing B's sentence the same way is SAVED: $($r5["green_$ka"])"
+      if ($PrevWorkbenchTag) { Check ($r5["prev_$kb"] -eq 'status=201 file=1 row=1') "R5 RED (the attempt-1 tip, $x): B's own sentence is SAVED into the shared file: $($r5["prev_$kb"])" }
+    }
+    # attempt 2 defect 1: a non-string field is a 400 for A and B alike, nothing written; an absent / null optional field is fine
+    foreach ($k in @('a_ns_agent_arr', 'b_ns_agent_arr', 'a_ns_agent_num', 'a_ns_agent_obj', 'a_ns_chat_arr', 'a_ns_nb_arr', 'a_ns_title_obj', 'a_ns_content_num')) {
+      Check ($r5["green_$k"] -eq 'status=400 file=0 row=0') "R5 GREEN ($k): a non-string field is a 400, nothing written: $($r5["green_$k"])"
+    }
+    Check ($r5['green_a_ns_agent_arr'] -eq $r5['green_b_ns_agent_arr'] -and $r5['green_a_ns_agent_arr_body'] -eq $r5['green_b_ns_agent_arr_body']) 'R5 GREEN: the 400 is identical for A and B'
+    Check ($r5['green_a_ns_agent_null_ok'] -eq 'status=201 file=1 row=1') "R5 GREEN: a null agent is the same as none: $($r5['green_a_ns_agent_null_ok'])"
+    if ($PrevWorkbenchTag) { foreach ($k in @('a_ns_agent_arr', 'a_ns_agent_num', 'a_ns_agent_obj')) { Check ($r5["prev_$k"] -match 'status=5') "R5 RED (the attempt-1 tip, $k): a non-string agent is a 500: $($r5["prev_$k"])" } }
+    # attempt 2 defect 2: B's own-sentence note and B's clean note at the same path at once (pre-check forced false): the clean file survives
+    $bad = @(1..4 | Where-Object { $r5["race_r2_$_"] -notmatch '^own:(422|503) clean:201 file=1 row=1$' })
+    Check ($bad.Count -eq 0) "R5 RACE R2 (the fix): in all 4 rounds the own note is refused and the clean note's file AND row survive: $((1..4 | ForEach-Object { $r5["race_r2_$_"] }) -join ' | ')"
+    if ($PrevWorkbenchTag) {
+      $lost = @(1..4 | Where-Object { $r5["prev_r2_$_"] -match 'clean:\d+ file=0' })
+      Check ($lost.Count -ge 1) "R5 RED (the attempt-1 tip, R2): at least one round lost the clean note's file to the other write's undo: $((1..4 | ForEach-Object { $r5["prev_r2_$_"] }) -join ' | ')"
+    }
     # (a refusal body only: a saved note's body echoes its own path, which the split cases build from the writer's own title)
     $leak = @($r5.Keys | Where-Object { $_ -like '*_body' } | Where-Object { $r5[$_] -match '"error"' -and $r5[$_] -match 'prcb' })
     Check ($leak.Count -eq 0) 'R5: no refusal body carries the claim''s text'

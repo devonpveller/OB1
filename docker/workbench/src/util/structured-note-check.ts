@@ -36,22 +36,54 @@ export type AskNoteRefused = (slug: string, title: string, body: string) => Prom
 // and the content is contiguous there) - AND the whole-FILE view (attempt 2, F1: the frontmatter's agent / chat /
 // notebook lines land in the shared vault file too). Refused when EITHER carries the writer's own sentence, so no row
 // the guard would refuse passes the check and the vault file is never written for one.
-export function structuredNoteViews(row: NoteRow, file: string, agent?: string): NoteRow[] {
+export type NoteFields = { title?: unknown; agent?: unknown; chat?: unknown; notebook?: unknown; content?: unknown };
+export function structuredNoteViews(row: NoteRow, file: string, fields?: string | NoteFields): NoteRow[] {
   const views = [row, { slug: row.slug, title: row.title, body: file }];
-  // rw-note-write-guard (2): the frontmatter writes `agent` beside the title, so the row view (title, then content) and
-  // the whole-file view (agent sits between other lines and the content) never see the agent line next to the content.
-  // Three more views put it there: agent then content, title then agent then content (agent + title + content as one
-  // run), and agent then title then content. A sentence split across the agent field and the content is caught as the
-  // guard would catch it if the row carried it.
-  const a = (agent ?? "").trim();
-  if (a) {
-    views.push(
-      { slug: row.slug, title: a, body: row.body },
-      { slug: row.slug, title: `${row.title} ${a}`, body: row.body },
-      { slug: row.slug, title: `${a} ${row.title}`, body: row.body },
-    );
-  }
+  if (fields === undefined) return views;
+  // rw-note-write-guard (2), widened after attempt 1: the vault file carries FIVE writer-supplied fields (title, agent, chat,
+  // notebook, content) on separate lines, with the frontmatter's own words between them, and JSON.stringify rewrites a
+  // tab (or a quote) inside a field into a backslash sequence - so neither the row view nor the whole-file view puts the
+  // fields' DECODED text next to each other. These views do: every combination of fields (each alone, every pair, every
+  // longer set, so a field the sentence skips over - the notebook line sits between chat and content - hides nothing) joined by a space, which the database's normaliser collapses, in the order the file renders
+  // them (title, agent, chat, notebook, content) and again with the agent first (the form attempt 1 shipped). A sentence
+  // of the writer's own split across ANY fields is judged as the guard would judge it if one row carried it.
+  const f: NoteFields = typeof fields === "string" ? { title: row.title, agent: fields, content: row.body } : fields;
+  if (typeof fields === "string" && !fields.trim()) return views;
+  const str = (v: unknown) => (typeof v === "string" ? v : "");
+  const seen = new Set<string>();
+  const add = (parts: string[]) => {
+    const n = parts.length;
+    for (let mask = 1; mask < 1 << n; mask++) {
+      const run = parts.filter((_, i) => mask & (1 << i)).join(" ");
+      if (seen.has(run)) continue;
+      seen.add(run);
+      views.push({ slug: row.slug, title: "", body: run });
+    }
+  };
+  const nonEmpty = (xs: unknown[]) => xs.map(str).filter((v) => v.trim() !== "");
+  add(nonEmpty([f.title, f.agent, f.chat, f.notebook, f.content]));
+  add(nonEmpty([f.agent, f.title, f.chat, f.notebook, f.content]));
   return views;
+}
+
+// rw-note-write-guard: one writer at a time per note path. The sequence read-previous / write / re-check / row / undo /
+// commit is not atomic, and without this a refused write's undo could take another request's saved file at the same
+// path out (attempt 1, race R2: the clean note answered 201 with its file gone). In-process, which is the workbench's
+// one process; keys are never user text (the repo-relative path).
+const pathTails = new Map<string, Promise<void>>();
+export async function withPathLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = pathTails.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const mine = new Promise<void>((r) => { release = r; });
+  const tail = prev.then(() => mine);
+  pathTails.set(key, tail);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (pathTails.get(key) === tail) pathTails.delete(key);
+  }
 }
 
 // rw-note-write-guard (3): a notebook (or title) slug longer than this makes a file name the OS rejects (255 bytes a
@@ -59,6 +91,13 @@ export function structuredNoteViews(row: NoteRow, file: string, agent?: string):
 // the same for every user (no existence signal). 100 leaves room for the ".md" and any `-note` suffix.
 export const MAX_SLUG_LEN = 100;
 export const NOTE_NAME_TOO_LONG = "the notebook or note name is too long; use a shorter one (at most 100 letters and digits)";
+// attempt 1 (tester): a notebook name of 200,000 characters took 85-118 s to refuse (the slug work). The RAW length is
+// capped first - far above any real name and far above the slug cap, so no name that slugs short is refused by it except
+// absurd ones - and the answer is the same 422 for every user.
+export const MAX_RAW_NAME_LEN = 1000;
+export function assertRawNoteNamesFit(notebook: string, title: string): void {
+  if (notebook.length > MAX_RAW_NAME_LEN || title.length > MAX_RAW_NAME_LEN) throw new StructuredNoteRefused(422, NOTE_NAME_TOO_LONG);
+}
 export function assertNoteNamesFit(nbSlug: string, fileSlug: string): void {
   if (nbSlug.length > MAX_SLUG_LEN || fileSlug.length > MAX_SLUG_LEN) throw new StructuredNoteRefused(422, NOTE_NAME_TOO_LONG);
 }
