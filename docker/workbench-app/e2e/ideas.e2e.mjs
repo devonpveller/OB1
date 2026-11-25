@@ -244,7 +244,7 @@ ok(await waitFor(`new RegExp(${JSON.stringify(OPAQUE)}).test(location.pathname)`
 ok(!(await ev(`new RegExp(${JSON.stringify(LEAKRE)}, 'i').test(decodeURIComponent(location.pathname + location.search + location.hash))`)), "Create a document: the address holds no owner key, title word, slug or .md");
 await go("/ideas"); await clickRow("ALPHA Plan the CPU upgrade");
 ok(await waitFor(`document.querySelector('[data-testid=act-document]')?.tagName==='A' && !!document.querySelector('[data-testid=belongs] a[href^="/documents/"]')`), "an idea with a document shows Open its document as a link, and the document under what belongs to it");
-const docLinks = JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('a[href^="/documents"]')].map(a=>a.getAttribute('href')))`));
+const docLinks = JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('main a[href^="/documents/"]')].map(a=>a.getAttribute('href')))`));
 ok(docLinks.length === 2 && docLinks.every((h) => new RegExp(OPAQUE).test(h)) && docLinks[0] === docLinks[1], `both document links are /documents/d/<id>: ${JSON.stringify(docLinks)}`);
 await click("[data-testid=act-document]");
 ok(await waitFor(`location.pathname===${JSON.stringify(docLinks[0])}`), "following Open its document lands on /documents/d/<id>");
