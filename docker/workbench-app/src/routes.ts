@@ -8,6 +8,7 @@ import type { Route } from "./lib/router";
 import { Home } from "./screens/home/Home";
 import { Documents } from "./screens/documents/Documents";
 import { DocumentScreen, LegacyDocument } from "./screens/documents/DocumentScreen";
+import { Imports } from "./screens/imports/Imports";
 import { StartResearch } from "./screens/research-start/StartResearch";
 
 export type Group = "everywhere" | "housekeeping";
@@ -33,7 +34,7 @@ export const ROUTES: RouteDef[] = [
   { path: "/ideas", label: "Ideas", group: "everywhere", phase: 4, will: "Capture an idea and refine it with its sources.", inMenu: true },
   { path: "/podcasts", label: "Podcasts", group: "everywhere", phase: 3, will: "Your episodes and the live discussions.", inMenu: true },
   { path: "/library", label: "Library", group: "everywhere", phase: 2, will: "Sources and claims: browse, check quality, add to a document.", inMenu: true },
-  { path: "/imports", label: "Imports", group: "housekeeping", phase: 5, will: "Bring links and files in, and see what happened to each.", inMenu: true },
+  { path: "/imports", label: "Imports", group: "housekeeping", phase: 5, will: "Bring links and files in, and see what happened to each.", inMenu: true, screen: Imports },
   { path: "/removals", label: "Removals and trail", group: "housekeeping", phase: 5, will: "What was removed, when, and why.", inMenu: true },
   { path: "/cleanup", label: "Cleanup", group: "housekeeping", phase: 5, will: "Sources waiting to be cleaned up.", inMenu: true },
   { path: "/settings", label: "Settings", group: "housekeeping", phase: 6, will: "Your account, privacy and preferences.", inMenu: true },

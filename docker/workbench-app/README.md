@@ -103,3 +103,17 @@ item sets one tab's `panel`). Saves are sent only for the person who opened the 
 browser. `src/lib/grammar.ts` is a byte-identical twin of `workbench/src/documents/grammar.ts`:
 `node scripts/grammar-twin.mjs` checks it, and the lab runner `run-workspace-tests.ps1` step `[5c]` does too. The CodeMirror
 `<style>` element runs under a per-response CSP nonce (`serve.mjs`). E2E: `e2e/run-editor-e2e.ps1` (subnet 10.250.103.0/24).
+
+## Imports (item `rwr-imports`)
+
+`src/screens/imports/` (`Imports.tsx`, `imports-data.ts`, `imports.css`): screen 14 on today's intake routes
+(`/workbench/intake/jobs`, `.../jobs/:kind/:id/retry|cancel`, `.../add`), plus the contract's documents and ideas reads
+for "where it lands". Listed: what / status / from / who sees it / when; "This week" counts and the four filters are
+counted from the person's own jobs read. A failed item shows the server's recorded reason; Try again is offered once
+(`attempts` starts at 1; the screen offers it while it is below 2, the server itself would allow more). Held adds are
+shown as "Only you" (a held source is private to its refinery until admitted); the older import route lands in the shared
+library. One link or file lands in a chosen document or idea (the existing add route); a file is checked up front against the intake route's own limit (25 MB, `FILE_LIMIT_BYTES`, read from the route's source by `test/imports-drift.test.ts`); the forwarder's smaller body cap (rwr-intake-upload-cap widens it) answers 413 and the screen shows its reason.
+The Connected inlets panel lists the person's own connections (kind and when) from `GET /workbench/contract/inlets/connections` (rwr-imports-server-api, slot 600) and says plainly when a read fails. A retry the server refuses (a second one, 409) shows the server's reason; the screen also never offers it.
+Tests: `test/imports.test.tsx` (vitest against `e2e/imports-fake.mjs`, a fake of the real routes that the e2e stub shares),
+`test/imports-drift.test.ts` (the fake against the server's source), `e2e/imports.e2e.mjs` run by `e2e/run-imports-e2e.ps1`
+(lab subnet 10.250.113.0/24).
