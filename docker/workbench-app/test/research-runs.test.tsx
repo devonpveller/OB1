@@ -19,6 +19,7 @@ const REPORT = "ALPHA-REPORT-TEXT";
 let RUN = ""; // alice's finished run (a steer branch, a gap pass; sources; claims)
 let LIVE = ""; // alice's running run
 let streams = 0;
+let listDelay = 0; // ms the list read waits (a real network takes time; the fake does not)
 let dropFirst = false; // the next stream is closed by the "server" right after its first card
 
 const j = (o: unknown, status = 200) => new Response(JSON.stringify(o), { status, headers: { "content-type": "application/json" } });
@@ -56,7 +57,7 @@ function streamBody(run: any, mine: boolean) {
 }
 
 function stub() {
-  seed(); streams = 0; dropFirst = false;
+  seed(); streams = 0; dropFirst = false; listDelay = 0;
   setFetcher(async (u, init) => {
     const url = new URL(u, "http://x");
     const method = (init?.method ?? "GET").toUpperCase();
@@ -66,6 +67,7 @@ function stub() {
     if (p === "/workbench/workspace/whoami") return j({ subject_sub: sub, actor_sub: sub, name: who });
     if (p === "/workbench/auth/me") return j({ mode: "forward-auth" });
     if (p === "/workbench/settings") return j({ admin: false, settings: [] });
+    if (listDelay && p === "/workbench/contract/research/runs") await new Promise((r) => setTimeout(r, listDelay));
     const a = fake.handle(method, u, body, sub);
     if (a) return a.stream ? streamBody(a.run, !!a.mine) : j(a.body, a.status);
     return j({}, 404);
@@ -247,9 +249,11 @@ describe("steer, follow-up and stop (acceptance 2)", () => {
 describe("archive is the person's own view (acceptance 3)", () => {
   it("Archive hides the run from this person's list, counts it as archived, and Undo brings it back", async () => {
     await openAt("/research?run=" + RUN);
-    await screen.findByTestId("run");
+    const open = await screen.findByTestId("run");
+    listDelay = 80;
     fireEvent.click(screen.getByTestId("act-archive"));
     await waitFor(() => expect(screen.getByTestId("count-n-archived").textContent).toBe("1"), { timeout: 3000 });
+    expect(screen.getByTestId("run")).toBe(open); // the list was read again WITHOUT dropping the open run (no flash, no lost draft)
     expect(rows().some((r) => /compare/.test(r))).toBe(false);
     expect(screen.getByTestId("count-n-done").textContent).toBe("0");
     expect(screen.getByTestId("toasts").textContent).toMatch(/Archived/);

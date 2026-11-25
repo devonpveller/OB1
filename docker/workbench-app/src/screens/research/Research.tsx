@@ -16,7 +16,7 @@ import type { ScreenProps } from "../../routes";
 import { navigate } from "../../lib/router";
 import { Link } from "../../shell/Link";
 import { useToast } from "../../shell/Toast";
-import { ago, useCard } from "../home/home-data";
+import { ago } from "../home/home-data";
 import {
   archiveRun, cancelRun, documentHref, GROUP_LABEL, groupRuns, KIND_LABEL, readRun, readRuns, reportAsDocument, steerRun, streamRun, unarchiveRun,
   type Counts, type Group, type GroupBy, type Outcome, type RunDetail, type RunNode, type RunRow,
@@ -46,8 +46,26 @@ export function Research({ subject, whoAnswered }: Pick<ScreenProps, "subject" |
 
 type Filter = Group | "archived" | null;
 
+// The list read keeps what it has while it is read again (after an archive, a steer or a stop): the open run and a draft must
+// not be dropped by a refresh of the counts.
+type ListState = { state: "loading" } | { state: "failed" } | { state: "ok"; data: { runs: RunRow[]; counts: Counts } };
+function useRuns(): [ListState, () => void] {
+  const [list, setList] = useState<ListState>({ state: "loading" });
+  const alive = useRef(true);
+  const token = useRef(0);
+  const reload = useCallback(() => {
+    const t = ++token.current;
+    readRuns().then(
+      (data) => { if (alive.current && t === token.current) setList({ state: "ok", data }); },
+      () => { if (alive.current && t === token.current) setList((s) => (s.state === "ok" ? s : { state: "failed" })); },
+    );
+  }, []);
+  useEffect(() => { alive.current = true; reload(); return () => { alive.current = false; }; }, [reload]);
+  return [list, () => { setList((s) => (s.state === "ok" ? s : { state: "loading" })); reload(); }];
+}
+
 function ResearchFor() {
-  const [list, reload] = useCard(readRuns);
+  const [list, reload] = useRuns();
   const [filter, setFilter] = useState<Filter>(null);
   const [by, setBy] = useState<GroupBy>("date");
   const selected = new URLSearchParams(window.location.search).get("run");
