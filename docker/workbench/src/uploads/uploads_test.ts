@@ -109,7 +109,8 @@ Deno.test("the owner lookup: another person's upload and a missing one are the s
     tx: (fn) => fn(db),
   };
   const intake = { target: () => Promise.resolve({ refineryId: null, docPath: null }), fileType: () => ({ type: "pdf" }), insertJob: () => Promise.reject(new Error("no")), run: () => {} };
-  const u = uploadSessions({ db, store: uploadStore(await Deno.makeTempDir()), limits: uploadLimits(() => undefined), intake });
+  const store = uploadStore(await Deno.makeTempDir());
+  const u = uploadSessions({ db, store, limits: uploadLimits(() => undefined), intake });
   const id = "5e1d0c00-0000-4000-8000-000000000001";
   const answers: string[] = [];
   for (const call of [() => u.status(B, id), () => u.piece(B, id, "0", "10", streamOf(new Uint8Array(10))), () => u.finish(B, id, {}), () => u.cancel(B, id),
@@ -128,6 +129,7 @@ Deno.test("the owner lookup: another person's upload and a missing one are the s
     assertEquals(q.args, [id, "user-b"]);
   }
   assertEquals(seen.length, 4, "a refused lookup runs no other statement (no piece is read, nothing is written)");
+  assertEquals([await store.sessions(), await store.usage()], [[], 0], "B's piece body was never read into storage");
   // the list and the count are the caller's only
   await u.list(A);
   assert(seen.slice(4).every((q) => q.args[0] === "user-a" || q.args.length === 1 && String(q.args[0]).length === 36), JSON.stringify(seen.slice(4)));
