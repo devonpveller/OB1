@@ -5,11 +5,14 @@
 import { useEffect, useRef, useState } from "react";
 import { ApiError } from "../../lib/api";
 import { readCited, type Cited } from "./editor-data";
+import { FlagForCleanup } from "../../components/flag/FlagForCleanup";
 
 export type DrawerTarget = { kind: "reference" | "source"; id: string; n: number };
 type View = { s: "loading" } | { s: "missing" } | { s: "failed" } | { s: "ready"; c: Cited };
 
-export function SourceDrawer({ target, onClose }: { target: DrawerTarget; onClose: () => void }) {
+// `docPath` (the open document's vault path) and `subject` (who is signed in) are what "Flag for cleanup" needs: the flag
+// records the document it was made from. Without them nothing is offered.
+export function SourceDrawer({ target, onClose, docPath, subject }: { target: DrawerTarget; onClose: () => void; docPath?: string; subject?: string | null }) {
   const [view, setView] = useState<View>({ s: "loading" });
   const head = useRef<HTMLHeadingElement>(null);
   const [tries, setTries] = useState(0);
@@ -52,6 +55,18 @@ export function SourceDrawer({ target, onClose }: { target: DrawerTarget; onClos
                 ))}
               </div>
             </>
+          )}
+          {docPath && subject && !view.c.held && (
+            <div className="drawer-flags" data-testid="drawer-flags">
+              {target.kind === "reference" && (
+                <FlagForCleanup item={{ kind: "reference", id: view.c.referenceId }} from={{ kind: "document", ref: docPath }}
+                  subject={subject} what="this reference" label="Flag this reference" />
+              )}
+              {view.c.sourceId && (
+                <FlagForCleanup item={{ kind: "source", id: view.c.sourceId }} from={{ kind: "document", ref: docPath }}
+                  subject={subject} what="this source" label="Flag this source" />
+              )}
+            </div>
           )}
         </div>
       )}

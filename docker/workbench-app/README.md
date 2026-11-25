@@ -103,3 +103,23 @@ item sets one tab's `panel`). Saves are sent only for the person who opened the 
 browser. `src/lib/grammar.ts` is a byte-identical twin of `workbench/src/documents/grammar.ts`:
 `node scripts/grammar-twin.mjs` checks it, and the lab runner `run-workspace-tests.ps1` step `[5c]` does too. The CodeMirror
 `<style>` element runs under a per-response CSP nonce (`serve.mjs`). E2E: `e2e/run-editor-e2e.ps1` (subnet 10.250.103.0/24).
+
+## Flag for cleanup (item `rwr-flag-buttons`)
+
+`src/components/flag/` is THE flag button: `<FlagForCleanup item from subject what/>` (`item` = `{kind: source|claim|reference, id}`,
+`from` = where it is flagged from, `{kind: document, ref: <vault path>}` or `{kind: source, ref: <source id>}`, `subject` = who is signed
+in). It opens a small dialog (one per open of the page, never modal) that says **Nothing changes until it is decided** (and that only the
+flagger and admins see the flag), offers exactly four reasons as radio buttons (Wrong claim, Low quality, Duplicate, Other: the keys of
+the `flag_reasons` registry; the mockup's Outdated and Broken link need two registry rows, a migration this item does not make) and an
+optional note (2000 characters, no control characters), then `POST /workbench/contract/flags`. A flag changes nothing about the item, so
+the done state is a line (no second flag from the same page) that links to Cleanup; the toast names no title, note or id.
+
+- Mounted today in the citation drawer of the writing surface (`SourceDrawer`: "Flag this reference" for a `[n]` citation, "Flag this
+  source" for its source; a held source is not in the shared library and offers nothing). A claim view and the Source screen (Library,
+  phase 2) mount the same component. `flag-data.ts` also holds what Cleanup > Flagged by you needs: `readMyFlags()` (the caller's own list,
+  never `scope=all`) and `flagBackLink(from)` (a document by its opaque id, a source as `/library?source=<id>`).
+- The dialog, its draft and an answer still in flight belong to one person and one item: the state epoch (a different person on the page,
+  the shell calls `resetState()`) or a different item or origin remounts it, and the request is sent only if `whoami` still names the person
+  who opened it. Every refusal is one fixed sentence (a missing item and another person's are the same); the server's text is never shown.
+- Tests: `test/flag-buttons.test.tsx` and `e2e/flags.e2e.mjs` (`e2e/run-flags-e2e.ps1`, subnet 10.250.95.0/24), both against ONE pair of
+  fakes, `e2e/flags-fake.mjs` (the flags routes and repo code) and `e2e/docs-fake.mjs`.
