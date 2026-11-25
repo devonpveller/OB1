@@ -411,7 +411,7 @@ try {
     Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) 'the fixture document listings are in place for Dredd'
     $gen = Join-Path $wb 'src\contracts\generated'
     $names = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${gen}:/spec:ro", $dreddTag, '/spec/openapi.json', "http://$P-wb:8000", '--names')
-    $prNames = @(($names -replace '\[[0-9;]*m', '' -split "`n") | Where-Object { $_ -match '^info: .*pending-refs' } | ForEach-Object { ($_ -replace '^info: ', '').Trim() })
+    $prNames = @(($names -replace '\[[0-9;]*m', '' -split "`n") | Where-Object { $_ -match 'info: .*pending-refs' } | ForEach-Object { ($_ -replace '^.*?info: ', '').Trim() })
     Save 'dredd-toplace-names.log' ((($names -replace '\[[0-9;]*m', '' -split "`n") | Where-Object { $_ -match 'pending' }) -join "`n")
     foreach ($l in $prNames | Select-Object -First 12) { Write-Host "    names: $l" }
     $onlyArgs = @(); foreach ($n in $prNames) { $onlyArgs += @('--only', $n) }
@@ -431,7 +431,8 @@ try {
     $mut = @(
       @{ id = 'M1'; file = 'src/contracts/repo/pending_refs.ts'; find = 'DELETE FROM public.document_pending_refs WHERE id = $1 AND owner_sub = $2 RETURNING id::text AS id'; repl = 'DELETE FROM public.document_pending_refs WHERE id = $1 RETURNING id::text AS id'; want = 'P4'; what = 'the delete route drops the owner filter' },
       @{ id = 'M2'; file = 'src/contracts/repo/pending_refs.ts'; find = 'WHERE path = $1 AND owner_sub = $2) AS ok'; repl = 'WHERE path = $1) AS ok'; want = 'P4'; what = 'the document check drops the owner (list and add on another user document)' },
-      @{ id = 'M3'; file = 'src/contracts/repo/pending_refs.ts'; find = 'WHERE owner_sub = $1 AND path = $2 ORDER BY created_at, id LIMIT $3'; repl = 'WHERE path = $2 AND $1 = $1 ORDER BY created_at, id LIMIT $3'; want = 'P4'; what = 'the list reads every owner row of the path' },
+      @{ id = 'M3'; file = 'src/contracts/repo/pending_refs.ts'; find = 'const UUIDISH = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;'; repl = 'const UUIDISH = /^/;'; want = 'P4'; what = 'a malformed id reaches the database (a different answer from a missing row)' },
+  const r = await db.query<{ id: string }>('; repl = 'const r = await db.query<{ id: string }>('; want = 'P4'; what = 'a malformed id reaches the database (a different answer from a missing row)' },
       @{ id = 'M4'; file = 'src/contracts/repo/pending_refs.ts'; find = 'DELETE FROM public.document_pending_refs WHERE id = $1 AND owner_sub = $2 RETURNING ${COLS}'; repl = 'SELECT ${COLS} FROM public.document_pending_refs WHERE id = $1 AND owner_sub = $2'; want = 'P2'; what = 'place no longer removes the row from the queue' },
       @{ id = 'M5'; file = 'src/contracts/repo/pending_refs.ts'; find = 'if (!row) throw new NotFound(NO_REF);'; repl = 'if (!row) throw new NotFound("no pending reference " + id);'; want = 'P4'; what = 'a refusal names the id it was given (not byte-identical to a missing one)' },
       @{ id = 'M6'; file = 'src/contracts/repo/pending_refs.ts'; find = 'if (n >= MAX_PER_DOCUMENT)'; repl = 'if (false)'; want = 'P7'; what = 'the per-document bound is gone' }
