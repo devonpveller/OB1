@@ -4,7 +4,7 @@
 // WORKSPACE_IDENTITY_HEADER=X-Test-Sub, the stub research service that stores a job in research_jobs, the stub embedder
 // that answers the same vector for every text). Never point it at a live stack.
 //
-// G1..G11 name the acceptance statements (test-plans/rwr-doc-gaps-api.md).
+// G1..G12 name the acceptance statements (test-plans/rwr-doc-gaps-api.md).
 // Environment: GAPS_TEST_BASE, GAPS_TEST_KEY, GAPS_TEST_SUB_HEADER (default X-Test-Sub), CONTRACT_TEST_DB_HOST/_PORT/_USER/_PASSWORD
 // (superuser: plants and snapshots).
 import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert@1";
@@ -473,6 +473,53 @@ t("G11: long texts - 2000 CJK characters and 2000 four-byte emoji are added (201
   const long = path.replace(/\/[^/]+$/, "/" + "\u6587".repeat(400) + ".md");
   const lp = await mk(A, long, "x");
   assert([400, 404].includes(lp.status), `a very long path is refused, not a 500 (${lp.status})`);
+});
+
+t("G12: a document in a folder with a space, comma, ampersand, apostrophe or parentheses takes gaps and research (review B1)", async () => {
+  const mkIn = async (who: string, folder: string) => {
+    const f = await call(who, "POST", "/workbench/documents/folders", { path: folder });
+    assert(f.status === 200 || f.status === 201, `folder ${folder}: ${f.status} ${f.text}`);
+    const d = await call(who, "POST", "/workbench/documents", { title: `in ${rnd()}`, folder, body: "A document in a folder with a name." });
+    assert(d.status === 201 || d.status === 207, `document in ${folder}: ${d.status} ${d.text}`);
+    return d.json.path as string;
+  };
+  const names = ["Client A", "Smith, Jones", "Q&A", "it's", "its (1)"];
+  let clientA = "";
+  for (const folder of names) {
+    const path = await mkIn(A, folder);
+    assert(/ |,|&|'|\(/.test(path), `the path carries the awkward character: ${path}`);
+    if (folder === "Client A") clientA = path;
+    const g = await mk(A, path, `a need in ${folder} ${rnd()}`);
+    assertEquals(g.status, 201, `${folder}: ${g.text.slice(0, 200)}`);
+    assertEquals(g.json.path, path, "the gap keeps the whole path");
+    const listed = await call(A, "GET", `${GP}?path=${encodeURIComponent(path)}`);
+    assertEquals([listed.status, listed.json.total], [200, 1], `${folder}: the list by path`);
+    const r = await call(A, "POST", `${GP}/research`, { ids: [g.json.id] });
+    assertEquals(r.status, 202, `${folder}: research: ${r.text.slice(0, 200)}`);
+    const dup = await mk(A, path, g.json.text);
+    assertEquals(dup.status, 409, `${folder}: a duplicate on that document is still a duplicate`);
+  }
+  // traversal and a path that is not a document stay refused
+  const keyA = clientA.split("/")[1];
+  const pathB = await docOf(B);
+  const keyB = pathB.split("/")[1];
+  for (const bad of ["documents/../x.md", "notes/x.md", `documents/${keyA}/x.txt`, `documents/${keyA}/%2e%2e/%2e%2e/x.md`]) {
+    assertEquals((await mk(A, bad, "x")).status, 400, `refused: ${bad}`);
+  }
+  // a traversal INTO another user's directory is never a gap: the request gate answers it as a foreign document (404) or the route as a bad path (400)
+  for (const bad of [`documents/${keyA}/../${keyB}/x.md`, `documents/${keyA}/%2e%2e/${keyB}/x.md`]) {
+    const r = await mk(A, bad, "x");
+    assert(r.status === 400 || r.status === 404, `refused: ${bad} -> ${r.status}`);
+  }
+  assertEquals((await sql(`SELECT 1 FROM public.document_gaps WHERE doc_path LIKE $1`, [`%${keyB}/x.md`])).length, 0, "no gap on B's directory");
+  // another identity naming A's "Client A" document is the missing document, byte for byte
+  const foreign = await mk(B, clientA, "x");
+  const missing = await mk(B, `documents/${keyA}-nobody/Client A/x.md`, "x");
+  assertEquals(foreign.status, 404);
+  assertEquals([foreign.status, foreign.text], [missing.status, missing.text]);
+  const gOnA = (await call(A, "GET", `${GP}?path=${encodeURIComponent(clientA)}`)).json.gaps[0];
+  assertEquals((await call(B, "GET", `${GP}/${gOnA.id}`)).status, 404);
+  assertEquals((await call(B, "GET", `${GP}?path=${encodeURIComponent(clientA)}`)).json.total ?? 0, 0);
 });
 
 Deno.test({ name: "G-close: close the pool", ignore, fn: async () => { await pool?.end(); }, sanitizeOps: false, sanitizeResources: false });

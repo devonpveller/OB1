@@ -36,7 +36,7 @@ async function jsonBody(c: Context, next: () => Promise<void>) {
   await next();
 }
 
-export function registerGaps(app: ContractApp, deps: ContractDeps, minSim = Number(Deno.env.get("GAP_COVER_MIN_SIM") ?? "") || gp.DEFAULT_MIN_SIM) {
+export function registerGaps(app: ContractApp, deps: ContractDeps, minSim = gp.parseMinSim(Deno.env.get("GAP_COVER_MIN_SIM"))) {
   app.use(P, jsonBody);
   app.use(`${P}/*`, jsonBody);
   const unavail = (c: Context, e: unknown) =>

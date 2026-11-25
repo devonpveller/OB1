@@ -24,7 +24,8 @@ import { type RegistryReader, REGISTRY, requireRegistered } from "../registry.ts
 import { BadRequest } from "../logic/scope.ts";
 import { Conflict, NotFound } from "./lifecycle.ts";
 import type { Identity } from "../../middleware/identity.ts";
-import { documentPathsIn, ownsDocumentPaths } from "../../documents/ownership.ts";
+import { ownsDocumentPaths } from "../../documents/ownership.ts";
+import { safeRelPath } from "../../util/paths.ts";
 
 export interface GapRow {
   id: string;
@@ -68,12 +69,32 @@ export function normalizeGapText(s: string): string {
 const isUnique = (e: unknown) => (e as { fields?: { code?: string } })?.fields?.code === "23505";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * The field is exactly ONE document path (review B1, attempt 3). It used to be run through `documentPathsIn`, a scanner for
+ * paths inside free text that stops at whitespace and at `" ' ? & # , )` - so `documents/<key>/Client A/notes.md` was read as
+ * `documents/<key>/Client` and answered 400, as did a comma, `Q&A` and `its (1)`, all of which the app's "+ Folder" makes.
+ * Here the whole string is the path: normalised by the shared `safeRelPath` (no traversal, no encoded dots, no control
+ * characters), under `documents/`, a `.md` file, at most 1024 bytes (the database CHECK).
+ * rw-doc-path-spaces adds a shared `singleDocumentPath` in documents/ownership.ts with the same rules; whichever of the two
+ * items merges second switches to the shared helper and drops this one.
+ */
+export function singleDocumentPath(path: string): string {
+  const refuse = () => new BadRequest("path must be a document path (documents/...)");
+  let norm: string;
+  try {
+    norm = safeRelPath(path);
+  } catch {
+    throw refuse();
+  }
+  if (!norm.startsWith("documents/") || norm.length <= "documents/".length || !norm.toLowerCase().endsWith(".md")) throw refuse();
+  if (new TextEncoder().encode(norm).length > 1024) throw refuse();
+  return norm;
+}
+
 async function checkDocument(db: Db, who: Identity, path: string): Promise<string> {
-  const paths = documentPathsIn(path);
-  const norm = path.replace(/\\/g, "/");
-  if (paths.length !== 1 || paths[0] !== norm) throw new BadRequest("path must be a document path (documents/...)");
+  const norm = singleDocumentPath(path);
   // another user's document and a missing one are the same refusal
-  if (!(await ownsDocumentPaths(db, paths, who))) throw new NotFound("no such document");
+  if (!(await ownsDocumentPaths(db, [norm], who))) throw new NotFound("no such document");
   return norm;
 }
 
@@ -171,10 +192,12 @@ export async function updateGap(db: Db, reg: RegistryReader, who: Identity, id: 
       `UPDATE public.document_gaps
           SET text = $3, text_norm = $4, state = $5, updated_at = now(),
               covered_at = CASE WHEN $5 = 'covered' THEN coalesce(covered_at, now()) ELSE NULL END
-        WHERE id = $1 AND owner_sub = $2 RETURNING ${COLS}`,
-      [id, who.sub, text, norm, state],
+        WHERE id = $1 AND owner_sub = $2 AND state = $6 RETURNING ${COLS}`,
+      [id, who.sub, text, norm, state, cur.state],
     );
-    return r[0] ? shape(r[0]) : null;
+    // the state read above is checked in the statement: a gap that was settled or sent to research meanwhile is not overwritten
+    if (!r[0]) throw new Conflict("the gap changed while it was being updated; look again");
+    return shape(r[0]);
   } catch (e) {
     if (!isUnique(e)) throw e;
     const again = await blocker(db, who, cur.path, norm, cur.origin, id);
@@ -189,7 +212,9 @@ export async function deleteGap(db: Db, who: Identity, id: string): Promise<bool
   if (!cur) return false;
   if (cur.state === "dismissed") throw new Conflict("a dismissed gap is kept so its origin cannot bring it back; reopen it instead");
   if (cur.state === "researching") throw new Conflict("a gap that is being researched cannot be removed");
-  await db.query(`DELETE FROM public.document_gaps WHERE id = $1 AND owner_sub = $2`, [id, who.sub]);
+  // the state is checked in the statement too: a gap that was dismissed or sent to research since the read is not removed
+  const gone = await db.query(`DELETE FROM public.document_gaps WHERE id = $1 AND owner_sub = $2 AND state NOT IN ('dismissed', 'researching') RETURNING id`, [id, who.sub]);
+  if (!gone.length) throw new Conflict("the gap changed while it was being removed; look again");
   return true;
 }
 
@@ -234,13 +259,22 @@ export async function researchGaps(db: Db, queue: QueueResearch | undefined, who
     throw e;
   }
   // 3. both (all) gaps carry that one job id
-  await db.query(`UPDATE public.document_gaps SET job_id = $3, updated_at = now() WHERE id = ANY($1::uuid[]) AND owner_sub = $2 AND state = 'researching'`, [want, who.sub, jobId]);
+  await db.query(`UPDATE public.document_gaps SET job_id = $3, updated_at = now() WHERE id = ANY($1::uuid[]) AND owner_sub = $2 AND state = 'researching' AND job_id IS NULL`, [want, who.sub, jobId]);
   const rows = await db.query<Raw>(`SELECT ${COLS} FROM public.document_gaps WHERE job_id = $1 AND owner_sub = $2 ORDER BY created_at, id`, [jobId, who.sub]);
   return { job_id: jobId, gaps: rows.map(shape) };
 }
 
 // ── the rotate-out rule ────────────────────────────────────────────────────────────────────
 export const DEFAULT_MIN_SIM = 0.55;
+
+/** GAP_COVER_MIN_SIM: unset or blank = the default; otherwise a number from 0 to 1 or the workbench refuses to start
+ *  (a typo must not silently become the default, and 0 is a value, not "unset"). */
+export function parseMinSim(raw: string | undefined | null): number {
+  if (raw === undefined || raw === null || raw.trim() === "") return DEFAULT_MIN_SIM;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || n > 1) throw new Error("GAP_COVER_MIN_SIM must be a number from 0 to 1");
+  return n;
+}
 
 /** Does ANY of these claims (ids the run filed) answer the gap and stand on two agreeing sources? */
 export async function coveredBy(db: Db, claimIds: string[], vec: number[], minSim: number): Promise<boolean> {

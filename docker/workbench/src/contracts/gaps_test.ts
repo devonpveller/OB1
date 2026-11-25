@@ -7,7 +7,7 @@ import { createContractApp, openApiDocument } from "./app.ts";
 import { RegistryReader } from "./registry.ts";
 import { unavailableScorer } from "./logic/reopen.ts";
 import type { Db } from "./db.ts";
-import { coveredBy, createGap, normalizeGapText, researchGaps, ResearchUnavailable, runQuery, settleGaps, updateGap } from "./repo/gaps.ts";
+import { coveredBy, createGap, normalizeGapText, parseMinSim, researchGaps, ResearchUnavailable, runQuery, settleGaps, singleDocumentPath, updateGap } from "./repo/gaps.ts";
 import { Conflict, NotFound } from "./repo/lifecycle.ts";
 import type { Identity } from "../middleware/identity.ts";
 
@@ -231,4 +231,53 @@ Deno.test("a gap's text is at most 2000 CHARACTERS (code points) and a path at m
   assert(!ok({ text: "x".repeat(2001) }) && !ok({ text: "\u{1F600}".repeat(2001) }), "2001 characters");
   assert(ok({ text: "x", path: "documents/u/" + "a".repeat(1000) }), "a path under 1024 bytes");
   assert(!ok({ text: "x", path: "documents/u/" + "\u6587".repeat(400) }), "a path over 1024 bytes (CJK 3 bytes each)");
+});
+
+Deno.test("B1: a document path is ONE path - spaces, commas, ampersands, apostrophes and parentheses in a folder name are fine", () => {
+  for (const name of ["Client A", "Smith, Jones", "Q&A", "it's", "its (1)", "a#b", "what?"]) {
+    const p = `documents/user-a/${name}/notes.md`;
+    assertEquals(singleDocumentPath(p), p, name);
+  }
+  assertEquals(singleDocumentPath("documents\\user-a\\Client A\\notes.md"), "documents/user-a/Client A/notes.md");
+  assertEquals(singleDocumentPath("documents//user-a/./x.md"), "documents/user-a/x.md");
+});
+
+Deno.test("B1: traversal, a path outside documents/, a non-.md file, control characters and over 1024 bytes stay refused (400)", () => {
+  for (const bad of ["documents/../x.md", "documents/user-a/../user-b/x.md", "documents/user-a/%2e%2e/x.md", "notes/x.md", "documents/", "documents",
+    "documents/user-a/x.txt", "documents/user-a/x\u0000.md", "documents/user-a/x\n.md", "", "documents/user-a/" + "\u6587".repeat(400) + ".md", "Documents/user-a/x.md"]) {
+    let threw = false;
+    try { singleDocumentPath(bad); } catch (e) { threw = e instanceof Error && e.constructor.name === "BadRequest"; }
+    assert(threw, `refused: ${JSON.stringify(bad).slice(0, 60)}`);
+  }
+});
+
+Deno.test("B1: a document of another user with a space in its folder is the missing document's twin", async () => {
+  // ownership is judged on the whole path: another user's key is a refusal (NotFound), not a partial scan
+  const { db } = recorder(() => []);
+  const e = await assertRejects(() => createGap(db, reader(db), WHO, { path: "documents/user-b/Client A/notes.md", text: "x" }), NotFound);
+  assertEquals(e.message, "no such document");
+});
+
+Deno.test("N3: GAP_COVER_MIN_SIM is range-checked; 0 is a value; a typo refuses to start", () => {
+  assertEquals(parseMinSim(undefined), 0.55);
+  assertEquals(parseMinSim(""), 0.55);
+  assertEquals(parseMinSim("0"), 0);
+  assertEquals(parseMinSim("0.7"), 0.7);
+  for (const bad of ["abc", "-0.1", "1.5", "NaN", "Infinity"]) {
+    let threw = false;
+    try { parseMinSim(bad); } catch { threw = true; }
+    assert(threw, bad);
+  }
+});
+
+Deno.test("N1/N2: the writes carry their state guards", async () => {
+  const { db, log } = recorder((s) => /FOR UPDATE/.test(s) ? [raw(G1)] : undefined);
+  await researchGaps(db, () => Promise.resolve({ job_id: JOB }), WHO, [G1]).catch(() => {});
+  assert(log.some((l) => /SET job_id = \$3/.test(l) && /AND job_id IS NULL/.test(l)), "the job id is set only on a gap with none");
+  const d = recorder((s) => /SELECT .* FROM public\.document_gaps WHERE id = \$1 AND owner_sub/.test(s) ? [raw(G1)] : undefined);
+  await assertRejects(() => import("./repo/gaps.ts").then((m) => m.deleteGap(d.db, WHO, G1)), Conflict);
+  assert(d.log.some((l) => /^DELETE/.test(l) && /state NOT IN \('dismissed', 'researching'\)/.test(l)), "the delete checks the state in the statement");
+  const u = recorder((s) => /SELECT .* FROM public\.document_gaps WHERE id = \$1 AND owner_sub/.test(s) ? [raw(G1)] : undefined);
+  await assertRejects(() => updateGap(u.db, reader(u.db), WHO, G1, { state: "dismissed" }), Conflict);
+  assert(u.log.some((l) => /^UPDATE/.test(l) && /AND state = \$6/.test(l)), "the update checks the state it read");
 });
