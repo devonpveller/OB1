@@ -8,7 +8,7 @@ import { safeJoin } from "./paths.ts";
 
 const dec = new TextDecoder();
 
-async function git(args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
+export async function git(args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
   const cmd = new Deno.Command("git", {
     args: ["-C", config.vault.gitDir, ...args],
     stdout: "piped",
