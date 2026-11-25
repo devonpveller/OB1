@@ -10,6 +10,7 @@ import { Ideas, RESEARCH_POLL_MS } from "../src/screens/ideas/Ideas";
 import { ToastProvider } from "../src/shell/Toast";
 import { setFetcher, requestLog, clearRequestLog } from "../src/lib/api";
 import { resetState } from "../src/lib/state";
+import { uid as docUid } from "../e2e/docs-fake.mjs";
 import { createFake, NOT_WAITING, UNCONFIGURED, type Who } from "../e2e/ideas-fake.mjs";
 
 let fake = createFake();
@@ -259,16 +260,20 @@ describe("Create / Open its document", () => {
     await renderApp();
     await pick("Plan the CPU upgrade");
     fireEvent.click(screen.getByTestId("act-document"));
-    await waitFor(() => expect(window.location.pathname).toMatch(/^\/documents\//));
+    // the address is the document's opaque id (rwr-doc-opaque-urls), never its path: no owner key, no title slug
+    const made = () => fake.ideas.get(ids.cpu).document.path as string;
+    await waitFor(() => expect(window.location.pathname).toMatch(/^\/documents\/d\/[0-9a-f-]{36}$/));
     expect(posts()).toEqual(["POST /workbench/documents/seed"]);
-    expect(fake.ideas.get(ids.cpu).document.path).toBe(decodeURIComponent(window.location.pathname.slice("/documents/".length)));
+    expect(window.location.pathname).toBe("/documents/d/" + docUid(made()));
+    expect(decodeURIComponent(window.location.pathname)).not.toMatch(/u-alice|plan-the-cpu|\.md/);
     cleanup();
     await renderApp();
     await pick("Plan the CPU upgrade");
-    const link = screen.getByTestId("act-document");
-    expect(link.tagName).toBe("A");
-    expect(link.textContent).toBe("Open its document");
-    expect(link.getAttribute("href")).toBe("/documents/" + encodeURIComponent(fake.ideas.get(ids.cpu).document.path));
+    await waitFor(() => expect(screen.getByTestId("act-document").tagName).toBe("A"));
+    const a = screen.getByTestId("act-document");
+    expect(a.textContent).toBe("Open its document");
+    expect(a.getAttribute("href")).toBe("/documents/d/" + docUid(made()));
+    expect(a.getAttribute("href")).not.toMatch(/u-alice|plan-the-cpu|\.md|%2F/);
   });
 });
 

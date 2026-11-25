@@ -11,7 +11,7 @@ export function createFake(o?: { now?: () => number }): {
   sessions: Map<string, any>;
   log: { method: string; url: string; who: string }[];
   people: Record<Who, { sub: string; name: string }>;
-  state: { mode: Who; failList: boolean; hang: boolean; researchConfigured: boolean };
+  state: { mode: Who; failList: boolean; hang: boolean; researchConfigured: boolean; docState: "ok" | "fail" | "noid" };
   iso(msAgo?: number): string;
   H: number;
   D: number;

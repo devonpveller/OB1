@@ -11,6 +11,7 @@ import { useToast } from "../../shell/Toast";
 import { navigate } from "../../lib/router";
 import { stateEpoch } from "../../lib/state";
 import { ago } from "../home/home-data";
+import { hrefOfPath } from "../documents/docs-data";
 import {
   approveQuestion, archive, createDocument, GROUPS, groupOf, isArchived, NotAvailable, readIdea, readIdeas, readResearch, reopen, researchNow,
   revise, runPrivately, STATE_LABEL, type IdeaDetail, type IdeaRow, type ResearchState, type Result,
@@ -156,7 +157,17 @@ function IdeaView({ row, onChanged }: { row: IdeaRow; onChanged: () => void }) {
   });
   const doReopen = () => run(() => reopen(id), (r) => toast({ message: r.message }));
   const doResearch = () => run(() => researchNow(id), (r) => toast({ message: r.message }));
-  const doDocument = () => run(() => createDocument(id), (r) => { if (r.path) navigate("/documents/" + encodeURIComponent(r.path)); });
+  // A document is addressed by its opaque id (rwr-doc-opaque-urls): the create answers with a path only, so the id is read back
+  // (docs-data hrefOfPath); when it cannot be read there is no address to give, and the page says where to find the document.
+  const doDocument = () => run(() => createDocument(id), (r) => {
+    if (!r.path) return;
+    const epoch = stateEpoch();
+    void hrefOfPath(r.path).then((h) => {
+      if (stateEpoch() !== epoch) return;
+      if (h) navigate(h); else toast({ message: "Document created. Open it from Documents." });
+    });
+  });
+  const docHref = useDocHref(d.state === "ok" ? d.data.document?.path ?? null : null);
 
   if (d.state === "loading") return <section className="card idea-view" aria-busy="true"><p className="meta" role="status" data-testid="idea-loading">Loading this idea...</p></section>;
   if (d.state === "gone") return <section className="card idea-view"><p data-testid="idea-gone">This idea is not available.</p></section>;
@@ -179,13 +190,16 @@ function IdeaView({ row, onChanged }: { row: IdeaRow; onChanged: () => void }) {
       <div className="idea-actions" role="group" aria-label="What to do with this idea">
         <button type="button" className="btn pri" disabled={busy || archived} onClick={doResearch} data-testid="act-research">Research this idea</button>
         {x.document
-          ? <Link to={"/documents/" + encodeURIComponent(x.document.path)} className="btn" data-testid="act-document">Open its document</Link>
+          ? (typeof docHref === "string"
+            ? <Link to={docHref} className="btn" data-testid="act-document">Open its document</Link>
+            : <button type="button" className="btn" disabled data-testid="act-document">Open its document</button>)
           : <button type="button" className="btn" disabled={busy || archived} onClick={doDocument} data-testid="act-document">Create a document from it</button>}
         <button type="button" className="btn" ref={reviseBtn} disabled={busy || archived} aria-expanded={editing} onClick={() => setEditing(true)} data-testid="act-revise">Revise the idea</button>
         {archived
           ? <button type="button" className="btn" disabled={busy} onClick={doReopen} data-testid="act-reopen">Reopen this idea</button>
           : <button type="button" className="btn" disabled={busy} onClick={doArchive} data-testid="act-archive">Archive idea</button>}
       </div>
+      {x.document && docHref === null && <p className="meta" data-testid="doc-unavailable">Its document cannot be opened from here right now. Find it in Documents.</p>}
       <p className="meta idea-help">
         Revise saves a new wording of the idea; the next research uses it, and earlier runs stay linked to the wording they started from.
         Archive stops any scheduled research and moves the idea to Archived, where Reopen brings it back as it was.
@@ -205,7 +219,7 @@ function IdeaView({ row, onChanged }: { row: IdeaRow; onChanged: () => void }) {
       <div className="idea-cols">
         <div className="idea-col" data-testid="belongs">
           <h3 className="lab">What belongs to it</h3>
-          <Belongs x={x} />
+          <Belongs x={x} docHref={docHref} />
         </div>
         <div className="idea-col" data-testid="changed">
           <h3 className="lab">How it changed</h3>
@@ -230,9 +244,23 @@ function IdeaView({ row, onChanged }: { row: IdeaRow; onChanged: () => void }) {
   );
 }
 
-function Belongs({ x }: { x: IdeaDetail }) {
+// The address of an idea's document: undefined while the id is being read, null when it cannot be read, else /documents/d/<id>.
+// The idea's own answer names the document by path only, and a path never goes into an address.
+function useDocHref(path: string | null): string | null | undefined {
+  const [h, setH] = useState<{ path: string; href: string | null } | null>(null);
+  useEffect(() => {
+    if (!path) return;
+    let on = true;
+    void hrefOfPath(path).then((href) => { if (on) setH({ path, href }); });
+    return () => { on = false; };
+  }, [path]);
+  if (!path) return null;
+  return h && h.path === path ? h.href : undefined;
+}
+
+function Belongs({ x, docHref }: { x: IdeaDetail; docHref: string | null | undefined }) {
   const items: { kind: string; name: string; line?: string; to?: string; key: string }[] = [];
-  if (x.document) items.push({ kind: "Document", name: x.document.title || "(untitled)", to: "/documents/" + encodeURIComponent(x.document.path), key: "doc" });
+  if (x.document) items.push({ kind: "Document", name: x.document.title || "(untitled)", to: typeof docHref === "string" ? docHref : undefined, key: "doc" });
   for (const r of x.runs) items.push({ kind: "Research", name: r.query || "a research run", line: r.status, to: "/research", key: "run-" + r.id });
   if (x.chat) items.push({ kind: "Chat", name: "The idea's room", line: x.chat.entries + (x.chat.entries === 1 ? " entry" : " entries"), key: "chat" });
   if (x.podcasts) items.push({ kind: "Podcast", name: x.podcasts + (x.podcasts === 1 ? " podcast" : " podcasts"), to: "/podcasts", key: "pod" });

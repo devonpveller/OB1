@@ -15,10 +15,13 @@ import { resetState } from "../src/lib/state";
 import { NOT_FOUND, hrefOfPath, docHref } from "../src/screens/documents/docs-data";
 import { startResearchHref } from "../src/screens/research-start/start-data";
 import { createFake, PEOPLE, uid } from "../e2e/docs-fake.mjs";
+import { createFake as createIdeasFake } from "../e2e/ideas-fake.mjs";
 
 configure({ asyncUtilTimeout: 5000 });
 const NOW = Date.now();
 const fake = createFake({ now: () => NOW });
+// the Ideas screen's own back end (rwr-ideas); it also answers state / resolve for the documents of an idea
+let ideasFake = createIdeasFake({ now: () => NOW });
 let who: "alice" | "bob" = "alice";
 const settings = new Map<string, { value: unknown; version: number }>();
 const CPU = "documents/k-a/Hardware/cpu.md";
@@ -28,7 +31,7 @@ const H = (p: string) => "/documents/d/" + ID(p);
 
 // what must never appear in an address: a title word, a file-name slug, a folder, the owner's folder key, an encoded
 // slash, the .md extension, the vault prefix of an owner
-const LEAK = /k-a|alpha|upgrading|\bcpu\b|gateway|hardware|stack|draft|fresh|%2F|\.md|documents\/k/i;
+const LEAK = /u-alice|k-a|alpha|upgrading|\bcpu\b|gateway|hardware|stack|draft|fresh|%2F|\.md|documents\/k/i;
 
 function stub() {
   setFetcher(async (u, init) => {
@@ -49,6 +52,8 @@ function stub() {
       return j({ key: k, value: body.value, version: n });
     }
     if (path === "/workbench/research/preview") return j({ ok: true, question: "q", topic: "t", links: [], depth: { name: "standard", rounds: 2, max_fetch: 40, wall_ms: 600000 }, refusal: null });
+    if (/^\/workbench\/(contract\/ideas|ideas\/)/.test(path) || path === "/workbench/documents/seed") { const a = ideasFake.handle(method, u, body, who); return j(a.body, a.status); }
+    if (path === "/workbench/documents/state" || path === "/workbench/documents/resolve") { const a = ideasFake.handle(method, u, body, who); if (a.status === 200 || ideasFake.state.docState === "fail") return j(a.body, a.status); }
     const r = fake.handle(who, method, u, body ?? {});
     if (r) return j(r.body, r.status);
     if (path === "/workbench/contract/sessions") return j({ sessions: [] });
@@ -83,6 +88,7 @@ const row = (title: string) => screen.getAllByTestId("doc-row").find((r) => r.te
 const edText = () => screen.getByTestId("doc-editor").querySelector(".cm-content")?.textContent ?? "";
 
 beforeEach(() => {
+  ideasFake = createIdeasFake({ now: () => NOW });
   cleanup(); clearRequestLog(); resetState(); fake.reset(); settings.clear(); who = "alice";
   window.localStorage.clear(); window.sessionStorage.clear();
   window.history.pushState({}, "", "/");
@@ -289,5 +295,60 @@ describe("the page title and storage", () => {
     for (const s of [window.localStorage, window.sessionStorage]) for (let i = 0; i < s.length; i++) expect(String(s.getItem(s.key(i)!))).not.toMatch(/ALPHA|k-a/);
     // the account keys keep the PATH (account-side, never an address): that is allowed; nothing else is stored
     expect(JSON.stringify([...settings])).not.toMatch(/ALPHA/);
+  });
+});
+
+describe("the Ideas screen's document links (rwr-ideas)", () => {
+  const pickIdea = async (title: string) => {
+    fireEvent.click(screen.getAllByTestId("idea-row").find((r) => r.querySelector(".idea-pick-title")!.textContent === title)!);
+    await waitFor(() => expect(screen.getByTestId("idea-title").textContent).toBe(title));
+  };
+  const openIdeas = async () => {
+    window.history.pushState({}, "", "/ideas");
+    watchHistory();
+    render(<App />);
+    await waitFor(() => expect(screen.queryByTestId("ideas-loading")).toBeNull());
+    await screen.findByTestId("idea-view");
+  };
+  const seedIdeas = () => {
+    ideasFake.addIdea(PEOPLE.alice.sub, { title: "ALPHA Plan the CPU upgrade", status: "promoted", created: new Date(NOW - 3 * 864e5).toISOString(), document: { path: CPU, title: "ALPHA Upgrading the CPU" } });
+    ideasFake.addIdea(PEOPLE.alice.sub, { title: "ALPHA Move the wiki", status: "new", created: new Date(NOW - 5 * 864e5).toISOString() });
+  };
+
+  it("Open its document, the document under what belongs to it and the address after Create are all /documents/d/<id>", async () => {
+    seedIdeas();
+    await openIdeas();
+    await pickIdea("ALPHA Plan the CPU upgrade");
+    const link = await screen.findByTestId("act-document");
+    await waitFor(() => expect(screen.getByTestId("act-document").tagName).toBe("A"));
+    expect(screen.getByTestId("act-document").getAttribute("href")).toBe(H(CPU));
+    const mem = screen.getAllByTestId("mem").find((m) => m.textContent?.includes("Document"))!;
+    await waitFor(() => expect(mem.tagName).toBe("A"));
+    expect(mem.getAttribute("href")).toBe(H(CPU));
+    expect(link).toBeTruthy();
+    none();
+    // Create: the seed answers with a path only; the address is the id read back, never the path
+    await pickIdea("ALPHA Move the wiki");
+    fireEvent.click(screen.getByTestId("act-document"));
+    await waitFor(() => expect(window.location.pathname).toMatch(/^\/documents\/d\/[0-9a-f-]{36}$/));
+    none();
+    for (const u of pushes) expect(u).toMatch(/^\/(ideas|documents(\/d\/[0-9a-f-]{36})?)$/);
+  });
+
+  it("when the id cannot be read back there is no link at all (never a path address) and Create says so", async () => {
+    seedIdeas();
+    ideasFake.hook("doc-state", { mode: "noid" });
+    await openIdeas();
+    await pickIdea("ALPHA Plan the CPU upgrade");
+    await waitFor(() => expect(screen.getByTestId("doc-unavailable")).toBeTruthy());
+    expect(screen.getByTestId("act-document").tagName).not.toBe("A");
+    const mem = screen.getAllByTestId("mem").find((m) => m.textContent?.includes("Document"))!;
+    expect(mem.tagName).not.toBe("A");
+    none();
+    await pickIdea("ALPHA Move the wiki");
+    fireEvent.click(screen.getByTestId("act-document"));
+    await waitFor(() => expect(screen.getByTestId("toasts").textContent).toMatch(/Open it from Documents/));
+    expect(window.location.pathname).toBe("/ideas");
+    none();
   });
 });

@@ -232,6 +232,24 @@ ok(fromCache.length === 0, "no /workbench/ read was answered from the browser's 
 const lgAll = await stub("/__log");
 ok(lgAll.every((x) => x.keyOk) && lgAll.every((x) => !/alpha|bravo|u-alice|u-bob/i.test(x.url)), "every request carried the door key and no URL names a person or an idea's words");
 
+// ---- 13. a document link is /documents/d/<id> (rwr-doc-opaque-urls): Create a document, then follow Open its document
+// (run last: the document screen's own reads name the document by path, which the check above is about the Ideas screen's own requests)
+await setMode("alice"); await go("/ideas");
+await clickRow("ALPHA Plan the CPU upgrade");
+await waitFor(`document.querySelector('[data-testid=idea-title]')?.textContent==='ALPHA Plan the CPU upgrade'`);
+const OPAQUE = "^/documents/d/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+const LEAKRE = "u-alice|alpha|plan-the|cpu|[.]md|%2F|documents/u";
+await click("[data-testid=act-document]");
+ok(await waitFor(`new RegExp(${JSON.stringify(OPAQUE)}).test(location.pathname)`), "Create a document: the address becomes /documents/d/<id>");
+ok(!(await ev(`new RegExp(${JSON.stringify(LEAKRE)}, 'i').test(decodeURIComponent(location.pathname + location.search + location.hash))`)), "Create a document: the address holds no owner key, title word, slug or .md");
+await go("/ideas"); await clickRow("ALPHA Plan the CPU upgrade");
+ok(await waitFor(`document.querySelector('[data-testid=act-document]')?.tagName==='A' && !!document.querySelector('[data-testid=belongs] a[href^="/documents/"]')`), "an idea with a document shows Open its document as a link, and the document under what belongs to it");
+const docLinks = JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('a[href^="/documents"]')].map(a=>a.getAttribute('href')))`));
+ok(docLinks.length === 2 && docLinks.every((h) => new RegExp(OPAQUE).test(h)) && docLinks[0] === docLinks[1], `both document links are /documents/d/<id>: ${JSON.stringify(docLinks)}`);
+await click("[data-testid=act-document]");
+ok(await waitFor(`location.pathname===${JSON.stringify(docLinks[0])}`), "following Open its document lands on /documents/d/<id>");
+ok(!(await ev(`new RegExp(${JSON.stringify(LEAKRE)}, 'i').test(decodeURIComponent(location.pathname))`)), "the address after following the link names no person, idea word or file");
+
 ws.close();
 await fetch(`http://${CH}:9222/json/close/${tgt.id}`).catch(() => {});
 console.log(fails ? `E2E FAIL (${fails})` : "E2E PASS");

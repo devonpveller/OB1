@@ -11,10 +11,13 @@
 //            archived_from remembers the state; 404 for a foreign or missing idea; 409 already-archived / not-archived
 //   seed     POST /workbench/documents/seed {idea_id}       documents/seed.ts seedFromIdea: 409 with the path when the idea has its
 //            document, 409 when archived, 201 {path} and the idea becomes promoted
+//   doc id   GET /workbench/documents/state?path= and /resolve?id=   documents routes: the listing row's opaque id of one of the
+//            caller's own idea documents (docs-fake's uid(path), the same id the documents fake gives it); anyone else's = 404
 // The shell's own reads (whoami, auth/me, settings, the menu counts) answer here too, for the e2e lab.
 // Test hooks (never reachable on the real server): see hook().
 
 // ideas/review.ts NOT_WAITING and UNCONFIGURED, word for word
+import { uid as docUid } from "./docs-fake.mjs";
 export const NOT_WAITING = "this idea's research question is not waiting for you (it was decided, or the idea changed since)";
 export const UNCONFIGURED = "the research service is not configured for the workspace (RESEARCH_URL, RESEARCH_WORKSPACE_KEY)";
 export const ARCHIVED_MSG = "this idea's refinery is archived: reopen it from its document first";
@@ -34,7 +37,7 @@ export function createFake({ now = () => Date.now() } = {}) {
   const research = new Map(); // idea id -> { state, candidate, failing }
   const log = [];
   // researchConfigured: the workspace's approval door to the research service (review.ts approveClient); the default install has none
-  const state = { mode: "alice", failList: false, hang: false, researchConfigured: false };
+  const state = { mode: "alice", failList: false, hang: false, researchConfigured: false, docState: "ok" }; // docState: ok | fail | noid
 
   function addIdea(owner, o) {
     const id = o.id ?? uid("a1");
@@ -146,6 +149,12 @@ export function createFake({ now = () => Date.now() } = {}) {
       research.set(i.id, { state: "queued", job: uid("b3") });
       return { status: verb === "research/approve" ? 202 : 202, body: { outcome: "queued", run: verb === "research/approve" ? "derived" : "private", job_id: research.get(i.id).job } };
     }
+    if (method === "GET" && (p === "/workbench/documents/state" || p === "/workbench/documents/resolve")) {
+      const want = p.endsWith("state") ? u.searchParams.get("path") : u.searchParams.get("id");
+      const i = [...ideas.values()].find((x) => mine(x, who) && x.document && (p.endsWith("state") ? x.document.path === want : docUid(x.document.path) === want));
+      if (!i || state.docState === "fail") return state.docState === "fail" ? { status: 500, body: { error: "internal" } } : NOT_FOUND;
+      return { status: 200, body: { id: state.docState === "noid" ? undefined : docUid(i.document.path), path: i.document.path, listed: true, trashed: false, archived: false } };
+    }
     if (method === "POST" && p === "/workbench/documents/seed") {
       const i = typeof body?.idea_id === "string" ? own(body.idea_id, who) : null;
       if (!i) return { status: 404, body: { error: "no idea with this id" } };
@@ -171,6 +180,7 @@ export function createFake({ now = () => Date.now() } = {}) {
     if (name === "research-state") { research.set(arg.id, { state: arg.state }); return {}; } // refused | delivered | failed | queued ...
     if (name === "configure-research") { state.researchConfigured = !!arg.on; return {}; }
     if (name === "mode") { state.mode = arg.mode; return {}; }
+    if (name === "doc-state") { state.docState = arg.mode; return {}; }
     if (name === "fail-list") { state.failList = !!arg.on; return {}; }
     return { error: "no such hook" };
   }
