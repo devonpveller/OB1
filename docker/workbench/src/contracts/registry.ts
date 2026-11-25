@@ -53,6 +53,9 @@ export const REGISTRY = {
   flagItemKinds: "flag_item_kinds",
   flagFromKinds: "flag_from_kinds",
   flagStates: "flag_states",
+  // rwr-doc-gaps-api (init-document-gaps.sql, slot 650): document gaps
+  gapOrigins: "gap_origins",
+  gapStates: "gap_states",
   // rwr-cast-edit-api (init-cast.sql, slot 560): the cast model's new fields
   podcastFormatKinds: "podcast_format_kinds",
   podcastFormatUses: "podcast_format_uses",
