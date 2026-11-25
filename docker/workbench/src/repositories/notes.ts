@@ -7,7 +7,7 @@ import { safeFolderRel, safeJoin, safeRelPath } from "../util/paths.ts";
 // @ts-ignore — plain .mjs from the /recipes bind-mount.
 import { slugifyNotebook } from "@shared/slug";
 import { parseNoteRow } from "../util/notes-parse.ts";
-import { assertStructuredNoteShareable, structuredNoteFileSlug, structuredNoteViews } from "../util/structured-note-check.ts";
+import { assertStructuredNoteShareable, structuredNoteStoredSlug, structuredNoteViews } from "../util/structured-note-check.ts";
 export { parseNoteRow };
 import { pool } from "../db/pool.ts";
 import { poolDb } from "../contracts/db.ts";
@@ -176,7 +176,7 @@ export async function writeStructuredNote(input: {
   // text, any user's claim): a title that slugifies to the notebook's own slug (any case or punctuation) is stored at
   // <nb>/<nb>-note instead. Decided from the slugs alone, never from the content, so the same request is stored at the
   // same path whatever its text - the hub shape can never answer differently for another user's sentence.
-  const fileSlug = structuredNoteFileSlug(nbSlug, slugifyNotebook(input.title) || "note");
+  const fileSlug = await structuredNoteStoredSlug(nbSlug, slugifyNotebook(input.title) || "note", input.authorSub ?? "");
   // Layout (operator-chosen): AI-generated content (from external inlets) lives
   // on the wiki/AI side under content/notebooks/<notebook>/ so it propagates;
   // user notes live under notes/notebooks/<notebook>/ (#4/#5). They never mix.

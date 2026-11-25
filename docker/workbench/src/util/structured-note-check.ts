@@ -29,6 +29,18 @@ export type NoteRow = { slug: string; title: string; body: string };
 export function structuredNoteFileSlug(nbSlug: string, titleSlug: string): string {
   return titleSlug === nbSlug ? `${titleSlug}-note` : titleSlug;
 }
+// rw-note-slug-owner: the stored slug is PER WRITER. Two users saving the same notebook and title used to share one
+// path (and one wiki_pages row: ON CONFLICT (slug) DO UPDATE), so the second silently replaced the first. The slug
+// now ends in a short tag derived from the writer's verified subject (sha256, first 8 hex; the subject is not
+// readable from it). Always applied, to every writer and every title, so the stored shape and the response are the
+// same whether or not another user holds the name (no existence signal), and decided from the slugs and the writer
+// alone, never from either note's text. Notes already stored at the old (untagged) paths are not touched: they keep
+// reading and listing; only a new save by this route takes the tagged path.
+export async function structuredNoteStoredSlug(nbSlug: string, titleSlug: string, authorSub: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`note-owner:${authorSub}`));
+  const tag = [...new Uint8Array(buf).slice(0, 4)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `${structuredNoteFileSlug(nbSlug, titleSlug)}-${tag}`;
+}
 export type AskNoteRefused = (slug: string, title: string, body: string) => Promise<boolean | null>;
 
 // The texts the writer's-own check reads (attempt 3, tester Case 6): the ROW view - exactly the slug, title and body

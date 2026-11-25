@@ -44,7 +44,7 @@ Deno.test("R5: writeStructuredNote checks BEFORE the vault write and the row syn
   const fnBody = w.slice(0, w.indexOf("\n}\n"));
   const check = fnBody.indexOf("await assertStructuredNoteShareable(structuredNoteViews({ slug: row.slug, title: row.title, body: row.body }, body), askNoteRefused(input.authorSub ?? \"\"));");
   assert(check > 0, "the check reads the row exactly as the guard judges it AND the whole file");
-  assert(fnBody.includes("const fileSlug = structuredNoteFileSlug(nbSlug, slugifyNotebook(input.title) || \"note\");"), "the file slug never takes the hub's");
+  assert(fnBody.includes("const fileSlug = await structuredNoteStoredSlug(nbSlug, slugifyNotebook(input.title) || \"note\", input.authorSub ?? \"\");"), "the file slug never takes the hub's (structuredNoteStoredSlug wraps structuredNoteFileSlug)");
   assert(check < fnBody.indexOf("await vaultWrite(rel, body);") && check < fnBody.indexOf("await syncNoteRow(rel, body, input.authorSub);"), "before the vault file and the row");
   assert(fnBody.includes("await syncNoteRow(rel, body, input.authorSub);"), "the row names its writer (the guard judges it author-only, as the check)");
   assert(repo.includes("SELECT public.private_report_claims_note_refused($1, $2, $3, $4) AS refused") && repo.includes("[authorSub, slug, title, body]"), "the database's answer for THIS writer (slot 575)");
