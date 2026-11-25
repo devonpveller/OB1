@@ -480,11 +480,9 @@ describe("the dialog's own behaviour", () => {
   });
 });
 
-// ── the folder-with-a-space defect (tester attempt 1, Case 1) ──
-// The real route reads `from.ref` through the server's documentPathsIn, which stops a path at a space or at " ' ? & # , ), so a
-// document in a folder named "Old notes" is refused (400) TODAY. The fake copies that scanner (flags-fake.mjs), so these two
-// cases show it. The server fix is the separate item rw-doc-path-spaces; when it lands, the flags-fake's copy changes with it and
-// the `it.fails` below turns green by itself (vitest then reports it as FAILED: remove the `.fails`).
+// ── a document in a folder whose name has a space or punctuation (rw-doc-path-spaces) ──
+// The real route reads `from.ref` WHOLE (singleDocumentPath), so such a folder is a path like any other; the fake copies that. What
+// stays refused (traversal, a path outside documents/) is a 400, shown as the sentence that names the document.
 const OLD = "documents/k-a/Old notes/cpu.md";
 const plantOld = () => {
   const d = docs.db().docs.get(CPU)!;
@@ -493,16 +491,18 @@ title: "ALPHA Old notes CPU"
 ---
 The board [@ref:${REF_A}] as stated.` });
 };
-describe("a document in a folder whose name has a space (server item rw-doc-path-spaces)", () => {
-  it("TODAY the real route refuses such an origin, and the fake says so exactly as the server does: the app shows its refusal", async () => {
-    for (const bad of ["documents/k-a/Old notes/cpu.md", "documents/k-a/R&D/x.md", "documents/k-a/Q1, Q2/x.md", "documents/k-a/Bob's/x.md", "documents/k-a/(draft)/x.md", "documents/k-a/a#b/x.md"]) {
+describe("a document in a folder whose name has a space or punctuation (rw-doc-path-spaces)", () => {
+  it("every such origin is accepted and read back byte-equal; traversal and a path outside documents/ are refused", async () => {
+    for (const ok of ["documents/k-a/Old notes/cpu.md", "documents/k-a/R&D/x.md", "documents/k-a/Q1, Q2/x.md", "documents/k-a/Bob's/x.md", "documents/k-a/(draft)/x.md", "documents/k-a/a#b/x.md"]) {
+      expect(await flagItem({ kind: "claim", id: CLAIM }, "other", "", { kind: "document", ref: ok }), ok).toEqual({ kind: "flagged" });
+      expect(flags.rows().at(-1)!.from_ref).toBe(ok);
+    }
+    for (const bad of ["documents/../notes/x.md", "documents/k-a/../k-b/x.md", "notes/x.md", "documents/"]) {
       expect(await flagItem({ kind: "claim", id: CLAIM }, "other", "", { kind: "document", ref: bad }), bad).toEqual({ kind: "refused" });
     }
-    expect(await flagItem({ kind: "claim", id: CLAIM }, "other", "", { kind: "document", ref: CPU })).toEqual({ kind: "flagged" });
-    expect(flags.rows()).toHaveLength(1);
+    expect(flags.rows()).toHaveLength(6);
   });
-  // EXPECTED TO FAIL until rw-doc-path-spaces lands (the server accepts a spaced folder): the person flags from such a document
-  it.fails("EXPECTED FAIL until rw-doc-path-spaces: flagging a reference from a document in 'Old notes' makes the flag", async () => {
+  it("flagging a reference from a document in 'Old notes' makes the flag", async () => {
     plantOld();
     await openDrawer(0, OLD);
     fireEvent.click(opener("reference"));
@@ -510,6 +510,15 @@ describe("a document in a folder whose name has a space (server item rw-doc-path
     fireEvent.click(screen.getByTestId("flag-send"));
     await waitFor(() => expect(screen.getByTestId("flag-done")).toBeTruthy(), { timeout: 1500 });
     expect(flags.rows()[0].from_ref).toBe(OLD);
+  });
+  it("a refusal for a document origin names the document, not the reason or the note", async () => {
+    render(<ToastProvider><FlagForCleanup item={{ kind: "claim", id: CLAIM }} from={{ kind: "document", ref: "documents/../notes/x.md" }} subject="u-alice" what="this claim" /></ToastProvider>);
+    fireEvent.click(screen.getByTestId("flag-open"));
+    choose("other");
+    fireEvent.click(screen.getByTestId("flag-send"));
+    const t = (await screen.findByTestId("flag-problem")).textContent!;
+    expect(t).toMatch(/document/);
+    expect(t).not.toMatch(/reason|note/i);
   });
 });
 

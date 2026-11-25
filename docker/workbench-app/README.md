@@ -152,9 +152,8 @@ reopening the drawer shows it; no second flag); the toast names no title, note o
   fakes, `e2e/flags-fake.mjs` (the flags routes and repo code) and `e2e/docs-fake.mjs`.
 - `/flag-harness.html` (dev-only, built only with `--build-arg FLAG_HARNESS=1`; the default image has none) lists the caller's own flags with the
   link `flagBackLink` builds, as Cleanup > Flagged by you will; the e2e follows one. `e2e/run-flags-e2e.ps1 -Owner <id>` sets the harness owner label.
-- Known server defect, tracked as `rw-doc-path-spaces`: the flags route reads `from.ref` with the server's `documentPathsIn`, which stops at a space
-  or at `& , ' ( ) #`, so a flag made from a document in a folder named "Old notes" is refused (400) and the app says "not accepted". The fake
-  copies that scanner on purpose; the vitest case and the e2e step for it are marked expected-to-fail (`it.fails`, `xfail`) until that item lands.
+- A document in a folder with a space or `& , ' ( ) #` in its name can be flagged from like any other (`rw-doc-path-spaces`): the route reads `from.ref`
+  whole. A refusal of the origin shows one sentence that names the document, not the reason or the note.
 
 ## Removals and trail (item `rwr-removals`)
 
