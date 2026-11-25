@@ -11,8 +11,11 @@ const JOB = "9a900000-0000-4000-8000-0000000000a1";
 // a C0 control character (bar tab, newline, carriage return) or DEL is refused here: a NUL would otherwise reach Postgres (22021)
 const CLEAN = (s: string) => !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(s);
 const CLEAN_MSG = { message: "must not contain control characters" };
-const TEXT = z.string().min(1).max(2000).refine(CLEAN, CLEAN_MSG).refine((s) => s.trim() !== "", { message: "must not be blank" });
-const PATH = z.string().min(1).max(1024).refine(CLEAN, CLEAN_MSG);
+// 2000 CHARACTERS (code points, as the database CHECK counts them), not UTF-16 units: 2000 four-byte emoji are 2000 characters
+const TEXT = z.string().min(1).refine((s) => Array.from(s).length <= 2000, { message: "must be at most 2000 characters" })
+  .refine(CLEAN, CLEAN_MSG).refine((s) => s.trim() !== "", { message: "must not be blank" });
+// a document path is at most 1024 BYTES (the database's CHECK; its owner index cannot hold more)
+const PATH = z.string().min(1).refine((s) => new TextEncoder().encode(s).length <= 1024, { message: "must be at most 1024 bytes" }).refine(CLEAN, CLEAN_MSG);
 
 export const Gap = z.object({
   id: uuid(GAP, "gap id"),

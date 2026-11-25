@@ -6626,14 +6626,12 @@
           "path": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 1024,
             "example": "documents/lab-user/notes.md",
             "description": "the caller's own document this gap belongs to"
           },
           "text": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 2000,
             "description": "what the document still needs; shown to its owner only"
           },
           "origin": {
@@ -6692,14 +6690,12 @@
           "path": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 1024,
             "example": "documents/lab-user/notes.md",
             "description": "the caller's own document"
           },
           "text": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 2000
+            "minLength": 1
           },
           "origin": {
             "type": "string",
@@ -6807,8 +6803,7 @@
         "properties": {
           "text": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 2000
+            "minLength": 1
           },
           "state": {
             "type": "string",

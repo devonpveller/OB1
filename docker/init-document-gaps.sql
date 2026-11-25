@@ -17,7 +17,12 @@
 --
 -- De-dup at the database as well as in the route: at most ONE active (open or researching) gap per
 -- (owner, document, normalised text); a dismissed gap is remembered per origin (at most one per owner,
--- document, normalised text and origin), so the same origin never brings it back.
+-- document, normalised text and origin), so the same origin never brings it back. The unique indexes are over
+-- md5() of that key, not the key itself: a btree entry cannot hold more than about 2.7 KB and a text of 2000
+-- characters is 6-8 KB in UTF-8 (attempt 1 failed on exactly that: 2000 CJK characters answered 500). The routes
+-- find a duplicate by comparing the full columns, so the 409 always names the right gap; the index is the backstop
+-- (a hash collision of two different keys is a 2^-128 event and would refuse the add as a duplicate).
+-- doc_path is kept under 1024 bytes by a CHECK, so the ordinary owner index below can hold it.
 --
 -- Idempotent (IF NOT EXISTS / ON CONFLICT DO NOTHING); re-running it changes nothing. Depends only on the roles
 -- of slot 480 (ob_workbench) and the service_role of the base chain. Fresh-volume slot 650; the live DB gets it by
@@ -66,14 +71,15 @@ CREATE TABLE IF NOT EXISTS public.document_gaps (
     covered_at  TIMESTAMPTZ,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT document_gaps_text_ck CHECK (btrim(text) <> '' AND length(text) <= 2000 AND text_norm <> '')
+    CONSTRAINT document_gaps_text_ck CHECK (btrim(text) <> '' AND length(text) <= 2000 AND text_norm <> ''),
+    CONSTRAINT document_gaps_path_ck CHECK (octet_length(doc_path) <= 1024)
 );
 CREATE INDEX IF NOT EXISTS idx_document_gaps_owner ON public.document_gaps (owner_sub, doc_path, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_document_gaps_job ON public.document_gaps (job_id) WHERE job_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS uq_document_gaps_active
-    ON public.document_gaps (owner_sub, doc_path, text_norm) WHERE state IN ('open', 'researching');
+    ON public.document_gaps (md5(owner_sub || E'\x01' || doc_path || E'\x01' || text_norm)) WHERE state IN ('open', 'researching');
 CREATE UNIQUE INDEX IF NOT EXISTS uq_document_gaps_dismissed
-    ON public.document_gaps (owner_sub, doc_path, text_norm, origin) WHERE state = 'dismissed';
+    ON public.document_gaps (md5(owner_sub || E'\x01' || doc_path || E'\x01' || text_norm || E'\x01' || origin)) WHERE state = 'dismissed';
 
 -- ── RLS + grants (the slot 500 shape; ob_workbench is the workbench's own login role) ──
 ALTER TABLE public.document_gaps ENABLE ROW LEVEL SECURITY;

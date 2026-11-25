@@ -54,6 +54,11 @@ Deno.test("the de-dup key ignores case, spacing, quotes and edge punctuation", (
   assertEquals(normalizeGapText("How does the pump hold pressure."), normalizeGapText("how does the pump hold pressure"));
   assert(normalizeGapText("pump A") !== normalizeGapText("pump B"));
   assertEquals(normalizeGapText("?!."), "");
+  // a zero-width character inside the text is not a different gap
+  assertEquals(normalizeGapText("zero\u200bwidth need"), normalizeGapText("zerowidth need"));
+  assertEquals(normalizeGapText("\ufeffa\u2060b\u200cc"), "abc");
+  // a CJK or emoji text has a key as long as the text: the unique index is over its md5, not the key itself
+  assertEquals(Array.from(normalizeGapText("\u6587".repeat(2000))).length, 2000);
 });
 
 Deno.test("a duplicate of an open gap is refused, names the existing gap, and nothing is inserted", async () => {
@@ -210,5 +215,20 @@ Deno.test("the migration: slot 650 is mounted, the revert drops exactly what the
   const grants = [...fwd.matchAll(/GRANT [^;]+ TO ([a-z_]+)/g)].map((m) => m[1]).sort();
   assertEquals(grants, ["ob_workbench", "service_role"]);
   assert(/ENABLE ROW LEVEL SECURITY/.test(fwd));
+  // attempt 2 (tester Case 12): a btree entry holds at most ~2.7 KB, so the unique indexes are over md5() of the key
+  const idx = [...fwd.matchAll(/CREATE UNIQUE INDEX IF NOT EXISTS (uq_document_gaps_\w+)\s+ON public\.document_gaps \(([^\n]+)\)/g)];
+  assertEquals(idx.map((m) => m[1]).sort(), ["uq_document_gaps_active", "uq_document_gaps_dismissed"]);
+  for (const m of idx) assert(/^md5\(/.test(m[2]) && !/^owner_sub|text_norm\s*,/.test(m[2]), `${m[1]} is over a hash: ${m[2]}`);
+  assert(/octet_length\(doc_path\) <= 1024/.test(fwd), "a document path is bounded in bytes");
   assert(!/sources|claims|wiki_pages/.test(rev.replace(/--.*$/gm, "")), "the revert touches no shared knowledge");
+});
+
+Deno.test("a gap's text is at most 2000 CHARACTERS (code points) and a path at most 1024 BYTES", async () => {
+  const { GapCreate } = await import("./schemas/gaps.ts");
+  const ok = (o: Record<string, unknown>) => GapCreate.safeParse({ path: DOC, ...o }).success;
+  assert(ok({ text: "\u6587".repeat(2000) }), "2000 CJK characters");
+  assert(ok({ text: "\u{1F600}".repeat(2000) }), "2000 four-byte emoji (4000 UTF-16 units)");
+  assert(!ok({ text: "x".repeat(2001) }) && !ok({ text: "\u{1F600}".repeat(2001) }), "2001 characters");
+  assert(ok({ text: "x", path: "documents/u/" + "a".repeat(1000) }), "a path under 1024 bytes");
+  assert(!ok({ text: "x", path: "documents/u/" + "\u6587".repeat(400) }), "a path over 1024 bytes (CJK 3 bytes each)");
 });

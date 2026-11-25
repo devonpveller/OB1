@@ -57,9 +57,11 @@ const shape = (r: Raw): GapRow => ({
 export const NO_SUCH_GAP = "no such gap";
 export class ResearchUnavailable extends Error {}
 
-/** The de-dup key: lower case, whitespace collapsed, quotes / brackets and sentence punctuation off the edges. */
+/** The de-dup key: lower case, whitespace collapsed, zero-width characters dropped (they make a second gap that looks
+ *  like the first; the TEXT keeps them as typed - joiner U+200D is kept, it is part of emoji sequences), quotes / brackets
+ *  and sentence punctuation off the edges. */
 export function normalizeGapText(s: string): string {
-  return s.normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim()
+  return s.normalize("NFKC").toLowerCase().replace(/[\u200b\u200c\u2060\ufeff]/g, "").replace(/\s+/g, " ").trim()
     .replace(/^[\s"'“”‘’(\[{]+/, "").replace(/[\s"'“”‘’)\]}.,;:!?…]+$/, "");
 }
 
