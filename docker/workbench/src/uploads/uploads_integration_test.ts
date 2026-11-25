@@ -20,7 +20,7 @@
 //   U9 a finish sent twice (and two at once) makes one job; a service key gets 403; no route serves a piece's bytes
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { Pool } from "postgres";
-import { createHash } from "node:crypto";
+import { Sha256 } from "./sha256.ts";
 
 const BASE = (Deno.env.get("UPLOADS_TEST_BASE") ?? "").replace(/\/+$/, "");
 const KEY = Deno.env.get("UPLOADS_TEST_KEY") ?? "";
@@ -65,7 +65,7 @@ async function call(method: string, path: string, o: { as?: string | null; body?
   return { status: r.status, json, text, ms };
 }
 const U = "/workbench/contract/uploads";
-const shaOf = (b: Uint8Array) => createHash("sha256").update(b).digest("hex");
+const shaOf = (b: Uint8Array) => new Sha256().update(b).hex();
 const start = (as: string, filename: string, size: number, sha256: string) => call("POST", U, { as, body: { filename, size, sha256 } });
 const put = (as: string, id: string, offset: number | string, bytes: Uint8Array) => call("PUT", `${U}/${id}/pieces?offset=${offset}`, { as, bytes });
 // a PDF-shaped file of n bytes (the intake takes a PDF), its content seeded so each file differs

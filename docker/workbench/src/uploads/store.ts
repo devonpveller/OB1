@@ -5,7 +5,7 @@
 //   <dir>/<session id>/t-<random>      a piece still arriving (a dropped connection leaves one; it is removed at once)
 //   <dir>/<session id>/assembled       the whole file, after a finish verified its size and sha256
 // A session id is a uuid checked here before it becomes a path, so no input can name another directory.
-import { createHash } from "node:crypto";
+import { Sha256 } from "./sha256.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -122,7 +122,7 @@ export function uploadStore(root: string) {
     async assemble(id: string, pieces: { offset: number; length: number }[]): Promise<AssembleResult> {
       const d = dirOf(id);
       const out = `${d}/assembled.part`;
-      const hash = createHash("sha256");
+      const hash = new Sha256();
       const w = await Deno.open(out, { write: true, create: true, truncate: true });
       let bytes = 0;
       try {
@@ -158,7 +158,7 @@ export function uploadStore(root: string) {
       }
       await Deno.rename(out, `${d}/assembled`);
       for (const p of pieces) await Deno.remove(`${d}/p-${p.offset}`).catch(() => {});
-      return { bytes, sha256: hash.digest("hex"), damaged: null };
+      return { bytes, sha256: hash.hex(), damaged: null };
     },
     async readAssembled(id: string): Promise<Uint8Array | null> {
       try {

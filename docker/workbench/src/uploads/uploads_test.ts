@@ -7,6 +7,7 @@ import { assert, assertEquals, assertRejects } from "jsr:@std/assert@1";
 import { coverage, cleanFilename, NO_SUCH_UPLOAD, parseOffset, placement, UploadRefused, uploadSessions } from "./sessions.ts";
 import { MB, uploadLimits } from "./limits.ts";
 import { PieceInterrupted, PieceTooLarge, uploadStore } from "./store.ts";
+import { Sha256 } from "./sha256.ts";
 import type { Db } from "../contracts/db.ts";
 import type { Identity } from "../middleware/identity.ts";
 import { USER_ONLY } from "../middleware/identity.ts";
@@ -46,6 +47,21 @@ Deno.test("placement: inside the file, never overlapping; the same piece again i
   for (const bad of ["", "-1", "1.5", "0x10", " ", "1e3", "9999999999999999", undefined, null]) assertEquals(parseOffset(bad), null, String(bad));
   assertEquals(cleanFilename(" survey.pdf "), "survey.pdf");
   for (const bad of ["", "a/b.pdf", "a\\b.pdf", "..", "x\u0000.pdf", "x\n.pdf", "a".repeat(256), 5]) assertEquals(cleanFilename(bad), null, String(bad));
+});
+
+Deno.test("the incremental sha256 equals WebCrypto's for every length around the block edges, fed in any split; no node: import", async () => {
+  for (const n of [0, 1, 55, 56, 57, 63, 64, 65, 119, 120, 127, 128, 129, 1000, 65537]) {
+    const data = new Uint8Array(n).map((_, i) => (i * 31 + n) & 0xff);
+    const want = hex(await crypto.subtle.digest("SHA-256", data));
+    assertEquals(new Sha256().update(data).hex(), want, `length ${n}`);
+    const h = new Sha256();
+    for (let i = 0; i < n; i += 7) h.update(data.subarray(i, Math.min(n, i + 7)));
+    assertEquals(h.hex(), want, `length ${n} in 7-byte pieces`);
+  }
+  assertEquals(new Sha256().update(new TextEncoder().encode("abc")).hex(), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  for (const f of ["store.ts", "sessions.ts", "limits.ts", "sha256.ts", "uploads_integration_test.ts"]) {
+    assert(!/from "node:/.test(Deno.readTextFileSync(new URL(f, import.meta.url))), `${f} imports no node: builtin (deno.lock would gain @types/node)`);
+  }
 });
 
 Deno.test("limits: the anchor's defaults, and each one from its environment variable", () => {
