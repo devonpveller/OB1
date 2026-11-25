@@ -211,11 +211,15 @@ describe("save as you go", () => {
     fireEvent.click(sw);
     await waitFor(() => expect(SRV.store.get("u-alice|refinery.brainstorm")?.value).toBe(false));
     await pick("Start screen");
-    const sel = within(screen.getByTestId("setting-ui.start_screen")).getByTestId("control") as HTMLSelectElement;
-    fireEvent.change(sel, { target: { value: "library" } });
+    const grp = within(screen.getByTestId("setting-ui.start_screen")).getByTestId("control");
+    expect(grp.getAttribute("role")).toBe("radiogroup");
+    expect(grp.querySelector("select")).toBeNull(); // the one-picker rule: no native <select> outside ItemPicker
+    expect(within(grp).getAllByRole("radio").map((r) => (r as HTMLInputElement).value)).toEqual(["", "home", "library", "chat"]);
+    expect((within(grp).getByRole("radio", { name: /Default/ }) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(within(grp).getByRole("radio", { name: "library" }));
     await waitFor(() => expect(SRV.store.get("u-alice|ui.start_screen")?.value).toBe("library"));
-    await waitFor(() => expect(sel.value).toBe("library"));
-    fireEvent.change(sel, { target: { value: "" } });
+    await waitFor(() => expect((within(grp).getByRole("radio", { name: "library" }) as HTMLInputElement).checked).toBe(true));
+    fireEvent.click(within(grp).getByRole("radio", { name: /Default/ }));
     await waitFor(() => expect(SRV.store.has("u-alice|ui.start_screen")).toBe(false));
     expect(requestLog().some((r) => r.method === "DELETE" && /ui\.start_screen\?version=1$/.test(r.url))).toBe(true);
   });
@@ -308,6 +312,43 @@ describe("one account, any browser, and two people", () => {
     await open("u-bob", false);
     await pick("My ideas");
     expect((within(screen.getByTestId("setting-refinery.dormancy_days")).getByTestId("control") as HTMLInputElement).value).toBe("14");
+  });
+});
+
+describe("a save answer that lands after the person changed (tester attempt 1, case 5)", () => {
+  it("is dropped: the next person's screen shows their own value, not the earlier person's save", async () => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    let who = "u-alice";
+    const row = (v: unknown, version: number, isDefault: boolean) => ({
+      key: "refinery.dormancy_days", tier: "user", type: "integer", section: "refinery", position: 20, label: "Days before a quiet idea goes dormant",
+      help: "", default: 14, env: null, validation: { min: 1, max: 365 }, editable: true, tag: "on_server", value: v, is_default: isDefault, version, updated_at: null,
+    });
+    setFetcher(async (url, init) => {
+      const [path] = url.split("?");
+      const json = (o: unknown, status = 200) => new Response(JSON.stringify(o), { status });
+      if (path === "/workbench/workspace/whoami") return json({ subject_sub: who, actor_sub: who, name: who });
+      if (path === "/workbench/auth/me") return json({ mode: "forward-auth", kind: "user", subject_sub: who, name: who });
+      if (path === "/workbench/settings" && (init?.method ?? "GET") === "GET") return json({ admin: false, settings: [row(null, 0, true)] });
+      if (path === "/workbench/settings/refinery.dormancy_days" && init?.method === "PUT") { await held; return json(row(30, 1, false)); }
+      return json({}, 404);
+    });
+    const ui = (subject: string) => <Settings subject={subject} whoAnswered />;
+    const { rerender } = render(ui("u-alice"));
+    await pick("My ideas");
+    const input = within(await screen.findByTestId("setting-refinery.dormancy_days")).getByTestId("control") as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "30" } });
+    fireEvent.blur(input); // alice's PUT is held
+    who = "u-bob";
+    rerender(ui("u-bob"));
+    await pick("My ideas");
+    await waitFor(() => expect((within(screen.getByTestId("setting-refinery.dormancy_days")).getByTestId("control") as HTMLInputElement).value).toBe("14"));
+    release(); // alice's answer lands now
+    await new Promise((r) => setTimeout(r, 50));
+    const r2 = screen.getByTestId("setting-refinery.dormancy_days");
+    expect((within(r2).getByTestId("control") as HTMLInputElement).value).toBe("14");
+    expect(r2.textContent).toMatch(/Using the default/);
+    expect(r2.textContent).not.toMatch(/Set by you/);
   });
 });
 

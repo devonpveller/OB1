@@ -26,7 +26,9 @@ type Status = { kind: "idle" } | { kind: "saving" } | { kind: "saved" } | { kind
 
 // The control for one setting. A text or number field saves when you leave it or press Enter; a switch and a choice save
 // at once. A value the server refuses is shown with the server's own words and the field goes back to what is stored.
-function Field({ row, onRow, onStale }: { row: Setting; onRow: (r: Setting) => void; onStale: () => void }) {
+// `epoch` reads which person this screen is for right now: a save answer that lands after the person changed is dropped
+// (the earlier person's value is never shown to the next one).
+function Field({ row, onRow, onStale, epoch }: { row: Setting; onRow: (r: Setting) => void; onStale: () => void; epoch: () => number }) {
   const id = useId();
   const effective = row.is_default ? row.default : row.value;
   const [draft, setDraft] = useState(effective === null || effective === undefined ? "" : String(effective));
@@ -40,7 +42,9 @@ function Field({ row, onRow, onStale }: { row: Setting; onRow: (r: Setting) => v
 
   const apply = useCallback(async (run: () => Promise<Awaited<ReturnType<typeof saveSetting>>>) => {
     setStatus({ kind: "saving" });
+    const mine = epoch();
     const r = await run();
+    if (mine !== epoch()) return; // the person changed while this was in flight: nothing of it is shown
     if (r.ok) {
       onRow(r.row);
       setStatus({ kind: "saved" });
@@ -51,7 +55,7 @@ function Field({ row, onRow, onStale }: { row: Setting; onRow: (r: Setting) => v
       setStatus({ kind: "error", message: `Not saved: ${r.message}` });
       setDraft(effective === null || effective === undefined ? "" : String(effective));
     }
-  }, [effective, onRow, onStale]);
+  }, [effective, onRow, onStale, epoch]);
 
   const save = (value: unknown) => void apply(() => saveSetting(row, value));
   const reset = () => void apply(() => resetSetting(row));
@@ -79,13 +83,20 @@ function Field({ row, onRow, onStale }: { row: Setting; onRow: (r: Setting) => v
         onChange={(e) => save(e.target.checked)} />
     );
   } else if (row.type === "enum") {
+    // a short fixed list of choices is a set of radio buttons (segmented), never a native <select> (one-picker rule)
     const options = Array.isArray(row.validation?.enum) ? (row.validation.enum as string[]) : [];
+    const chosen = row.is_default ? "" : String(row.value);
+    const choices: Array<[string, string]> = [["", `Default (${show(row.default)})`], ...options.map((o): [string, string] => [o, o])];
     control = (
-      <select id={id} value={row.is_default ? "" : String(row.value)} disabled={busy} data-testid="control"
-        onChange={(e) => (e.target.value === "" ? reset() : save(e.target.value))}>
-        <option value="">Default ({show(row.default)})</option>
-        {options.map((o) => <option key={o} value={o}>{o}</option>)}
-      </select>
+      <div role="radiogroup" aria-labelledby={id + "-l"} className="seg" data-testid="control">
+        {choices.map(([v, text]) => (
+          <label key={v || "default"} className={"seg-o" + (chosen === v ? " on" : "")}>
+            <input type="radio" name={id} value={v} checked={chosen === v} disabled={busy}
+              onChange={() => (v === "" ? reset() : save(v))} />
+            <span>{text}</span>
+          </label>
+        ))}
+      </div>
     );
   } else {
     const num = row.type === "integer" || row.type === "number";
@@ -103,7 +114,7 @@ function Field({ row, onRow, onStale }: { row: Setting; onRow: (r: Setting) => v
   return (
     <div className="srow" data-testid={"setting-" + row.key} data-key={row.key}>
       <div className="s-main">
-        <label className="s-label" htmlFor={editable ? id : undefined}>{row.label}</label>
+        <label className="s-label" id={id + "-l"} htmlFor={editable && row.type !== "enum" ? id : undefined}>{row.label}</label>
         {row.help && <p className="meta">{row.help}</p>}
         <p className="meta">{row.is_default ? `Using the default: ${show(row.default)}` : (row.tier === "admin" ? "Set by an admin" : "Set by you")}</p>
       </div>
@@ -128,6 +139,8 @@ export function Settings({ subject = null, whoAnswered = true }: { subject?: str
   const [mode, setMode] = useState<Mode>({ state: "loading" });
   const [sel, setSel] = useState<string | null>(null);
   const turn = useRef(0);
+  const person = useRef(0); // bumped when the signed-in person changes: an answer to a save made for the earlier one is dropped
+  const epoch = useCallback(() => person.current, []);
 
   const load = useCallback(() => {
     const mine = ++turn.current;
@@ -141,7 +154,7 @@ export function Settings({ subject = null, whoAnswered = true }: { subject?: str
     setMode({ state: "loading" });
     setSel(null);
     load();
-    return () => { turn.current++; };
+    return () => { turn.current++; person.current++; };
   }, [subject, whoAnswered, load]);
 
   const onRow = useCallback((r: Setting) => {
@@ -217,7 +230,7 @@ export function Settings({ subject = null, whoAnswered = true }: { subject?: str
                 <h2 id="h-section" data-testid="section-title">{current.title}</h2>
                 {current.tier === "admin" && <p className="meta">These settings are one value for everybody.</p>}
                 {current.keys.map((k) => (
-                  <Field key={k.key} row={k} onRow={onRow} onStale={load} />
+                  <Field key={k.key} row={k} onRow={onRow} onStale={load} epoch={epoch} />
                 ))}
               </>
             ) : <p className="empty" data-testid="settings-empty">There are no settings to show yet. <Link to="/">Back to Home</Link></p>}

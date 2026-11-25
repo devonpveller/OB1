@@ -96,7 +96,8 @@ await A.type("[data-testid=setting-refinery\\.dormancy_days] [data-testid=contro
 ok(await A.waitFor(`!!document.querySelector('[data-testid="error-refinery.dormancy_days"]')`) && /Not saved: .*must be at most 365/.test((await text(A, '[data-testid="error-refinery.dormancy_days"]')) || ""), "a value the server refuses is shown in the server's words");
 ok((await A.ev(`document.querySelector('[data-testid="setting-refinery.dormancy_days"] [data-testid=control]').value`)) === "30", "and the field goes back to what is stored");
 await section(A, "user-ui");
-await A.ev(`(()=>{const s=document.querySelector('[data-testid="setting-ui.start_screen"] [data-testid=control]');s.value='library';s.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+ok((await A.ev(`document.querySelectorAll('select, datalist').length`)) === 0, "no native select or datalist on the screen (one-picker rule): the Start screen choice is a radio group");
+await A.ev(`document.querySelector('[data-testid="setting-ui.start_screen"] [data-testid=control] input[value=library]').click()`);
 ok(await A.waitFor(`document.querySelector('[data-testid="saved-ui.start_screen"]')?.textContent==='Saved'`), "a choice saves at once");
 
 // ---- 3. another browser (a fresh tab with its storage cleared) shows the same values
@@ -108,7 +109,7 @@ await section(A2, "user-refinery");
 ok((await A2.ev(`document.querySelector('[data-testid="setting-refinery.dormancy_days"] [data-testid=control]').value`)) === "30", "a value saved on one browser shows on another (30)");
 ok((await A2.ev(`document.querySelector('[data-testid="setting-refinery.brainstorm"] [data-testid=control]').checked`)) === false, "and so does the switch (off)");
 await section(A2, "user-ui");
-ok((await A2.ev(`document.querySelector('[data-testid="setting-ui.start_screen"] [data-testid=control]').value`)) === "library", "and the choice (library)");
+ok((await A2.ev(`document.querySelector('[data-testid="setting-ui.start_screen"] [data-testid=control] input:checked')?.value`)) === "library", "and the choice (library)");
 // a stale save from the first browser is refused, not overwritten
 await section(A2, "user-refinery");
 await A2.type("[data-testid=setting-refinery\\.dormancy_days] [data-testid=control]", "40");
@@ -148,7 +149,7 @@ await A.ev(`document.activeElement.blur()`);
 let reachedControl = false, ring = false;
 for (let i = 0; i < 60 && !reachedControl; i++) {
   await A.key("Tab", "Tab", 9);
-  const s = JSON.parse(await A.ev(`(()=>{const e=document.activeElement;const cs=getComputedStyle(e);return JSON.stringify({c:e.dataset.testid==='control',ow:parseFloat(cs.outlineWidth),os:cs.outlineStyle})})()`));
+  const s = JSON.parse(await A.ev(`(()=>{const e=document.activeElement;const r=e.closest('label.seg-o')||e;const cs=getComputedStyle(r);return JSON.stringify({c:e.dataset.testid==='control'||!!e.closest('[data-testid=control]'),ow:parseFloat(cs.outlineWidth),os:cs.outlineStyle})})()`));
   if (s.c) { reachedControl = true; ring = s.os !== "none" && s.ow >= 2; }
 }
 ok(reachedControl, "Tab reaches a setting's control");
