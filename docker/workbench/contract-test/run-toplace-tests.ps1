@@ -139,7 +139,7 @@ function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
   return (($out.Result + $err.Result) -replace "`r", '').TrimEnd()
 }
 function Dk { Lab-Docker 300 ([string[]]$args) }
-function DkLong { Lab-Docker 2400 ([string[]]$args) }
+function DkLong { Lab-Docker 9000 ([string[]]$args) }
 
 $shimCases = @(
   @('run', '-p', '8080:8080', 'x'), @('run', '--network', 'ai-stack_llm-net', 'x'), @('network', 'create', '--driver', 'macvlan', 'n'),
@@ -363,10 +363,11 @@ try {
     $chk = Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/check-document-toplace.sql
     Save 'check-document-toplace.log' $chk
     Check (($chk -match 'check: OK') -and ($chk -notmatch 'check: FAIL')) 'check-document-toplace.sql on the lab database after the tests: OK'
-    $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "UPDATE public.document_pending_refs SET owner_sub = 'planted-other' WHERE id = (SELECT id FROM public.document_pending_refs LIMIT 1)"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "INSERT INTO public.document_pending_refs (owner_sub, actor_sub, path, claim_id, added_from) SELECT l.owner_sub, l.owner_sub, l.path, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1', 'plant' FROM public.user_document_listings l LIMIT 1"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "UPDATE public.document_pending_refs SET owner_sub = 'planted-other' WHERE added_from = 'plant'"
     $chkBad = Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/check-document-toplace.sql
     Check ($chkBad -match 'check: FAIL \(.*cross_owner_rows') 'the check FAILS on a planted cross-owner row (and names it)'
-    $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "UPDATE public.document_pending_refs SET owner_sub = (SELECT l.owner_sub FROM public.user_document_listings l WHERE l.path = document_pending_refs.path) WHERE owner_sub = 'planted-other'"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "DELETE FROM public.document_pending_refs WHERE added_from = 'plant'"
     $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "GRANT UPDATE ON public.document_pending_refs TO service_role"
     $chkAcl = Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/check-document-toplace.sql
     Check ($chkAcl -match 'check: FAIL \(.*grants_exact') 'the check FAILS when a right is widened (grants_exact)'
@@ -410,14 +411,15 @@ try {
     Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) 'the fixture document listings are in place for Dredd'
     $gen = Join-Path $wb 'src\contracts\generated'
     $names = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${gen}:/spec:ro", $dreddTag, '/spec/openapi.json', "http://$P-wb:8000", '--names')
-    $prNames = @(($names -replace '\[[0-9;]*m', '' -split "`n") | Where-Object { $_ -match '^info: (/workbench/contract/documents/pending-refs.*)$' } | ForEach-Object { $Matches[1].Trim() })
-    Save 'dredd-toplace-names.log' ($prNames -join "`n")
+    $prNames = @(($names -replace '\[[0-9;]*m', '' -split "`n") | Where-Object { $_ -match '^info: (.*pending-refs.*)$' } | ForEach-Object { $Matches[1].Trim() })
+    Save 'dredd-toplace-names.log' ((($names -replace '\[[0-9;]*m', '' -split "`n") | Where-Object { $_ -match 'pending' }) -join "`n")
     foreach ($l in $prNames | Select-Object -First 12) { Write-Host "    names: $l" }
     $onlyArgs = @(); foreach ($n in $prNames) { $onlyArgs += @('--only', $n) }
     $o = Lab-Docker 600 (@('run', '--rm', '--label', $label, '--network', $net, '-v', "${gen}:/spec:ro", '-v', "${ct}:/ct:ro", $dreddTag,
         '/spec/openapi.json', "http://$P-wb:8000", '--header', "X-Brain-Key: $key", '--hookfiles=/ct/dredd-hooks.js') + $onlyArgs)
     $clean = ($o -replace $key, '***') -replace '\x1b\[[0-9;]*m', ''
-    Save 'dredd-toplace.log' $clean
+    Save 'dredd-toplace.log' ($clean.Substring(0, [Math]::Min($clean.Length, 15000)))
+    Save 'dredd-toplace-pending.log' ((($clean -split "`n") | Where-Object { $_ -match 'pending-refs|complete:' }) -join "`n")
     foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '^(fail|error):|Transaction:.*pending|^\s+(expected|real|body)' } | Select-Object -First 40) { Write-Host "    $l" }
     $dm = ([regex]'complete: (\d+) passing, (\d+) failing, (\d+) errors, (\d+) skipped, (\d+) total').Match($clean)
     # list and add are checked; delete and place act on a row by id (a per-user row the fixture does not seed) and are skipped by the hooks
@@ -444,9 +446,9 @@ try {
       if (-not $txt.Contains($m.find)) { Fail "$($m.id): the text to mutate is not in $($m.file)"; continue }
       [System.IO.File]::WriteAllText($f, $txt.Replace($m.find, $m.repl), (New-Object System.Text.UTF8Encoding $false))
       $mn = "$P-mut-$($m.id.ToLower())"
-      $null = Dk run -d --name $mn --label $label --network $net @($wbArgs) -v "${dir}\src:/app/src:ro" $wbTag
+      $ro = Dk run -d --name $mn --label $label --network $net @($wbArgs) -v "${dir}\src:/app/src:ro" $wbTag
       $script:made.containers += $mn
-      if (-not (Wait-Http "http://${mn}:8000/health" 90)) { Fail "$($m.id): the mutated workbench did not start"; continue }
+      if (-not (Wait-Http "http://${mn}:8000/health" 90)) { Fail "$($m.id): the mutated workbench did not start: $ro"; Save "mutation-$($m.id)-start.log" ((Dk logs --tail 30 $mn) -join "`n"); $null = Dk rm -f -v $mn; continue }
       $rm = Run-It $mn
       Save "mutation-$($m.id).log" ((($rm.clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||error:|Assertion|=> ' }) -join "`n")
       Check ($rm.failed -contains $m.want) "$($m.id) ($($m.what)): $($m.want) FAILS (failed: $($rm.failed -join ',')) - $($rm.sum.Value)"

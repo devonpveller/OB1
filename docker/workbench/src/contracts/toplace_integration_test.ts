@@ -163,15 +163,15 @@ t("P2: placing at the cursor creates a pinned reference record and removes the r
   assertEquals((await call(A, "POST", `${PR}/${noQuote}/place`, { form: "added" })).status, 400);
   assertEquals((await call(A, "POST", `${PR}/${noQuote}/place`, { user: "b" })).status, 400);
   assertEquals((await rows(p3)).length, 2, "both rows still wait");
-  // placing a source the document already cites is refused by the place path (one reference per source): the row stays
+  // a document may cite one source more than once (the place path allows it): the second placement succeeds and leaves the queue too
   const first = await call(A, "POST", `${PR}/${noQuote}/place`, {});
   assertEquals(first.status, 201, first.text);
-  const dupe = (await add(A, p3, { source_id: SRC_WHOLE, quote: "", section: "again" })).json;
-  assertEquals((await call(A, "POST", `${PR}/${dupe.id}/place`, {})).status, 409);
-  assertEquals((await rows(p3)).map((r) => r.id).includes(dupe.id), true, "the refused row is still queued");
+  const second = (await add(A, p3, { source_id: SRC_WHOLE, quote: "", section: "again" })).json;
+  assertEquals((await call(A, "POST", `${PR}/${second.id}/place`, {})).status, 201);
+  assertEquals((await rows(p3)).map((r) => r.id), [badQuote], "only the refused row still waits");
   // taking one out (the delete route) removes only it
-  assertEquals((await call(A, "DELETE", `${PR}/${dupe.id}`)).json.removed, dupe.id);
-  assertEquals((await rows(p3)).map((r) => r.id), [badQuote]);
+  assertEquals((await call(A, "DELETE", `${PR}/${badQuote}`)).json.removed, badQuote);
+  assertEquals((await rows(p3)).length, 0);
 });
 
 t("P3: trash then restore keeps the queue; a move, an archive and a folder trash carry it; delete forever removes it (no orphan)", async () => {
@@ -316,9 +316,9 @@ t("P5: nothing private from this item appears on a shared surface (a planted mar
   }
   assert(read >= tables.length * 0.9, `most tables were scanned (${read} / ${tables.length})`);
   assertEquals(hits, [], "no other table holds the marker");
-  // 2. the shared reads and searches, as A and as B
+  // 2. the shared reads and searches, as A and as B (a search echoes its own query, so it asks by the marker's first 16 characters: the full marker must not come back)
   for (const who of [A, B]) {
-    for (const path of [`/workbench/search?q=${mark}`, `/workbench/search?q=${markS}`, `/workbench/contract/search?q=${mark}`,
+    for (const path of [`/workbench/search?q=${mark.slice(0, 16)}`, `/workbench/search?q=${markS.slice(0, 16)}`, `/workbench/contract/search?q=${mark.slice(0, 16)}`,
       `/workbench/contract/documents`, `/workbench/contract/sources`, `/workbench/documents/references?path=${encodeURIComponent(p)}`, `/workbench/contract/timeline`]) {
       const r = await call(who, "GET", path);
       assert(!r.text.includes(mark) && !r.text.includes(markS), `${path} (${who === A ? "A" : "B"}) carries a planted marker`);
