@@ -12,6 +12,7 @@ import { Imports } from "./screens/imports/Imports";
 import { StartResearch } from "./screens/research-start/StartResearch";
 import { Ideas } from "./screens/ideas/Ideas";
 import { RemovalsScreen } from "./screens/removals/Removals";
+import { Settings } from "./screens/settings/Settings";
 
 export type Group = "everywhere" | "housekeeping";
 // What every screen is given. `params` holds the route's `:name` segments, decoded (so /documents/d/:ref with
@@ -39,7 +40,7 @@ export const ROUTES: RouteDef[] = [
   { path: "/imports", label: "Imports", group: "housekeeping", phase: 5, will: "Bring links and files in, and see what happened to each.", inMenu: true, screen: Imports },
   { path: "/removals", label: "Removals and trail", group: "housekeeping", phase: 5, will: "What was removed, when, and why.", inMenu: true, screen: RemovalsScreen },
   { path: "/cleanup", label: "Cleanup", group: "housekeeping", phase: 5, will: "Sources waiting to be cleaned up.", inMenu: true },
-  { path: "/settings", label: "Settings", group: "housekeeping", phase: 6, will: "Your account, privacy and preferences.", inMenu: true },
+  { path: "/settings", label: "Settings", group: "housekeeping", phase: 6, will: "Your account, privacy and preferences.", inMenu: true, screen: Settings },
   // not in the menu
   { path: "/documents/d/:ref", label: "Document", phase: 1, will: "The writing surface, with its references, topics and history.", inMenu: false, screen: DocumentScreen },
   // an old /documents/<path> address: resolved to the id form and replaced (no path left in history)

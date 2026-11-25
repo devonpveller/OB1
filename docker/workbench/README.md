@@ -723,6 +723,19 @@ key is a 409 until 490 runs). Rollback = the previous workbench image FIRST (the
 `revert-settings.sql`. Lab: `run-workspace-tests.ps1` step `[5j2]` (the integration test over the real workbench and database: two identities, stale
 version, validation, the database guard, a trashed document) and `[5m2]` (the slot's init / revert cycle); both run under `-SettingsOnly`.
 
+### The tag on every settings key (rwr-settings-shell, slot 550)
+
+`init-settings-tags.sql` (slot 550; revert `revert-settings-tags.sql`) adds `settings_keys.tag`: who can see a key's value - `only_you`, `on_server`
+or `admin_all` (the new app's Settings screen draws it beside every setting). `cloud` ("Sent to a cloud provider") is refused by the column's CHECK on every key
+until phase 9 widens it. The column is nullable on purpose (slots 400 and 490 insert keys with ON CONFLICT DO UPDATE, which a NOT NULL column would refuse
+on a re-run); a key without a tag is what the catalog test (`settings_tags_integration_test.ts` T1) fails on, and the routes then report `tag: null`, which the
+screen shows as "No tag", never a guess. A later slot that adds a key sets its tag in its INSERT. Slots 400 and 490 are untouched. Routes: every setting the
+user and admin doors send now carries `tag`; and an admin key reached through the USER door (`PUT/DELETE /workbench/settings/:key`) answers a non-admin exactly as
+a key that does not exist (404), so trying names teaches nothing (an admin is still told where to go: 403). Order: forward = slots 400 + 490, a fresh DB backup,
+`init-settings-tags.sql`, then the new workbench image (it selects the column); rollback = the previous image FIRST, then `revert-settings-tags.sql`, before
+`revert-ui-state.sql` / `revert-settings.sql`. Lab: `run-workspace-tests.ps1` step `[5j3]` (the tag catalog, the wire for a non-admin, two identities) and `[5m3]`
+(the slot's init / revert cycle); `[5n]` and `[5m]` revert it before 490 and put it back after.
+
 ## My private material (rw-owner-private-view, plan 08 PD-PV, slot 480)
 
 The owner's own private material, which slot 440 moved out of the shared tables: their private claims, the shared

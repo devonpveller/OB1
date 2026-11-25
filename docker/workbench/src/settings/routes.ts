@@ -80,6 +80,10 @@ export function settingsRouter(deps: SettingsDeps) {
     const who = await identityOf(c);
     return settingsAdmin(who) ? who : null;
   };
+  // An admin key reached through the user door (rwr-settings-shell): an admin is told where to go; anyone else gets exactly
+  // what a key that does not exist gets (404), so a non-admin cannot learn which admin keys exist by trying names.
+  const notYours = (c: Context, who: Awaited<ReturnType<typeof identityOf>>, k: store.KeyRow, hint: string) =>
+    settingsAdmin(who) ? c.json({ error: hint }, 403) : c.json({ error: `${k.key} is not a setting` }, 404);
   const ADMIN_ONLY = { error: "only an admin may read or change the shared settings" };
 
   // ── the admin tier (registered before /:key; a key always holds a '.', so it is never "admin") ──
@@ -120,7 +124,7 @@ export function settingsRouter(deps: SettingsDeps) {
     const who = await identityOf(c);
     const k = await known(c);
     if (k instanceof Response) return k;
-    if (k.tier !== "user") return c.json({ error: `${k.key} is a shared setting: only an admin changes it (PUT /workbench/settings/admin/${k.key})` }, 403);
+    if (k.tier !== "user") return notYours(c, who, k, `${k.key} is a shared setting: only an admin changes it (PUT /workbench/settings/admin/${k.key})`);
     if (!k.editable) return c.json({ error: `${k.key} is read-only here` }, 409);
     const p = parseWrite(await c.req.json().catch(() => null));
     if (typeof p === "string") return c.json({ error: p }, 400);
@@ -134,7 +138,7 @@ export function settingsRouter(deps: SettingsDeps) {
     const who = await identityOf(c);
     const k = await known(c);
     if (k instanceof Response) return k;
-    if (k.tier !== "user") return c.json({ error: `${k.key} is a shared setting: only an admin changes it` }, 403);
+    if (k.tier !== "user") return notYours(c, who, k, `${k.key} is a shared setting: only an admin changes it`);
     // ?version=N: the version the caller last read; a stale one is refused (409) and nothing is deleted
     const v = c.req.query("version");
     if (v !== undefined && !/^\d{1,9}$/.test(v)) return c.json({ error: "version must be a whole number" }, 400);

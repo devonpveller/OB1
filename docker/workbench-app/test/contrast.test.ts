@@ -25,7 +25,7 @@ const PAIRS: [string, string, string][] = [
   ["amber-text", "amber-soft", "banner, For document bar, amber chip, current document"], ["amber-text", "panel", "Locked document label"],
   ["on-accent", "accent", "+ Start research"], ["on-accent", "accent-strong", "+ Start research hovered"],
   ["lock-fg", "lock-bg", "locked-document chip"], ["lock-fg", "lock-btn", "chip buttons"],
-  ["bg", "fg", "toast, avatar"], ["bg", "danger", "typed-confirm button"], ["fg", "panel-2", "typed-confirm input"],
+  ["danger", "panel", "Settings: a refused save"], ["accent-strong", "sunken", "Settings: a hovered section"], ["bg", "fg", "toast, avatar"], ["bg", "danger", "typed-confirm button"], ["fg", "panel-2", "typed-confirm input"],
 ];
 for (const [name, t] of [["light", light], ["dark", dark]] as const) {
   describe(`${name} tokens: AA text contrast`, () => {
