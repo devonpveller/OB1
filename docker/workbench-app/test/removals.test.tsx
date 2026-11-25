@@ -94,7 +94,11 @@ function stub() {
       const s = SRC.find((x) => x.id === m![1]); if (!s) return j({ error: "not found" }, 404);
       SRC = SRC.filter((x) => x !== s);
       const aid = record("restore", s.id, null);
-      TRAIL.push(ev("restored", s.id, { state: "current", context: { from: s.lifecycle, to: "active" }, lifecycle: "active", at: new Date().toISOString() }));
+      // REAL (repositories/sources.ts:330-333): restore clears retraction_committed_at / unlinked_at, so the derived 'suppressed'
+      // line (contracts/repo/knowledge.ts:468-473) is gone; and (sources.ts:340-342) the 'restored' line's detail is
+      // { from, to, reason, door } with NO title.
+      TRAIL = TRAIL.filter((e) => !(e.kind === "suppressed" && e.source_id === s.id));
+      TRAIL.push(ev("restored", s.id, { state: "current", context: { from: s.lifecycle, to: "active", reason: s.reason, door: "POST /workbench/sources/:id/restore" }, lifecycle: "active", at: new Date().toISOString() }));
       return j({ source: { id: s.id }, transition: { from: s.lifecycle, to: "active" }, aid });
     }
     m = path.match(/^\/workbench\/contract\/cleanup\/sources\/([^/]+)\/erase$/);
@@ -112,16 +116,23 @@ function stub() {
       const t = TOMB[m[1]]; if (!t) return j({ error: "no" }, 404);
       if (t.erased_by !== who) return j({ error: "only the eraser" }, 403);
       t.lifted = true; record("lift", null, m[1]);
-      TRAIL.push(ev("lifted", "gone1", { tombstone_id: m[1], context: { tombstone_id: m[1] }, lifecycle: "erased", at: new Date().toISOString() }));
+      // REAL (contracts/repo/lifecycle.ts:36-41 trail() inserts no tombstone_id column; :343 puts the id in detail only)
+      TRAIL.push(ev("lifted", "gone1", { tombstone_id: null, context: { tombstone_id: m[1], note: null }, lifecycle: "erased", at: new Date().toISOString() }));
       return j({ tombstone_id: m[1] });
     }
     if (path === "/workbench/documents/restore" && method === "POST") {
       const d = DOCS[who].find((x) => x.path === body.path); if (!d) return j({ error: "no such document" }, 404);
-      d.path = d.path.replace("/.trash/", "/"); return j({ restored: d.path });
+      // REAL (documents/repo.ts:241-245 restoreDocument writes a 'restored' line to documents/trail; trail.ts:8 TrailKind)
+      d.path = d.path.replace("/.trash/", "/").replace("/.archive/", "/");
+      DTRAIL[who].unshift({ id: "lr" + ++seq, kind: "restored", path: d.path, actor_sub: "u-" + who, trashed_at: null, created_at: new Date().toISOString() });
+      return j({ restored: d.path });
     }
     if (path === "/workbench/documents/unarchive" && method === "POST") {
       const d = DOCS[who].find((x) => x.path === body.path); if (!d) return j({ error: "no such document" }, 404);
-      d.path = d.path.replace("/.archive/", "/"); return j({ unarchived: d.path, refinery: { refinery_id: null, archived: false } });
+      // REAL: the unarchive door writes an 'unarchived' line (documents/trail.ts:8)
+      d.path = d.path.replace("/.archive/", "/");
+      DTRAIL[who].unshift({ id: "lu" + ++seq, kind: "unarchived", path: d.path, actor_sub: "u-" + who, trashed_at: null, created_at: new Date().toISOString() });
+      return j({ unarchived: d.path, refinery: { refinery_id: null, archived: false } });
     }
     if (path === "/workbench/documents/refinery/open" && method === "POST") {
       const i = IDEAS[who].find((x) => x.document_path === body.path); if (!i) return j({ error: "no" }, 404);
@@ -211,13 +222,16 @@ describe("each action calls the existing route and shows up in the trail with th
     await waitFor(() => expect(titles("sources")).toEqual(["Cut loose source two", "Held by private work"]));
     expect(calls.filter((c) => c.method === "POST").map((c) => c.url)).toEqual(["/workbench/sources/s1/restore"]);
     await goTrail();
-    const l = lines().find((x) => /Shown again: Hidden source one/.test(x))!;
-    expect(l).toBeTruthy(); expect(l).toMatch(/You/);
+    // the real restored line has no title, so none is invented: it says what it came back from, and why it had gone
+    const l = lines().find((x) => /Shown again \(it had been hidden\)/.test(x))!;
+    expect(l).toBeTruthy(); expect(l).toMatch(/You/); expect(l).toMatch(/misattributed quote/); expect(l).not.toMatch(/Hidden source one/);
+    // and the Hidden line is gone with the state it was read from
+    expect(lines().some((x) => /Hidden: Hidden source one/.test(x))).toBe(false);
   });
   it("Erase for good: POST cleanup/sources/:id/erase with the chosen reason, then an 'Erased for good ... You' line", async () => {
     await open();
     fireEvent.click(within(within(sec("sources")).getAllByTestId("row-source")[1]).getByTestId("erase"));
-    fireEvent.change(screen.getByTestId("erase-reason"), { target: { value: "credibility" } });
+    fireEvent.click(screen.getByTestId("erase-reason-credibility"));
     typeWord("ERASE");
     fireEvent.click(screen.getByTestId("typed-ok"));
     await waitFor(() => expect(titles("sources")).toEqual(["Hidden source one", "Held by private work"]));
@@ -330,10 +344,12 @@ describe("the trail is read only (acceptance 4)", () => {
     await goTrail();
     const tab = screen.getByTestId("trail-tab");
     expect(within(tab).queryAllByRole("button")).toHaveLength(0);
-    expect([...tab.querySelectorAll("input, textarea, [contenteditable], form")]).toHaveLength(0);
-    expect([...tab.querySelectorAll("select")].map((s) => s.getAttribute("data-testid"))).toEqual(["f-show", "f-what", "f-who"]);
+    expect([...tab.querySelectorAll("textarea, select, [contenteditable], form")]).toHaveLength(0);
+    expect([...tab.querySelectorAll("input")].every((i) => i.getAttribute("type") === "radio")).toBe(true);
+    expect([...tab.querySelectorAll("fieldset")].map((s) => s.getAttribute("data-testid"))).toEqual(["f-show", "f-what", "f-who"]);
     expect(calls.every((c) => c.method === "GET")).toBe(true);
-    expect(tab.textContent).toMatch(/never changed or removed/);
+    expect(tab.textContent).toMatch(/Nothing on this screen can change or delete a line/);
+    expect(tab.textContent).not.toMatch(/only grows/);
   });
   it("lists newest first, source lines and document lines, and the filters narrow it", async () => {
     await open();
@@ -341,17 +357,17 @@ describe("the trail is read only (acceptance 4)", () => {
     expect(lines().length).toBeGreaterThanOrEqual(8);
     const times = within(screen.getByTestId("trail-tab")).getAllByTestId("trail-line").map((l) => l.querySelector(".meta")!.textContent!);
     expect([...times].sort().reverse()).toEqual(times);
-    fireEvent.change(screen.getByTestId("f-show"), { target: { value: "Documents" } });
+    fireEvent.click(screen.getByTestId("f-show-Documents"));
     expect(lines().every((l) => /Deleted forever|Removed after 30 days/.test(l))).toBe(true);
     expect(lines()).toHaveLength(2);
     expect(lines().find((l) => /Removed after 30 days/.test(l))).toMatch(/The nightly clean-up/);
-    fireEvent.change(screen.getByTestId("f-show"), { target: { value: "all" } });
-    fireEvent.change(screen.getByTestId("f-what"), { target: { value: "suppressed" } });
+    fireEvent.click(screen.getByTestId("f-show-all"));
+    fireEvent.click(screen.getByTestId("f-what-suppressed"));
     expect(lines()).toHaveLength(3);
-    fireEvent.change(screen.getByTestId("f-who"), { target: { value: "me" } });
+    fireEvent.click(screen.getByTestId("f-who-me"));
     expect(lines()).toHaveLength(1);
     expect(lines()[0]).toMatch(/Hidden: Hidden source one/);
-    fireEvent.change(screen.getByTestId("f-what"), { target: { value: "lifted" } });
+    fireEvent.click(screen.getByTestId("f-what-lifted"));
     expect(screen.getByTestId("trail-empty")).toBeTruthy();
   });
   it("names only You, Someone else, the nightly clean-up or an administrator: never a subject or name", async () => {
@@ -421,7 +437,7 @@ describe("private rows show only to their owner, and user B never sees user A's 
     for (const f of readdirSync("src/screens/removals")) {
       const s = readFileSync("src/screens/removals/" + f, "utf8").split(/\r?\n/).filter((l) => !/^\s*\/\//.test(l)).join(" ");
       expect(s, f).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie|caches\.|console\.|fetch\(|XMLHttpRequest|sendBeacon/);
-      expect(s, f).not.toMatch(/type="search"|role="search"|type="text"|<input\b/); // no search or list-search component here
+      expect(s, f).not.toMatch(/type="search"|role="search"|type="text"|<select|<datalist|role="listbox"/); // no search or list-search component here
     }
   });
   it("every read is a GET and every action a POST to a /workbench/ route the lifecycle items own; nothing names a person in a URL", async () => {
@@ -445,5 +461,109 @@ describe("who did it is answered from the caller's own action log", () => {
     expect(isMine(e("severed", { sourceId: "s2", at: iso(10 * H) }), mine)).toBe(false);
     expect(isMine(e("suppressed", { context: { suppressed_by: "operator" } }), mine)).toBe(false);
     expect(isMine(e("suppressed"), [])).toBe(false);
+  });
+});
+
+describe("fix round 1 (tester t-removals, attempt 1): the screen against the real route shapes", () => {
+  it("F1 (T1): a lift whose real trail line has tombstone_id NULL still leaves Erased sources and reads You", async () => {
+    await open();
+    fireEvent.click(within(sec("erased")).getByTestId("lift"));
+    fireEvent.click(screen.getByTestId("lift-ok"));
+    await waitFor(() => expect(within(sec("erased")).getByTestId("empty-erased")).toBeTruthy());
+    expect(within(sec("erased")).queryAllByTestId("row-erased")).toHaveLength(0);
+    await goTrail();
+    expect(lines().find((x) => /Marker lifted/.test(x))).toMatch(/You/);
+    expect(TRAIL.find((e) => e.kind === "lifted")!.tombstone_id).toBeNull(); // the fake is the real shape
+  });
+  it("F1: isMine matches a lifted line by the id in its detail; another person's tombstone id does not match", () => {
+    const mine = [{ id: AID(2), kind: "lift", sourceId: null, tombstoneId: "t1", at: iso(H) }];
+    const line = (tid: string) => ({ kind: "lifted", sourceId: "gone1", tombstoneId: null, state: "current", reason: "", context: { tombstone_id: tid, note: null }, at: iso(H) });
+    expect(isMine(line("t1"), mine)).toBe(true);
+    expect(isMine(line("t9"), mine)).toBe(false);
+  });
+  it("F2 (T3): a document put back from the trash or the archive reads as put back, never 'Removed'", async () => {
+    await open();
+    fireEvent.click(within(within(sec("trashed")).getAllByTestId("row-trashed")[0]).getByTestId("show-again"));
+    await waitFor(() => expect(within(sec("trashed")).queryAllByTestId("row-trashed").length).toBe(0));
+    fireEvent.click(within(within(sec("archived")).getAllByTestId("row-archived")[0]).getByTestId("show-again"));
+    await waitFor(() => expect(within(sec("archived")).queryAllByTestId("row-archived").length).toBe(0));
+    await goTrail();
+    const memo = lines().find((x) => /memo/.test(x) && /Shown again/.test(x))!;
+    expect(memo, lines().join("\n")).toBeTruthy(); expect(memo).toMatch(/You/);
+    const notes = lines().find((x) => /notes/.test(x))!;
+    expect(notes).toMatch(/Taken out of the archive/); expect(notes).toMatch(/You/);
+    expect(lines().some((x) => /^.*Removed: (memo|notes)/.test(x))).toBe(false);
+    // and the What filter offers the new kind
+    fireEvent.click(screen.getByTestId("f-what-unarchived"));
+    expect(lines()).toHaveLength(1);
+  });
+  it("F3 (T2): a source shown again reads from what the real lines carry; no title is invented, the old reason is kept", async () => {
+    await open();
+    fireEvent.click(within(within(sec("sources")).getAllByTestId("row-source")[0]).getByTestId("show-again"));
+    await waitFor(() => expect(titles("sources")).toEqual(["Cut loose source two", "Held by private work"]));
+    await goTrail();
+    const l = lines().find((x) => /Shown again/.test(x))!;
+    expect(l).toMatch(/Shown again \(it had been hidden\): a source/);
+    expect(l).toMatch(/It had been taken out because: misattributed quote/);
+    expect(l).not.toMatch(/Hidden source one/);
+  });
+  it("Case 10 (T4): while one Erase confirmation is open, every other destructive button is off", async () => {
+    await open();
+    fireEvent.click(within(within(sec("sources")).getAllByTestId("row-source")[1]).getByTestId("erase"));
+    expect(screen.getByTestId("erase-panel")).toBeTruthy();
+    expect((within(sec("trashed")).getByTestId("delete-forever") as HTMLButtonElement).disabled).toBe(true);
+    expect((within(sec("erased")).getByTestId("lift") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId("typed-cancel"));
+    expect((within(sec("trashed")).getByTestId("delete-forever") as HTMLButtonElement).disabled).toBe(false);
+    expect((within(sec("erased")).getByTestId("lift") as HTMLButtonElement).disabled).toBe(false);
+  });
+  it("Case 10 (T5): two confirmations are never open together, whichever is opened first", async () => {
+    await open();
+    fireEvent.click(within(within(sec("sources")).getAllByTestId("row-source")[1]).getByTestId("erase"));
+    fireEvent.click(within(sec("trashed")).getByTestId("delete-forever"));
+    expect(screen.queryAllByTestId("typed-confirm").length).toBe(1);
+    fireEvent.click(screen.getByTestId("typed-cancel"));
+    fireEvent.click(within(sec("trashed")).getByTestId("delete-forever"));
+    expect((within(sec("sources")).getAllByTestId("erase")[0] as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(within(sec("sources")).getAllByTestId("erase")[0]);
+    fireEvent.click(within(sec("erased")).getByTestId("lift"));
+    expect(screen.queryAllByTestId("typed-confirm").length).toBe(1);
+    expect(screen.queryByTestId("lift-panel")).toBeNull();
+  });
+  it("Case 10: a lift panel open also turns the Erase and Delete forever buttons off", async () => {
+    await open();
+    fireEvent.click(within(sec("erased")).getByTestId("lift"));
+    expect((within(sec("trashed")).getByTestId("delete-forever") as HTMLButtonElement).disabled).toBe(true);
+    expect((within(sec("sources")).getAllByTestId("erase")[0] as HTMLButtonElement).disabled).toBe(true);
+  });
+  it("Case 13: the screen holds no <select> or <datalist>; the choices are radios, and the erase reason is sent", async () => {
+    await open();
+    expect(document.querySelectorAll("select, datalist")).toHaveLength(0);
+    fireEvent.click(within(within(sec("sources")).getAllByTestId("row-source")[1]).getByTestId("erase"));
+    expect(document.querySelectorAll("select, datalist")).toHaveLength(0);
+    expect((screen.getByTestId("erase-reason-deliberate") as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByTestId("erase-reason-debunked"));
+    expect((screen.getByTestId("erase-reason-debunked") as HTMLInputElement).checked).toBe(true);
+    typeWord("ERASE"); fireEvent.click(screen.getByTestId("typed-ok"));
+    await waitFor(() => expect(calls.some((c) => c.method === "POST")).toBe(true));
+    expect(calls.find((c) => c.method === "POST")!.body).toEqual({ reason_type: "debunked" });
+  });
+  it("T9: 'Only me' shows only the caller's own lines, not the nightly clean-up or an administrator's", async () => {
+    DTRAIL.alice.push({ id: "l3", kind: "delete_forever", path: "documents/k-a/.trash/ALPHA-admin.md", actor_sub: "u-admin", trashed_at: iso(H), created_at: iso(10 * H) });
+    await open();
+    await goTrail();
+    expect(lines().some((l) => /The nightly clean-up/.test(l))).toBe(true);
+    expect(lines().some((l) => /An administrator/.test(l))).toBe(true);
+    fireEvent.click(screen.getByTestId("f-who-me"));
+    for (const l of lines()) expect(l).not.toMatch(/nightly clean-up|Someone else|An administrator/);
+    expect(lines().some((l) => /Deleted forever: ALPHA-old/.test(l))).toBe(true);
+  });
+  it("the fallback line for an action with no shared trail line uses readable words, never the raw kind", async () => {
+    ACTS.alice.push({ id: AID(7), kind: "lift", source_id: null, tombstone_id: "t77", created_at: iso(H) }, { id: AID(8), kind: "mystery", source_id: null, tombstone_id: null, created_at: iso(2 * H) });
+    await open();
+    await goTrail();
+    expect(lines().some((l) => /You lifted a marker/.test(l))).toBe(true);
+    expect(lines().some((l) => /An action of yours/.test(l))).toBe(true);
+    expect(lines().some((l) => /Action recorded in your log|\blift\b|\bmystery\b/.test(l))).toBe(false);
   });
 });

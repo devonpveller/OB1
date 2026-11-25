@@ -129,7 +129,17 @@ const KIND_OF: Record<string, string[]> = {
 const WINDOW_MS = 120_000;
 const ms = (s: string) => { const t = Date.parse(s); return Number.isFinite(t) ? t : 0; };
 
+// The marker a trail line is about. An "erased" line carries it in the tombstone_id column; a real "lifted" line has
+// tombstone_id NULL and names it only in its detail (contracts/repo/lifecycle.ts:36-41 trail() writes no tombstone_id,
+// :343 writes { tombstone_id, note }; contracts/repo/knowledge.ts:484 returns the column, the detail comes back as context).
+export function tombstoneOf(e: TrailEntry): string | null {
+  if (e.tombstoneId) return e.tombstoneId;
+  const d = e.context.tombstone_id;
+  return typeof d === "string" && d !== "" ? d : null;
+}
+
 export function isMine(e: TrailEntry, mine: MyAction[]): boolean {
+  const tid = tombstoneOf(e);
   const ids = new Set(mine.map((a) => a.id.toLowerCase()));
   const own = (ref: unknown) => { const m = typeof ref === "string" ? REF.exec(ref) : null; return !!m && ids.has(m[1].toLowerCase()); };
   // a line that names its action settles it: that action is mine or it is not (never guessed from the time)
@@ -138,7 +148,7 @@ export function isMine(e: TrailEntry, mine: MyAction[]): boolean {
   const kinds = KIND_OF[e.kind];
   if (!kinds) return false;
   return mine.some((a) => kinds.includes(a.kind) && (
-    (e.tombstoneId !== null && a.tombstoneId === e.tombstoneId) ||
+    (tid !== null && a.tombstoneId === tid) ||
     (a.sourceId !== null && a.sourceId === e.sourceId && Math.abs(ms(a.at) - ms(e.at)) <= WINDOW_MS)));
 }
 

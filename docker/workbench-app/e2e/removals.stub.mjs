@@ -92,7 +92,11 @@ http.createServer((req, res) => {
     if (m) {
       const s = W.src.find((x) => x.id === m[1]); if (!s) return json({ error: "not found" }, 404);
       W.src = W.src.filter((x) => x !== s); record("restore", s.id, null);
-      W.trail.push(ev("restored", s.id, { context: { from: s.lifecycle, to: "active", title: s.title }, lifecycle: "active", at: new Date().toISOString() }));
+      // As the real routes: restore clears retraction_committed_at / unlinked_at (repositories/sources.ts:330-333), so the derived
+      // 'suppressed' line (contracts/repo/knowledge.ts:468-473) is gone; the 'restored' line's detail is { from, to, reason, door }
+      // with NO title (sources.ts:340-342).
+      W.trail = W.trail.filter((e) => !(e.kind === "suppressed" && e.source_id === s.id));
+      W.trail.push(ev("restored", s.id, { context: { from: s.lifecycle, to: "active", reason: s.reason, door: "POST /workbench/sources/:id/restore" }, lifecycle: "active", at: new Date().toISOString() }));
       return json({ source: { id: s.id }, transition: { from: s.lifecycle, to: "active" } });
     }
     m = p.match(/^\/workbench\/contract\/cleanup\/sources\/([^/]+)\/erase$/);
@@ -109,12 +113,17 @@ http.createServer((req, res) => {
       const t = W.tomb[m[1]]; if (!t) return json({ error: "no" }, 404);
       if (t.by !== mode) return json({ error: "only the eraser" }, 403);
       t.lifted = true; record("lift", null, m[1]);
-      W.trail.push(ev("lifted", "gone1", { tombstone_id: m[1], context: { tombstone_id: m[1] }, lifecycle: "erased", at: new Date().toISOString() }));
+      // As the real route: the trail() insert writes no tombstone_id column (contracts/repo/lifecycle.ts:36-41); the id is only in
+      // detail (:343), which the trail read returns as context (contracts/repo/knowledge.ts:484).
+      W.trail.push(ev("lifted", "gone1", { tombstone_id: null, context: { tombstone_id: m[1], note: null }, lifecycle: "erased", at: new Date().toISOString() }));
       return json({ tombstone_id: m[1] });
     }
     const d = () => W.docs[mode].find((x) => x.path === b.path);
-    if (p === "/workbench/documents/restore") { const x = d(); if (!x) return json({ error: "no such document" }, 404); x.path = x.path.replace("/.trash/", "/"); return json({ restored: x.path }); }
-    if (p === "/workbench/documents/unarchive") { const x = d(); if (!x) return json({ error: "no such document" }, 404); x.path = x.path.replace("/.archive/", "/"); return json({ unarchived: x.path, refinery: { refinery_id: null, archived: false } }); }
+    // As the real doors: documents/repo.ts:241-245 (restoreDocument, { trail: "restored" }) and the unarchive door write a put-back
+    // line to documents/trail (documents/trail.ts:8 TrailKind).
+    const putBack = (kind, path) => W.dtrail[mode].unshift({ id: "lp" + ++seq, kind, path, actor_sub: SUB[mode], trashed_at: null, created_at: new Date().toISOString() });
+    if (p === "/workbench/documents/restore") { const x = d(); if (!x) return json({ error: "no such document" }, 404); x.path = x.path.replace("/.trash/", "/").replace("/.archive/", "/"); putBack("restored", x.path); return json({ restored: x.path }); }
+    if (p === "/workbench/documents/unarchive") { const x = d(); if (!x) return json({ error: "no such document" }, 404); x.path = x.path.replace("/.archive/", "/"); putBack("unarchived", x.path); return json({ unarchived: x.path, refinery: { refinery_id: null, archived: false } }); }
     if (p === "/workbench/documents/refinery/open") { const i = W.ideas[mode].find((x) => x.document_path === b.path); if (!i) return json({ error: "no" }, 404); i.status = "engaged"; return json({ refinery_id: i.id, archived: false }); }
     if (p === "/workbench/documents/delete-forever") {
       if (b.confirm !== true) return json({ error: "confirm" }, 400);

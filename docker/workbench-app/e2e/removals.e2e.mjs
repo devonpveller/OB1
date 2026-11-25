@@ -70,8 +70,8 @@ await click(`document.querySelector('[data-testid=row-source] [data-testid=show-
 ok(JSON.stringify(await rowTitles("sources")) === JSON.stringify(["Cut loose source two", "Held by private work"]), "Show it again: the source left the Removed list");
 ok((await posts()).includes("/workbench/sources/s1/restore"), "...through POST /workbench/sources/:id/restore");
 await tab("trail");
-const shown = (await lines()).find((l) => /Shown again: Hidden source one/.test(l));
-ok(!!shown && /You/.test(shown), `...and the trail has the line with You as actor: ${shown}`);
+const shown = (await lines()).find((l) => /Shown again \(it had been hidden\)/.test(l));
+ok(!!shown && /You/.test(shown) && !/Hidden source one/.test(shown), `...and the trail has the line with You as actor, with no invented title: ${shown}`);
 await tab("removed");
 
 // ---- 3. Erase for good: the typed word, the reason, lost and stays
@@ -80,9 +80,11 @@ ok(/What is lost/.test(await ev(`${T("lost-stays")}.textContent`)) && /What stay
 await axe("light erase panel");
 const dis = () => ev(`${T("typed-ok")}.disabled`);
 ok((await dis()) === true, "the Erase button is disabled before anything is typed");
+ok((await ev(`${T("delete-forever")}.disabled && ${T("lift")}.disabled`)) === true, "one confirmation at a time: Delete forever and Lift the marker are off while the Erase panel is open");
+ok((await ev(`document.querySelectorAll('select, datalist').length`)) === 0, "no <select> or <datalist> on the screen");
 for (const w of ["erase", "Erase", "ERAS", "ERASE now"]) { await typeInto("typed-input", w); ok((await dis()) === true, `typing "${w}" does not enable it`); }
 ok(!(await posts()).some((u) => /erase$/.test(u)), "nothing was sent for a wrong word");
-await ev(`(()=>{const s=${T("erase-reason")};s.value='credibility';s.dispatchEvent(new Event('change',{bubbles:true}))})()`);
+await click(T("erase-reason-credibility"));
 await typeInto("typed-input", "ERASE");
 ok((await dis()) === false, "typing ERASE exactly enables it");
 await click(T("typed-ok")); await idle(); await sleep(300);
@@ -98,6 +100,7 @@ await click(T("lift")); await sleep(150);
 ok(/does not bring it back/.test(await ev(`${T("lost-stays")}.textContent`)), "Lift the marker says what it does and does not do");
 await click(T("lift-ok")); await idle(); await sleep(300);
 ok((await posts()).some((u) => /^\/workbench\/contract\/cleanup\/tombstones\/t\d+\/lift$/.test(u)), "Lift the marker calls the existing route");
+ok(JSON.stringify(await rowTitles("erased")) === "[]", "the lifted marker left Erased sources (the real lifted line has no tombstone_id column)");
 await tab("trail");
 const lf = (await lines()).find((l) => /Marker lifted/.test(l));
 ok(!!lf && /You/.test(lf), `the trail has Marker lifted with You: ${lf}`);
@@ -108,6 +111,10 @@ await click(`document.querySelector('[data-testid=row-archived] [data-testid=sho
 await click(`document.querySelector('[data-testid=row-idea] [data-testid=show-again]')`); await idle();
 const ps = await posts();
 ok(ps.includes("/workbench/documents/unarchive") && ps.includes("/workbench/documents/refinery/open"), "archived document and archived idea: Show it again calls unarchive and refinery/open");
+await tab("trail");
+const ua = (await lines()).find((l) => /Taken out of the archive/.test(l));
+ok(!!ua && /You/.test(ua) && !/Removed:/.test(ua), `the trail has the unarchive line, not "Removed": ${ua}`);
+await tab("removed");
 await click(T("delete-forever")); await sleep(150);
 await typeInto("typed-input", "delete"); ok((await dis()) === true, "Delete forever stays disabled for the wrong case");
 await typeInto("typed-input", "DELETE"); await click(T("typed-ok")); await idle(); await sleep(300);
@@ -118,11 +125,11 @@ const df = (await lines()).find((l) => /Deleted forever: memo/.test(l));
 ok(!!df && /You/.test(df), `the trail has Deleted forever with You: ${df}`);
 
 // ---- 6. the trail is read only
-const tr = JSON.parse(await ev(`JSON.stringify({buttons:document.querySelectorAll('[data-testid=trail-tab] button').length, inputs:document.querySelectorAll('[data-testid=trail-tab] input, [data-testid=trail-tab] textarea, [data-testid=trail-tab] form').length, selects:document.querySelectorAll('[data-testid=trail-tab] select').length})`));
-ok(tr.buttons === 0 && tr.inputs === 0 && tr.selects === 3, `the trail has no button, input or form: only its three filters (${JSON.stringify(tr)})`);
+const tr = JSON.parse(await ev(`JSON.stringify({buttons:document.querySelectorAll('[data-testid=trail-tab] button').length, inputs:document.querySelectorAll('[data-testid=trail-tab] input:not([type=radio]), [data-testid=trail-tab] textarea, [data-testid=trail-tab] form').length, filters:document.querySelectorAll('[data-testid=trail-tab] fieldset').length})`));
+ok(tr.buttons === 0 && tr.inputs === 0 && tr.filters === 3, `the trail has no button, text input or form: only its three radio filters (${JSON.stringify(tr)})`);
 const before = (await stub("/__log")).length;
-await ev(`(()=>{const s=document.querySelector('[data-testid=f-who]');s.value='me';s.dispatchEvent(new Event('change',{bubbles:true}))})()`); await sleep(200);
-ok((await lines()).every((l) => /You|nightly clean-up/.test(l)) && !(await lines()).some((l) => /Someone else/.test(l)) && (await lines()).length >= 4, "Only me narrows the trail to your own lines (and your own documents)");
+await click(T("f-who-me")); await sleep(200);
+ok((await lines()).every((l) => /You/.test(l) && !/nightly clean-up|An administrator/.test(l)) && !(await lines()).some((l) => /Someone else/.test(l)) && (await lines()).length >= 4, "Only me narrows the trail to your own lines (and your own documents)");
 ok((await stub("/__log")).length === before, "changing a filter sends nothing");
 for (const sch of ["light", "dark"]) { await scheme(sch); await axe(`${sch} Trail tab`); }
 await scheme("light");
