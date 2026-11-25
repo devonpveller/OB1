@@ -53,6 +53,13 @@ image, `openbrain-workbench-app`. Later items fill it in. Not a stack service ye
   headless-Chromium e2e with axe in an isolated lab: `e2e/run-e2e.ps1 -Image openbrain-workbench-app:wt-<id>
   -AxeJs <axe.min.js>` (an `--internal` network, a stub workbench, no plane lease needed).
 
+## Settings (item `rwr-settings-shell`)
+
+- `src/screens/settings/`: `Settings.tsx` (the frame), `settings-data.ts` (reads, versioned writes, the legend) and `settings.css`. `App.tsx` mounts it for `/settings` (one line); nothing else of the shell changed.
+- The frame: the privacy stance (no word about cloud until the cloud items land), the tags legend (Only you / Stays on this server / Sent to a cloud provider / Admin changes it for everyone), a section list (Yours, and Admin only when the SERVER says `admin: true`), and one row per setting: label, help, its tag (the registry row's `tag`, slot 550; a row without one says "No tag"), a control that saves as you go ("Saved"), and "Back to default". The app's own state keys (locked / last document, Recently viewed) are not offered as a form.
+- Reads: `GET /workbench/settings` (the caller's own user tier + `admin`), and only when that says admin, `GET /workbench/settings/admin`. A non-admin's page never requests the shared tier and the server would refuse it (403); nothing is hidden by CSS. Writes: `PUT /workbench/settings/:key {value, version}` (a stale version is refused 409 and the latest is shown), `DELETE ...?version=N` for Back to default. Nothing is kept in the browser.
+- Tests: `test/settings.test.tsx` (vitest) and `e2e/settings.e2e.mjs` (headless Chromium, `e2e/run-settings-e2e.ps1`, subnet 10.250.96.0/24): the wire for a non-admin, a value saved in one tab shown in a fresh one, two people, a stale save, axe light and dark.
+
 ## Home (item `rwr-home`)
 
 - `src/screens/home/`: `Home.tsx` (the ask box and six cards) and `home-data.ts` (one read per card, its own loading/failed/ok state, a Try again). `App.tsx` mounts it for `/`; nothing else of the shell changed.

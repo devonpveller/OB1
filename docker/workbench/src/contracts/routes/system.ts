@@ -11,12 +11,30 @@ export function settingsAdmin(who: Identity, cfg = identityConfig()): boolean {
   return !cfg.signIn && who.sub === cfg.defaultSub;
 }
 import { createRoute, z } from "../deps.ts";
+import type { Db } from "../db.ts";
+import { NotFound } from "../repo/lifecycle.ts";
 import * as sys from "../repo/system.ts";
 import { parseLimit } from "../logic/scope.ts";
 import { ErrorBody, limit, pathParam, queryParam } from "../schemas/common.ts";
 import { Notifications, Registries, RegistryDetail, Setting, Settings, SettingWrite } from "../schemas/system.ts";
 import { EX } from "../schemas/examples.ts";
 import { authorOf, body, type ContractApp, type ContractDeps, errors, op, fail, json, PREFIX, send } from "./http.ts";
+
+// rwr-settings-shell (tester attempt 1, case 1): the contract's settings reads hold the shared (admin-tier) keys. A PERSON who is
+// not an admin never receives one: the list leaves them out, and one key read answers exactly as for a key that does not exist
+// (404, the same words), so trying names teaches nothing. A SERVICE (its own key: the podcast writer reads
+// podcast.archive_destination here) and an admin see everything, as before. Fail closed: a key is a person's to see only
+// when public.settings_keys says it is user tier; a registry key the table does not know is treated as admin tier.
+export function seesAdminTier(who: Identity, cfg = identityConfig()): boolean {
+  return who.kind === "service" || settingsAdmin(who, cfg);
+}
+async function userTierKeys(db: Db): Promise<Set<string>> {
+  try {
+    return new Set((await db.query<{ key: string }>(`SELECT key FROM public.settings_keys WHERE tier = 'user'`)).map((r) => r.key));
+  } catch {
+    return new Set(); // the table is not there (slot 400 not applied): nothing is shown to a person
+  }
+}
 
 export function registerSystem(app: ContractApp, deps: ContractDeps) {
   op(app, createRoute({
@@ -48,7 +66,12 @@ export function registerSystem(app: ContractApp, deps: ContractDeps) {
     responses: { 200: json(Settings, EX.settings, "settings"), ...errors },
   }), async (c) => {
     try {
-      return send(c, Settings, await sys.settings(deps.db, deps.registry, deps.mountsRoot));
+      const out = await sys.settings(deps.db, deps.registry, deps.mountsRoot);
+      if (!seesAdminTier(await identityOf(c))) {
+        const mine = await userTierKeys(deps.db);
+        out.settings = out.settings.filter((s) => mine.has(s.key));
+      }
+      return send(c, Settings, out);
     } catch (e) {
       return fail(c, e);
     }
@@ -61,7 +84,11 @@ export function registerSystem(app: ContractApp, deps: ContractDeps) {
     responses: { 200: json(Setting, EX.setting, "the setting"), ...errors },
   }), async (c) => {
     try {
-      return send(c, Setting, await sys.setting(deps.db, deps.registry, c.req.valid("param").key, deps.mountsRoot));
+      const key = c.req.valid("param").key;
+      if (!seesAdminTier(await identityOf(c)) && !(await userTierKeys(deps.db)).has(key)) {
+        throw new NotFound(`'${key}' is not a key of the settings registry`); // the very answer an unknown key gets (repo/system.ts setting)
+      }
+      return send(c, Setting, await sys.setting(deps.db, deps.registry, key, deps.mountsRoot));
     } catch (e) {
       return fail(c, e);
     }
