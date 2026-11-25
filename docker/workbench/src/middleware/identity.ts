@@ -251,7 +251,8 @@ const OPEN = /^\/workbench\/(health|auth\/me)$/;
 // rw-owner-private-view: and the owner's private views (contract/private/*: a service is nobody's owner)
 // rwr-cast-edit-api: and the cast (contract/cast/*: a person's presenters, teams, formats and voices; openbrain-podcast
 // reads the model through its own REST door, never here)
-export const USER_ONLY = /^\/workbench\/(documents|workspace|ideas|settings|contract\/(flags|private|inlets|cast)|auth\/(impersonate|users|audit))(\/|$)/;
+// rwr-own-thoughts-search-api: and my own thoughts (contract/own-thoughts/*: a service is nobody's owner)
+export const USER_ONLY = /^\/workbench\/(documents|workspace|ideas|settings|contract\/(flags|private|inlets|cast|own-thoughts)|auth\/(impersonate|users|audit))(\/|$)/;
 // the reads that can carry a research job's original prompt (round 4, F4)
 // rw-p8a1-core round 3 (reviewer RF1): the trail's leads too - an admin may read an ownerless tree's
 // rw-p5a-intake: and the intake panel's reads (and the old /workbench/jobs), whose ownerless jobs an admin who is

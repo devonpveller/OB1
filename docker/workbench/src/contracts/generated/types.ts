@@ -904,6 +904,25 @@ export type Notifications = {
   notifications: Array<Notification>;
 };
 
+export type OwnThoughtHit = {
+  kind: string;
+  id: string;
+  title: string;
+  snippet: string;
+  state: string;
+  lifecycle: unknown | null;
+  page_class: unknown | null;
+  date: string;
+  private: boolean;
+  marker: string;
+};
+
+export type OwnThoughts = {
+  private: boolean;
+  query: string;
+  results: Array<OwnThoughtHit>;
+};
+
 export type PodcastEpisode = {
   id: string;
   title: string;

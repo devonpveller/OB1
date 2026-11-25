@@ -16,6 +16,7 @@ import { registerInlets } from "./routes/inlets.ts";
 import { registerResearchStart } from "./routes/research_start.ts";
 import { registerIdeaCapture } from "./routes/idea_capture.ts";
 import { registerIdeaArchive } from "./routes/idea_archive.ts";
+import { registerOwnThoughts } from "./routes/own_thoughts.ts";
 import { tombstoneActorMask } from "./routes/actor_mask.ts";
 import { registerPrivate } from "./routes/private.ts";
 import { registerCast } from "./routes/cast.ts";
@@ -34,6 +35,7 @@ export function createContractApp(deps: ContractDeps) {
   registerPodcasts(app, deps);
   registerSessions(app, deps);
   registerTrust(app, deps); // P3b: the trust panels' reads
+  registerOwnThoughts(app, deps); // rwr-own-thoughts-search-api: my own thoughts, search (no MCP tool)
   registerCleanup(app, deps); // P8a (rw-p8a2-cleanup): the cleanup view
   registerLibrary(app, deps); // rwr-home round 4: the shared-library reads behind the Home library cards
   registerFlags(app, deps); // rwr-flags-api: flag for cleanup (per user)
