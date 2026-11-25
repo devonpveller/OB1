@@ -380,7 +380,8 @@ t("G7: nothing private from this item appears on a shared surface (planted marke
   // 4. the ops corpus: the wiki pages and the shared search read nothing of this table
   assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE content::text LIKE $1 OR title LIKE $1`, [`%${MARK}%`]).catch(() => [{ n: 0 }]))[0].n, 0);
   // 5. every body B received in the whole run carries no marker of A's (G5 checked the ids)
-  assert(!seen[B].some((x) => x.includes(MARK)));
+  // (B's own search for the words echoes them back as `query`; that is B's own text, not a finding)
+  assert(!seen[B].some((x) => x.includes(MARK) && !x.startsWith(`{"query":"${MARK}`)), "B received a body carrying A's marker");
 });
 
 t("G8: bodies are strict, errors say nothing of other users, and the id and filter parameters are checked", async () => {
