@@ -6,7 +6,7 @@
 //             (getSource: the metadata filter, the lifecycle state, evidence-only);
 //   private   a moved email-body / podcast-transcript source (slot 440): ONLY its owner, through the owner-only
 //             functions (inlet_private_source, slot 440; inlet_private_reader_chunks / _claims, slot 520). Anyone
-//             else - another user, a non-owner admin, a service, a filtered (cloud door) caller - and a source that
+//             else - another user, a non-owner admin, an impersonating admin, an on-behalf caller, a service, a filtered (cloud door) caller - and a source that
 //             does not exist get the same answer: null, which the route turns into one 404 body.
 // Nothing here calls a model. Held (refinery) sources are not served: they are an idea's, not the library's.
 import type { Db } from "../db.ts";
@@ -14,7 +14,8 @@ import type { MetadataFilter } from "../logic/scope.ts";
 import { sourceRecordState } from "../logic/state.ts";
 import { placeClaim, type Placement, sectionsFor } from "../logic/source_reader.ts";
 import { getSource, sourceStateDetail } from "./sources.ts";
-import type { Viewer } from "../../documents/ownership.ts";
+import type { Identity } from "../../middleware/identity.ts";
+import { privateEligible, type PrivateViewConfig } from "../../identity/private_view.ts";
 
 interface ClaimRow {
   claim_id: string;
@@ -27,8 +28,6 @@ interface ChunkRow {
   idx: number;
   content: string;
 }
-
-const isOwnerSub = (sub: string) => !!sub && sub.trim() !== "" && !sub.startsWith("service:");
 
 // 42883 (function missing: slot 440 / 520 not applied) and 42501 (this role may not call it) read as absent:
 // fail closed, the same answer as no such source
@@ -74,7 +73,7 @@ function shape(
 export async function sourceReader(
   db: Db,
   id: string,
-  opts: { evidenceOnly: boolean; visible: Set<string>; filter: MetadataFilter; who: Viewer },
+  opts: { evidenceOnly: boolean; visible: Set<string>; filter: MetadataFilter; who: Identity | undefined; privateView: PrivateViewConfig },
 ) {
   const s = await getSource(db, id, opts.filter);
   if (s) {
@@ -99,7 +98,9 @@ export async function sourceReader(
     return shape(base, content, chunks, claims);
   }
   // not a shared source: a private one is its owner's, and never reaches a filtered (cloud door) caller
-  if (opts.filter || !isOwnerSub(opts.who.sub)) return null;
+  // ... and only to the person themselves (identity/private_view.ts privateEligible, decision D2): a signed-in user acting
+  // as themselves. An admin impersonating the owner and an on-behalf caller (openbrain-mcp, Open WebUI) get the missing-source answer.
+  if (opts.filter || !privateEligible(opts.who, opts.privateView) || !opts.who) return null;
   const src = await privateQuery<{ id: string; title: string; url: string | null; content: string }>(
     db, `SELECT id, title, url, content FROM public.inlet_private_source($1::uuid, $2)`, [id, opts.who.sub],
   );

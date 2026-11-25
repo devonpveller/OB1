@@ -12,10 +12,12 @@ import { SOURCE_READER_EXAMPLE, SourceReader } from "../schemas/source_reader.ts
 import { FX } from "../schemas/fixtures.ts";
 import { type ContractApp, type ContractDeps, errors, fail, json, op, PREFIX, send } from "./http.ts";
 import { identityOf } from "../../middleware/identity.ts";
+import { privateViewConfig } from "../../identity/private_view.ts";
 
 export const NOT_FOUND_BODY = { error: "no source with this id" };
 
 export function registerSourceReader(app: ContractApp, deps: ContractDeps) {
+  const privateView = deps.privateView ?? privateViewConfig();
   op(app, createRoute({
     method: "get", path: `${PREFIX}/sources/{id}/reader`, operationId: "sourceReader", tags: ["source reader"],
     summary: "sourceReader(id) - the source's chunks in order with section names, and each claim drawn from it placed " +
@@ -31,7 +33,7 @@ export function registerSourceReader(app: ContractApp, deps: ContractDeps) {
       const entries = await deps.registry.entries("source_states");
       const r = await sourceReader(deps.db, c.req.valid("param").id, {
         evidenceOnly: parseFlag(q.evidence_only), visible: evidenceVisibleStates(entries),
-        filter: parseMetadataFilter(q.metadata_filter), who: await identityOf(c),
+        filter: parseMetadataFilter(q.metadata_filter), who: await identityOf(c), privateView,
       });
       if (!r) return c.json(NOT_FOUND_BODY, 404);
       c.header("Cache-Control", "no-store");

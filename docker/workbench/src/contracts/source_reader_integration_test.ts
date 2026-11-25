@@ -34,10 +34,20 @@ const front = db
     const app = createContractApp({
       db, registry: new RegistryReader(db, 0), scorer: unavailableScorer, chunk: chunkText, mountsRoot: "/tmp/contract-mounts",
       embed: () => Promise.resolve(Array.from({ length: 1024 }, (_, i) => (i === 0 ? 1 : 0))), streamPollMs: 20, log: (m) => logs.push(m),
+      privateView: { signIn: true, defaultSub: "" }, // the private-view rule (identity/private_view.ts) in its signed-in mode
     });
     const h = new Hono();
     const env = (k: string) => ({ WORKSPACE_SERVICE_KEYS: `sr-test=${SERVICE_KEY}`, WORKSPACE_IDENTITY_HEADER: "X-Test-Sub" } as Record<string, string>)[k];
     h.use("*", identitySeam(seamDeps(null, env)));
+    // lab identities: x-test-inject sets a full identity (an impersonating admin, an on-behalf caller); otherwise a named
+    // X-Test-Sub subject is a signed-in user acting as themselves (the seam's header identity has kind "header")
+    h.use("*", async (c, next) => {
+      const inj = c.req.header("x-test-inject");
+      const who = c.get("identity" as never) as { kind?: string; sub: string } | undefined;
+      if (inj) c.set("identity" as never, JSON.parse(inj) as never);
+      else if (who?.kind === "header") c.set("identity" as never, { ...who, kind: "user", actor: who.sub } as never);
+      await next();
+    });
     h.route("/", app);
     return h;
   })()
@@ -47,9 +57,12 @@ const t = (name: string, fn: () => Promise<void>) => Deno.test({ name, ignore, f
 const sql = <T = Record<string, unknown>>(text: string, args: unknown[] = []) => admin!.query<T>(text, args);
 const uuid = () => crypto.randomUUID();
 const rnd = () => crypto.randomUUID().replace(/-/g, "").slice(0, 10);
-async function read(id: string, as: string | null, query = "", opts: { service?: boolean } = {}) {
+async function read(id: string, as: string | null, query = "", opts: { service?: boolean; inject?: Record<string, unknown> } = {}) {
   const r = await front!.request(`/workbench/contract/sources/${id}/reader${query}`, {
-    headers: { ...(as ? { "X-Test-Sub": as } : {}), ...(opts.service ? { "x-brain-key": SERVICE_KEY } : {}) },
+    headers: {
+      ...(as ? { "X-Test-Sub": as } : {}), ...(opts.service ? { "x-brain-key": SERVICE_KEY } : {}),
+      ...(opts.inject ? { "x-test-inject": JSON.stringify(opts.inject) } : {}),
+    },
   });
   const text = await r.text();
   let json: Record<string, any> = {};
@@ -240,6 +253,10 @@ t("acceptance 2+6: a private source is its owner's; anyone else - user B, a non-
     ["a non-owner admin", await read(W.priv, W.subAdmin)],
     ["the default user", await read(W.priv, null)],
     ["a service", await read(W.priv, null, "", { service: true })],
+    // attempt-1 Case 2 (T2b, T2c): the owner's subject, but not the owner acting as themselves (identity/private_view.ts D2)
+    ["an admin impersonating the owner (T2b)", await read(W.priv, null, "", { inject: { sub: W.subA, actor: W.subAdmin, name: W.subA, key: W.subA, kind: "user", admin: true, impersonating: { reason: "lab", since: new Date().toISOString() } } })],
+    ["openbrain-mcp on behalf of the owner (T2c)", await read(W.priv, null, "", { inject: { sub: W.subA, actor: "service:mcp", name: W.subA, key: W.subA, kind: "on-behalf", admin: false, impersonating: null } })],
+    ["Open WebUI on behalf of the owner", await read(W.priv, null, "", { inject: { sub: W.subA, actor: "service:owui", name: W.subA, key: W.subA, kind: "on-behalf", admin: false, impersonating: null } })],
     ["the owner under a cloud-door filter", await read(W.priv, W.subA, `?metadata_filter=${encodeURIComponent('{"share":"cloud"}')}`)],
   ] as const;
   for (const [who, r] of refusals) {

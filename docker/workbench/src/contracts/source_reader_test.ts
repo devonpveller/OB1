@@ -79,3 +79,70 @@ Deno.test("the route is in the contract, a plain read, not an MCP tool, and its 
   const r = SourceReader.safeParse(SOURCE_READER_EXAMPLE);
   assert(r.success, JSON.stringify(r.error?.issues));
 });
+
+// ---- the private-view rule (PD1 / identity/private_view.ts D2): attempt-1 Case 2 (T2b, T2c) ----
+// A private source is read ONLY by a signed-in user acting as themselves. An admin impersonating the owner (T2b) and
+// openbrain-mcp acting on the owner's behalf (T2c) get the very answer a missing source gets (null -> the one 404),
+// and no private query is even sent for them. Over a fake Db that WOULD hand the private source to anyone who asks.
+import { sourceReader } from "./repo/source_reader.ts";
+import type { Db } from "./db.ts";
+import type { Identity } from "../middleware/identity.ts";
+import type { PrivateViewConfig } from "../identity/private_view.ts";
+
+const OWNER = "sub-owner-1";
+function fakeDb(sent: string[]): Db {
+  const db: Db = {
+    query: (sql: string) => {
+      sent.push(sql);
+      if (sql.includes("inlet_private_source(")) return Promise.resolve([{ id: "s1", title: "T", url: null, content: "PRIVMARK" }] as never);
+      if (sql.includes("inlet_private_reader_chunks")) return Promise.resolve([{ idx: 0, content: "PRIVMARK" }] as never);
+      return Promise.resolve([] as never);
+    },
+    tx: (fn: (d: Db) => Promise<unknown>) => fn(db),
+  } as unknown as Db;
+  return db;
+}
+const ID_USER: Identity = { sub: OWNER, actor: OWNER, name: OWNER, key: OWNER, kind: "user", admin: false, impersonating: null };
+const ID_ADMIN_AS: Identity = { sub: OWNER, actor: "admin-9", name: OWNER, key: OWNER, kind: "user", admin: true, impersonating: { reason: "t", since: "2026-11-25T00:00:00Z" } };
+const ID_MCP_FOR: Identity = { sub: OWNER, actor: "service:mcp", name: OWNER, key: OWNER, kind: "on-behalf", admin: false, impersonating: null };
+const ID_OWUI_FOR: Identity = { ...ID_MCP_FOR, actor: "service:owui" };
+const ID_SERVICE: Identity = { sub: "service:mcp", actor: "service:mcp", name: "mcp", key: "k", kind: "service", admin: false, impersonating: null };
+const ID_HEADER: Identity = { ...ID_USER, kind: "header" };
+const SIGNIN: PrivateViewConfig = { signIn: true, defaultSub: "" };
+const asReader = (who: Identity | undefined, cfg: PrivateViewConfig, sent: string[]) =>
+  sourceReader(fakeDb(sent), "00000000-0000-0000-0000-0000000000aa", { evidenceOnly: false, visible: new Set(), filter: null, who: who as Identity, privateView: cfg } as never);
+
+Deno.test("private reader: the signed-in owner acting as themselves reads their private source (control)", async () => {
+  const sent: string[] = [];
+  const r = await asReader(ID_USER, SIGNIN, sent);
+  assert(r && r.private === true && r.chunks.length === 1);
+});
+
+Deno.test("private reader T2b: an admin impersonating the owner gets null (the missing-source 404) and no private query is sent", async () => {
+  const sent: string[] = [];
+  assertEquals(await asReader(ID_ADMIN_AS, SIGNIN, sent), null);
+  assert(!sent.some((q) => q.includes("inlet_private")), "a private read was sent for an impersonating admin");
+});
+
+Deno.test("private reader T2c: openbrain-mcp / owui acting on behalf of the owner gets null and no private query is sent", async () => {
+  for (const who of [ID_MCP_FOR, ID_OWUI_FOR]) {
+    const sent: string[] = [];
+    assertEquals(await asReader(who, SIGNIN, sent), null);
+    assert(!sent.some((q) => q.includes("inlet_private")), "a private read was sent for an on-behalf caller");
+  }
+});
+
+Deno.test("private reader: a service, a header identity, no identity, and the default identity while sign-in is on get null", async () => {
+  for (const who of [ID_SERVICE, ID_HEADER, undefined]) assertEquals(await asReader(who, SIGNIN, []), null);
+  const dflt: Identity = { sub: "dflt", actor: "dflt", name: "d", key: "d", kind: "default", admin: false, impersonating: null };
+  assertEquals(await asReader(dflt, SIGNIN, []), null);
+});
+
+Deno.test("private reader: with sign-in off, only the default identity named by WORKSPACE_DEFAULT_SUB reads", async () => {
+  const cfg: PrivateViewConfig = { signIn: false, defaultSub: "dflt" };
+  const dflt: Identity = { sub: "dflt", actor: "dflt", name: "d", key: "d", kind: "default", admin: false, impersonating: null };
+  assert(await asReader(dflt, cfg, []) !== null);
+  assertEquals(await asReader(ID_HEADER, cfg, []), null);
+  assertEquals(await asReader({ ...dflt, sub: "other", actor: "other" }, cfg, []), null);
+  assertEquals(await asReader(dflt, { signIn: false, defaultSub: "" }, []), null);
+});
