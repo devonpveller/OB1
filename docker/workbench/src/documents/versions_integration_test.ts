@@ -386,3 +386,48 @@ t("V10: migration slot 620: the table, its checks, its row-level security and it
   assertEquals(await bad(ins, [h, h, "x".repeat(121), "named"]), "refused");
   assertEquals(await bad(ins, [h, h, "n", "other"]), "refused");
 });
+
+// ── attempt 1 of the tester: a commit that carries two owners' files ──────────────────────────────────────────────
+// B's new document must have exactly one version, B's restore of v1 must leave B's own text, and nothing of A's may reach B
+// - whether the two owners' operations race through the API (the vault's git lock keeps their commits apart) or a commit
+// that was not made by this service (the wiki compile's `git add -A`, simulated here by staging A's removal by hand)
+// sweeps both owners' files into one (the chase follows only exact renames inside one owner's tree).
+async function bSeesOnlyOwn(bPath: string, bText: string, aMarker: string, label: string) {
+  const l = await versions(bPath, B);
+  assertEquals([l.total, l.current_version], [1, 1], `${label}: B has exactly one version`);
+  assertEquals(l.versions[0].snapshots, []);
+  const r = await call("POST", `${D}/restore-version`, { path: bPath, version: 1 }, B);
+  assertEquals(r.status, 200, r.text);
+  assertEquals(r.json.unchanged, true, `${label}: restoring v1 changes nothing`);
+  assertEquals(await textOf(bPath), bText, `${label}: B's file is B's`);
+  const all = [JSON.stringify(l), r.text, (await call("GET", `${D}/compare?path=${q(bPath)}&from=1&to=1`, undefined, B)).text, (await call("GET", `${D}/snapshots?path=${q(bPath)}`, undefined, B)).text].join("\n");
+  assert(!all.includes(aMarker), `${label}: nothing of A's reaches B`);
+}
+
+t("V11: A's delete-forever racing B's create (and a hand-staged removal swept into B's commit): B has one version, B's restore of v1 leaves B's text, no marker of A's", async () => {
+  for (let round = 0; round < 6; round++) {
+    const aMark = `RACE-A-${run}-${round}`;
+    const aPath = await newDoc(A, `race-a-${run}-${round}`, aMark);
+    for (let i = 0; i < 2; i++) await edit(aPath, `---\ntitle: a\n---\n\n${aMark} ${i}\n`);
+    const tp = (await call("POST", `${D}/trash`, { path: aPath })).json.trashed as string;
+    const [del, mk] = await Promise.all([
+      call("POST", `${D}/delete-forever`, { path: tp, confirm: true }),
+      call("POST", D, { title: `race-b-${run}-${round}`, body: `B's own text ${round}`, folder: "" }, B),
+    ]);
+    assertEquals(del.status, 200, del.text);
+    assertEquals(mk.status, 201, mk.text);
+    await bSeesOnlyOwn(mk.json.path, await textOf(mk.json.path), aMark, `race round ${round}`);
+  }
+  // not made by this service: A's removal is staged by hand, then B's create commits the whole index
+  for (const same of [false, true]) {
+    const aMark = `STAGED-A-${run}-${same}`;
+    const aPath = await newDoc(A, `staged-a-${run}-${same}`, aMark);
+    await edit(aPath, `---\ntitle: a\n---\n\n${aMark} 2\n`);
+    const tp = (await call("POST", `${D}/trash`, { path: aPath })).json.trashed as string;
+    await git("rm", "--quiet", "--", tp);
+    const mk = await call("POST", D, { title: `staged-b-${run}-${same}`, body: same ? aMark : `B's text ${same}`, folder: "" }, B);
+    assertEquals(mk.status, 201, mk.text);
+    // (when B's own text is A's text byte for byte the marker is B's too: the checks that remain are the version count and the file)
+    await bSeesOnlyOwn(mk.json.path, await textOf(mk.json.path), same ? "no-such-marker-xyz" : aMark, `staged removal (same=${same})`);
+  }
+});

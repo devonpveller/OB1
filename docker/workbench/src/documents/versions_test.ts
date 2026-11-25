@@ -199,7 +199,7 @@ Deno.test("compare: the diff is exactly git diff of the two commits on the vault
   await put(moved, body(5), "edit after move");
   const vs2 = await v.versionsOf(moved);
   const across = await v.compareVersions(deps, moved, 1, 5, A);
-  assertEquals(across.diff, await git("diff", vs2[0].commit, vs2[4].commit, "--", vs2[0].path, vs2[4].path));
+  assertEquals(across.diff, await git("diff", `${vs2[0].commit}:${vs2[0].path}`, `${vs2[4].commit}:${vs2[4].path}`));
   assert(across.diff.includes("line 5"));
   await assertRejects(() => v.compareVersions(deps, moved, 1, 9, A), DocError, "no such version");
 });
@@ -305,4 +305,113 @@ Deno.test("the snapshot table missing (slot 620 not applied) fails closed: 503 o
   assertEquals([e.status, e.message], [503, "snapshots are not available"]);
   assertEquals((await v.compareVersions(d, p, 1, 2, A)).identical, false);
   await assertRejects(() => v.listVersions(d, p, A), DocError, "snapshots are not available"); // the list carries the snapshots: it fails closed too
+});
+
+// ── attempt 1 of the tester: quoted paths, a reused old path, commits that carry two owners' files ─────────────────
+Deno.test("quoted paths: a document whose path git quotes keeps its whole history after a move, a trash and a restore", async () => {
+  // Windows cannot hold some of these names: the full set runs in the image build gate (Linux)
+  const all = [`q"uote`, `back\\slash`, `uni\u00e9\u4e2d`, `rep[1]`, `st*r`, `sp ace`, `q?m`, `it's`, `-dash`, `#hash`];
+  const names = Deno.build.os === "windows" ? all.filter((n) => !/["*?\\]/.test(n)) : all;
+  for (const n of names) {
+    const p = `documents/${A.key}/${n}-${++doc}.md`;
+    for (let i = 1; i <= 3; i++) await put(p, body(i), "edit");
+    const moved = `documents/${A.key}/fold er/${n}-${doc}.md`;
+    await vlt.gitMv(p, moved, "documents: move", A.name);
+    const trashed = `documents/${A.key}/.trash/fold er/${n}-${doc}.md`;
+    await vlt.gitMv(moved, trashed, "documents: trash", A.name);
+    assertEquals((await v.versionsOf(trashed)).map((x) => x.version), [1, 2, 3], `history of ${n} in the trash`);
+    await vlt.gitMv(trashed, p, "documents: restore", A.name);
+    assertEquals((await v.versionsOf(p)).map((x) => x.version), [1, 2, 3], `history of ${n} back`);
+    // a glob character in a name is a name, never a pattern: a sibling it would match has its own history
+    const sib = `documents/${A.key}/${n.replace(/[[\]*?]/g, "z")}-sib-${doc}.md`;
+    await put(sib, body(9), "sibling");
+    assertEquals((await v.versionsOf(sib)).length, 1);
+    assertEquals((await v.versionsOf(p)).length, 3);
+  }
+});
+
+Deno.test("compare: a different document that now sits at the old path is never part of the diff", async () => {
+  const p = `documents/${A.key}/reused-${++doc}.md`;
+  for (let i = 1; i <= 2; i++) await put(p, body(i) + "X-TEXT\n", "edit");
+  const moved = `documents/${A.key}/fold/${p.split("/").pop()}`;
+  await vlt.gitMv(p, moved, "documents: move", A.name);
+  await put(p, "Y-DOCUMENT-TEXT secret of another document\n", "Y is written at the old path");
+  await put(moved, body(3) + "X-TEXT\n", "edit X after the move");
+  const out = await v.compareVersions(deps, moved, 1, 3, A);
+  const vs = await v.versionsOf(moved);
+  assertEquals(vs.length, 3);
+  assert(!out.diff.includes("Y-DOCUMENT-TEXT"), "Y's text is not in X's diff");
+  assertEquals(out.diff, await git("diff", `${vs[0].commit}:${vs[0].path}`, `${vs[2].commit}:${vs[2].path}`));
+  assertEquals((await v.versionsOf(p)).length, 1, "Y has its own single version");
+});
+
+// one commit that carries two owners' files: A's removal is staged (git rm), then B's create commits the WHOLE index
+async function mixedCommit(aPath: string, bPath: string, bText: string) {
+  await git("rm", "--quiet", "--", aPath); // A's delete-forever, staged, not yet committed
+  await vlt.vaultWrite(bPath, bText);
+  await vlt.vaultCommitPath(bPath, `documents: create ${bPath}`, B.name); // the whole index: both owners' files in one commit
+}
+
+Deno.test("a commit that carries two owners' files: B's new document does not inherit A's history, text or marker", async () => {
+  const aTrash = `documents/${A.key}/.trash/secret-${++doc}.md`;
+  const aText = (n: number) => `---\ntitle: "s"\n---\n\nA-SECRET-MARKER ${n} ` + "a long paragraph of A's text that is quite similar to B's.\n".repeat(8);
+  for (let i = 1; i <= 3; i++) await put(aTrash, aText(i), "documents: edit");
+  // B's text is near-identical (a similarity pairing git would make) and, in the second round, byte-identical
+  for (const bText of [aText(3).replace("A-SECRET-MARKER", "B-OWN-TEXT"), aText(3)]) {
+    const aFile = `documents/${A.key}/.trash/secret-${++doc}.md`;
+    for (let i = 1; i <= 3; i++) await put(aFile, aText(i), "documents: edit");
+    const bPath = `documents/${B.key}/new-${doc}.md`;
+    await mixedCommit(aFile, bPath, bText);
+    const vs = await v.versionsOf(bPath);
+    assertEquals(vs.length, 1, "B has exactly one version");
+    assertEquals(await vlt.vaultBlob(vs[0].blob), bText);
+    // B's restore of v1 (the only text B ever had) is a no-op: B's file is B's
+    const r = await v.restoreVersion(deps, { path: bPath, version: 1 }, B);
+    assertEquals([r.restored, r.unchanged], [false, true]);
+    assertEquals(await vlt.vaultRead(bPath), bText);
+    const everything = JSON.stringify([await v.listVersions(deps, bPath, B), await v.compareVersions(deps, bPath, 1, 1, B)]);
+    assert(!everything.includes("A-SECRET-MARKER") && !everything.includes(`secret-${doc}`) && !everything.includes(A.name), "nothing of A's in B's answers");
+    assertEquals((await v.versionsOf(aFile)).length, 0, "A's removed file has no live history to read");
+  }
+});
+
+Deno.test("the compile-sweep form: git add -A commits A's removal and B's new file together; B still sees only B's", async () => {
+  const aFile = `documents/${A.key}/.trash/sweep-${++doc}.md`;
+  for (let i = 1; i <= 3; i++) await put(aFile, `A-SWEEP-MARKER ${i}\n`.repeat(4), "documents: edit");
+  const bPath = `documents/${B.key}/swept-${doc}.md`;
+  await git("rm", "--quiet", "--", aFile);
+  await vlt.vaultWrite(bPath, `B swept text\n`);
+  await git("add", "-A");
+  await git("-c", "user.name=wiki", "-c", "user.email=w@x", "commit", "-q", "-m", `compile: documents/${A.key}/.trash/sweep-${doc}.md gone`);
+  const l = await v.listVersions(deps, bPath, B);
+  assertEquals([l.total, l.current_version], [1, 1]);
+  assertEquals(l.versions[0].message, "", "a message naming another document's path is not shown");
+  assertEquals(l.versions[0].author, null, "an author that is not the caller is not shown");
+  assert(!JSON.stringify(l).includes("A-SWEEP-MARKER") && !JSON.stringify(l).includes(`sweep-${doc}`));
+  assertEquals((await v.compareVersions(deps, bPath, 1, 1, B)).diff, "");
+});
+
+Deno.test("legacy and cross-owner scopes: an exact rename between two different owners' directories is not a move", async () => {
+  const x = `documents/${A.key}/moveme-${++doc}.md`;
+  await put(x, body(1) + "cross\n", "A creates");
+  await put(x, body(2) + "cross\n", "A edits");
+  const y = `documents/${B.key}/moveme-${doc}.md`;
+  await vlt.gitMv(x, y, "a bad move across owners", A.name);
+  assertEquals((await v.versionsOf(y)).length, 1, "B's file starts at B's first version: the pairing is not followed");
+  const { ownerScope } = await import("../util/vault_versions.ts");
+  assertEquals([ownerScope(`documents/u1/a.md`), ownerScope(`documents/u1/.trash/a.md`), ownerScope(`documents/.trash/a.md`), ownerScope(`documents/a.md`)], ["u1", "u1", "", ""]);
+});
+
+Deno.test("restore: a request that answers 404 does not commit the caller's unsaved text", async () => {
+  const p = newPath();
+  await put(p, body(1), "edit");
+  await put(p, body(2), "edit");
+  await vlt.vaultWrite(p, "UNSAVED TEXT\n");
+  const before = (await git("rev-list", "--count", "HEAD")).trim();
+  for (const input of [{ path: p, version: 9 }, { path: p, snapshot_id: "00000000-0000-4000-8000-0000000000aa" }]) {
+    await assertRejects(() => v.restoreVersion(deps, input, A), DocError);
+  }
+  assertEquals((await git("rev-list", "--count", "HEAD")).trim(), before, "no commit was made");
+  assertEquals(await vlt.vaultRead(p), "UNSAVED TEXT\n");
+  assertEquals((await v.listVersions(deps, p, A)).unsaved_changes, true);
 });

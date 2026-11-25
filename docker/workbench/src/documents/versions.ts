@@ -17,10 +17,10 @@
 // place that decides whether a path is the caller's: another user's document answers exactly like a document
 // that does not exist (404 "no such document"), before anything about versions, snapshots or counts is read.
 import type { Identity } from "../middleware/identity.ts";
-import { afterWrite, DocError, ownedPath, sha256, type DocDeps } from "./repo.ts";
+import { afterWrite, commitLocked, DocError, ownedPath, sha256, type DocDeps } from "./repo.ts";
 import { isArchived, isTrashed } from "./paths.ts";
 import { withPathLock } from "./path_lock.ts";
-import { vaultCommitPath, vaultExists, vaultRead, vaultWrite } from "../util/vault.ts";
+import { vaultExists, vaultRead, vaultWrite } from "../util/vault.ts";
 import { vaultBlob, vaultDiff, vaultFileCommits, vaultWorkingBlob } from "../util/vault_versions.ts";
 
 export interface Version {
@@ -76,7 +76,7 @@ async function pendingText(rel: string, versions: Version[]): Promise<boolean> {
 // Commit the text the file has now as a version (if it differs from the last one); the new list.
 async function settle(rel: string, versions: Version[], who: Identity): Promise<Version[]> {
   if (!(await pendingText(rel, versions))) return versions;
-  await vaultCommitPath(rel, `documents: edit ${rel}`, who.name);
+  await commitLocked(rel, `documents: edit ${rel}`, who.name);
   return await versionsOf(rel);
 }
 
@@ -127,6 +127,16 @@ async function addSnapshot(deps: DocDeps, who: Identity, v: Version, name: strin
   return rows[0];
 }
 
+// A commit can carry more than one owner's files (see commitLocked), so what a commit SAYS is not always about this
+// document: its author is shown only when it is the caller's own name, and its message only when every document path
+// it names is a path this document has had.
+const ownAuthor = (author: string, who: Identity) => (author === who.name ? author : null);
+function ownMessage(message: string, versions: Version[]): string {
+  const mine = new Set(versions.map((v) => v.path));
+  for (const m of message.matchAll(/documents\/\S*/g)) if (!mine.has(m[0].replace(/\)+$/, ""))) return "";
+  return message;
+}
+
 // ── reads ─────────────────────────────────────────────────────────────────────────────────────
 export const LIMIT_DEFAULT = 100;
 export const LIMIT_MAX = 500;
@@ -147,7 +157,7 @@ export async function listVersions(deps: DocDeps, path: string, who: Identity, o
     unsaved_changes: await pendingText(rel, versions),
     total: versions.length,
     versions: page.map((v) => ({
-      version: v.version, commit: v.commit, saved_at: v.date, author: v.author, message: v.message,
+      version: v.version, commit: v.commit, saved_at: v.date, author: ownAuthor(v.author, who), message: ownMessage(v.message, versions),
       snapshots: (snaps.get(`${v.commit}:${v.blob}`) ?? []).map((s) => snapshotOut(s, v.version)),
     })),
     next: older.length > limit ? page[page.length - 1].version : null,
@@ -214,8 +224,9 @@ export async function restoreVersion(deps: DocDeps, input: { path: string; versi
     if (!UUIDISH.test(snapId)) throw noSnapshot();
   }
   return await withPathLock(rel, async () => {
+    // the target is looked up on the COMMITTED versions first: a restore that answers 404 changes nothing (unsaved
+    // text becomes a version only once the target is known); settling only appends, so the target stays valid
     let versions = await versionsOf(rel);
-    versions = await settle(rel, versions, who);
     let target: Version | undefined;
     if (snapId) {
       const row = (await snapshotQuery<SnapshotRow>(
@@ -230,6 +241,7 @@ export async function restoreVersion(deps: DocDeps, input: { path: string; versi
       target = versions.find((v) => v.version === wantV);
       if (!target) throw noVersion();
     }
+    versions = await settle(rel, versions, who);
     const current = versions[versions.length - 1];
     if (target.blob === current.blob) {
       return { restored: false, unchanged: true, from_version: target.version, version: current.version, snapshot: null };
@@ -242,7 +254,7 @@ export async function restoreVersion(deps: DocDeps, input: { path: string; versi
     try {
       await vaultWrite(rel, text);
       listing = await afterWrite(deps, rel, text, who);
-      await vaultCommitPath(rel, `documents: restore ${rel} to v${target.version}`, who.name);
+      await commitLocked(rel, `documents: restore ${rel} to v${target.version}`, who.name);
     } catch (e) {
       await vaultWrite(rel, prior).catch(() => {}); // the file is what it was; the marker on the current version stays (it is true)
       throw e;
