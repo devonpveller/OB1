@@ -32,6 +32,10 @@ export interface ContractDeps {
   // user's / a missing one. Injected by src/app.ts, never imported here: documents/repo.ts pulls config.ts (DB_* read
   // at import) into the contract's module graph (see repo/trust.ts ownedDocument). Absent = every document is null.
   readOwnDocument?: (path: string, who: import("../../middleware/identity.ts").Identity) => Promise<{ path: string; content: string } | null>;
+  // rwr-doc-gaps-api: queue ONE gap-kind research run for a document of the signed-in owner, through the existing
+  // research path (documents/refinery.ts queueResearch, local model, the workspace caller key). Injected by src/app.ts
+  // for the same reason as readOwnDocument; absent = the stated 503.
+  queueGapResearch?: (path: string, query: string, who: import("../../middleware/identity.ts").Identity) => Promise<{ job_id: string }>;
 }
 
 export const PREFIX = "/workbench/contract";
