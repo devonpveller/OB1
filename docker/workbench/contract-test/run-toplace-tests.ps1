@@ -411,7 +411,7 @@ try {
     Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) 'the fixture document listings are in place for Dredd'
     $gen = Join-Path $wb 'src\contracts\generated'
     $names = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${gen}:/spec:ro", $dreddTag, '/spec/openapi.json', "http://$P-wb:8000", '--names')
-    $prNames = @(($names -replace '\[[0-9;]*m', '' -split "`n") | Where-Object { $_ -match 'info: .*pending-refs' } | ForEach-Object { ($_ -replace '^.*?info: ', '').Trim() })
+    $prNames = @(($names -replace '\[[0-9;]*m', '' -split "`n") | Where-Object { $_ -match 'info: .*pending-refs' } | ForEach-Object { ($_ -replace '^.*?info: ', '').Trim() })
     Save 'dredd-toplace-names.log' ((($names -replace '\[[0-9;]*m', '' -split "`n") | Where-Object { $_ -match 'pending' }) -join "`n")
     foreach ($l in $prNames | Select-Object -First 12) { Write-Host "    names: $l" }
     $onlyArgs = @(); foreach ($n in $prNames) { $onlyArgs += @('--only', $n) }
