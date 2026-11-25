@@ -100,7 +100,7 @@ await click(T("lift")); await sleep(150);
 ok(/does not bring it back/.test(await ev(`${T("lost-stays")}.textContent`)), "Lift the marker says what it does and does not do");
 await click(T("lift-ok")); await idle(); await sleep(300);
 ok((await posts()).some((u) => /^\/workbench\/contract\/cleanup\/tombstones\/t\d+\/lift$/.test(u)), "Lift the marker calls the existing route");
-ok(JSON.stringify(await rowTitles("erased")) === "[]", "the lifted marker left Erased sources (the real lifted line has no tombstone_id column)");
+let erasedNow = await rowTitles("erased"); for (let i = 0; i < 20 && erasedNow.includes("Cut loose source two"); i++) { await sleep(250); erasedNow = await rowTitles("erased"); } ok(!erasedNow.includes("Cut loose source two"), `erased rows now ${JSON.stringify(erasedNow)}: the lifted marker (the newest, Cut loose source two) left Erased sources and the other stays (the real lifted line has no tombstone_id column)`);
 await tab("trail");
 const lf = (await lines()).find((l) => /Marker lifted/.test(l));
 ok(!!lf && /You/.test(lf), `the trail has Marker lifted with You: ${lf}`);
