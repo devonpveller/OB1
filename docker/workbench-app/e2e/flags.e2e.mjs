@@ -11,9 +11,13 @@ const APP = process.env.APP_IP, CH = process.env.CH || "127.0.0.1";
 const origin = `http://${APP}:8080`;
 let fails = 0;
 const ok = (c, m) => { console.log((c ? "PASS " : "FAIL ") + m); if (!c) fails++; };
+// a check that is EXPECTED to fail today for a reason that is not this item's: XFAIL does not count; if it passes, that is a FAIL
+// (the marker is stale: remove it). Name the item that fixes it.
+const xfail = (c, m, item) => { console.log(c ? `FAIL unexpected pass, remove the xfail (${item} landed?): ${m}` : `XFAIL (until ${item}) ${m}`); if (c) fails++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const CPU = "documents/k-a/Hardware/cpu.md";
 const BRAVO = "documents/k-b/bravo.md";
+const OLD = "documents/k-a/Old notes/cpu.md";
 const MARK = "PRIVATE-NOTE-MARKER-5521";
 const MARK2 = "DRAFT-MARKER-8842";
 const H = (p) => "/documents/d/" + uid(p);
@@ -147,13 +151,26 @@ await click("[data-testid=flag-send]");
 ok(await until(`document.querySelectorAll('[data-testid=flag-done]').length===2`), "the source is flagged too");
 const mine2 = (await stub("/__db")).flags;
 ok(mine2.length === 2 && mine2.some((f) => f.item_kind === "source" && f.item_id === SRC_A && f.reason === "duplicate" && f.from_ref === CPU && f.note === ""), "its flag is a source flag from the same document, with no note");
+// the flagged state survives closing the drawer and opening the citation again (same person, same document)
+await click("[data-testid=drawer-close]");
+ok(await until(`!document.querySelector('[data-testid=source-drawer]')`), "the drawer closes");
+await openChip(0);
+ok((await ev(`document.querySelectorAll('[data-testid=drawer-flags] [data-testid=flag-done]').length`)) === 2 && !(await has("[data-testid=drawer-flags] [data-testid=flag-open]")), "reopening the citation shows both as flagged, with no Flag button (no second flag from this page)");
+ok((await db()).flags.length === 2, "...and no request was made for it: still two flags on the server");
 // the link back and the link to Cleanup
 ok((await ev(`document.querySelector('[data-testid=flag-cleanup-link]').getAttribute('href')`)) === "/cleanup", "the done line links to Cleanup");
 // what Cleanup > Flagged by you reads: alice's own two flags, each with the document it came from
 const aliceList = JSON.parse((await asApp("/workbench/contract/flags")).body);
 ok(aliceList.total === 2 && aliceList.flags.length === 2 && aliceList.flags.every((f) => f.from.kind === "document" && f.from.ref === CPU && f.flagged_by === null), "alice's own list (what Flagged by you reads) holds both, each with `from` = the document, and no flagged_by");
-await go(H(CPU));
-ok(await has("[data-testid=doc-editor]"), "the link back (the document's opaque id) opens the document it was made from");
+// the link back: the harness page (built only with FLAG_HARNESS=1) lists the caller's own flags with the link `flagBackLink` builds
+await go("/flag-harness.html");
+ok(await until(`!!document.querySelector('[data-testid=harness-total]')`), "the flags list (Flagged by you's read) loads");
+ok((await text("[data-testid=harness-total]")) === "2" && (await ev(`document.querySelectorAll('[data-testid=harness-row]').length`)) === 2, "it lists alice's two flags");
+const hrefs = JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('[data-testid=harness-backlink]')].map(a=>a.getAttribute('href')))`));
+ok(hrefs.length === 2 && hrefs.every((h) => h === H(CPU)), `each flag carries the link back built by flagBackLink: ${JSON.stringify(hrefs)}`);
+ok(!hrefs.some((h) => /cpu|Hardware|\.md|ALPHA/i.test(h)), "...which names no path, folder, file or title");
+await click("[data-testid=harness-backlink]");
+ok(await until(`location.pathname===${JSON.stringify(H(CPU))} && !!document.querySelector('[data-testid=doc-editor] .cm-content')`), "following that link opens the document the flag was made from");
 ok(problems().length === 0, `no console errors/warnings/exceptions (${problems().length})` + JSON.stringify(problems().map((e) => e.params?.entry?.text || e.params?.exceptionDetails?.text)));
 
 // ---- 4. nothing private on a shared surface: the planted marker
@@ -195,6 +212,9 @@ await click("[data-testid=flag-send]");
 ok(await until(`!!document.querySelector('[data-testid=flag-done]')`), "bob flags the same reference: his own flag");
 const bobMine = JSON.parse((await asApp("/workbench/contract/flags")).body);
 ok(bobMine.total === 1 && bobMine.flags[0].reason === "other" && bobMine.flags[0].from.ref === BRAVO, "bob's list: one flag, his, from his document");
+await go("/flag-harness.html");
+await until(`!!document.querySelector('[data-testid=harness-total]')`);
+ok((await text("[data-testid=harness-total]")) === "1" && JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('[data-testid=harness-backlink]')].map(a=>a.getAttribute('href')))`)).join() === H(BRAVO), "bob's flags list holds exactly his one flag, linking to his own document");
 await setMode("alice");
 await go("/documents");
 const aliceAgain = JSON.parse((await asApp("/workbench/contract/flags")).body);
@@ -258,6 +278,20 @@ ok((await ev(`document.querySelector('input[type=radio]:checked')?.value`)) === 
 await ev(`document.querySelector('[data-testid=flag-send]').focus()`);
 await typed("Enter", 13, "\r");
 ok(await until(`!!document.querySelector('[data-testid=flag-done]')`) && (await db()).flags.length === 1 && (await db()).flags[0].reason === "low_quality", "Enter on Flag it sends the flag from the keyboard");
+
+// ---- 9. EXPECTED TO FAIL until the server item rw-doc-path-spaces lands: a document in a folder with a space
+await stub("/__reset", "POST");
+await setMode("alice");
+ok(await openDoc(OLD), "alice's document in the folder 'Old notes' opens");
+await openChip(0);
+await click(flagBtn("reference"));
+await click("[data-testid=flag-reason-other]");
+await click("[data-testid=flag-send]");
+await sleep(1500);
+const spaced = (await db()).flags.length === 1 && (await has("[data-testid=flag-done]"));
+const shownSpaced = await text("[data-testid=flag-problem]");
+xfail(spaced, "a reference can be flagged from a document in a folder with a space (the real route reads from.ref with documentPathsIn, which stops at the space, and answers 400)", "rw-doc-path-spaces");
+ok(spaced || (/The flag was not accepted/.test(shownSpaced ?? "") && (await db()).flags.length === 0), `today the person is told it was not accepted and nothing is made: ${shownSpaced}`);
 
 console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

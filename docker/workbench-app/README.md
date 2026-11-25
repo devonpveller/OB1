@@ -112,7 +112,8 @@ in). It opens a small dialog (one per open of the page, never modal) that says *
 flagger and admins see the flag), offers exactly four reasons as radio buttons (Wrong claim, Low quality, Duplicate, Other: the keys of
 the `flag_reasons` registry; the mockup's Outdated and Broken link need two registry rows, a migration this item does not make) and an
 optional note (2000 characters, no control characters), then `POST /workbench/contract/flags`. A flag changes nothing about the item, so
-the done state is a line (no second flag from the same page) that links to Cleanup; the toast names no title, note or id.
+the done state is a line that links to Cleanup, kept in memory for that person, item and document until the page is left (closing and
+reopening the drawer shows it; no second flag); the toast names no title, note or id.
 
 - Mounted today in the citation drawer of the writing surface (`SourceDrawer`: "Flag this reference" for a `[n]` citation, "Flag this
   source" for its source; a held source is not in the shared library and offers nothing). A claim view and the Source screen (Library,
@@ -123,3 +124,8 @@ the done state is a line (no second flag from the same page) that links to Clean
   who opened it. Every refusal is one fixed sentence (a missing item and another person's are the same); the server's text is never shown.
 - Tests: `test/flag-buttons.test.tsx` and `e2e/flags.e2e.mjs` (`e2e/run-flags-e2e.ps1`, a free 10.250.9x.0/24 given as -Octet), both against ONE pair of
   fakes, `e2e/flags-fake.mjs` (the flags routes and repo code) and `e2e/docs-fake.mjs`.
+- `/flag-harness.html` (dev-only, built only with `--build-arg FLAG_HARNESS=1`; the default image has none) lists the caller's own flags with the
+  link `flagBackLink` builds, as Cleanup > Flagged by you will; the e2e follows one. `e2e/run-flags-e2e.ps1 -Owner <id>` sets the harness owner label.
+- Known server defect, tracked as `rw-doc-path-spaces`: the flags route reads `from.ref` with the server's `documentPathsIn`, which stops at a space
+  or at `& , ' ( ) #`, so a flag made from a document in a folder named "Old notes" is refused (400) and the app says "not accepted". The fake
+  copies that scanner on purpose; the vitest case and the e2e step for it are marked expected-to-fail (`it.fails`, `xfail`) until that item lands.

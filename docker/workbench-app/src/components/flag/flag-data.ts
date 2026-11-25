@@ -6,7 +6,7 @@
 // A flag changes NOTHING about the flagged item (the route only checks that it exists), so there is nothing here to undo.
 import { api, ApiError } from "../../lib/api";
 import { resolveDocument } from "../../lib/state";
-import { DOC_PREFIX } from "../../screens/documents/docs-data";
+import { docHref } from "../../screens/documents/docs-data";
 
 // The four reasons the anchor allows, in the order they are shown: the keys are the flag_reasons registry's, the words are
 // the person's. (The Cleanup mockup also shows Outdated and Broken link: they need two registry rows, a migration this item
@@ -73,5 +73,5 @@ export async function readMyFlags(limit = 100): Promise<{ flags: MyFlag[]; total
 export async function flagBackLink(from: FlagFrom): Promise<string | null> {
   if (from.kind === "source") return "/library?source=" + encodeURIComponent(from.ref);
   const d = await resolveDocument(from.ref);
-  return d?.ref ? DOC_PREFIX + encodeURIComponent(d.ref) : null;
+  return d?.ref ? docHref(d.ref) : null;
 }

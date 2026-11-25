@@ -39,6 +39,32 @@ export const ITEMS = {
   ],
 };
 
+// A COPY of the server's path check (workbench/src/documents/ownership.ts: normalize 122-131, documentPathsIn 133-144,
+// isDocumentsPath 101, ownsDocumentPaths 103-120; used by contracts/repo/flags.ts:97-101 checkFrom). It stops a path at a space
+// or at any of  " ' ? & # , )  - so a document in a folder named "Old notes" is a 400 on the real route today (tester
+// attempt 1, Case 1). Keep it byte-for-byte equal to the server's: do NOT make the fake kinder than the server.
+const normalize = (p) => {
+  const out = [];
+  for (const seg of p.replace(/\\/g, "/").split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") out.pop();
+    else out.push(seg);
+  }
+  return out.join("/");
+};
+const isDocumentsPath = (p) => p.slice(0, "documents".length + 1).toLowerCase() === "documents/";
+export function documentPathsIn(s) {
+  const found = [];
+  const t = s.replace(/\\/g, "/");
+  const re = /(^|[\/\s"'=:(,])((?:\.{1,2}\/)*documents\/[^\s"'?&#,)]*)/gi;
+  for (const m of t.matchAll(re)) found.push(m[2]);
+  for (const m of t.matchAll(/[^\s"'?&#,]*\.\.[^\s"'?&#,]*/g)) {
+    const n = normalize(m[0]);
+    if (isDocumentsPath(n)) found.push(n);
+  }
+  return [...new Set(found.map(normalize).filter((p) => isDocumentsPath(p) && p.length > "documents/".length))];
+}
+
 export function createFlagsFake({ ownsDocument, admins = [], now = () => Date.now() } = {}) {
   let rows = [];
   let seq = 0;
@@ -81,8 +107,14 @@ export function createFlagsFake({ ownsDocument, admins = [], now = () => Date.no
       if (!FROM_KINDS.includes(f.kind)) return unreg("flag_from_kinds", f.kind);
       // checkFrom: where the flag was made must be the flagger's own document, or a source that exists
       if (f.kind === "document") {
-        if (!f.ref.startsWith("documents/") || f.ref.includes("\\")) return bad("from.ref must be a document path (documents/...)");
-        if (!ownsDocument || !ownsDocument(who, f.ref)) return { status: 404, body: { error: "no such document" } };
+        // repo/flags.ts:97-101, as the server has it: exactly one documents/ path, equal to the ref (backslashes read as slashes)
+        const paths = documentPathsIn(f.ref);
+        if (paths.length !== 1 || paths[0] !== f.ref.replace(/\\/g, "/")) return bad("from.ref must be a document path (documents/...)");
+        // ownsDocumentPaths: the caller's own key directory is theirs (existence is NOT checked); a legacy documents/<file>.md
+        // or documents/.x is theirs only if its listing row is (the callback); any other key is not
+        const seg = paths[0].split("/")[1] ?? "";
+        const mine = seg === who.key || ((seg.endsWith(".md") || seg.startsWith(".")) && ownsDocument && ownsDocument(who, paths[0]));
+        if (!mine) return { status: 404, body: { error: "no such document" } };
       } else {
         if (!UUIDISH.test(f.ref)) return bad("from.ref must be a source id");
         if (!exists("source", f.ref, who.sub) && !planted.has(f.ref)) return { status: 404, body: { error: "no such source" } };

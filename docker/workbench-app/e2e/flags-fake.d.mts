@@ -20,3 +20,4 @@ export function createFlagsFake(opts?: {
   plantSource(id: string): void;
   itemsSnapshot(): string;
 };
+export function documentPathsIn(s: string): string[];

@@ -8,6 +8,7 @@ param(
   [Parameter(Mandatory = $true)][string]$Image,
   [Parameter(Mandatory = $true)][string]$AxeJs,
   [string]$Tag = "wt-rwr-flag-buttons",
+  [string]$Owner = $Tag,  # the harness owner label on everything the lab creates (a tester passes their own id)
   [int]$TimeoutSec = 600,
   [ValidateRange(95,99)][int]$Octet = 96   # the lab is 10.250.<Octet>.0/24: pick a free one in 95-99 (docker network ls first)
 )
@@ -22,12 +23,12 @@ function Clean { $e = $ErrorActionPreference; $ErrorActionPreference = "Continue
 Clean
 $code = 1
 try {
-  docker network create --label ai-stack.harness.owner=wt-rwr-flag-buttons --internal --subnet "10.250.${Octet}.0/24" $net | Out-Null
-  docker run -d --label ai-stack.harness.owner=wt-rwr-flag-buttons --name "$Tag-stub" --network $net --ip 10.250.${Octet}.20 --network-alias stub -e LAB_KEY=$labKey -v "${here}:/lab:ro" node:22-slim node /lab/flags.stub.mjs | Out-Null
-  docker run -d --label ai-stack.harness.owner=wt-rwr-flag-buttons --name "$Tag-app" --network $net --ip 10.250.${Octet}.10 -e WORKBENCH_URL=http://stub:9000 -e WORKBENCH_KEY=$labKey -e WIKI_VIEWER_ALLOWED_HOSTS=10.250.${Octet}.10 $Image | Out-Null
-  docker run -d --label ai-stack.harness.owner=wt-rwr-flag-buttons --name "$Tag-chrome" --network $net --ip 10.250.${Octet}.30 chromedp/headless-shell:latest | Out-Null
+  docker network create --label "ai-stack.harness.owner=$Owner" --internal --subnet "10.250.${Octet}.0/24" $net | Out-Null
+  docker run -d --label "ai-stack.harness.owner=$Owner" --name "$Tag-stub" --network $net --ip 10.250.${Octet}.20 --network-alias stub -e LAB_KEY=$labKey -v "${here}:/lab:ro" node:22-slim node /lab/flags.stub.mjs | Out-Null
+  docker run -d --label "ai-stack.harness.owner=$Owner" --name "$Tag-app" --network $net --ip 10.250.${Octet}.10 -e WORKBENCH_URL=http://stub:9000 -e WORKBENCH_KEY=$labKey -e WIKI_VIEWER_ALLOWED_HOSTS=10.250.${Octet}.10 $Image | Out-Null
+  docker run -d --label "ai-stack.harness.owner=$Owner" --name "$Tag-chrome" --network $net --ip 10.250.${Octet}.30 chromedp/headless-shell:latest | Out-Null
   Start-Sleep -Seconds 6
-  docker run --rm --label ai-stack.harness.owner=wt-rwr-flag-buttons --name "$Tag-driver" --network "container:$Tag-chrome" -e APP_IP=10.250.${Octet}.10 -e CH=127.0.0.1 -e LAB_KEY=$labKey `
+  docker run --rm --label "ai-stack.harness.owner=$Owner" --name "$Tag-driver" --network "container:$Tag-chrome" -e APP_IP=10.250.${Octet}.10 -e CH=127.0.0.1 -e LAB_KEY=$labKey `
     -v "${here}:/lab:ro" -v "${axe}:/axe/axe.min.js:ro" node:22-slim timeout $TimeoutSec node /lab/flags.e2e.mjs
   $code = $LASTEXITCODE
 } finally {

@@ -8,15 +8,20 @@
 //   GET  /__log                   every request seen (method, url, mode, whether the door key was present, raw body)
 //   GET  /__db                    the flags (all owners), the flagged items as planted and the documents' file text, for the driver's checks
 import http from "node:http";
-import { createFake, PEOPLE, REF_A, REF_B } from "./docs-fake.mjs";
+import { createFake, PEOPLE, REF_A, REF_B, uid } from "./docs-fake.mjs";
 import { createFlagsFake, ITEMS } from "./flags-fake.mjs";
 
 const KEY = process.env.LAB_KEY || "";
 const docs = createFake();
 const CPU = "documents/k-a/Hardware/cpu.md";
 const BRAVO = "documents/k-b/bravo.md";
+const OLD = "documents/k-a/Old notes/cpu.md"; // a folder with a space: the real flags route refuses it today (server item rw-doc-path-spaces)
 const plant = () => {
   docs.db().docs.get(CPU).raw = `---\ntitle: "ALPHA Upgrading the CPU"\n---\nThe board supports it [@ref:${REF_A}] as stated, and also [@ref:${REF_B}].`;
+  docs.db().docs.set(OLD, { ...docs.db().docs.get(CPU), id: uid(OLD), title: "ALPHA Old notes CPU", raw: `---
+title: "ALPHA Old notes CPU"
+---
+The board [@ref:${REF_A}] as stated.` });
   docs.db().docs.get(BRAVO).raw = `---\ntitle: "BRAVO plan"\n---\nBravo cites the same shared reference [@ref:${REF_A}].`;
 };
 plant();

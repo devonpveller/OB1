@@ -10,6 +10,7 @@ import { App } from "../src/App";
 import { ToastProvider } from "../src/shell/Toast";
 import { FlagForCleanup, NOTHING_CHANGES } from "../src/components/flag/FlagForCleanup";
 import { SourceDrawer } from "../src/screens/document-editor/SourceDrawer";
+import { docHref } from "../src/screens/documents/docs-data";
 import { flagBackLink, flagItem, readMyFlags, REASONS } from "../src/components/flag/flag-data";
 import { setFetcher, requestLog, clearRequestLog } from "../src/lib/api";
 import { resetState } from "../src/lib/state";
@@ -80,8 +81,8 @@ afterEach(() => { vi.restoreAllMocks(); });
 const withChips = (refs: string[] = [REF_A]) => {
   docs.db().docs.get(CPU)!.raw = `---\ntitle: "ALPHA Upgrading the CPU"\n---\nThe board [@ref:${refs[0]}] as stated${refs[1] ? ` and [@ref:${refs[1]}]` : ""}.`;
 };
-const openDrawer = async (n = 0) => {
-  window.history.pushState({}, "", "/documents/d/" + uid(CPU));
+const openDrawer = async (n = 0, path = CPU) => {
+  window.history.pushState({}, "", "/documents/d/" + uid(path));
   render(<App />);
   await waitFor(() => expect(screen.getByTestId("doc-editor").querySelector(".cm-content")).toBeTruthy());
   await waitFor(() => expect(screen.getByTestId("doc-version").textContent).toMatch(/^v\d/));
@@ -200,6 +201,7 @@ describe("acceptance 1: the flag is recorded with the reason and a link back to 
     const mine = await readMyFlags();
     expect(mine.total).toBe(1);
     expect(mine.flags[0]).toMatchObject({ item: { kind: "reference", id: REF_A }, reason: "other", from: { kind: "document", ref: CPU }, state: "open" });
+    expect(await flagBackLink(mine.flags[0].from)).toBe(docHref(uid(CPU))); // built by the app's own document-link helper
     expect(await flagBackLink(mine.flags[0].from)).toBe("/documents/d/" + uid(CPU));
     expect(await flagBackLink({ kind: "source", ref: SRC_A })).toBe("/library?source=" + SRC_A);
     // a document that is gone has no link, and the address never carries the path or a title
@@ -475,5 +477,74 @@ describe("the dialog's own behaviour", () => {
     expect(document.getElementById(dlg.getAttribute("aria-labelledby")!)!.textContent).toBe("Flag this claim for cleanup");
     expect(dlg.contains(document.activeElement)).toBe(true);
     expect((screen.getByTestId("flag-open") as HTMLButtonElement).disabled).toBe(true); // one dialog at a time
+  });
+});
+
+// ── the folder-with-a-space defect (tester attempt 1, Case 1) ──
+// The real route reads `from.ref` through the server's documentPathsIn, which stops a path at a space or at " ' ? & # , ), so a
+// document in a folder named "Old notes" is refused (400) TODAY. The fake copies that scanner (flags-fake.mjs), so these two
+// cases show it. The server fix is the separate item rw-doc-path-spaces; when it lands, the flags-fake's copy changes with it and
+// the `it.fails` below turns green by itself (vitest then reports it as FAILED: remove the `.fails`).
+const OLD = "documents/k-a/Old notes/cpu.md";
+const plantOld = () => {
+  const d = docs.db().docs.get(CPU)!;
+  docs.db().docs.set(OLD, { ...d, id: uid(OLD), raw: `---
+title: "ALPHA Old notes CPU"
+---
+The board [@ref:${REF_A}] as stated.` });
+};
+describe("a document in a folder whose name has a space (server item rw-doc-path-spaces)", () => {
+  it("TODAY the real route refuses such an origin, and the fake says so exactly as the server does: the app shows its refusal", async () => {
+    for (const bad of ["documents/k-a/Old notes/cpu.md", "documents/k-a/R&D/x.md", "documents/k-a/Q1, Q2/x.md", "documents/k-a/Bob's/x.md", "documents/k-a/(draft)/x.md", "documents/k-a/a#b/x.md"]) {
+      expect(await flagItem({ kind: "claim", id: CLAIM }, "other", "", { kind: "document", ref: bad }), bad).toEqual({ kind: "refused" });
+    }
+    expect(await flagItem({ kind: "claim", id: CLAIM }, "other", "", { kind: "document", ref: CPU })).toEqual({ kind: "flagged" });
+    expect(flags.rows()).toHaveLength(1);
+  });
+  // EXPECTED TO FAIL until rw-doc-path-spaces lands (the server accepts a spaced folder): the person flags from such a document
+  it.fails("EXPECTED FAIL until rw-doc-path-spaces: flagging a reference from a document in 'Old notes' makes the flag", async () => {
+    plantOld();
+    await openDrawer(0, OLD);
+    fireEvent.click(opener("reference"));
+    choose("other");
+    fireEvent.click(screen.getByTestId("flag-send"));
+    await waitFor(() => expect(screen.getByTestId("flag-done")).toBeTruthy(), { timeout: 1500 });
+    expect(flags.rows()[0].from_ref).toBe(OLD);
+  });
+});
+
+describe("one flag per item, person and document for the life of the page", () => {
+  it("closing the drawer and opening the same citation again shows the flagged line, not the button; no second request", async () => {
+    withChips(); await openDrawer();
+    fireEvent.click(opener("reference"));
+    choose("other");
+    fireEvent.click(screen.getByTestId("flag-send"));
+    await waitFor(() => expect(screen.getByTestId("flag-done")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("drawer-close"));
+    await waitFor(() => expect(screen.queryByTestId("source-drawer")).toBeNull());
+    fireEvent.mouseDown(screen.getByTestId("doc-editor").querySelectorAll("button.ws-chip")[0]);
+    await waitFor(() => expect(screen.getByTestId("drawer-body")).toBeTruthy());
+    expect(screen.getByTestId("drawer-flags").querySelector("[data-testid=flag-done]")).toBeTruthy();
+    expect(within(screen.getByTestId("drawer-flags")).getAllByTestId("flag-open").map((b) => b.textContent)).toEqual(["Flag this source"]); // the source was not flagged
+    expect(posts()).toHaveLength(1);
+  });
+  it("it is that person's and that document's: another person, or the same item from another origin, may flag again", async () => {
+    const mount = (sub: string, ref: string) => (
+      <ToastProvider><FlagForCleanup item={{ kind: "claim", id: CLAIM }} from={{ kind: "source", ref }} subject={sub} what="this claim" /></ToastProvider>
+    );
+    const r = render(mount("u-alice", SRC_A));
+    fireEvent.click(screen.getByTestId("flag-open"));
+    choose("other");
+    fireEvent.click(screen.getByTestId("flag-send"));
+    await waitFor(() => expect(screen.getByTestId("flag-done")).toBeTruthy());
+    r.rerender(mount("u-alice", "b1000000-0000-4000-8000-0000000000b2")); // another origin
+    expect(screen.getByTestId("flag-open")).toBeTruthy();
+    r.rerender(mount("u-alice", SRC_A)); // back to the first: still flagged
+    expect(screen.getByTestId("flag-done")).toBeTruthy();
+    who = "bob";
+    act(() => resetState()); // a different person on the page: nothing carries over
+    r.rerender(mount("u-bob", SRC_A));
+    expect(screen.queryByTestId("flag-done")).toBeNull();
+    expect(screen.getByTestId("flag-open")).toBeTruthy();
   });
 });

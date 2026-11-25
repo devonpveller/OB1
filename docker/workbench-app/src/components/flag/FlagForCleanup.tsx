@@ -5,8 +5,9 @@
 // The rules this keeps (each has a test):
 //  - the dialog says, before anything is sent, that nothing changes until it is decided (and who can see the flag);
 //  - the reasons are exactly the four of flag-data.ts, as radio buttons (never a drop-down list); none is chosen for the person;
-//  - a flag changes nothing about the item, so there is nothing to undo: one flag per open of the page (after it is made the
-//    button gives way to a line that says so and links to Cleanup), never two by a double click;
+//  - a flag changes nothing about the item, so there is nothing to undo: one flag per item, person and document for as long as
+//    the page lives (after it is made the button gives way to a line that says so and links to Cleanup, also when the drawer is
+//    closed and opened again), never two by a double click;
 //  - the dialog, its draft (reason, note) and an answer still in flight belong to ONE person and ONE item: when the person
 //    on the page changes without a reload (the shell resets the state: a new epoch) or a different item is named, everything
 //    is dropped, and an answer that arrives later changes nothing and toasts nothing;
@@ -20,6 +21,11 @@ import { Link } from "../../shell/Link";
 import { useToast } from "../../shell/Toast";
 import { CONTROL, flagItem, NOTE_MAX, REASONS, type FlagFrom, type FlagItem, type ReasonKey } from "./flag-data";
 import "./flag.css";
+
+// What this page has flagged, for the person and document it was flagged from: the drawer (and so the component) is closed and
+// reopened freely, and a second flag of the same thing from the same place is almost always a slip (the server does not
+// dedupe). Memory only - a page load, or a different person (the key holds the state epoch and subject) starts afresh.
+const flagged = new Set<string>();
 
 export type FlagProps = {
   item: FlagItem;
@@ -44,10 +50,10 @@ export function FlagForCleanup(p: FlagProps) {
   // one person, one item, one place it was flagged from: any change remounts, dropping the open dialog, the draft and any
   // request in flight
   const key = [epoch, p.subject, p.item.kind, p.item.id, p.from.kind, p.from.ref].join("|");
-  return <Flagger key={key} {...p} subject={p.subject} />;
+  return <Flagger key={key} memo={key} {...p} subject={p.subject} />;
 }
 
-function Flagger({ item, from, subject, what, label = "Flag for cleanup" }: FlagProps & { subject: string }) {
+function Flagger({ item, from, subject, what, memo, label = "Flag for cleanup" }: FlagProps & { subject: string; memo: string }) {
   const toast = useToast();
   const uid = useId();
   const [open, setOpen] = useState(false);
@@ -55,7 +61,7 @@ function Flagger({ item, from, subject, what, label = "Flag for cleanup" }: Flag
   const [note, setNote] = useState("");
   const [sending, setSending] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  const [done, setDone] = useState(false);
+  const [done, setDone] = useState(() => flagged.has(memo));
   const live = useRef(true);
   const head = useRef<HTMLHeadingElement>(null);
   const opener = useRef<HTMLButtonElement>(null);
@@ -79,7 +85,7 @@ function Flagger({ item, from, subject, what, label = "Flag for cleanup" }: Flag
     if (!live.current) return; // a different person or item took the page: nothing more happens
     setSending(false);
     if (out.kind === "flagged") {
-      setOpen(false); setDone(true); setNote(""); setReason(null);
+      flagged.add(memo); setOpen(false); setDone(true); setNote(""); setReason(null);
       toast({ message: "Flagged for cleanup. It is under Cleanup, Flagged by you." }); // no title, no note, no id
     } else setProblem(MSG[out.kind]);
   };
