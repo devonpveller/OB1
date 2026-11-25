@@ -216,7 +216,8 @@ t("G4: rotate-out - a run that finished with a claim of two agreeing sources cov
   const sameHost = await plantClaim(q("same host"), 0, [{ host: "alpha.example", edge: "states" }, { host: "ALPHA.example", edge: "corroborates" }]);
   const against = await plantClaim(q("one agrees one contradicts"), 0, [{ host: "alpha.example", edge: "states" }, { host: "beta.example", edge: "contradicts" }]);
   const far = await plantClaim(q("far from the question"), 1, [{ host: "alpha.example", edge: "states" }, { host: "beta.example", edge: "states" }]);
-  const disputed = await plantClaim(q("contradicted"), 0, [{ host: "alpha.example", edge: "states" }, { host: "beta.example", edge: "states" }], { contradicted: true });
+  // a contradicts edge makes the claim contradicted (slot init-claims' trigger sets claims.contradicted from the edges)
+  const disputed = await plantClaim(q("contradicted"), 0, [{ host: "alpha.example", edge: "states" }, { host: "beta.example", edge: "states" }, { host: "gamma.example", edge: "contradicts" }]);
   const retracted = await plantClaim(q("retracted"), 0, [{ host: "alpha.example", edge: "states" }, { host: "beta.example", edge: "states" }], { status: "retracted" });
 
   const ok = await runAndEnd(A, path, q("covered question"), "done", [good]);
@@ -349,7 +350,9 @@ t("G7: nothing private from this item appears on a shared surface (planted marke
   // 1. the shared search, as B, and as A (a gap is not indexed anywhere)
   for (const who of [A, B]) {
     const s = await call(who, "GET", `/workbench/contract/search?q=${MARK}&limit=50`);
-    assert(!s.text.includes(MARK), `${who}: the shared search carries no gap text`);
+    // the search echoes the asked query; what it FOUND is what must carry nothing
+    assertEquals(s.json.count, 0, `${who}: the shared search finds nothing for a gap's words`);
+    assert(!JSON.stringify(s.json.results).includes(MARK), `${who}: the shared search carries no gap text`);
   }
   // 2. shared rows: no shared table holds the marker. The only rows are the gap (its own table), the run's own query and
   //    its owner-scoped prompt, both of which the existing research path writes and which B cannot read (G5).

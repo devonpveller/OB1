@@ -280,6 +280,10 @@ try {
     if (-not (Run-Detached $db0 @('-e', "POSTGRES_PASSWORD=$pw", '-e', 'POSTGRES_DB=openbrain', '-v', "${stage0}:/docker-entrypoint-initdb.d:ro", $PgImage))) { throw 'db0' }
     for ($i = 0; $i -lt 150; $i++) { if ((Dk logs $db0) -match 'PostgreSQL init process complete') { break }; Start-Sleep -Seconds 2 }
     for ($i = 0; $i -lt 60; $i++) { $null = Dk exec $db0 pg_isready -h 127.0.0.1 -U postgres -d openbrain; if ($script:rc -eq 0) { break }; Start-Sleep -Seconds 2 }
+    # the lab's own trigger switches (fixtures load, the test's planting) are not the migration's: put both databases in one trigger mode
+    $norm = "DO `$`$ BEGIN IF to_regclass('public.inlet_connections') IS NOT NULL THEN ALTER TABLE public.thoughts ENABLE TRIGGER USER; ALTER TABLE public.sources ENABLE TRIGGER USER; END IF; END `$`$"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -c $norm
+    $null = Dk exec $db0 psql -U postgres -d openbrain -X -q -c $norm
     $dPre = & $dumpF (Dk exec $db0 sh -c "$dump")
     Check ($dPre.Length -gt 1000 -and $dPre -notmatch 'document_gaps') 'the chain built without 650: its schema has no gaps object'
     $null = Dk cp (Join-Path $dockerDir 'init-document-gaps.sql') "${db}:/tmp/init-document-gaps.sql"

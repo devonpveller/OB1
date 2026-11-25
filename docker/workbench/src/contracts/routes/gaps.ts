@@ -71,7 +71,8 @@ export function registerGaps(app: ContractApp, deps: ContractDeps, minSim = Numb
     request: {
       query: z.object({
         limit: limit(100, 500),
-        path: queryParam("path", "documents/lab-user/notes.md", "only the gaps of this document"),
+        // no example: Dredd would send a path that is not its own identity's document (a 404 by design)
+        path: z.string().optional().openapi({ param: { name: "path", in: "query" }, description: "only the gaps of this document (the caller's own)" }),
         state: queryParam("state", "open", "only gaps in this state (default: every state but dismissed)"),
       }),
     },

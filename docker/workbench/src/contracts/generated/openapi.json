@@ -16832,13 +16832,12 @@
           {
             "schema": {
               "type": "string",
-              "description": "only the gaps of this document"
+              "description": "only the gaps of this document (the caller's own)"
             },
             "required": false,
-            "description": "only the gaps of this document",
+            "description": "only the gaps of this document (the caller's own)",
             "name": "path",
-            "in": "query",
-            "example": "documents/lab-user/notes.md"
+            "in": "query"
           },
           {
             "schema": {
