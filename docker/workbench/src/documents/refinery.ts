@@ -30,6 +30,7 @@ import { parseDocument } from "./grammar.ts";
 import { FOREIGN_HELD_TARGET, FOREIGN_IDEA } from "./ownership.ts";
 import { listingRow, type OutboundLink, syncListing } from "./listing.ts";
 import { DocError, ownedPath, readDocument } from "./repo.ts";
+import { writeReopened } from "./trail.ts";
 import { HOLDER_KIND } from "./paths.ts";
 import { gateErrorBody, isGateError } from "../fetch-gate/client.ts";
 
@@ -110,6 +111,7 @@ export async function reopenRefinery(deps: RefineryDeps, path: string, who: Iden
     await deps.db.tx(async (t) => {
       await t.query(`UPDATE public.refinery_state SET archived_at = NULL, archived_from = NULL WHERE refinery_id = $1`, [refinery.id]);
       await t.query(`UPDATE public.ideas SET status = $2, updated_at = now() WHERE id = $1`, [refinery.id, refinery.archived_from ?? "engaged"]);
+      await writeReopened(t, who.sub, who.sub, refinery.id); // rw-idea-reopen-trail: only a refinery that really was archived
     });
   }
   // pick up what the document linked while the refinery rested

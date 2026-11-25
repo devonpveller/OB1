@@ -114,6 +114,8 @@ ok(ps.includes("/workbench/documents/unarchive") && ps.includes("/workbench/idea
 await tab("trail");
 const ua = (await lines()).find((l) => /Taken out of the archive/.test(l));
 ok(!!ua && /You/.test(ua) && !/Removed:/.test(ua), `the trail has the unarchive line, not "Removed": ${ua}`);
+const ro = (await lines()).find((l) => /Reopened an idea/.test(l));
+ok(!!ro && /You/.test(ro) && !/ALPHA parked idea/.test(ro), `the trail has one 'Reopened an idea' line for You and no idea text: ${ro}`);
 await tab("removed");
 await click(T("delete-forever")); await sleep(150);
 await typeInto("typed-input", "delete"); ok((await dis()) === true, "Delete forever stays disabled for the wrong case");
