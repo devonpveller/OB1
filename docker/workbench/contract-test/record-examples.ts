@@ -97,6 +97,15 @@ for (const [k, f] of [["timeline", "events"], ["trail", "entries"], ["jobs", "jo
   ex[k][f] = ex[k][f].slice(0, 3);
 }
 delete ex.steer;
+// rw-settings-registry-tier: the published examples never name an admin-tier key (the registry route hides those from a person who is
+// not an admin, and openapi.json is public). The lab records the real fixture key (the only entry the settings registry holds);
+// the document shows a user-tier key instead, and dredd-hooks.js points those two operations back at the fixture key.
+const SHOWN_KEY = "refinery.dormancy_days";
+const SHOWN_RESOLVED = { path: null, reachable: false, via: "value" };
+ex.settings.settings = ex.settings.settings.map((x: any) => ({ ...x, key: SHOWN_KEY, value: { days: 14 }, resolved: SHOWN_RESOLVED }));
+ex.setting = { ...ex.setting, key: SHOWN_KEY, value: { days: 14 }, resolved: SHOWN_RESOLVED };
+ex.settingWritten = { ...ex.settingWritten, key: SHOWN_KEY, value: { days: 21 }, resolved: SHOWN_RESOLVED };
+reqs.settingWritten = { value: { days: 21 }, by: "dredd" };
 const lines = [
   "// Response and request examples for the OpenAPI document. RECORDED from the contract",
   "// served over contract-test/fixtures.sql by contract-test/record-examples.ts (timestamps",

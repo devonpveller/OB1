@@ -22,7 +22,7 @@ export const Notifications = z.object({
 }).openapi("Notifications");
 
 export const Setting = z.object({
-  key: registryValue(REGISTRY.settings, "podcast.archive_destination"),
+  key: registryValue(REGISTRY.settings, "refinery.dormancy_days"),
   value: Json.openapi({ description: "{\"mount\": <name>} or {\"path\": <directory>}" }),
   is_default: z.boolean(),
   version: z.number().int(),

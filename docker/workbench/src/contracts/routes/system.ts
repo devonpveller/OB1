@@ -18,6 +18,7 @@ import { parseLimit } from "../logic/scope.ts";
 import { ErrorBody, limit, pathParam, queryParam } from "../schemas/common.ts";
 import { Notifications, Registries, RegistryDetail, Setting, Settings, SettingWrite } from "../schemas/system.ts";
 import { EX } from "../schemas/examples.ts";
+import { REGISTRY } from "../registry.ts";
 import { authorOf, body, type ContractApp, type ContractDeps, errors, op, fail, json, PREFIX, send } from "./http.ts";
 
 // rwr-settings-shell (tester attempt 1, case 1): the contract's settings reads hold the shared (admin-tier) keys. A PERSON who is
@@ -77,7 +78,7 @@ export function registerSystem(app: ContractApp, deps: ContractDeps) {
     }
   });
 
-  const keyParam = z.object({ key: pathParam("key", "podcast.archive_destination", "a settings registry key") });
+  const keyParam = z.object({ key: pathParam("key", "refinery.dormancy_days", "a settings registry key") });
   op(app, createRoute({
     method: "get", path: `${PREFIX}/settings/{key}`, operationId: "setting", tags: ST, summary: "one setting",
     request: { params: keyParam },
@@ -120,7 +121,13 @@ export function registerSystem(app: ContractApp, deps: ContractDeps) {
     responses: { 200: json(Registries, EX.registries, "registries"), ...errors },
   }), async (c) => {
     try {
-      return send(c, Registries, await sys.registries(deps.db));
+      const out = await sys.registries(deps.db);
+      // rw-settings-registry-tier: the settings registry's entry count is what this person may see, as in the registry itself
+      if (!seesAdminTier(await identityOf(c))) {
+        const mine = await userTierKeys(deps.db);
+        for (const r of out.registries) if (r.name === REGISTRY.settings) r.entries = (await deps.registry.entries(r.name)).filter((e) => mine.has(e.key)).length;
+      }
+      return send(c, Registries, out);
     } catch (e) {
       return fail(c, e);
     }
@@ -135,6 +142,13 @@ export function registerSystem(app: ContractApp, deps: ContractDeps) {
     try {
       const r = await sys.registry(deps.db, deps.registry, c.req.valid("param").name);
       if (!r) return c.json({ error: "no such registry" }, 404);
+      // rw-settings-registry-tier (settings-shell review N1): the settings registry holds the admin-tier keys (their names, labels,
+      // default mounts); a person who is not an admin sees only the entries public.settings_keys says are user tier (the same rule
+      // as the settings reads above; an entry the table does not know is hidden). The contract_registry MCP tool calls this route.
+      if (r.name === REGISTRY.settings && !seesAdminTier(await identityOf(c))) {
+        const mine = await userTierKeys(deps.db);
+        r.entries = r.entries.filter((e) => mine.has(e.key));
+      }
       return send(c, RegistryDetail, r);
     } catch (e) {
       return fail(c, e);

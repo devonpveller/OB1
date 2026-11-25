@@ -57,7 +57,20 @@ const PRIVATE_BY_ID = /\/private\/(claims|jobs)\/\{id\}/;
 //    order (archive, then reopen), which leaves the idea as it was.
 const IDEA_REST = /\/ideas\/\{id\}\/(archive|reopen)/;
 
+// 9. rw-settings-registry-tier: the OpenAPI examples for GET and PUT /settings/{key} show a user-tier key (the document is public and the
+//    registry hides admin-tier entries from a person who is not an admin); the Dredd lab's settings registry holds only the fixture
+//    key, so these two transactions are pointed back at it, and the PUT carries a destination that key accepts.
+const SETTING_SHOWN = '/settings/refinery.dormancy_days';
+const SETTING_FIXTURE = '/settings/podcast.archive_destination';
+
 hooks.beforeEach((transaction, done) => {
+  if (transaction.request && String(transaction.request.uri || '').endsWith(SETTING_SHOWN)) {
+    transaction.fullPath = String(transaction.fullPath || '').replace(SETTING_SHOWN, SETTING_FIXTURE);
+    transaction.request.uri = String(transaction.request.uri).replace(SETTING_SHOWN, SETTING_FIXTURE);
+    if (String(transaction.request.method || '').toUpperCase() === 'PUT') {
+      transaction.request.body = JSON.stringify({ value: { path: '/mounts/podcast-archive/alt' }, by: 'dredd' });
+    }
+  }
   if (IDEA_REST.test(String(transaction.name || '')) && transaction.request && transaction.request.headers) {
     transaction.request.headers['X-Test-Sub'] = 'lab-ideas-0001';
   }

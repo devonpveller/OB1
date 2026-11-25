@@ -51,6 +51,10 @@ function fakeDb(tiers: Record<string, string> | "missing"): Db {
         if (tiers === "missing") return Promise.reject(new Error('relation "public.settings_keys" does not exist'));
         return Promise.resolve(Object.entries(tiers).filter(([, t]) => t === "user").map(([key]) => ({ key })));
       }
+      if (/FROM public\.contract_registries WHERE name/.test(sql)) return Promise.resolve([{ name: "settings", version: 1, owner: "P0", description: "the configuration store keys" }]);
+      if (/FROM public\.contract_registries r/.test(sql)) {
+        return Promise.resolve([{ name: "settings", version: 1, owner: "P0", description: "the configuration store keys", entries: ENTRIES.length }]);
+      }
       return Promise.resolve([]); // contract_settings: nothing stored, every key reads its default
     },
   } as unknown as Db;
@@ -131,4 +135,45 @@ Deno.test("fail closed: a registry key settings_keys does not know, or no settin
   assertEquals(await keysOf(await noTable(LIST, h)), []);
   assertEquals((await noTable(ONE("ui.sample"), h)).status, 404);
   assertEquals((await keysOf(await noTable(LIST, { "x-brain-key": FA.WORKBENCH_KEY }))).sort(), [ADMIN_KEY, "ui.sample"]);
+});
+
+// rw-settings-registry-tier: the registry route (and the contract_registry MCP tool, which calls exactly this route) is the
+// same door. A person who is not an admin gets no admin-tier entry: not its key, its label, its default mount, anywhere in the body.
+const REG = "/workbench/contract/registries/settings";
+const regKeys = async (r: Response) => { const j = await r.json(); if (!j.entries) throw new Error("status " + r.status + " " + JSON.stringify(j)); return (j.entries as { key: string }[]).map((e) => e.key); };
+const ADMIN_LABEL = ENTRIES[0].label + "";
+
+Deno.test("registry/settings: a non-admin person sees only the user-tier entries; no admin key, default mount or definition anywhere in the body", async () => {
+  const call = door(FA);
+  const h = { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-alice", ["users"]) };
+  const r = await call(REG, h);
+  assertEquals(r.status, 200);
+  const body = await r.text();
+  assertEquals(JSON.parse(body).entries.map((e: { key: string }) => e.key), ["ui.sample"]);
+  for (const leak of [ADMIN_KEY, "podcast-archive", "destination", "archive"]) assert(!body.includes(leak), `'${leak}' leaked: ${body}`);
+  assert(ADMIN_LABEL.length > 0);
+  // the summary list counts only what this person may see
+  const sum = await (await call("/workbench/contract/registries", h)).json();
+  assertEquals(sum.registries.find((x: { name: string }) => x.name === "settings").entries, 1);
+});
+
+Deno.test("registry/settings: an admin person and every service caller still see every entry", async () => {
+  const call = door(FA);
+  const admin = { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-root", ["users", "research-admins"]) };
+  assertEquals((await regKeys(await call(REG, admin))).sort(), [ADMIN_KEY, "ui.sample"]);
+  for (const key of [FA.WORKBENCH_KEY, "podcast-key-0123456789", "mcp-key-012345678901"]) {
+    assertEquals((await regKeys(await call(REG, { "x-brain-key": key }))).sort(), [ADMIN_KEY, "ui.sample"], key);
+  }
+  const sum = await (await call("/workbench/contract/registries", { "x-brain-key": FA.WORKBENCH_KEY })).json();
+  assertEquals(sum.registries.find((x: { name: string }) => x.name === "settings").entries, 2);
+});
+
+Deno.test("registry/settings: header mode person sees no admin entry, the default subject sees all; fail closed with no settings_keys table", async () => {
+  const E = { WORKBENCH_KEY: "internal-key-0123456789", WORKSPACE_IDENTITY_HEADER: "X-Test-Sub" };
+  const call = door(E);
+  const k = { "x-brain-key": E.WORKBENCH_KEY };
+  assertEquals(await regKeys(await call(REG, { ...k, "x-test-sub": "bob" })), ["ui.sample"]);
+  assertEquals((await regKeys(await call(REG, k))).sort(), [ADMIN_KEY, "ui.sample"]);
+  const h = { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-alice", ["users"]) };
+  assertEquals(await regKeys(await door(FA, "missing")(REG, h)), []);
 });
