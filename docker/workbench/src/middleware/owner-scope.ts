@@ -27,7 +27,8 @@ import { documentPathsIn, ownsDocumentPaths } from "../documents/ownership.ts";
 
 const OTHER = "(another user's document)";
 // a body field holding a document's TEXT, not a path: never searched (a document may quote a path)
-const TEXT_FIELDS = new Set(["content", "body", "text", "markdown", "exact", "note", "summary"]);
+// ("quote": the to-place queue's quote, text copied from a source, as "exact" is)
+const TEXT_FIELDS = new Set(["content", "body", "text", "markdown", "exact", "quote", "note", "summary"]);
 const UUID_IN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 // the documents API's own URL prefixes are routes, not vault paths
 const ROUTE_PREFIX = /^\/workbench\/(?:documents|contract\/documents)(?=\/|$)/;
