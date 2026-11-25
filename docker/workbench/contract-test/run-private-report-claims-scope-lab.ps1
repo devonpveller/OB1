@@ -430,10 +430,21 @@ try {
         @('b_own_in_agent', $subB, 'A clean note body.', '', $t_b1, ''),
         @('b_own_in_chat', $subB, 'A clean note body.', '', '', $t_b1),
         @('b_split_own', $subB, $splitRest, $splitTitle, '', ''),
-        @('a_split_b', $subA, $splitRest, $splitTitle, '', ''))
+        @('a_split_b', $subA, $splitRest, $splitTitle, '', ''),
+        # rw-note-slug-owner: two writers, ONE notebook and title (the 7th field names the shared notebook): both notes survive
+        @('so_a', $subA, 'Owner note text X from A.', '', '', '', 'owner'),
+        @('so_b', $subB, 'Owner note text Y from B.', '', '', '', 'owner'),
+        @('so_a2', $subA, 'Owner note text X2 from A, saved again.', '', '', '', 'owner'),
+        @('so_hub_a', $subA, 'Hub-titled text X from A.', '@NB', '', '', 'owner'),
+        @('so_hub_b', $subB, 'Hub-titled text Y from B.', '@NB', '', '', 'owner'),
+        @('so_note_a', $subA, 'Note-titled text X from A.', '@NBNOTE', '', '', 'owner'),
+        @('so_note_b', $subB, 'Note-titled text Y from B.', '@NBNOTE', '', '', 'owner'),
+        # B's sentence in A's note saves, B's own is refused, with both writers on the shared name
+        @('so_a_quotes_b', $subA, "Notes from a call. $t_b1 More notes.", 'quote', '', '', 'owner'),
+        @('so_b_quotes_own', $subB, "My summary. $t_b1", 'quote', '', '', 'owner'))
       foreach ($case in $cases) {
-        $nb = "prcr5$ph$($case[0] -replace '_', '')"
-        $title = switch ($case[3]) { '@NB' { $nb } '@NBVAR' { $nb.ToUpper() + '!' } '' { 'r5 note' } default { $case[3] } }
+        $nb = "prcr5$ph$(if ($case.Count -gt 6) { $case[6] } else { $case[0] -replace '_', '' })"
+        $title = switch ($case[3]) { '@NB' { $nb } '@NBVAR' { $nb.ToUpper() + '!' } '@NBNOTE' { "$nb-note" } '' { 'r5 note' } default { $case[3] } }
         $js = "const o = { notebook: Deno.env.get('R5_NB'), title: Deno.env.get('R5_TITLE'), content: Deno.env.get('R5_CONTENT'), source: 'user_note' }; if (Deno.env.get('R5_AGENT')) o.agent = Deno.env.get('R5_AGENT'); if (Deno.env.get('R5_CHAT')) o.chat = Deno.env.get('R5_CHAT'); const r = await fetch('http://${wbName}:8000/workbench/notes', { method: 'POST', headers: { 'content-type': 'application/json', 'x-brain-key': Deno.env.get('R5_KEY'), 'X-Test-Sub': Deno.env.get('R5_SUB') }, body: JSON.stringify(o) }); const t = await r.text(); console.log('R5STATUS=' + r.status); console.log('R5BODY=' + t.slice(0, 300));"
         $envs = @('-e', "R5_KEY=$key", '-e', "R5_SUB=$($case[1])", '-e', "R5_NB=$nb", '-e', "R5_TITLE=$title", '-e', "R5_CONTENT=$($case[2])")
         if ($case[4]) { $envs += @('-e', "R5_AGENT=$($case[4])") }
@@ -470,8 +481,28 @@ try {
     foreach ($v in @('hub', 'hubvar')) {
       $qb = "a_${v}_quotes_b"; $qn = "a_${v}_quotes_none"
       Check ($r5["red_$qb"] -ne $r5["red_$qn"]) "R5 RED (the tip, title = notebook$(if ($v -eq 'hubvar') { ', another spelling' })): A quoting B's sentence and A quoting nobody's are DISTINGUISHABLE (the oracle) - B's: $($r5["red_$qb"]); nobody's: $($r5["red_$qn"])"
-      Check ($r5["green_$qb"] -eq 'status=201 file=1 row=1' -and $r5["green_$qn"] -eq 'status=201 file=1 row=1' -and $r5["green_${qb}_shape"] -eq $r5["green_${qn}_shape"] -and $r5["green_${qb}_shape"] -match 'path=content/notebooks/NB/NB-note\.md') "R5 GREEN (title = notebook$(if ($v -eq 'hubvar') { ', another spelling' })): both SAVED and served beside the hub, the same status and body shape - B's: $($r5["green_$qb"]) [$($r5["green_${qb}_shape"])]; nobody's: $($r5["green_$qn"]) [$($r5["green_${qn}_shape"])]"
+      Check ($r5["green_$qb"] -eq 'status=201 file=1 row=1' -and $r5["green_$qn"] -eq 'status=201 file=1 row=1' -and $r5["green_${qb}_shape"] -eq $r5["green_${qn}_shape"] -and $r5["green_${qb}_shape"] -match 'path=content/notebooks/NB/NB-note-[0-9a-f]{8}\.md') "R5 GREEN (title = notebook$(if ($v -eq 'hubvar') { ', another spelling' })): both SAVED and served beside the hub, the same status and body shape - B's: $($r5["green_$qb"]) [$($r5["green_${qb}_shape"])]; nobody's: $($r5["green_$qn"]) [$($r5["green_${qn}_shape"])]"
     }
+    # rw-note-slug-owner: two writers, one notebook and title. RED (the tip): B's save replaced A's note (still ONE file and ONE
+    # row after both saves); GREEN: two files and two rows, each reading its own text; A saving again replaces only A's.
+    # (per-writer files in the owner notebook, green: 'r5 note' A+B, <nb>-note A+B (the hub-titled and note-titled saves of one
+    # writer are the one file: the hub rule), 'quote' A = 5; B's own-sentence save is refused and writes nothing)
+    $oa = $r5['green_so_b_shape'] -replace '-[0-9a-f]{8}\.md', '-TAG.md'
+    $ob = $r5['green_a_clean_shape'] -replace '-[0-9a-f]{8}\.md', '-TAG.md'
+    $nbOwn = { param($ph) "prcr5${ph}owner" }
+    Check ($r5['red_so_a'] -eq 'status=201 file=1 row=1' -and $r5['red_so_b'] -eq 'status=201 file=1 row=1') "R5 RED (the tip): B's save over A's name REPLACED A's note (one file, one row after both): A $($r5['red_so_a']); B $($r5['red_so_b'])"
+    Check ($r5['green_so_a'] -eq 'status=201 file=1 row=1' -and $r5['green_so_b'] -eq 'status=201 file=2 row=2') "R5 GREEN: B's save over A's name left both notes (two files, two rows): A $($r5['green_so_a']); B $($r5['green_so_b'])"
+    Check ($r5['green_so_a2'] -eq 'status=201 file=2 row=2') "R5 GREEN: A saving again replaced only A's note (still two files, two rows): $($r5['green_so_a2'])"
+    Check ($r5['green_so_hub_b'] -eq 'status=201 file=3 row=3' -and $r5['green_so_note_b'] -eq 'status=201 file=4 row=4') "R5 GREEN: titles <nb> and <nb>-note: A and B each keep their own <nb>-note (4 files after both writers): hub B $($r5['green_so_hub_b']); note B $($r5['green_so_note_b'])"
+    $dg = Join-Path $vault 'content\notebooks\prcr5greenowner'
+    $tx = @(Get-ChildItem -File -Path $dg -Filter '*.md' -ErrorAction SilentlyContinue | ForEach-Object { [System.IO.File]::ReadAllText($_.FullName) })
+    $has = { param($t) @($tx | Where-Object { $_.Contains($t) }).Count }
+    Save 'owner-green.txt' ("files=$($tx.Count)`n" + ($tx -join "`n----`n"))
+    Check ((& $has 'text X2 from A') -eq 1 -and (& $has 'text X from A') -eq 0 -and (& $has 'text Y from B') -eq 1) "R5 GREEN: the files read A's second text X2 and B's Y (A's X was replaced by A's own re-save; B's untouched)"
+    Check ((& $has 'Note-titled text X from A') -eq 1 -and (& $has 'Note-titled text Y from B') -eq 1) "R5 GREEN: the <nb>-note files read A's and B's own texts"
+    Check ($r5['green_so_b_quotes_own'] -match '^status=422' -and $r5['green_so_b_quotes_own_body'] -match [regex]::Escape($msg)) "R5 GREEN: B's own sentence is refused (422) on the shared name too: $($r5['green_so_b_quotes_own'])"
+    Check ($r5['green_so_a_quotes_b'] -match '^status=201') "R5 GREEN: B's sentence in A's note saves on the shared name: $($r5['green_so_a_quotes_b'])"
+    Check ($r5['green_so_b'] -match '^status=201' -and $oa -eq $ob -and $oa -match 'path=content/notebooks/NB/') "R5 GREEN (no oracle): B over A's name answers 201 with the same body keys and path shape as a name nobody holds: [$($r5['green_so_b_shape'])] vs [$($r5['green_a_clean_shape'])]"
     # attempt 2 (F1): the writer's own sentence in a field that lands in the vault file's frontmatter
     foreach ($f in @('agent', 'chat')) {
       $k = "b_own_in_$f"
