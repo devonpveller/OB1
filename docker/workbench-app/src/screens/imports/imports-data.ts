@@ -5,16 +5,17 @@
 // The back end is today's intake routes (workbench/src/intake/routes.ts, repo.ts):
 //   GET  /workbench/intake/jobs?kinds=import,add&limit=N      the caller's own jobs (another person's is never listed)
 //   POST /workbench/intake/jobs/:kind/:id/retry | /cancel     404 for a job that is not the caller's (same as a missing one)
-//   POST /workbench/intake/add                                JSON {url, path | refinery_id} or multipart (file)
+//   POST /workbench/intake/add                                JSON {url, path | refinery_id} or multipart (file): the upload path itself
 // A job's `detail` carries what the screen shows; `detail.actions` says what the server would allow now.
 import { api, apiForm, ApiError } from "../../lib/api";
+export { hrefOfPath } from "../documents/docs-data";
 
 export const JOBS_LIMIT = 200; // the server's per-kind maximum (parseLimit(.., 50, 200))
 export const WEEK_MS = 7 * 24 * 3600 * 1000;
 // The intake route's own file limit (workbench/src/intake/routes.ts: `deps.maxFileBytes ?? 25 * 1024 * 1024`), checked
 // up front so a person is not made to wait for a refusal. test/imports-drift.test.ts reads the route's source. The
-// forwarder in front of the workbench has its own, smaller body cap until rwr-intake-upload-cap widens it; a file over
-// THAT gets the forwarder's 413 and the screen shows its reason as the server says it (ApiError body.error).
+// forwarder already passes intake/add as an upload path (rwr-intake-upload-cap, wiki-viewer/lib/workbench-proxy.mjs), so
+// the route's own 25 MB check is the real limit; any refusal is shown as the server says it (ApiError body.error).
 export const FILE_LIMIT_BYTES = 25 * 1024 * 1024;
 
 export type Inlet = { kind: string; since: string };
@@ -76,8 +77,8 @@ export const statusOf = (j: Job): { label: string; tone: Tone } => {
 export const isActive = (j: Job) => ["queued", "fetching", "extracting", "embedding", "linking", "holding"].includes(j.status);
 export const needsLook = (j: Job) => j.status === "failed";
 
-// Who sees it. An add is HELD in the person's refinery (workbench/src/intake/pipeline.ts: "held is a quality gate");
-// a held source is private to its refinery until it is admitted (init-research-contract.sql, "held sources"). An
+// Who sees it. An add is HELD in the person's refinery; a held source is PRIVATE to that user's idea until it is
+// admitted (rw-held-owner-scope; init-research-contract.sql, "held sources"), so "Only you" is the stated rule. An
 // import (the older file / link import) lands in the shared library directly. This is the job's own fact, not a guess.
 export const isPrivate = (j: Job) => j.kind === "add";
 export const whoSees = (j: Job): { short: string; long: string } =>
@@ -90,8 +91,10 @@ export const fromOf = (j: Job): string =>
 export const titleOf = (j: Job): string => j.filename || j.url || "(no name)";
 
 const stem = (p: string) => (p.split("/").pop() ?? p).replace(/\.md$/i, "").replace(/[-_]+/g, " ");
+// A document's link is never built from its path (that would put the owner's folder key and the file name in the
+// address): the screen asks the Documents screen's own builder (hrefOfPath -> docHref, /documents/d/<id>) for it.
 export const landedIn = (j: Job): { text: string; href: string | null } =>
-  j.docPath ? { text: "Document: " + stem(j.docPath), href: "/documents/" + encodeURIComponent(j.docPath) }
+  j.docPath ? { text: "Document: " + stem(j.docPath), href: null }
   : j.refineryId ? { text: "One of your ideas' refineries", href: null }
   : { text: "The shared library", href: null };
 
@@ -120,7 +123,7 @@ export function stepsOf(j: Job): Step[] | null {
 }
 
 // Try again is offered ONCE: the job's `attempts` starts at 1 and a retry makes it 2 (intake/routes.ts). The server
-// would still accept a third go, so the screen does not offer it (and says why).
+// itself refuses a third retry with a 409; the screen does not offer it either (and says why).
 export const MAX_ATTEMPTS = 2;
 export const canRetry = (j: Job) => j.actions.includes("retry") && j.attempts < MAX_ATTEMPTS;
 export const retriedAlready = (j: Job) => (j.status === "failed" || j.status === "cancelled") && j.actions.includes("retry") && j.attempts >= MAX_ATTEMPTS;

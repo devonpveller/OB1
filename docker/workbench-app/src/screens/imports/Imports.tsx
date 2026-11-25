@@ -8,7 +8,7 @@ import { getLockedDocument } from "../../lib/state";
 import type { ScreenProps } from "../../routes";
 import { ago } from "../home/home-data";
 import {
-  addOne, canCancel, inletName, readInlets, canRetry, cancelJob, FILE_LIMIT_BYTES, fileProblem, FILTERS, fromOf, isActive, JOBS_LIMIT, landedIn, linkProblem, passes,
+  addOne, canCancel, inletName, readInlets, canRetry, cancelJob, FILE_LIMIT_BYTES, fileProblem, FILTERS, fromOf, hrefOfPath, isActive, JOBS_LIMIT, landedIn, linkProblem, passes,
   readJobs, readLandings, reasonOf, retriedAlready, retryJob, statusOf, stepsOf, titleOf, weekOf, whoSees, isPrivate,
   type Filter, type Inlet, type Job, type JobsRead, type LandingOption,
 } from "./imports-data";
@@ -147,6 +147,15 @@ function Details({ job, onChanged }: { job: Job | null; onChanged: (message: str
   const [retried, setRetried] = useState<Record<string, true>>({}); // a retry already sent: its button is gone at once, before the re-read
   const live = useRef(true);
   useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
+  // The landed document's link is the opaque /documents/d/<id> (docHref), read back from its path: never built from the path.
+  const [docHref, setDocHref] = useState<{ path: string; href: string | null } | null>(null);
+  const docPath = job?.docPath ?? "";
+  useEffect(() => {
+    if (!docPath) return;
+    let alive = true;
+    void hrefOfPath(docPath).then((href) => { if (alive) setDocHref({ path: docPath, href }); });
+    return () => { alive = false; };
+  }, [docPath]);
   if (!job) return <section className="card" data-testid="imp-details-empty"><p className="empty">Pick an item to see its steps, where it landed and why it failed.</p></section>;
   const s = statusOf(job), w = whoSees(job), landed = landedIn(job), steps = stepsOf(job);
   const act = async (verb: "retry" | "cancel") => {
@@ -174,7 +183,7 @@ function Details({ job, onChanged }: { job: Job | null; onChanged: (message: str
           ) : <span>{job.status === "cancelled" ? "Stopped before it finished." : "It stopped before it finished."} It has run {job.attempts} {job.attempts === 1 ? "time" : "times"}.</span>}
         </dd>
         <dt>Landed in</dt>
-        <dd>{job.status === "held" || job.status === "done" ? (landed.href ? <Link to={landed.href}>{landed.text}</Link> : landed.text) : <span>{landed.text} <span className="meta">(when it finishes)</span></span>}</dd>
+        <dd>{job.status === "held" || job.status === "done" ? (docHref && docHref.path === job.docPath && docHref.href ? <Link to={docHref.href}>{landed.text}</Link> : landed.text) : <span>{landed.text} <span className="meta">(when it finishes)</span></span>}</dd>
         <dt>Who sees it</dt><dd>{w.long}</dd>
       </dl>
       {job.status === "failed" && <p className="imp-why" data-testid="imp-why"><strong>Why it failed:</strong> {job.error || "No reason was recorded."}</p>}

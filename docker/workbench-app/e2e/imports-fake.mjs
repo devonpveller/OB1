@@ -5,6 +5,8 @@
 // test/imports-drift.test.ts reads the server's source and fails when a constant or a message here stops matching it.
 // WHO is the identity seam's subject (a string); a request body never names one.
 
+import { uid } from "./docs-fake.mjs";
+
 export const ACTIVE = ["queued", "fetching", "extracting", "embedding", "linking", "holding"];
 export const CANCELLABLE = ["queued", "fetching", "extracting"];
 export const KINDS = ["import", "add", "chunk", "extract", "entity"];
@@ -121,6 +123,11 @@ export function createFake() {
     if (method === "GET" && path === "/workbench/contract/inlets/connections") {
       // kind and stamps only, the caller's rows only (slot 600); a person with none gets an empty list
       return { status: 200, body: { connections: inlets.filter((i) => i.owner === who).sort((a, b) => a.created - b.created).map((i) => ({ kind: i.kind, created_at: iso(i.created), updated_at: iso(i.created) })) } };
+    }
+    if (method === "GET" && path === "/workbench/documents/state") {
+      // as the documents route: the caller's own listed document answers with its opaque id; another person's is the same 404 as a missing one
+      const d = docs.find((x) => x.owner === who && x.path === query.path);
+      return d ? { status: 200, body: { id: uid(d.path), path: d.path, listed: true, trashed: /(^|\/)\.trash\//.test(d.path), archived: /(^|\/)\.archive\//.test(d.path), carries_idea: false, refinery: null, tags: [] } } : { status: 404, body: { error: "no such document" } };
     }
     if (method === "GET" && path === "/workbench/contract/documents") {
       return { status: 200, body: { documents: docs.filter((d) => d.owner === who).map((d) => ({ title: d.title, path: d.path, updated: iso(Date.now()), outbound_links: [] })) } };

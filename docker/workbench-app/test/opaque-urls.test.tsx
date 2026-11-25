@@ -52,10 +52,14 @@ function stub() {
     const r = fake.handle(who, method, u, body ?? {});
     if (r) return j(r.body, r.status);
     if (path === "/workbench/contract/sessions") return j({ sessions: [] });
-    if (path === "/workbench/intake/jobs") return j({ jobs: [] });
+    if (path === "/workbench/intake/jobs") return j({ jobs: who === "alice" ? importJobs : [] });
     return j({ error: "not found" }, 404);
   });
 }
+
+// alice's one import job, landed in the CPU document: the Imports screen's "Landed in" link is one more document link builder
+const importJobs = [{ id: "99999999-0000-4000-8000-000000000001", kind: "add", status: "held", created_at: new Date(NOW - 3600000).toISOString(), updated_at: new Date(NOW - 3600000).toISOString(),
+  detail: { url: "https://example.test/article", doc_path: "documents/k-a/Hardware/cpu.md", held_source_id: "aaaaaaaa-0000-4000-8000-000000000001", attempts: 1, actions: [] } }];
 
 // every URL the app hands to the history, and every leak found so far
 let urls: string[] = [];
@@ -202,6 +206,24 @@ describe("every document link builder, walked as alice", () => {
     expect(await hrefOfPath(GATEWAY)).toBe(H(GATEWAY));
     expect(await hrefOfPath("documents/k-a/no-such.md")).toBeNull();
     expect(docHref("")).toBe("/documents"); // no id, no address that names anything
+  });
+});
+
+describe("the Imports screen's Landed in link", () => {
+  it("is the document's id: no title, slug, folder key or .md in the href, the address or history", async () => {
+    window.history.pushState({}, "", "/imports");
+    watchHistory();
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByTestId("imp-row").length).toBe(1));
+    fireEvent.click(screen.getAllByTestId("imp-row")[0]);
+    const link = await waitFor(() => within(screen.getByTestId("imp-details")).getByRole("link", { name: /Document:/ }));
+    expect(link.getAttribute("href")).toBe(H(CPU));
+    none();
+    fireEvent.click(link);
+    expect(window.location.pathname).toBe(H(CPU));
+    await waitFor(() => expect(screen.getByTestId("doc-editor")).toBeTruthy());
+    none();
+    for (const u of pushes) expect(u).toMatch(/^\/(imports|documents\/d\/[0-9a-f-]{36})$/);
   });
 });
 

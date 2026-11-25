@@ -26,7 +26,10 @@ describe.skipIf(!have)("the fake matches the server's intake source", () => {
   });
   it("a job starts at attempts 1 and a retry adds one (so MAX_ATTEMPTS = 2 means Try again once)", () => {
     expect(readFileSync(resolve(__dirname, "../../init-intake-queue.sql"), "utf8")).toMatch(/attempts\s+INT NOT NULL DEFAULT 1/);
-    expect(src("routes.ts")).toMatch(/attempts = attempts \+ 1/);
+    // the retry's one write lives in repo.ts (RETRY_MOVE_SQL, bounded on attempts < MAX_ATTEMPTS); the route runs that statement
+    expect(src("repo.ts")).toMatch(/RETRY_MOVE_SQL = `UPDATE public\.import_jobs SET status = 'queued', error = NULL, attempts = attempts \+ 1/);
+    expect(src("repo.ts")).toMatch(/export const MAX_ATTEMPTS = 2;/);
+    expect(src("routes.ts")).toContain("db.query(repo.RETRY_MOVE_SQL, [job.id, repo.MAX_ATTEMPTS])");
     expect(MAX_ATTEMPTS).toBe(2);
   });
   it("the list's per-kind limit is 200 and its default is 50 (parseLimit)", () => {

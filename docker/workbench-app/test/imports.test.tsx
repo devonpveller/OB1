@@ -9,6 +9,7 @@ import { Imports } from "../src/screens/imports/Imports";
 import { setFetcher, requestLog, clearRequestLog } from "../src/lib/api";
 import { resetState } from "../src/lib/state";
 import { createFake, RETRIED_ALREADY } from "../e2e/imports-fake.mjs";
+import { uid } from "../e2e/docs-fake.mjs";
 
 const H = 3600 * 1000, D = 24 * H;
 let fake = createFake();
@@ -189,7 +190,8 @@ describe("details: steps, landed in, who sees it, why it failed (acceptance 1)",
     const d = screen.getByTestId("imp-details").textContent!;
     expect(d).toMatch(/Fetched through the private search gateway/); expect(d).toMatch(/Held in your refinery/);
     expect(d).toMatch(/Document: alpha plan/);
-    expect(within(screen.getByTestId("imp-details")).getByRole("link", { name: /alpha plan/ }).getAttribute("href")).toBe("/documents/documents%2Fk-a%2Falpha-plan.md");
+    // the link is the opaque id (docHref), never the owner's folder key or the file name
+    await waitFor(() => expect(within(screen.getByTestId("imp-details")).getByRole("link", { name: /alpha plan/ }).getAttribute("href")).toBe("/documents/d/" + uid("documents/k-a/alpha-plan.md")));
     expect(d).toMatch(/private to your refinery until it is admitted/);
     pickRow("old-import");
     expect(screen.getByTestId("imp-details").textContent).toMatch(/Everyone on the workbench/);
@@ -404,8 +406,9 @@ describe("two identities (acceptance 2 and 5)", () => {
     const gate = new Promise<void>((r) => { release = r; });
     setFetcher(async (u, init) => {
       const x = new URL(u, "http://x");
-      if (x.pathname === "/workbench/intake/jobs" && who === "alice") { await gate; }
-      const r = fake.handle({ who: "u-" + who, method: init?.method ?? "GET", path: x.pathname, query: Object.fromEntries(x.searchParams) });
+      const sub = "u-" + who; // the person who MADE the request: the late answer holds THEIR data (alice's), not the next person's
+      const r = fake.handle({ who: sub, method: init?.method ?? "GET", path: x.pathname, query: Object.fromEntries(x.searchParams) });
+      if (x.pathname === "/workbench/intake/jobs" && sub === "u-alice") { await gate; }
       return new Response(JSON.stringify(r?.body ?? {}), { status: r?.status ?? 404 });
     });
     const { rerender } = render(<Imports subject="u-alice" whoAnswered />);
