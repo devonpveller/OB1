@@ -261,4 +261,61 @@ t("R2: a NUL in a note is 400; an admin keeps from.ref of another user's documen
   assertEquals(gone.status, 404, gone.text);
 });
 
+// ── rw-doc-path-spaces ─────────────────────────────────────────────────────────────────────────────────────
+const ODD_FOLDERS = ["Old notes", "a&b", "a,b", "it's", "a(b)", "a#b", "a?b", 'say "hi"', "a b&c, (d) 'e' #f"];
+
+t("S1: a document in a folder whose name has a space or punctuation can be flagged; the flag reads back byte-equal", async () => {
+  for (const folder of ODD_FOLDERS) {
+    const ref = `documents/${A}/${folder}/cpu.md`;
+    const made = await mk(A, { from: { kind: "document", ref } });
+    assertEquals(made.status, 201, `${folder}: ${made.text}`);
+    assertEquals(made.json.from, { kind: "document", ref });
+    const row = (await sql(`SELECT from_ref FROM public.user_flags WHERE id = $1`, [made.json.id]))[0];
+    assertEquals(row.from_ref, ref, "stored byte-equal");
+    const listed = (await call(A, "GET", `${FL}?limit=500`)).json.flags as any[];
+    assertEquals(listed.find((f) => f.id === made.json.id).from.ref, ref, "listed byte-equal");
+  }
+});
+
+t("S2: B naming A's document in such a folder gets the answer for a missing document; B never learns the folder exists", async () => {
+  for (const folder of ODD_FOLDERS) {
+    const foreign = await mk(B, { from: { kind: "document", ref: `documents/${A}/${folder}/cpu.md` } });
+    const missing = await mk(B, { from: { kind: "document", ref: `documents/${A}-nobody/${folder}/cpu.md` } });
+    assertEquals(foreign.status, 404, `${folder}: ${foreign.text}`);
+    assertEquals([foreign.status, foreign.text], [missing.status, missing.text], folder);
+  }
+  assertEquals((await sql(`SELECT count(*)::int AS n FROM public.user_flags WHERE owner_sub = $1`, [B]))[0].n, 0);
+});
+
+t("S3: traversal, a control character and a path outside documents/ are still refused", async () => {
+  for (const ref of [`documents/../notes/x.md`, `documents/${A}/../${B}/x.md`, `documents/${A}/x\u0001.md`, `notes/x.md`, `documents/`]) {
+    const r = await mk(A, { from: { kind: "document", ref } });
+    assert(r.status === 400 || r.status === 404, `${JSON.stringify(ref)} -> ${r.status} ${r.text}`);
+    assertEquals(r.json.id, undefined, ref);
+  }
+});
+
+// A's legacy file (documents/<file>.md, owned by its listing row) whose name has a space after a prefix that is B's own
+// legacy file: the scanner cuts A's path at the space and used to judge the prefix - B's. B naming A's file is refused
+// exactly as for a missing document, at the request gate and in each route that checks again.
+t("S4: legacy files - a path cut at a space is never judged as the shorter path another user owns", async () => {
+  const tag = rnd();
+  const mine = `documents/${tag}-team.md`;
+  const theirs = `documents/${tag}-team.md copy.md`;
+  const gone = `documents/${tag}-none.md`;
+  await sql(`INSERT INTO public.user_document_listings (path, title, owner_sub) VALUES ($1, 'b', $3), ($2, 'a', $4)`, [mine, theirs, B, A]);
+  try {
+    const nope = async (label: string, call_: (p: string) => Promise<{ status: number; text: string }>) => {
+      const foreign = await call_(theirs);
+      const missing = await call_(gone);
+      assertEquals(foreign.status, 404, `${label}: ${foreign.text}`);
+      assertEquals([foreign.status, foreign.text], [missing.status, missing.text], label);
+    };
+    await nope("flag from", (p) => mk(B, { from: { kind: "document", ref: p } }));
+    await nope("holder references", (p) => call(B, "GET", `/workbench/contract/holders/user_document/references?ref=${encodeURIComponent(p)}`));
+  } finally {
+    await sql(`DELETE FROM public.user_document_listings WHERE path = ANY($1)`, [[mine, theirs]]);
+  }
+});
+
 Deno.test({ name: "close the pool", ignore, sanitizeOps: false, sanitizeResources: false, fn: async () => { await pool?.end(); } });

@@ -116,7 +116,16 @@ export async function ownsDocumentPaths(db: Db, paths: string[], who: Viewer): P
     [legacy, who.sub, live],
   );
   const mine = new Set(rows.map((r) => r.path));
-  return legacy.every((p, i) => mine.has(p) || mine.has(live[i]));
+  if (!legacy.every((p, i) => mine.has(p) || mine.has(live[i]))) return false;
+  // rw-doc-path-spaces: a path the scanner cut short (a space or " ' ? & # , ) in a file name) reaches here as its own
+  // prefix. If that prefix is the caller's file but it is also the start, at one of those characters, of ANOTHER
+  // user's path, the full path the route will read may be theirs: refuse, exactly as for a missing document.
+  const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const cut = [...legacy, ...live].map((x) => `^${esc(x)}[\\s"'?&#,)]`);
+  const other = await db.query<{ path: string }>(
+    `SELECT path FROM public.user_document_listings WHERE owner_sub <> $2 AND path ~ ANY($1) LIMIT 1`, [cut, who.sub],
+  );
+  return other.length === 0;
 }
 
 function normalize(p: string): string {
@@ -127,6 +136,20 @@ function normalize(p: string): string {
     else out.push(seg);
   }
   return out.join("/");
+}
+
+// A field known to hold EXACTLY ONE document path (flag from.ref): the whole string is the path - never scanned,
+// so a space or & , ' ( ) # ? in a folder name cannot cut it short (rw-doc-path-spaces). Returns the path, or null
+// when it is not a plain documents/<...> path: no `..`/`.` segment, no empty segment (`//`, trailing `/`), no
+// control character, nothing at or above the documents/ root. It resolves nothing: a path that would need
+// resolving is refused, not rewritten, so the string judged is the string stored and read back.
+export function singleDocumentPath(ref: string): string | null {
+  // deno-lint-ignore no-control-regex
+  if (typeof ref !== "string" || /[\x00-\x1f\x7f]/.test(ref)) return null;
+  const p = ref.replace(/\\/g, "/");
+  if (!isDocumentsPath(p) || p.length <= DOCUMENTS_ROOT.length + 1) return null;
+  if (p.split("/").some((seg) => seg === "" || seg === "." || seg === "..")) return null;
+  return p;
 }
 
 // Every documents/... path named inside a string (after `..` resolution: notes/../documents/x is one).
