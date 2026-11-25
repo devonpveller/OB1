@@ -117,3 +117,11 @@ The Connected inlets panel lists the person's own connections (kind and when) fr
 Tests: `test/imports.test.tsx` (vitest against `e2e/imports-fake.mjs`, a fake of the real routes that the e2e stub shares),
 `test/imports-drift.test.ts` (the fake against the server's source), `e2e/imports.e2e.mjs` run by `e2e/run-imports-e2e.ps1`
 (lab subnet 10.250.113.0/24).
+## Removals and trail (item `rwr-removals`)
+
+- `src/screens/removals/`: `Removals.tsx` (the two tabs), `removals-data.ts` (every read and action, each to a route that already exists), `lost-stays.ts` (the "what is lost / what stays" text and the typed words). `routes.ts` gives `/removals` its `screen` (`RemovalsScreen`); nothing else of the shell changed.
+- **Removed tab:** sources by stage (hidden, cut loose) with by / why / depended on it, erased sources with their marker, connections cut, trashed and archived documents, archived ideas. **Show it again** (`POST sources/:id/restore`, `documents/restore`, `documents/unarchive`, `documents/refinery/open`), **Lift the marker** (`POST contract/cleanup/tombstones/:id/lift`, only for who erased it or an admin: the screen asks `contract/tombstones/:id` `may_lift`), **Erase for good** (`POST contract/cleanup/sources/:id/erase`, typed `ERASE`, offered only when the list says `erase_allowed`), **Delete forever** (`POST documents/delete-forever`, typed `DELETE`, a trashed document only).
+- **Trail tab:** read only (no button, no input; three filters). Source lines are the shared trail (`contract/trail`); document lines are the caller's own (`documents/trail`). "You" is answered from the caller's own action log (`contract/cleanup/actions`): a shared line never names a person, so anyone else reads "Someone else".
+- Mapping the plan left open: "cut connections" = the trail's `severed` lines; "lift the marker" = lift the tombstone an erase leaves.
+- No count of a dependence kind a person can own (document links, references, reports) is shown; the row says only that something in private work still holds the source.
+- Tests: `test/removals.test.tsx`; `e2e/removals.e2e.mjs` with `e2e/removals.stub.mjs` via `e2e/run-removals-e2e.ps1` (same method as `run-e2e.ps1`).

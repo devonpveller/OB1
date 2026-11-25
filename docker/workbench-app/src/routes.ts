@@ -10,6 +10,7 @@ import { Documents } from "./screens/documents/Documents";
 import { DocumentScreen, LegacyDocument } from "./screens/documents/DocumentScreen";
 import { Imports } from "./screens/imports/Imports";
 import { StartResearch } from "./screens/research-start/StartResearch";
+import { RemovalsScreen } from "./screens/removals/Removals";
 
 export type Group = "everywhere" | "housekeeping";
 // What every screen is given. `params` holds the route's `:name` segments, decoded (so /documents/d/:ref with
@@ -35,7 +36,7 @@ export const ROUTES: RouteDef[] = [
   { path: "/podcasts", label: "Podcasts", group: "everywhere", phase: 3, will: "Your episodes and the live discussions.", inMenu: true },
   { path: "/library", label: "Library", group: "everywhere", phase: 2, will: "Sources and claims: browse, check quality, add to a document.", inMenu: true },
   { path: "/imports", label: "Imports", group: "housekeeping", phase: 5, will: "Bring links and files in, and see what happened to each.", inMenu: true, screen: Imports },
-  { path: "/removals", label: "Removals and trail", group: "housekeeping", phase: 5, will: "What was removed, when, and why.", inMenu: true },
+  { path: "/removals", label: "Removals and trail", group: "housekeeping", phase: 5, will: "What was removed, when, and why.", inMenu: true, screen: RemovalsScreen },
   { path: "/cleanup", label: "Cleanup", group: "housekeeping", phase: 5, will: "Sources waiting to be cleaned up.", inMenu: true },
   { path: "/settings", label: "Settings", group: "housekeeping", phase: 6, will: "Your account, privacy and preferences.", inMenu: true },
   // not in the menu

@@ -95,5 +95,11 @@ private body` }) : json({ error: "no such document" }, 404);
   if (p === "/workbench/intake/jobs") return json({ jobs: f.jobs.map((a, i) => ({ id: "j" + i, detail: { actions: a } })) });
   if (p === "/workbench/contract/cleanup/sources") return json({ sources: [], total: f.total });
   if (p === "/workbench/contract/cleanup/reopen-candidates") return json({ candidates: f.candidates.map((e) => ({ evidence: e ? [{}] : [] })) });
+  // the Removals screen (rwr-removals) is a real screen: empty answers so the shell run can open it (its own e2e is removals.e2e.mjs)
+  if (p === "/workbench/contract/trail") return json({ entries: [], leads: [] });
+  if (p === "/workbench/contract/cleanup/actions") return json({ actions: [] });
+  if (p === "/workbench/contract/documents") return json({ documents: [] });
+  if (p === "/workbench/contract/ideas") return json({ ideas: [] });
+  if (p === "/workbench/documents/trail") return json({ lines: [], total: 0 });
   json({ error: "not found" }, 404);
 }).listen(9000, () => console.log("stub up"));
