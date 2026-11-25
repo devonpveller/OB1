@@ -411,7 +411,7 @@ try {
     Check (($script:rc -eq 0) -and ($o -cnotmatch 'ERROR:')) 'the fixture document listings are in place for Dredd'
     $gen = Join-Path $wb 'src\contracts\generated'
     $names = Lab-Docker 300 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${gen}:/spec:ro", $dreddTag, '/spec/openapi.json', "http://$P-wb:8000", '--names')
-    $prNames = @(($names -replace '\[[0-9;]*m', '' -split "`n") | Where-Object { $_ -match '^info: (.*pending-refs.*)$' } | ForEach-Object { $Matches[1].Trim() })
+    $prNames = @(($names -replace '\[[0-9;]*m', '' -split "`n") | Where-Object { $_ -match '^info: .*pending-refs' } | ForEach-Object { ($_ -replace '^info: ', '').Trim() })
     Save 'dredd-toplace-names.log' ((($names -replace '\[[0-9;]*m', '' -split "`n") | Where-Object { $_ -match 'pending' }) -join "`n")
     foreach ($l in $prNames | Select-Object -First 12) { Write-Host "    names: $l" }
     $onlyArgs = @(); foreach ($n in $prNames) { $onlyArgs += @('--only', $n) }
@@ -446,7 +446,7 @@ try {
       if (-not $txt.Contains($m.find)) { Fail "$($m.id): the text to mutate is not in $($m.file)"; continue }
       [System.IO.File]::WriteAllText($f, $txt.Replace($m.find, $m.repl), (New-Object System.Text.UTF8Encoding $false))
       $mn = "$P-mut-$($m.id.ToLower())"
-      $ro = Dk run -d --name $mn --label $label --network $net @($wbArgs) -v "${dir}\src:/app/src:ro" $wbTag
+      $ro = Dk run -d --name $mn --label $label --network $net @wbArgs -v "${dir}\src:/app/src:ro" $wbTag
       $script:made.containers += $mn
       if (-not (Wait-Http "http://${mn}:8000/health" 90)) { Fail "$($m.id): the mutated workbench did not start: $ro"; Save "mutation-$($m.id)-start.log" ((Dk logs --tail 30 $mn) -join "`n"); $null = Dk rm -f -v $mn; continue }
       $rm = Run-It $mn
