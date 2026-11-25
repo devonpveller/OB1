@@ -60,6 +60,7 @@ import { graph } from "./routes/graph.ts";
 import { nav } from "./routes/nav.ts";
 import { documentsRouter, workspaceRouter } from "./routes/documents.ts";
 import { documentsLifecycleRouter } from "./routes/documents_lifecycle.ts";
+import { documentsVersionsRouter } from "./routes/documents_versions.ts";
 import { ideaScheduleRouter } from "./routes/idea-schedule.ts";
 import { roomsRouter } from "./routes/rooms.ts";
 import { ideasRouter } from "./ideas/routes.ts";
@@ -156,6 +157,7 @@ app.route("/workbench/search", search); // wiki-dynamic-index P3 — DB-backed w
 app.route("/workbench/graph", graph); // wiki-dynamic-index — page-scoped graph neighbourhood
 app.route("/workbench/nav", nav); // research-workbench P1b — the explorer, one folder at a time (forwards to the viewer)
 app.route("/workbench/documents", documentsLifecycleRouter(docDeps)); // rwr-docs-lifecycle-api — unarchive, delete forever, empty trash, the removal trail (literal paths, before the wildcard-free documents router)
+app.route("/workbench/documents", documentsVersionsRouter(docDeps)); // rwr-doc-versions-api - numbered versions, named snapshots, restore a version, compare (literal paths)
 app.route("/workbench/documents", documentsRouter(docDeps)); // research-workbench P2b — user documents (D12)
 app.route("/workbench/workspace", workspaceRouter(cdeps.db)); // research-workbench P2b — the bell's acknowledgement
 app.route("/workbench/idea-schedule", ideaScheduleRouter(cdeps.db)); // rw-idea-schedule - when research on my ideas starts; research now

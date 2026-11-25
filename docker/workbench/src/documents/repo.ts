@@ -32,6 +32,14 @@ import {
   ARCHIVE, DOCUMENTS_ROOT, docRel, folderRel, inSubtree, isArchived, isTrashed, liveRel, rootOf, slugify, TRASH,
 } from "./paths.ts";
 
+// Every commit the documents API makes goes through the vault's git lock (the one gitMv and gitRm already take):
+// vaultCommitPath commits the WHOLE index, so a commit that runs between another operation's `git rm` / `git mv`
+// and its own commit sweeps that staged change in, and one commit then carries two owners' files
+// (rwr-doc-versions-api attempt 1). Taken here, never inside a path lock held by a caller that already holds this key.
+export function commitLocked(relPath: string, message: string, author?: string) {
+  return withPathLock(VAULT_GIT, () => vaultCommitPath(relPath, message, author));
+}
+
 export interface DocDeps {
   db: Db;
   reg: RegistryReader;
@@ -74,7 +82,7 @@ export interface ListingOutcome {
 
 // Update the listing after a file write; never throws. A failure is reported once: the caller's
 // response carries it, and one notification (deduplicated on the document) is posted.
-async function afterWrite(deps: DocDeps, rel: string, content: string, who: Identity): Promise<ListingOutcome> {
+export async function afterWrite(deps: DocDeps, rel: string, content: string, who: Identity): Promise<ListingOutcome> {
   try {
     await syncListing(deps.db, deps.reg, rel, content, who, who.name);
     return { ok: true };
@@ -108,7 +116,7 @@ export async function saveDocument(
   }
   await vaultWrite(rel, content);
   const listing = await afterWrite(deps, rel, content, who);
-  if (opts.commit) await vaultCommitPath(rel, `documents: edit ${rel}`, who.name);
+  if (opts.commit) await commitLocked(rel, `documents: edit ${rel}`, who.name);
   return { path: rel, hash: await sha256(content), listing };
 }
 
@@ -128,7 +136,7 @@ export async function createDocument(
   const content = newDocumentText(title, input.fields ?? {}, input.body ?? "");
   await vaultWrite(rel, content);
   const listing = await afterWrite(deps, rel, content, who);
-  await vaultCommitPath(rel, `documents: create ${rel}`, who.name);
+  await commitLocked(rel, `documents: create ${rel}`, who.name);
   return { path: rel, hash: await sha256(content), listing };
 }
 
@@ -168,7 +176,7 @@ export async function createFolder(path: string, who: Identity) {
   if (dir === rootOf(who)) throw new DocError("not a folder you can create", 400);
   if (await vaultExists(dir)) return { path: dir, created: false };
   await vaultWrite(`${dir}/.keep`, "");
-  await vaultCommitPath(`${dir}/.keep`, `documents: create folder ${dir}`, who.name);
+  await commitLocked(`${dir}/.keep`, `documents: create folder ${dir}`, who.name);
   return { path: dir, created: true };
 }
 
@@ -365,7 +373,7 @@ export async function recoverDocument(deps: DocDeps, path: string, from: string,
   const live = liveRel(rel);
   await vaultWrite(live, content);
   const listing = await afterWrite(deps, live, content, who);
-  await vaultCommitPath(live, `documents: recover ${live} @ ${from.slice(0, 8)}`, who.name);
+  await commitLocked(live, `documents: recover ${live} @ ${from.slice(0, 8)}`, who.name);
   return { recovered: live, hash: await sha256(content), listing };
 }
 
