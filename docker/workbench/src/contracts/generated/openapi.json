@@ -4750,7 +4750,31 @@
             "required": [
               "title",
               "turns"
-            ]
+            ],
+            "description": "a room transcript (the original input); send this OR from, never both"
+          },
+          "from": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40,
+                "example": "idea",
+                "description": "run | report | document | idea | topic (discussion is registered, not usable yet: 409)"
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "the id of one thing of that kind (a document is named by its path); it must be the caller's own, else it reads as missing (404)"
+              }
+            },
+            "required": [
+              "kind",
+              "id"
+            ],
+            "description": "rwr-episode-from: make the episode from one of the caller's own things; send this OR transcript, never both"
           },
           "refinery_id": {
             "type": "string",
@@ -4761,9 +4785,112 @@
         },
         "required": [
           "team_id",
-          "title",
-          "transcript"
+          "title"
         ]
+      },
+      "PodcastShareDisclosure": {
+        "type": "object",
+        "properties": {
+          "episode_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "e7000000-0000-4000-8000-000000000001",
+            "description": "uuid"
+          },
+          "already_shared": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string",
+            "description": "the sentence the owner reads, with the list in it"
+          },
+          "would_share": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PodcastDisclosureItem"
+            },
+            "description": "every private or cloud-derived item another user would then see"
+          },
+          "share_digest": {
+            "type": "string",
+            "description": "fingerprint of exactly this list: send it with shared: true to confirm"
+          }
+        },
+        "required": [
+          "episode_id",
+          "already_shared",
+          "text",
+          "would_share",
+          "share_digest"
+        ]
+      },
+      "PodcastDisclosureItem": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "example": "idea",
+            "description": "episode | run | report | document | idea | claim | source | quote | transcript"
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "marker": {
+            "type": "string",
+            "description": "private | cloud"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "label",
+          "marker"
+        ]
+      },
+      "PodcastPatchResult": {
+        "type": "object",
+        "properties": {
+          "episode_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "e7000000-0000-4000-8000-000000000001",
+            "description": "uuid"
+          },
+          "shared": {
+            "type": "boolean"
+          },
+          "disclosed": {
+            "type": "integer",
+            "description": "how many items the confirmed list held (0 when unsharing)"
+          }
+        },
+        "required": [
+          "episode_id",
+          "shared",
+          "disclosed"
+        ]
+      },
+      "PodcastPatchBody": {
+        "type": "object",
+        "properties": {
+          "shared": {
+            "type": "boolean",
+            "description": "true shares the episode with the other users: only with share_digest; false unshares it"
+          },
+          "share_digest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "the digest of GET .../share-preview, read just before (a stale one is refused)"
+          }
+        },
+        "required": [
+          "shared"
+        ],
+        "additionalProperties": false
       },
       "Sessions": {
         "type": "object",
@@ -13872,7 +13999,7 @@
         "tags": [
           "podcasts (P7a)"
         ],
-        "summary": "ask for a render of a room transcript by one of the caller's teams; the requester is the caller",
+        "summary": "ask for a render of a room transcript, or of one of the caller's own run / report / document / idea / topic (from), by one of the caller's teams; the requester is the caller; the episode starts private",
         "requestBody": {
           "required": true,
           "content": {
@@ -13918,6 +14045,216 @@
                 },
                 "schema": {
                   "$ref": "#/components/schemas/PodcastRenderRequest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/podcasts/{id}/share-preview": {
+      "get": {
+        "operationId": "podcastSharePreview",
+        "tags": [
+          "podcasts (P7a)"
+        ],
+        "summary": "what sharing this episode would make visible to other users (the owner's own episode only), and the digest that confirms it",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "example": "e7000000-0000-4000-8000-000000000001",
+              "description": "the episode (the caller's own: another user's reads as missing)"
+            },
+            "required": true,
+            "description": "the episode (the caller's own: another user's reads as missing)",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the sentence, the list, and the digest to confirm",
+            "content": {
+              "application/json": {
+                "example": {
+                  "episode_id": "e7000000-0000-4000-8000-000000000001",
+                  "already_shared": false,
+                  "text": "By sharing this podcast, you'll be sharing the following private information to the users who have access to this server: [episode: Fixture episode; idea: Fixture idea]",
+                  "would_share": [
+                    {
+                      "type": "episode",
+                      "id": "e7000000-0000-4000-8000-000000000001",
+                      "label": "Fixture episode",
+                      "marker": "private"
+                    },
+                    {
+                      "type": "idea",
+                      "id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+                      "label": "Fixture idea",
+                      "marker": "private"
+                    }
+                  ],
+                  "share_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/PodcastShareDisclosure"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/podcasts/{id}": {
+      "patch": {
+        "operationId": "podcastPatch",
+        "tags": [
+          "podcasts (P7a)"
+        ],
+        "summary": "share the owner's episode with the other users (shared: true, with the share-preview's digest), or unshare it (shared: false)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "example": "e7000000-0000-4000-8000-000000000001",
+              "description": "the episode (the caller's own: another user's reads as missing)"
+            },
+            "required": true,
+            "description": "the episode (the caller's own: another user's reads as missing)",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "shared": false
+              },
+              "schema": {
+                "$ref": "#/components/schemas/PodcastPatchBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "shared or unshared",
+            "content": {
+              "application/json": {
+                "example": {
+                  "episode_id": "e7000000-0000-4000-8000-000000000001",
+                  "shared": false,
+                  "disclosed": 0
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/PodcastPatchResult"
                 }
               }
             }

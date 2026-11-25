@@ -904,6 +904,13 @@ export type Notifications = {
   notifications: Array<Notification>;
 };
 
+export type PodcastDisclosureItem = {
+  type: string;
+  id: string;
+  label: string;
+  marker: string;
+};
+
 export type PodcastEpisode = {
   id: string;
   title: string;
@@ -913,6 +920,17 @@ export type PodcastEpisode = {
   shared: boolean;
   mine: boolean;
   created_at: string;
+};
+
+export type PodcastPatchBody = {
+  shared: boolean;
+  share_digest?: string;
+};
+
+export type PodcastPatchResult = {
+  episode_id: string;
+  shared: boolean;
+  disclosed: number;
 };
 
 export type PodcastPresenter = {
@@ -944,18 +962,30 @@ export type PodcastRenderRequest = {
 export type PodcastRenderRequestBody = {
   team_id: string;
   title: string;
-  transcript: {
+  transcript?: {
     title: string;
     turns: Array<{
       presenterId: string;
       text: string;
     }>;
   };
+  from?: {
+    kind: string;
+    id: string;
+  };
   refinery_id?: string;
 };
 
 export type PodcastRenderRequests = {
   requests: Array<PodcastRenderRequest>;
+};
+
+export type PodcastShareDisclosure = {
+  episode_id: string;
+  already_shared: boolean;
+  text: string;
+  would_share: Array<PodcastDisclosureItem>;
+  share_digest: string;
 };
 
 export type PodcastTeam = {

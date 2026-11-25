@@ -137,6 +137,10 @@ export interface ScriptChatConfig {
    *
    *  Default FALSE - the safe reading. Only `scriptChat` sets it. */
   salvageTruncated?: boolean;
+  /** rwr-episode-from: this caller's prompts carry a person's private material, and an upstream error body can echo
+   *  what it was sent - so the log line names the status and never quotes the body. Default false (the other callers
+   *  log as they always did). */
+  withholdBody?: boolean;
 }
 /** Transient = worth re-sampling: network/timeout, 429, 5xx, or an empty 200.
  *  A 401/403/400 is a CONFIGURATION fault; retrying it just burns the clock. */
@@ -223,7 +227,7 @@ export function makeScriptChat(cfg: ScriptChatConfig): ChatFnWithReason {
           signal: AbortSignal.timeout(timeoutFor(budget)),
         });
         if (!res.ok) {
-          const detail = (await res.text().catch(() => "")).slice(0, 200);
+          const detail = cfg.withholdBody ? "(body withheld)" : (await res.text().catch(() => "")).slice(0, 200);
           if (!isTransientStatus(res.status) || last) {
             console.warn(`[${label}] HTTP ${res.status} (giving up after ${attempt}): ${detail}`);
             return giveUp(`HTTP ${res.status} after ${attempt} attempt(s)`);

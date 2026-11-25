@@ -26,6 +26,8 @@ export interface VoiceRequest {
   shared: boolean;
   requestId?: string | null;
   slug: string;
+  /** rwr-episode-from: the episode starts from personal data - its title and text appear in no log line */
+  private?: boolean;
   meta?: Record<string, unknown>;
 }
 
@@ -46,7 +48,7 @@ export async function voiceAndArchive(t: RoomTranscript, team: Team, req: VoiceR
   // file, no row); it is read again at the write itself, so a change in between is honoured too.
   await d.archive.destination();
   const rendered = await renderTranscript(t, team, { cache: d.cache, concurrency: d.concurrency });
-  log(`[podcast-audio] "${t.title}": ${rendered.stats.turns} turns, ${rendered.stats.hits} cached, ${rendered.stats.misses} synthesised, ` +
+  log(`[podcast-audio] ${req.private ? "(private episode)" : `"${t.title}"`}: ${rendered.stats.turns} turns, ${rendered.stats.hits} cached, ${rendered.stats.misses} synthesised, ` +
     `${rendered.stats.coalesced} coalesced, peak ${rendered.stats.peakConcurrency} at once, ${rendered.seconds.toFixed(1)} s`);
   const tmp = await Deno.makeTempDir({ prefix: "podcast-render-" });
   try {

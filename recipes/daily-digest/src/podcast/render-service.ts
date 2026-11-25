@@ -13,8 +13,9 @@
 import { type ArchiveWriter, type DestinationFn, transcodeArchived } from "./archive.ts";
 import { restAuthHeaders } from "../clients/rest-auth.ts";
 import { voiceAndArchive } from "./episode-audio.ts";
+import { INPUT_KINDS, type InputKindRegistry, materialOf } from "./input-kinds.ts";
+import type { ChatFn } from "./script-renderer.ts";
 import { type Ffmpeg, TARGET_MENU } from "./ffmpeg.ts";
-import type { RoomTranscript } from "./presenters.ts";
 import type { PresenterStore } from "./presenter-store.ts";
 import type { SegmentCache } from "./segment-cache.ts";
 
@@ -27,12 +28,19 @@ export interface RenderServiceDeps {
   concurrency: number;
   restBase: string; // PostgREST (episode rows)
   log?: (m: string) => void;
+  /** the input kinds (input-kinds.ts); the default registry unless a test passes its own */
+  kinds?: InputKindRegistry;
+  /** the script writer for material inputs: the gateway chat on this service's own virtual key. Absent = a request
+   *  that needs a script fails (the service is shipped inert for it) */
+  chat?: ChatFn;
+  /** the voicing step (episode-audio.ts voiceAndArchive); a test passes a fake */
+  voice?: typeof voiceAndArchive;
 }
 
-function isTranscript(v: unknown): v is RoomTranscript {
-  const t = v as RoomTranscript;
+function isTranscript(v: unknown): v is { title: string; turns: { presenterId: string; text: string }[] } {
+  const t = v as { title?: unknown; turns?: unknown };
   return !!t && typeof t.title === "string" && Array.isArray(t.turns) &&
-    t.turns.every((x) => x && typeof x.presenterId === "string" && typeof x.text === "string");
+    t.turns.every((x) => x && typeof (x as { presenterId?: unknown }).presenterId === "string" && typeof (x as { text?: unknown }).text === "string");
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -60,19 +68,34 @@ export class RenderService {
 
   async #run(id: string, row: Record<string, unknown>): Promise<void> {
     const log = this.#d.log ?? ((m: string) => console.log(m));
+    let personal = false;
+    let kindId = "unknown";
     try {
       const owner = String(row.requester_sub);
       const team = await this.#d.store.team(owner, String(row.team_id));
       if (!team) throw new Error(`team ${row.team_id} is not the requester's`);
-      const input = (row.input as Record<string, unknown>)?.transcript;
-      if (!isTranscript(input)) throw new Error("the request's input is not a room transcript");
-      const v = await voiceAndArchive(input, team, {
-        ownerSub: owner, requesterSub: owner, shared: false, requestId: id, slug: String(row.title ?? input.title),
+      // the kind is read from the request and looked up: no branch here names one (input-kinds.ts is the registry)
+      const material = materialOf(row.input);
+      if (!material) throw new Error("the request's input is not a room transcript or a source");
+      const kind = (this.#d.kinds ?? INPUT_KINDS).get(material.kind);
+      if (!kind || !kind.available) throw new Error(`input kind ${kind ? "not available yet" : "not registered"}`);
+      kindId = kind.id;
+      personal = kind.personal;
+      const chat: ChatFn = this.#d.chat ?? (() => Promise.resolve(null));
+      const transcript = await kind.toTranscript(material, { team, chat });
+      if (!isTranscript(transcript)) throw new Error("the input did not become a transcript");
+      const voice = this.#d.voice ?? voiceAndArchive;
+      const v = await voice(transcript, team, {
+        ownerSub: owner, requesterSub: owner, shared: false, requestId: id,
+        slug: personal ? "episode" : String(row.title ?? transcript.title), private: personal,
+        meta: { input_kind: kind.id },
       }, { cache: this.#d.cache, concurrency: this.#d.concurrency, ffmpeg: this.#d.ffmpeg, archive: this.#d.archive, store: this.#d.store, log });
       await this.#d.store.updateRequest(id, { state: "done", episode_id: v.episodeRowId });
     } catch (e) {
-      log(`[podcast-render] request ${id} failed: ${e}`);
-      await this.#d.store.updateRequest(id, { state: "failed", error: String(e).slice(0, 500) }).catch(() => {});
+      // a personal input's failure is recorded as a class: an error can carry the text it was working on
+      const why = personal ? `${kindId} input could not be rendered` : String(e).slice(0, 500);
+      log(`[podcast-render] request ${id} failed${personal ? ` (${kindId})` : `: ${e}`}`);
+      await this.#d.store.updateRequest(id, { state: "failed", error: why }).catch(() => {});
     }
   }
 

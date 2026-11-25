@@ -52,7 +52,12 @@ const TurnIn = z.object({ presenterId: z.string().min(1), text: z.string().min(1
 export const RenderRequestBody = z.object({
   team_id: z.string().min(1),
   title: z.string().min(1).max(200),
-  transcript: z.object({ title: z.string().min(1).max(200), turns: z.array(TurnIn).min(1).max(2000) }),
+  transcript: z.object({ title: z.string().min(1).max(200), turns: z.array(TurnIn).min(1).max(2000) }).optional()
+    .openapi({ description: "a room transcript (the original input); send this OR from, never both" }),
+  from: z.object({
+    kind: z.string().min(1).max(40).openapi({ example: "idea", description: "run | report | document | idea | topic (discussion is registered, not usable yet: 409)" }),
+    id: z.string().min(1).max(512).openapi({ description: "the id of one thing of that kind (a document is named by its path); it must be the caller's own, else it reads as missing (404)" }),
+  }).optional().openapi({ description: "rwr-episode-from: make the episode from one of the caller's own things; send this OR transcript, never both" }),
   refinery_id: uuid("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
     "rw-p8a4-ideas: requested from inside this idea refinery (the caller's own): recorded as its member; an archived refinery refuses (409)").optional(),
 }).openapi("PodcastRenderRequestBody");
@@ -70,3 +75,30 @@ export const RenderRequest = z.object({
 }).openapi("PodcastRenderRequest");
 
 export const RenderRequests = z.object({ requests: z.array(RenderRequest) }).openapi("PodcastRenderRequests");
+
+// rwr-episode-from: the share step. The owner is shown the list, then confirms it by sending its fingerprint back.
+export const DisclosureItem = z.object({
+  type: z.string().openapi({ example: "idea", description: "episode | run | report | document | idea | claim | source | quote | transcript" }),
+  id: z.string(),
+  label: z.string(),
+  marker: z.string().openapi({ description: "private | cloud" }),
+}).openapi("PodcastDisclosureItem");
+
+export const ShareDisclosure = z.object({
+  episode_id: uuid("e7000000-0000-4000-8000-000000000001"),
+  already_shared: z.boolean(),
+  text: z.string().openapi({ description: "the sentence the owner reads, with the list in it" }),
+  would_share: z.array(DisclosureItem).openapi({ description: "every private or cloud-derived item another user would then see" }),
+  share_digest: z.string().openapi({ description: "fingerprint of exactly this list: send it with shared: true to confirm" }),
+}).openapi("PodcastShareDisclosure");
+
+export const PodcastPatchBody = z.object({
+  shared: z.boolean().openapi({ description: "true shares the episode with the other users: only with share_digest; false unshares it" }),
+  share_digest: z.string().min(1).max(128).optional().openapi({ description: "the digest of GET .../share-preview, read just before (a stale one is refused)" }),
+}).strict().openapi("PodcastPatchBody");
+
+export const PodcastPatchResult = z.object({
+  episode_id: uuid("e7000000-0000-4000-8000-000000000001"),
+  shared: z.boolean(),
+  disclosed: z.number().int().openapi({ description: "how many items the confirmed list held (0 when unsharing)" }),
+}).openapi("PodcastPatchResult");

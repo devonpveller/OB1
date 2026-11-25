@@ -34,6 +34,7 @@ import { ArchiveWriter, storeDestination } from "./src/podcast/archive.ts";
 import { PresenterStore } from "./src/podcast/presenter-store.ts";
 import { RenderService } from "./src/podcast/render-service.ts";
 import { SegmentCache } from "./src/podcast/segment-cache.ts";
+import { makeScriptChat } from "./src/podcast/script-renderer.ts";
 import { gatewaySpeech } from "./src/podcast/tts-client.ts";
 import { realClock } from "./src/routine/clock.ts";
 import { routineConfigFromEnv } from "./src/routine/routine.ts";
@@ -73,6 +74,18 @@ const render = new RenderService({
   ffmpeg: { bin: env("FFMPEG_BIN", "ffmpeg") },
   concurrency: num("PODCAST_TTS_CONCURRENCY", 2),
   restBase,
+  // rwr-episode-from: the script writer for a request made from material (a run, report, document, idea, topic) - the
+  // gateway alias on this service's EXISTING virtual key (CHAT_API_KEY, as the daily chain's script pass); no new route
+  chat: makeScriptChat({
+    chatApiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"),
+    chatModel: env("CHAT_MODEL", "local-large"),
+    nothinkSuffix: env("SCRIPT_NOTHINK_SUFFIX", ":nothink"),
+    apiKey: env("CHAT_API_KEY"),
+    label: "episode-from",
+    maxTokens: num("SCRIPT_MAX_TOKENS", 6000),
+    salvageTruncated: true,
+    withholdBody: true, // the prompt carries the listener's private material: an upstream error body is never logged
+  }),
 });
 
 servePodcast(svc, {

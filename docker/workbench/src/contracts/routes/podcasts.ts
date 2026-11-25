@@ -10,7 +10,9 @@ import { identityOf } from "../../middleware/identity.ts";
 import * as pod from "../repo/podcasts.ts";
 import { parseLimit } from "../logic/scope.ts";
 import { limit } from "../schemas/common.ts";
-import { Podcasts, Presenters, RenderRequest, RenderRequestBody, RenderRequests, Teams } from "../schemas/podcasts.ts";
+import {
+  Podcasts, Presenters, RenderRequest, RenderRequestBody, RenderRequests, PodcastPatchBody, PodcastPatchResult, ShareDisclosure, Teams,
+} from "../schemas/podcasts.ts";
 import { EX } from "../schemas/examples.ts";
 import { body, type ContractApp, type ContractDeps, errors, fail, json, op, PREFIX, send } from "./http.ts";
 
@@ -70,13 +72,13 @@ export function registerPodcasts(app: ContractApp, deps: ContractDeps) {
 
   op(app, createRoute({
     method: "post", path: `${PREFIX}/podcasts/requests`, operationId: "podcastRequest", tags: T,
-    summary: "ask for a render of a room transcript by one of the caller's teams; the requester is the caller",
+    summary: "ask for a render of a room transcript, or of one of the caller's own run / report / document / idea / topic (from), by one of the caller's teams; the requester is the caller; the episode starts private",
     request: { body: body(RenderRequestBody, EX.podcastRequestBody) },
     responses: { 202: json(RenderRequest, EX.podcastRequest, "recorded (and handed to the renderer when configured)"), ...errors },
   }), async (c) => {
     try {
       const who = await identityOf(c);
-      const row = await pod.createRequest(deps.db, who, c.req.valid("json"));
+      const row = await pod.createRequest(deps.db, who, c.req.valid("json"), { readOwnDocument: deps.readOwnDocument });
       const url = deps.podcastRenderUrl ?? "";
       if (url) {
         // best-effort: a render service that is down leaves the request queued (the row says so)
@@ -89,6 +91,36 @@ export function registerPodcasts(app: ContractApp, deps: ContractDeps) {
           .catch((e) => deps.log(`podcast render hand-off failed: ${e}`));
       }
       return send(c, RenderRequest, row, 202);
+    } catch (e) {
+      return fail(c, e);
+    }
+  });
+
+  // rwr-episode-from: the share step, as the cast's own (share-preview, then PATCH shared + share_digest). The disclosure
+  // comes first (what would become visible), then the owner's confirmation. Another user's episode, a missing one and an
+  // id that cannot exist all answer 404 "no such episode".
+  op(app, createRoute({
+    method: "get", path: `${PREFIX}/podcasts/{id}/share-preview`, operationId: "podcastSharePreview", tags: T,
+    summary: "what sharing this episode would make visible to other users (the owner's own episode only), and the digest that confirms it",
+    request: { params: z.object({ id: z.string().min(1).max(64).openapi({ example: "e7000000-0000-4000-8000-000000000001", description: "the episode (the caller's own: another user's reads as missing)" }) }) },
+    responses: { 200: json(ShareDisclosure, EX.podcastShareDisclosure, "the sentence, the list, and the digest to confirm"), ...errors },
+  }), async (c) => {
+    try {
+      return send(c, ShareDisclosure, await pod.sharePreview(deps.db, (await identityOf(c)).sub, c.req.valid("param").id));
+    } catch (e) {
+      return fail(c, e);
+    }
+  });
+
+  op(app, createRoute({
+    method: "patch", path: `${PREFIX}/podcasts/{id}`, operationId: "podcastPatch", tags: T,
+    summary: "share the owner's episode with the other users (shared: true, with the share-preview's digest), or unshare it (shared: false)",
+    request: { params: z.object({ id: z.string().min(1).max(64).openapi({ example: "e7000000-0000-4000-8000-000000000001", description: "the episode (the caller's own: another user's reads as missing)" }) }), body: body(PodcastPatchBody, EX.podcastPatchBody) },
+    responses: { 200: json(PodcastPatchResult, EX.podcastPatchResult, "shared or unshared"), ...errors },
+  }), async (c) => {
+    try {
+      const b = c.req.valid("json");
+      return send(c, PodcastPatchResult, await pod.setShared(deps.db, (await identityOf(c)).sub, c.req.valid("param").id, b.shared, b.share_digest));
     } catch (e) {
       return fail(c, e);
     }

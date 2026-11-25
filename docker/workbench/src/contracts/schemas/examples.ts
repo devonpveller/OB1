@@ -128,4 +128,16 @@ export const EX = {
     status: "not_implemented", operation, lands_in: landsIn,
     message: `${operation} is part of the contract; its backing lands in ${landsIn}`,
   }),
+  // rwr-episode-from: written by hand in the served shape
+  podcastShareDisclosure: {
+    episode_id: "e7000000-0000-4000-8000-000000000001", already_shared: false,
+    text: "By sharing this podcast, you'll be sharing the following private information to the users who have access to this server: [episode: Fixture episode; idea: Fixture idea]",
+    would_share: [
+      { type: "episode", id: "e7000000-0000-4000-8000-000000000001", label: "Fixture episode", marker: "private" },
+      { type: "idea", id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1", label: "Fixture idea", marker: "private" },
+    ],
+    share_digest: "0000000000000000000000000000000000000000000000000000000000000000",
+  },
+  podcastPatchBody: { shared: false },
+  podcastPatchResult: { episode_id: "e7000000-0000-4000-8000-000000000001", shared: false, disclosed: 0 },
 };
