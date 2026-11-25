@@ -278,13 +278,14 @@ t("S1: a document in a folder whose name has a space or punctuation can be flagg
 });
 
 t("S2: B naming A's document in such a folder gets the answer for a missing document; B never learns the folder exists", async () => {
+  const before = (await sql(`SELECT count(*)::int AS n FROM public.user_flags WHERE owner_sub = $1`, [B]))[0].n; // earlier cases may have made B flags
   for (const folder of ODD_FOLDERS) {
     const foreign = await mk(B, { from: { kind: "document", ref: `documents/${A}/${folder}/cpu.md` } });
     const missing = await mk(B, { from: { kind: "document", ref: `documents/${A}-nobody/${folder}/cpu.md` } });
     assertEquals(foreign.status, 404, `${folder}: ${foreign.text}`);
     assertEquals([foreign.status, foreign.text], [missing.status, missing.text], folder);
   }
-  assertEquals((await sql(`SELECT count(*)::int AS n FROM public.user_flags WHERE owner_sub = $1`, [B]))[0].n, 0);
+  assertEquals((await sql(`SELECT count(*)::int AS n FROM public.user_flags WHERE owner_sub = $1`, [B]))[0].n, before, "B made no flag");
 });
 
 t("S3: traversal, a control character and a path outside documents/ are still refused", async () => {
