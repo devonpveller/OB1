@@ -134,9 +134,14 @@ function stub() {
       DTRAIL[who].unshift({ id: "lu" + ++seq, kind: "unarchived", path: d.path, actor_sub: "u-" + who, trashed_at: null, created_at: new Date().toISOString() });
       return j({ unarchived: d.path, refinery: { refinery_id: null, archived: false } });
     }
-    if (path === "/workbench/documents/refinery/open" && method === "POST") {
-      const i = IDEAS[who].find((x) => x.document_path === body.path); if (!i) return j({ error: "no" }, 404);
-      i.status = "engaged"; return j({ refinery_id: i.id, archived: false });
+    // REAL (contracts/routes/idea_archive.ts:3,36-38; ideas/repo.ts reopenIdea): by the idea's id, for the caller's own ideas only.
+    // Another user's idea is 404 exactly like a missing one; an idea that is not archived is 409; 200 {idea_id, status: <the state it
+    // was archived from>, archived: false}. Needs no document.
+    m = path.match(/^\/workbench\/ideas\/([^/]+)\/reopen$/);
+    if (m && method === "POST") {
+      const i = IDEAS[who].find((x) => x.id === m![1]); if (!i) return j({ error: "no such idea" }, 404);
+      if (i.status !== "archived") return j({ error: "not archived" }, 409);
+      i.status = "engaged"; return j({ idea_id: i.id, status: "engaged", archived: false });
     }
     if (path === "/workbench/documents/delete-forever" && method === "POST") {
       if (body.confirm !== true) return j({ error: "confirm" }, 400);
@@ -259,7 +264,7 @@ describe("each action calls the existing route and shows up in the trail with th
     await waitFor(() => expect(within(sec("archived")).getByTestId("empty-archived")).toBeTruthy());
     fireEvent.click(within(within(sec("ideas")).getByTestId("row-idea")).getByTestId("show-again"));
     await waitFor(() => expect(within(sec("ideas")).getByTestId("empty-ideas")).toBeTruthy());
-    expect(calls.filter((c) => c.method === "POST").map((c) => c.url)).toEqual(["/workbench/documents/restore", "/workbench/documents/unarchive", "/workbench/documents/refinery/open"]);
+    expect(calls.filter((c) => c.method === "POST").map((c) => c.url)).toEqual(["/workbench/documents/restore", "/workbench/documents/unarchive", "/workbench/ideas/i1/reopen"]);
   });
   it("Delete forever (a trashed document): typed word, POST documents/delete-forever with confirm, then a 'Deleted forever ... You' line", async () => {
     await open();
@@ -445,7 +450,7 @@ describe("private rows show only to their owner, and user B never sees user A's 
     fireEvent.click(within(within(sec("sources")).getAllByTestId("row-source")[0]).getByTestId("show-again"));
     await waitFor(() => expect(titles("sources")).not.toContain("Hidden source one"));
     const posts = requestLog().filter((r) => r.method === "POST").map((r) => r.url);
-    expect(posts.every((u) => /^\/workbench\/(sources\/[^/]+\/restore|contract\/cleanup\/(sources\/[^/]+\/erase|tombstones\/[^/]+\/lift)|documents\/(restore|unarchive|refinery\/open|delete-forever))$/.test(u))).toBe(true);
+    expect(posts.every((u) => /^\/workbench\/(sources\/[^/]+\/restore|contract\/cleanup\/(sources\/[^/]+\/erase|tombstones\/[^/]+\/lift)|documents\/(restore|unarchive|delete-forever)|ideas\/[^/]+\/reopen)$/.test(u))).toBe(true);
     expect(requestLog().some((r) => /alice|bob|u-|subject|owner/i.test(r.url))).toBe(false);
   });
 });
@@ -565,5 +570,36 @@ describe("fix round 1 (tester t-removals, attempt 1): the screen against the rea
     expect(lines().some((l) => /You lifted a marker/.test(l))).toBe(true);
     expect(lines().some((l) => /An action of yours/.test(l))).toBe(true);
     expect(lines().some((l) => /Action recorded in your log|\blift\b|\bmystery\b/.test(l))).toBe(false);
+  });
+});
+
+describe("review D1: every archived idea reopens by its id, with or without a document", () => {
+  it("bob's idea with no document (i9) has Show it again and reopens through POST ideas/:id/reopen", async () => {
+    await open("bob");
+    const row = within(sec("ideas")).getByTestId("row-idea");
+    expect(row.textContent).not.toMatch(/no document/i);
+    expect(sec("ideas").textContent).toMatch(/not recorded in the Trail yet/); // operator exception 2026-11-25: the screen does not claim a line
+    fireEvent.click(within(row).getByTestId("show-again"));
+    await waitFor(() => expect(within(sec("ideas")).getByTestId("empty-ideas")).toBeTruthy());
+    const post = calls.find((c) => c.method === "POST")!;
+    expect(post.url).toBe("/workbench/ideas/i9/reopen"); expect(post.body).toEqual({});
+  });
+  it("a reopen the server refuses reads as the plain sentences: 404 not there any more, 409 no longer possible", async () => {
+    await open("bob");
+    failNext["POST /workbench/ideas/i9/reopen"] = 404;
+    fireEvent.click(within(within(sec("ideas")).getByTestId("row-idea")).getByTestId("show-again"));
+    await waitFor(() => expect(screen.getByTestId("row-error").textContent).toBe("That is not there any more, so nothing was changed."));
+    failNext["POST /workbench/ideas/i9/reopen"] = 409;
+    fireEvent.click(within(within(sec("ideas")).getByTestId("row-idea")).getByTestId("show-again"));
+    await waitFor(() => expect(screen.getByTestId("row-error").textContent).toMatch(/no longer possible.*Nothing was changed/));
+    expect(document.body.textContent).not.toMatch(/SECRET|ALPHA/);
+  });
+  it("the real route's refusals: another user's idea is 404, an idea that is not archived is 409 (the fake behaves as the server)", async () => {
+    await open("alice");
+    who = "bob"; IDEAS.bob[0].status = "engaged";
+    const { api } = await import("../src/lib/api");
+    await expect(api("POST", "/workbench/ideas/i9/reopen", {})).rejects.toMatchObject({ status: 409 });
+    who = "alice";
+    await expect(api("POST", "/workbench/ideas/i9/reopen", {})).rejects.toMatchObject({ status: 404 });
   });
 });

@@ -124,7 +124,9 @@ http.createServer((req, res) => {
     const putBack = (kind, path) => W.dtrail[mode].unshift({ id: "lp" + ++seq, kind, path, actor_sub: SUB[mode], trashed_at: null, created_at: new Date().toISOString() });
     if (p === "/workbench/documents/restore") { const x = d(); if (!x) return json({ error: "no such document" }, 404); x.path = x.path.replace("/.trash/", "/").replace("/.archive/", "/"); putBack("restored", x.path); return json({ restored: x.path }); }
     if (p === "/workbench/documents/unarchive") { const x = d(); if (!x) return json({ error: "no such document" }, 404); x.path = x.path.replace("/.archive/", "/"); putBack("unarchived", x.path); return json({ unarchived: x.path, refinery: { refinery_id: null, archived: false } }); }
-    if (p === "/workbench/documents/refinery/open") { const i = W.ideas[mode].find((x) => x.document_path === b.path); if (!i) return json({ error: "no" }, 404); i.status = "engaged"; return json({ refinery_id: i.id, archived: false }); }
+    // REAL (contracts/routes/idea_archive.ts:3,36-38): by id, own ideas only; another user's or a missing idea is 404, one that is not archived 409.
+    m = p.match(/^\/workbench\/ideas\/([^/]+)\/reopen$/);
+    if (m) { const i = W.ideas[mode].find((x) => x.id === m[1]); if (!i) return json({ error: "no such idea" }, 404); if (i.status !== "archived") return json({ error: "not archived" }, 409); i.status = "engaged"; return json({ idea_id: i.id, status: "engaged", archived: false }); }
     if (p === "/workbench/documents/delete-forever") {
       if (b.confirm !== true) return json({ error: "confirm" }, 400);
       const x = d(); if (!x || !x.path.includes("/.trash/")) return json({ error: "no such document" }, 404);

@@ -207,11 +207,9 @@ function IdeaItem({ idea, refresh }: { idea: IdeaItem; refresh: () => void }) {
     <li className="rm-row" data-testid="row-idea">
       <div className="rm-head"><span className="row-title">{idea.title || "(untitled idea)"}</span><span className="pill done">Archived</span></div>
       <span className="meta">Last changed {when(idea.updated)}</span>
-      {idea.documentPath ? (
-        <div className="rm-actions">
-          <button type="button" data-testid="show-again" disabled={d.busy} onClick={() => void d.run("reopen", () => reopenIdea(idea.documentPath!), "Idea shown again.")}>Show it again</button>
-        </div>
-      ) : <p className="meta">This idea has no document to reopen it through.</p>}
+      <div className="rm-actions">
+        <button type="button" data-testid="show-again" disabled={d.busy} onClick={() => void d.run("reopen", () => reopenIdea(idea.id), "Idea shown again.")}>Show it again</button>
+      </div>
       {d.err && <p className="rm-err" role="alert" data-testid="row-error">{d.err}</p>}
     </li>
   );
@@ -299,7 +297,7 @@ function RemovedTab({ tick, refresh }: { tick: number; refresh: () => void }) {
       <Section id="archived" title="Archived documents" count={archived.length} read={docs} empty="You have no archived documents.">
         {archived.map((d) => <DocumentItem key={d.path} doc={d} refresh={refresh} ask={ask} />)}
       </Section>
-      <Section id="ideas" title="Archived ideas" count={archIdeas.length} read={ideas} empty="You have no archived ideas.">
+      <Section id="ideas" title="Archived ideas" count={archIdeas.length} read={ideas} empty="You have no archived ideas." note="Showing an idea again is not recorded in the Trail yet.">
         {archIdeas.map((i) => <IdeaItem key={i.id} idea={i} refresh={refresh} />)}
       </Section>
     </div>

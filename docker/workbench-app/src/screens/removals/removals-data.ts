@@ -6,7 +6,7 @@
 //   documents   GET  contract/documents                  the caller's own documents (path says trashed / archived)
 //   ideas       GET  contract/ideas                       the caller's own ideas (status archived)
 //   doc trail   GET  documents/trail                      the caller's own document removal lines
-//   Show it again   POST sources/:id/restore | documents/restore | documents/unarchive | documents/refinery/open
+//   Show it again   POST sources/:id/restore | documents/restore | documents/unarchive | ideas/:id/reopen
 //   Lift the marker POST contract/cleanup/tombstones/:id/lift
 //   Erase for good  POST contract/cleanup/sources/:id/erase
 //   Delete forever  POST documents/delete-forever
@@ -106,7 +106,8 @@ export const eraseSource = (id: string, reason_type: string) => api("POST", `/wo
 export const liftMarker = (id: string) => api("POST", `/workbench/contract/cleanup/tombstones/${enc(id)}/lift`, {});
 export const restoreDocument = (path: string) => api("POST", "/workbench/documents/restore", { path });
 export const unarchiveDocument = (path: string) => api("POST", "/workbench/documents/unarchive", { path });
-export const reopenIdea = (documentPath: string) => api("POST", "/workbench/documents/refinery/open", { path: documentPath });
+// By the idea's id (contracts/routes/idea_archive.ts): works with or without a document. 404 = not yours or missing, 409 = not archived.
+export const reopenIdea = (id: string) => api("POST", `/workbench/ideas/${enc(id)}/reopen`, {});
 export const deleteForever = (path: string) => api("POST", "/workbench/documents/delete-forever", { path, confirm: true });
 
 // A refusal in plain words. The server's text is never shown, so a row that is someone else's and a row that is

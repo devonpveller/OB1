@@ -110,7 +110,7 @@ await tab("removed");
 await click(`document.querySelector('[data-testid=row-archived] [data-testid=show-again]')`); await idle();
 await click(`document.querySelector('[data-testid=row-idea] [data-testid=show-again]')`); await idle();
 const ps = await posts();
-ok(ps.includes("/workbench/documents/unarchive") && ps.includes("/workbench/documents/refinery/open"), "archived document and archived idea: Show it again calls unarchive and refinery/open");
+ok(ps.includes("/workbench/documents/unarchive") && ps.includes("/workbench/ideas/i1/reopen"), "archived document and archived idea: Show it again calls unarchive and ideas/:id/reopen");
 await tab("trail");
 const ua = (await lines()).find((l) => /Taken out of the archive/.test(l));
 ok(!!ua && /You/.test(ua) && !/Removed:/.test(ua), `the trail has the unarchive line, not "Removed": ${ua}`);
