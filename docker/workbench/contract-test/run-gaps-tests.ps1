@@ -6,7 +6,7 @@
 # -Subnet is REQUIRED (harness-subnet.ps1: exactly a /24 outside Docker's default pools and 192.168.0.0/16);
 # -Evidence must be absent or empty. -Red runs THIS tree's gaps integration test against a workbench built from -BaseSha (the
 # development pin before rwr-doc-gaps-api): every route case must FAIL there (the chain is this tree's, so the table exists;
-# the base workbench has no routes over it). -Prebuilt uses images already built under this run's :wt-<id> tags.
+# the base workbench has no routes over it). -Quick runs 5a only (the mutation proofs: a deliberately broken tree must go red there). -Prebuilt uses images already built under this run's :wt-<id> tags.
 #
 # LAB DOCKER SHIM (as run-flags-tests.ps1): every docker call goes through Lab-Docker, which REFUSES a published port, a network
 # other than this run's, a network create that is not --internal on the pinned subnet, a macvlan / ipvlan driver, any 192.168.x
@@ -35,6 +35,7 @@ param(
   [string]$CaddyImage = 'caddy:2-alpine',
   [string]$BaseSha = '66ddb63',
   [switch]$Red,
+  [switch]$Quick,
   [switch]$Prebuilt,
   [switch]$KeepImages
 )
@@ -268,7 +269,7 @@ try {
     Check ($dbleak.Count -eq 0) "the database log carries no marker ($($dbleak.Count) lines)"
   }
 
-  if (-not $Red) {
+  if (-not $Red -and -not $Quick) {
     Write-Host '[5b] the migration round trip (revert = the pre-650 schema; forward x2; revert; forward; the dump compares)'
     $dump = 'pg_dump -U postgres -d openbrain --schema-only --no-owner --no-privileges -n public'
     $dumpF = { param($x) (($x -split "`n") | Where-Object { $_ -notmatch '^\\(un)?restrict ' }) -join "`n" }
@@ -308,7 +309,7 @@ try {
     Check (($revObjs -notmatch '(?i)DROP (TABLE|FUNCTION|TRIGGER)[^;]*(sources|claims|reference|wiki)')) 'the revert drops nothing of the shared knowledge'
     Save 'schema-roundtrip.log' "forward-twice identical: $($dOrig -eq $d1b); revert equals the chain without 650: $($d0 -eq $dPre); forward-after-revert identical: $($d2 -eq $dOrig)"
   }
-  if (-not $Red) {
+  if (-not $Red -and -not $Quick) {
     Write-Host '[5c] Dredd over the gap routes (generated/openapi.json against the lab workbench; hooks as the contract run)'
     $dreddTag = "rw-dredd:wt-$short"
     $null = Dk image inspect $dreddTag
