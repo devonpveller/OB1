@@ -391,8 +391,9 @@ try {
     Check ($wbDb.role -eq 'ob_workbench') 'the lab workbench logs in as ob_workbench (slot 480), as compose runs it'
     $t_b1 = Q "SELECT v FROM public.lab_prc_scope WHERE k = 't_b1'"
     $r5 = @{}
-    foreach ($phase in @(@('red', $BaseWorkbenchTag), @('green', $WorkbenchTag))) {
-      $ph = $phase[0]; $tag = $phase[1]
+    # rw-note-write-guard: a third run, 'race', is the fix image with the pre-check forced to answer false (the test seam)
+    foreach ($phase in @(@('red', $BaseWorkbenchTag, ''), @('green', $WorkbenchTag, ''), @('race', $WorkbenchTag, '1'))) {
+      $ph = $phase[0]; $tag = $phase[1]; $force = $phase[2]
       $null = Dk image inspect $tag
       Check ($script:rc -eq 0) "${ph}: the image $tag is present"
       if ($script:rc -ne 0) { continue }
@@ -402,7 +403,7 @@ try {
       $o = Dk run -d --name $wbName --label $label --network $net --network-alias $wbName -e 'PORT=8000' -e "WORKBENCH_KEY=$key" -e "DB_HOST=$db" `
         -e "DB_USER=$($wbDb.role)" -e "DB_PASSWORD=$($wbDb.pw)" -e 'OPEN_BRAIN_URL=http://unreachable.invalid' -e 'EMBEDDING_API_BASE=http://unreachable.invalid/v1' `
         -e 'EXTRACT_URL=http://unreachable.invalid' -e 'WIKI_GIT_DIR=/wiki' -e 'WIKI_ASSETS_DIR=/wiki/assets' -e 'CONTRACT_MOUNTS_ROOT=/mounts' `
-        -e 'RESEARCH_URL=http://unreachable.invalid' -e 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub' -v "${vault}:/wiki" -v "$(Join-Path $ob1 'recipes'):/recipes:ro" $tag
+        -e 'RESEARCH_URL=http://unreachable.invalid' -e 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub' -e "WORKBENCH_TEST_FORCE_PRECHECK_FALSE=$force" -v "${vault}:/wiki" -v "$(Join-Path $ob1 'recipes'):/recipes:ro" $tag
       if ($script:rc -ne 0) { Fail "${ph}: the workbench did not start: $o"; continue }
       $script:made.containers += $wbName
       $up = $false
@@ -430,9 +431,19 @@ try {
         @('b_own_in_agent', $subB, 'A clean note body.', '', $t_b1, ''),
         @('b_own_in_chat', $subB, 'A clean note body.', '', '', $t_b1),
         @('b_split_own', $subB, $splitRest, $splitTitle, '', ''),
-        @('a_split_b', $subA, $splitRest, $splitTitle, '', ''))
+        @('a_split_b', $subA, $splitRest, $splitTitle, '', ''),
+        # rw-note-write-guard (2): B's own sentence split across the AGENT field and the content; A writing B's split
+        @('b_split_agent_own', $subB, $splitRest, '', "The $wB alpha result", ''),
+        @('a_split_agent_b', $subA, $splitRest, '', "The $wB alpha result", ''),
+        # (3): a 300-letter notebook name (A and B alike) and a long but normal one
+        @('a_longnb', $subA, 'A clean note.', '', '', ''),
+        @('b_longnb', $subB, 'A clean note.', '', '', ''),
+        @('a_longnb_ok', $subA, 'A clean note.', '', '', ''))
+      # the race run asks only the two that matter: the writer's own sentence (B) and another user's (A)
+      if ($ph -eq 'race') { $cases = @($cases | Where-Object { $_[0] -in @('b_quotes_own', 'a_quotes_b') }) }
       foreach ($case in $cases) {
         $nb = "prcr5$ph$($case[0] -replace '_', '')"
+        if ($case[0] -in @('a_longnb', 'b_longnb')) { $nb += ('x' * 300) } elseif ($case[0] -eq 'a_longnb_ok') { $nb += ('x' * 50) }
         $title = switch ($case[3]) { '@NB' { $nb } '@NBVAR' { $nb.ToUpper() + '!' } '' { 'r5 note' } default { $case[3] } }
         $js = "const o = { notebook: Deno.env.get('R5_NB'), title: Deno.env.get('R5_TITLE'), content: Deno.env.get('R5_CONTENT'), source: 'user_note' }; if (Deno.env.get('R5_AGENT')) o.agent = Deno.env.get('R5_AGENT'); if (Deno.env.get('R5_CHAT')) o.chat = Deno.env.get('R5_CHAT'); const r = await fetch('http://${wbName}:8000/workbench/notes', { method: 'POST', headers: { 'content-type': 'application/json', 'x-brain-key': Deno.env.get('R5_KEY'), 'X-Test-Sub': Deno.env.get('R5_SUB') }, body: JSON.stringify(o) }); const t = await r.text(); console.log('R5STATUS=' + r.status); console.log('R5BODY=' + t.slice(0, 300));"
         $envs = @('-e', "R5_KEY=$key", '-e', "R5_SUB=$($case[1])", '-e', "R5_NB=$nb", '-e', "R5_TITLE=$title", '-e', "R5_CONTENT=$($case[2])")
@@ -482,6 +493,17 @@ try {
     Check ($r5['red_b_split_own'] -eq 'status=201 file=1 row=1') "R5 RED (the tip): B's own sentence split across title and content is SAVED: $($r5['red_b_split_own'])"
     Check ($r5['green_b_split_own'] -eq 'status=422 file=0 row=0' -and $r5['green_b_split_own_body'] -match [regex]::Escape($msg)) "R5 GREEN: B's own sentence split across title and content is REFUSED (422, no vault file, no row): $($r5['green_b_split_own'])"
     Check ($r5['red_a_split_b'] -eq 'status=201 file=1 row=1' -and $r5['green_a_split_b'] -eq 'status=201 file=1 row=1') "R5: A writing B's sentence split the same way is SAVED and served on both (red $($r5['red_a_split_b']); green $($r5['green_a_split_b']))"
+    # rw-note-write-guard (2): the agent field next to the content
+    Check ($r5['red_b_split_agent_own'] -eq 'status=201 file=1 row=1') "R5 RED (the tip): B's own sentence split across agent and content is SAVED: $($r5['red_b_split_agent_own'])"
+    Check ($r5['green_b_split_agent_own'] -eq 'status=422 file=0 row=0' -and $r5['green_b_split_agent_own_body'] -match [regex]::Escape($msg)) "R5 GREEN: B's own sentence split across agent and content is REFUSED (422, no file, no row): $($r5['green_b_split_agent_own'])"
+    Check ($r5['green_a_split_agent_b'] -eq 'status=201 file=1 row=1') "R5 GREEN: A writing B's sentence split across agent and content is SAVED: $($r5['green_a_split_agent_b'])"
+    # (3): the long notebook name - a plain 4xx, identical for A and B, nothing written; a normal long name saves
+    Check ($r5['red_a_longnb'] -match 'status=5') "R5 RED (the tip): a 300-letter notebook name is a 5xx: $($r5['red_a_longnb'])"
+    Check ($r5['green_a_longnb'] -eq 'status=422 file=0 row=0' -and $r5['green_a_longnb'] -eq $r5['green_b_longnb'] -and $r5['green_a_longnb_body'] -eq $r5['green_b_longnb_body'] -and $r5['green_a_longnb_body'] -match 'too long') "R5 GREEN: the 300-letter name is a 422 with one plain message, identical for A and B, nothing written: A $($r5['green_a_longnb']) / B $($r5['green_b_longnb'])"
+    Check ($r5['green_a_longnb_ok'] -eq 'status=201 file=1 row=1') "R5 GREEN: a long normal notebook name still saves: $($r5['green_a_longnb_ok'])"
+    # the race: pre-check forced false, the claim present at the row write
+    Check ($r5['race_b_quotes_own'] -match '^status=(422|503) file=0 row=0$') "R5 RACE: the writer's own sentence with the pre-check forced false ends 422/503, no vault file, no row: $($r5['race_b_quotes_own'])"
+    Check ($r5['race_a_quotes_b'] -eq 'status=201 file=1 row=1') "R5 RACE: another user's sentence with the pre-check forced false still saves (201, file, row): $($r5['race_a_quotes_b'])"
     # (a refusal body only: a saved note's body echoes its own path, which the split cases build from the writer's own title)
     $leak = @($r5.Keys | Where-Object { $_ -like '*_body' } | Where-Object { $r5[$_] -match '"error"' -and $r5[$_] -match 'prcb' })
     Check ($leak.Count -eq 0) 'R5: no refusal body carries the claim''s text'

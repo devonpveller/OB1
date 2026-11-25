@@ -7,7 +7,7 @@ import { safeFolderRel, safeJoin, safeRelPath } from "../util/paths.ts";
 // @ts-ignore — plain .mjs from the /recipes bind-mount.
 import { slugifyNotebook } from "@shared/slug";
 import { parseNoteRow } from "../util/notes-parse.ts";
-import { assertStructuredNoteShareable, structuredNoteFileSlug, structuredNoteViews } from "../util/structured-note-check.ts";
+import { assertNoteNamesFit, structuredNoteFileSlug, structuredNoteViews, writeGuardedStructuredNote } from "../util/structured-note-check.ts";
 export { parseNoteRow };
 import { pool } from "../db/pool.ts";
 import { poolDb } from "../contracts/db.ts";
@@ -17,6 +17,7 @@ import {
   gitRm,
   vaultCommit,
   vaultCommitPath,
+  vaultDelete,
   vaultExists,
   vaultFolderHistory,
   vaultGitShow,
@@ -75,7 +76,9 @@ async function resolveLinks(rawLinks: string[]): Promise<string[]> {
 // save (and its presence in search) never depends on whether someone else holds a sentence. Re-syncs with no author
 // (move, trash, restore, recover) name nobody and match nothing; a structured / AI note (writeStructuredNote) names its
 // writer (rw-570-hub-note-scope, the operator's second ruling).
-async function syncNoteRow(rel: string, content: string, authorSub?: string | null): Promise<void> {
+// rw-note-write-guard (1): `strict` is the structured note's own write - the row's failure (the guard's 42501 above all)
+// is thrown, never swallowed (it used to be logged and the request answered 201 with the file left in the shared vault).
+async function syncNoteRow(rel: string, content: string, authorSub?: string | null, strict = false): Promise<void> {
   try {
     const { slug, title, body, tags, rawLinks } = parseNoteRow(rel, content);
     const links = await resolveLinks(rawLinks);
@@ -87,6 +90,7 @@ async function syncNoteRow(rel: string, content: string, authorSub?: string | nu
       [slug, title, body, JSON.stringify(tags), JSON.stringify(links), authorSub ?? ""],
     );
   } catch (e) {
+    if (strict) throw e;
     console.error("[wiki-pages] note row sync failed (non-fatal):", (e as Error).message);
   }
   await syncNoteReferences(rel, content);
@@ -147,6 +151,12 @@ export async function writeNote(
 // rw-570-hub-note-scope R5: the structured-note check (util/structured-note-check.ts) asks the database this - the
 // wiki guard's author-only predicate for this writer (slot 575's private_report_claims_note_refused).
 export { StructuredNoteRefused } from "../util/structured-note-check.ts";
+// Test seam (the lab only; production never sets it): forces the PRE-check to answer "not refused" so the lab can prove
+// the check at the row write (askNoteRefused, never forced) catches a claim that appears in between.
+function askNoteRefusedPre(authorSub: string): (slug: string, title: string, body: string) => Promise<boolean | null> {
+  if (Deno.env.get("WORKBENCH_TEST_FORCE_PRECHECK_FALSE") === "1") return () => Promise.resolve(false);
+  return askNoteRefused(authorSub);
+}
 function askNoteRefused(authorSub: string): (slug: string, title: string, body: string) => Promise<boolean | null> {
   return async (slug, title, body) => {
     const r = await query<{ refused: boolean | null }>(
@@ -177,6 +187,9 @@ export async function writeStructuredNote(input: {
   // <nb>/<nb>-note instead. Decided from the slugs alone, never from the content, so the same request is stored at the
   // same path whatever its text - the hub shape can never answer differently for another user's sentence.
   const fileSlug = structuredNoteFileSlug(nbSlug, slugifyNotebook(input.title) || "note");
+  // rw-note-write-guard (3): a name whose slug makes a file name the OS rejects is refused 422 first, before any check
+  // or write, from the slugs alone (the same answer for every user).
+  assertNoteNamesFit(nbSlug, fileSlug);
   // Layout (operator-chosen): AI-generated content (from external inlets) lives
   // on the wiki/AI side under content/notebooks/<notebook>/ so it propagates;
   // user notes live under notes/notebooks/<notebook>/ (#4/#5). They never mix.
@@ -206,9 +219,23 @@ export async function writeStructuredNote(input: {
   // content is caught as the guard would catch it) and the WHOLE file the vault would hold (the frontmatter's agent,
   // chat and notebook lines too: the vault file is the shared page).
   const row = parseNoteRow(rel, body);
-  await assertStructuredNoteShareable(structuredNoteViews({ slug: row.slug, title: row.title, body: row.body }, body), askNoteRefused(input.authorSub ?? ""));
-  await vaultWrite(rel, body);
-  await syncNoteRow(rel, body, input.authorSub);
+  // rw-note-write-guard (1)+(2): the views now include agent beside the content; the check is made again at the row
+  // write (never the test seam) and a refusal there - or the guard's own 42501 - removes the vault file (the path's
+  // previous content is put back when it had one) and fails the request 422 / 503: no row, no commit.
+  const views = structuredNoteViews({ slug: row.slug, title: row.title, body: row.body }, body, input.agent);
+  const had = await vaultExists(rel);
+  const before = had ? await vaultRead(rel) : null;
+  await writeGuardedStructuredNote({
+    views,
+    ask: askNoteRefusedPre(input.authorSub ?? ""),
+    askAtWrite: askNoteRefused(input.authorSub ?? ""),
+    writeFile: async () => { await vaultWrite(rel, body); },
+    writeRow: () => syncNoteRow(rel, body, input.authorSub, true),
+    undoFile: async () => {
+      if (before !== null) await vaultWrite(rel, before);
+      else await vaultDelete(rel);
+    },
+  });
   await vaultCommit(`ai-note: write ${rel}`);
   return { path: rel, hash: await sha256(body) };
 }
