@@ -439,10 +439,12 @@ t("G11: long texts - 2000 CJK characters and 2000 four-byte emoji are added (201
     const again = await mk(A, path, text);
     assertEquals(again.status, 409, `${label} repeat: ${again.text.slice(0, 200)}`);
     assertEquals(again.json.detail.existing.id, first.json.id, `${label}: the refusal names the first gap`);
-    // a duplicate of a long text in other spacing / punctuation is the same gap
-    const variant = await mk(A, path, `  ${text}.  `);
-    assertEquals(variant.status, 409, `${label} variant`);
-    assertEquals(variant.json.detail.existing.id, first.json.id);
+    // a duplicate of a long text in other spacing / punctuation is the same gap (kept under 2000 characters so it is not refused for length)
+    const core = await mk(A, path, head(text, 20));
+    assertEquals(core.status, 201, `${label} core: ${core.text.slice(0, 200)}`);
+    const variant = await mk(A, path, `  ${head(text, 20)}.  `);
+    assertEquals(variant.status, 409, `${label} variant: ${variant.text.slice(0, 200)}`);
+    assertEquals(variant.json.detail.existing.id, core.json.id);
     // two long texts that differ only at the very end are two gaps (the key is the whole text, not a prefix)
     const near = await mk(A, path, head(text, 1) + "Z");
     assertEquals(near.status, 201, `${label}: a long text that differs at its last character is not a duplicate`);
