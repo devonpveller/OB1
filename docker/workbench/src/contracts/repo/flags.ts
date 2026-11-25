@@ -11,7 +11,7 @@ import { type RegistryReader, requireRegistered, REGISTRY } from "../registry.ts
 import { BadRequest } from "../logic/scope.ts";
 import { NotFound } from "./lifecycle.ts";
 import type { Identity } from "../../middleware/identity.ts";
-import { documentPathsIn, FOREIGN_HELD_TARGET, ownsDocumentPaths } from "../../documents/ownership.ts";
+import { FOREIGN_HELD_TARGET, ownsDocumentPaths, singleDocumentPath } from "../../documents/ownership.ts";
 
 export interface FlagRow {
   id: string;
@@ -95,9 +95,10 @@ export async function createFlag(db: Db, reg: RegistryReader, who: Identity, b: 
 // Where the flag was made from must be the flagger's own: a document of theirs, or a source id.
 async function checkFrom(db: Db, who: Identity, from: { kind: string; ref: string }) {
   if (from.kind === "document") {
-    const paths = documentPathsIn(from.ref);
-    if (paths.length !== 1 || paths[0] !== from.ref.replace(/\\/g, "/")) throw new BadRequest("from.ref must be a document path (documents/...)");
-    if (!(await ownsDocumentPaths(db, paths, who))) throw new NotFound("no such document");
+    // one field, one path: read whole (a folder name may hold a space or & , ' ( ) # ?), never scanned
+    const path = singleDocumentPath(from.ref);
+    if (path === null) throw new BadRequest("from.ref must be a document path (documents/...)");
+    if (!(await ownsDocumentPaths(db, [path], who))) throw new NotFound("no such document");
   } else {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(from.ref)) throw new BadRequest("from.ref must be a source id");
     // a shared source that exists: a private or held source id gets the same refusal as a missing one (no oracle)

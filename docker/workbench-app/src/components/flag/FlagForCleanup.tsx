@@ -38,7 +38,8 @@ export type FlagProps = {
 export const NOTHING_CHANGES = "Nothing changes until it is decided.";
 const MSG = {
   gone: "That item is not available any more, so nothing was flagged.",
-  refused: "The flag was not accepted. Check the reason and the note, then try again.",
+  // the reason and the note are fixed by the dialog (a list, a cap, no control characters), so a refusal is about where it was made from
+  refused: "The flag was not accepted. The document it was made from could not be used, so nothing was flagged.",
   failed: "The flag could not be sent. Nothing was flagged. Try again.",
   control: "The note cannot hold control characters. Remove them and try again.",
   changed: "The person signed in changed, so nothing was sent.",

@@ -13,7 +13,6 @@ let fails = 0;
 const ok = (c, m) => { console.log((c ? "PASS " : "FAIL ") + m); if (!c) fails++; };
 // a check that is EXPECTED to fail today for a reason that is not this item's: XFAIL does not count; if it passes, that is a FAIL
 // (the marker is stale: remove it). Name the item that fixes it.
-const xfail = (c, m, item) => { console.log(c ? `FAIL unexpected pass, remove the xfail (${item} landed?): ${m}` : `XFAIL (until ${item}) ${m}`); if (c) fails++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const CPU = "documents/k-a/Hardware/cpu.md";
 const BRAVO = "documents/k-b/bravo.md";
@@ -279,7 +278,7 @@ await ev(`document.querySelector('[data-testid=flag-send]').focus()`);
 await typed("Enter", 13, "\r");
 ok(await until(`!!document.querySelector('[data-testid=flag-done]')`) && (await db()).flags.length === 1 && (await db()).flags[0].reason === "low_quality", "Enter on Flag it sends the flag from the keyboard");
 
-// ---- 9. EXPECTED TO FAIL until the server item rw-doc-path-spaces lands: a document in a folder with a space
+// ---- 9. a document in a folder with a space (rw-doc-path-spaces: the server reads from.ref whole)
 await stub("/__reset", "POST");
 await setMode("alice");
 ok(await openDoc(OLD), "alice's document in the folder 'Old notes' opens");
@@ -289,9 +288,7 @@ await click("[data-testid=flag-reason-other]");
 await click("[data-testid=flag-send]");
 await sleep(1500);
 const spaced = (await db()).flags.length === 1 && (await has("[data-testid=flag-done]"));
-const shownSpaced = await text("[data-testid=flag-problem]");
-xfail(spaced, "a reference can be flagged from a document in a folder with a space (the real route reads from.ref with documentPathsIn, which stops at the space, and answers 400)", "rw-doc-path-spaces");
-ok(spaced || (/The flag was not accepted/.test(shownSpaced ?? "") && (await db()).flags.length === 0), `today the person is told it was not accepted and nothing is made: ${shownSpaced}`);
+ok(spaced, "a reference can be flagged from a document in a folder with a space");
 
 console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);
