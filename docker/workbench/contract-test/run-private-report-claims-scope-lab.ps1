@@ -249,6 +249,12 @@ try {
   Check ($s0 -match 'scope: OK') 'fresh chain: the scope check says OK'
   # ---------------------------------------------------------------- [2] back to the 390 model
   Write-Host '[2] revert the chain''s 575, then 570; 575 without 570 is refused'
+  # rw-withheld-owner-view: slot 660 sits on 570 in the chain; the documented revert order puts it first
+  $rev660 = Join-Path $dockerDir 'revert-private-report-claims-withheld.sql'
+  if (Test-Path $rev660) {
+    $r = Psql-File $rev660 'revert the chain''s 660'
+    Check ($r.rc -eq 0) "the chain's slot 660 is reverted first (exit $($r.rc))"
+  }
   $f575 = Q $fnQ
   $r = Psql-File $rev575 'revert the chain''s 575'
   Check ($r.rc -eq 0 -and $r.msg -match 'scope revert: nothing to restore') 'the chain''s 575 reverts (nothing it moved)'

@@ -654,6 +654,18 @@ FIRST, then 570's. Re-run 575 after any 570 re-run. Deploy order: 575 BEFORE the
 `private_report_claims_note_refused` the image's `POST /workbench/notes` fails closed with 503); on a 575 revert, put the
 previous workbench image back first (the same 503 otherwise).
 
+**Slot 660 keeps a withheld two-owner claim its owners' own sentence (rw-withheld-owner-view; a forward slot on 570).**
+A claim 570 withheld because two users' private reports both hold it is in nobody's store, so 570's author-only check
+(`private_report_claims_own_text_shows`, asked by the wiki guard and by 575's `private_report_claims_note_refused`) refused
+neither owner. 660 has it read the subject's store and the withheld claims one of the subject's OWN private reports links
+(`private_report_claims_withheld_of`, granted to nobody; 570 keeps a withheld claim's links): each owner's note quoting it is
+refused (a structured note 422; a `notes/...` row refused by the guard), a third user's note saves exactly as a sentence
+nobody holds would. A withheld claim no valid owner's report links refuses nobody. No row moves and no table is locked; no
+image change. Check: `check-private-report-claims-withheld.sql`; tests: `src/inlet/private_report_claims_withheld_test.ts`,
+`contract-test/run-private-report-claims-withheld-unit.ps1` (stub schema, `--network none`, no lease) and
+`contract-test/run-private-report-claims-withheld-lab.ps1` (the chain, the HTTP door, the live-size rehearsal); revert:
+`revert-private-report-claims-withheld.sql` FIRST, then 575's, then 570's. Re-run 660 after any 570 re-run.
+
 **Existing personal data is its owner's, and private (rw-inlet-owner, plan 08 PD1, slot 440, after 430).** `init-inlet-owner.sql`
 (run with `-v owner_sub=<WORKSPACE_DEFAULT_SUB>`; the subject is recorded once in `inlet_owner`) gives every thought an
 owner (`thoughts.user_id`; only that column changes), moves the email-body sources (url mail.google.com) and the podcast
