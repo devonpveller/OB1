@@ -68,6 +68,9 @@ import { refetchClient, researchClient } from "./documents/clients.ts";
 import { createContractApp, openApiDocument } from "./contracts/app.ts";
 import { contractDeps } from "./contracts/wiring.ts";
 import { DocError, readDocument } from "./documents/repo.ts";
+import * as refinery from "./documents/refinery.ts";
+import { Conflict, NotFound } from "./contracts/repo/lifecycle.ts";
+import { ResearchUnavailable } from "./contracts/repo/gaps.ts";
 import type { Identity } from "./middleware/identity.ts";
 import { privateViewsMode } from "./identity/private_view.ts";
 
@@ -102,6 +105,19 @@ const cdeps = {
     } catch (e) {
       if (e instanceof DocError) return null; // another user's or a missing one: the same 404 upstream
       throw e;
+    }
+  },
+  // rwr-doc-gaps-api: "research these" queues ONE gap-kind run through the existing research path (the refinery module's
+  // queueResearch: the workspace caller key, the local model, the prompt kept owner-scoped in research_prompts). Whatever
+  // goes wrong is answered without the service's own words.
+  queueGapResearch: async (path: string, query: string, who: Identity) => {
+    try {
+      const r = await refinery.queueResearch(docDeps, path, { query, kind: "gap" }, who);
+      return { job_id: r.job_id };
+    } catch (e) {
+      if (e instanceof DocError && e.status === 404) throw new NotFound("no such document");
+      if (e instanceof DocError && e.status === 409) throw new Conflict(e.message); // not listed yet: save the document first
+      throw new ResearchUnavailable("the research run could not be queued");
     }
   },
 };
