@@ -179,3 +179,46 @@ Deno.test("R2-4: the flags routes are user-only: a service key reaches none of t
   for (const p of ["/workbench/contract/flags", "/workbench/contract/flags/f1a90000-0000-4000-8000-000000000001"]) assert(USER_ONLY.test(p), p);
   assertEquals(USER_ONLY.test("/workbench/contract/sources"), false);
 });
+
+// ── rw-doc-path-spaces: a document folder's name may hold a space or punctuation ───────────────────────────
+// from.ref names exactly ONE path, so it is validated whole (singleDocumentPath), never scanned.
+const FOLDER_NAMES = ["Old notes", "a&b", "a,b", "it's", "a(b)", "a#b", "a?b", 'say "hi"', "tab nbsp"];
+for (const folder of FOLDER_NAMES) {
+  Deno.test(`rw-doc-path-spaces: flagging from ${JSON.stringify(folder)} is accepted for the owner and read back byte-equal`, async () => {
+    const { db, log } = recorder();
+    const ref = `documents/${WHO.key}/${folder}/cpu.md`;
+    const f = await createFlag(db, reader(db), WHO, { item_kind: "source", item_id: SRC, reason: "low_quality", note: "n", from: { kind: "document", ref } });
+    assert(f);
+    const ins = log.find((l) => /^INSERT INTO public\.user_flags/.test(l));
+    assert(ins, "the flag was written");
+  });
+}
+
+Deno.test("rw-doc-path-spaces: the INSERT carries from.ref unchanged", async () => {
+  const params: unknown[][] = [];
+  const { db } = recorder();
+  const spy: Db = { query: <T>(sql: string, p?: unknown[]) => { if (/INSERT INTO public\.user_flags/.test(sql)) params.push(p ?? []); return db.query<T>(sql, p); }, tx: (fn) => fn(spy) };
+  const ref = `documents/${WHO.key}/Old notes/a&b, (c) #d 'e'/cpu.md`;
+  await createFlag(spy, reader(spy), WHO, { item_kind: "source", item_id: SRC, reason: "low_quality", from: { kind: "document", ref } });
+  assertEquals(params[0][7], ref);
+});
+
+Deno.test("rw-doc-path-spaces: another user's document in a spaced folder is 'no such document' (404), as a missing one", async () => {
+  const { db } = recorder();
+  const mk = (ref: string) => createFlag(db, reader(db), WHO, { item_kind: "source", item_id: SRC, reason: "low_quality", from: { kind: "document", ref } });
+  const foreign = await assertRejects(() => mk("documents/user-b/Old notes/cpu.md"));
+  const missing = await assertRejects(() => mk("documents/user-b-nobody/Old notes/cpu.md"));
+  assertEquals((foreign as Error).message, "no such document");
+  assertEquals((foreign as Error).constructor, (missing as Error).constructor);
+  assertEquals((foreign as Error).message, (missing as Error).message);
+});
+
+Deno.test("rw-doc-path-spaces: traversal, control characters and a path outside documents/ are still refused", async () => {
+  const { db, log } = recorder();
+  for (const ref of ["documents/../notes/x.md", "documents/user-a/../user-b/x.md", "documents/user-a/x\u0000.md", "documents/user-a/x\n.md",
+      "notes/x.md", "documents/", "documents", `documents/${WHO.key}//x.md`, `documents/${WHO.key}/./x.md`, `documents/${WHO.key}/x.md/`]) {
+    const e = await assertRejects(() => createFlag(db, reader(db), WHO, { item_kind: "source", item_id: SRC, reason: "low_quality", from: { kind: "document", ref } }), Error, "", ref);
+    assertEquals(e.constructor.name, "BadRequest", ref);
+  }
+  assertEquals(log.filter((l) => /^INSERT/.test(l)).length, 0);
+});
