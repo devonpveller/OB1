@@ -74,7 +74,7 @@ export interface ListingOutcome {
 
 // Update the listing after a file write; never throws. A failure is reported once: the caller's
 // response carries it, and one notification (deduplicated on the document) is posted.
-async function afterWrite(deps: DocDeps, rel: string, content: string, who: Identity): Promise<ListingOutcome> {
+export async function afterWrite(deps: DocDeps, rel: string, content: string, who: Identity): Promise<ListingOutcome> {
   try {
     await syncListing(deps.db, deps.reg, rel, content, who, who.name);
     return { ok: true };
