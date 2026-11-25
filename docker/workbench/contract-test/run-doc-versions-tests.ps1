@@ -288,11 +288,11 @@ try {
     $hits = @($wlog -split "`n" | Where-Object { $_ -match 'VBODY-|VSNAPNAME-|VTitle|SNAPNAME-|SECRETBODY|APLANT-|BPLANT-|UNSAVED-' })
     Check ($hits.Count -eq 0) "no planted body, snapshot-name or title marker in the workbench log ($($hits.Count) hits)"
 
-    # slot 620: the check script; revert, revert, init, init, revert, init - a schema-only pg_dump after each step
+    # slot 620: pg_dump 16.x prints a random restrict key on every run (two lines, dropped before the compare); the check script; revert, revert, init, init, revert, init - a schema-only pg_dump after each step
     Write-Host '[5b] check-document-versions.sql, then revert / init / revert in turn with a schema-only pg_dump byte-compared, init again (slot 620)'
     $q = { param($x) (Dk exec $db psql -U postgres -d openbrain -X -tAc $x).Trim() }
     $run620 = { param($f) $null = Dk cp (Join-Path $dockerDir $f) "${db}:/tmp/rv620.sql"; $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv620.sql; [pscustomobject]@{ rc = $script:rc; out = $o } }
-    $dump = { $null = Dk exec $db sh -c 'pg_dump -U postgres -d openbrain --schema-only --no-owner > /tmp/schema.sql'; ((Dk exec $db sh -c 'md5sum < /tmp/schema.sql; wc -c < /tmp/schema.sql') -split "`n" | ForEach-Object { ($_ -split '\s+')[0] }) -join '/' }
+    $dump = { $null = Dk exec $db sh -c 'pg_dump -U postgres -d openbrain --schema-only --no-owner | grep -v -E "^.(un)?restrict " > /tmp/schema.sql'; ((Dk exec $db sh -c 'md5sum < /tmp/schema.sql; wc -c < /tmp/schema.sql') -split "`n" | ForEach-Object { ($_ -split '\s+')[0] }) -join '/' }
     $mineSql = "SELECT string_agg(column_name || ':' || data_type || ':' || is_nullable || ':' || coalesce(column_default, ''), ',' ORDER BY ordinal_position) || ' / ' || (SELECT count(*)::text FROM pg_indexes WHERE tablename = 'document_snapshots') || ' idx / ' || (SELECT count(*)::text FROM pg_policies WHERE tablename = 'document_snapshots') || ' pol / ' || (SELECT string_agg(a.privilege_type, ',' ORDER BY a.privilege_type) FROM pg_class cl, aclexplode(cl.relacl) a WHERE cl.oid = 'public.document_snapshots'::regclass) || ' grants' FROM information_schema.columns WHERE table_name = 'document_snapshots'"
     $null = Dk cp (Join-Path $dockerDir 'check-document-versions.sql') "${db}:/tmp/check620.sql"
     $chk = Dk exec $db psql -X -A -t -q -U postgres -d openbrain -f /tmp/check620.sql
