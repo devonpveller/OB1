@@ -1,0 +1,33 @@
+/* Settings (rwr-settings-shell). Colour only through the tokens whose AA contrast pairs the app already tests. */
+.settings .stance h2, .settings .gh { margin: 0; font-size: 15px; font-weight: 600; }
+.settings .gh { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin: 12px 0 4px; }
+.settings .gh:first-child { margin-top: 0; }
+.legend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.legend li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line-strong); color: var(--fg-2); background: var(--sunken); white-space: nowrap; }
+.tag-only_you { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
+.tag-on_server { background: var(--sunken); color: var(--fg-2); }
+.tag-cloud, .tag-admin_all, .tag-none { background: var(--amber-soft); border-color: var(--amber-line); color: var(--amber-text); }
+.frame-s { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 16px; align-items: start; }
+.snav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.snav button { width: 100%; text-align: left; border-color: transparent; background: transparent; padding: 6px 10px; }
+.snav button:hover { background: var(--sunken); }
+.snav button[aria-current="page"] { background: var(--accent-soft); color: var(--accent-strong); border-color: var(--accent); }
+.spanel h2 { margin: 0; font-size: 17px; font-weight: 600; }
+.srow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 260px); gap: 8px 16px; padding: 12px 0; border-top: 1px solid var(--line); }
+.srow:first-of-type { border-top: 0; }
+.s-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.s-label { font-weight: 600; overflow-wrap: anywhere; }
+.s-side { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
+.s-ctl input[type="text"], .s-ctl input[type="number"], .s-ctl input[type="time"], .s-ctl select { font: inherit; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: 6px; padding: 4px 8px; max-width: 100%; }
+.s-ctl input[type="checkbox"] { width: 18px; height: 18px; }
+.s-ctl .ro { color: var(--fg-2); overflow-wrap: anywhere; }
+.s-state { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; min-height: 1.4em; }
+.saved { color: var(--accent-strong); font-size: 13px; }
+.err { color: var(--danger); font-size: 13px; overflow-wrap: anywhere; }
+button.link { border: 0; background: transparent; padding: 0; color: var(--accent-strong); text-decoration: underline; font-size: 13px; }
+@media (max-width: 760px) {
+  .frame-s { grid-template-columns: minmax(0, 1fr); }
+  .srow { grid-template-columns: minmax(0, 1fr); }
+}
+.settings select:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
