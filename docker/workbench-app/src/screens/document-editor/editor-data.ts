@@ -86,6 +86,8 @@ export type Cited = {
   quote: string;           // the exact words the reference pins (they come from the pinned revision)
   passage: { idx: number; text: string; target: boolean }[]; // the pinned chunk and its neighbours (current text)
   state: string;
+  sourceId: string;        // the source the reference points into ("" when the answer did not name one)
+  held: boolean;           // a HELD source (still in an idea's refinery): not in the shared library, so it cannot be flagged
 };
 export async function readCited(referenceId: string): Promise<Cited> {
   const { data } = await api<any>("GET", `/workbench/contract/references/${encodeURIComponent(referenceId)}`);
@@ -96,6 +98,7 @@ export async function readCited(referenceId: string): Promise<Cited> {
   const src = data?.source ?? data?.held ?? null;
   if (!data || typeof data !== "object" || (!rec && !src)) throw new Error("unexpected answer");
   const sourceId = typeof rec?.source_id === "string" ? rec.source_id : "";
+  const held = !data?.source && !!data?.held;
   const quote = typeof rec?.selectors?.quote?.exact === "string" ? rec.selectors.quote.exact : typeof src?.excerpt === "string" ? src.excerpt : "";
   const current = typeof data.version === "number" ? data.version : null;
   const pinned = Number(rec?.pinned_revision) || current || 1;
@@ -109,7 +112,7 @@ export async function readCited(referenceId: string): Promise<Cited> {
       }
     } catch { /* the pinned words below still stand */ }
   }
-  return { referenceId, title: String(src?.title ?? "") || "Untitled source", pinned, current, quote, passage, state: String(data.state ?? "") };
+  return { referenceId, title: String(src?.title ?? "") || "Untitled source", pinned, current, quote, passage, state: String(data.state ?? ""), sourceId: sourceId || (!rec && !held && src ? referenceId : ""), held };
 }
 
 // ── "Research this" until Start research lands (phase 3): the document's own research route ──

@@ -8,13 +8,19 @@ import { resolve } from "node:path";
 // rwr-picker: the picker's dev-only test harness page is a second HTML entry, built ONLY with PICKER_HARNESS=1
 // (the lab image); the production build is the one index.html.
 const harness = process.env.PICKER_HARNESS === "1";
+// rwr-flag-buttons: the same for /flag-harness.html (Flagged by you's read and link builder, which Cleanup will use), built ONLY with FLAG_HARNESS=1
+const flagHarness = process.env.FLAG_HARNESS === "1";
+const entries: Record<string, string> = {
+  ...(harness ? { "picker-harness": resolve(__dirname, "picker-harness.html") } : {}),
+  ...(flagHarness ? { "flag-harness": resolve(__dirname, "flag-harness.html") } : {}),
+};
 
 export default defineConfig({
   base: "/",
   plugins: [react()],
   build: {
     outDir: "dist", sourcemap: false, modulePreload: { polyfill: false },
-    ...(harness ? { rollupOptions: { input: { index: resolve(__dirname, "index.html"), "picker-harness": resolve(__dirname, "picker-harness.html") } } } : {}),
+    ...(Object.keys(entries).length ? { rollupOptions: { input: { index: resolve(__dirname, "index.html"), ...entries } } } : {}),
   },
   test: {
     environment: "happy-dom",

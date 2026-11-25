@@ -16,6 +16,9 @@ COPY . .
 # rwr-picker: PICKER_HARNESS=1 also builds /picker-harness.html (the picker's dev-only test page); the default image has none.
 ARG PICKER_HARNESS=
 ENV PICKER_HARNESS=$PICKER_HARNESS
+# rwr-flag-buttons: FLAG_HARNESS=1 also builds /flag-harness.html (dev-only: the flags list with its link-back builder); the default image has none.
+ARG FLAG_HARNESS=
+ENV FLAG_HARNESS=$FLAG_HARNESS
 COPY --from=viewerlib workbench-proxy.mjs security-headers.mjs workbench-proxy.test.mjs security-headers.test.mjs /app/lib/shared/
 RUN set -e; \
   npx tsc --noEmit; \
