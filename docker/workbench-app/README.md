@@ -129,3 +129,29 @@ The Connected inlets panel lists the person's own connections (kind and when) fr
 Tests: `test/imports.test.tsx` (vitest against `e2e/imports-fake.mjs`, a fake of the real routes that the e2e stub shares),
 `test/imports-drift.test.ts` (the fake against the server's source), `e2e/imports.e2e.mjs` run by `e2e/run-imports-e2e.ps1`
 (lab subnet 10.250.113.0/24).
+
+## Flag for cleanup (item `rwr-flag-buttons`)
+
+`src/components/flag/` is THE flag button: `<FlagForCleanup item from subject what/>` (`item` = `{kind: source|claim|reference, id}`,
+`from` = where it is flagged from, `{kind: document, ref: <vault path>}` or `{kind: source, ref: <source id>}`, `subject` = who is signed
+in). It opens a small dialog (one per open of the page, never modal) that says **Nothing changes until it is decided** (and that only the
+flagger and admins see the flag), offers exactly four reasons as radio buttons (Wrong claim, Low quality, Duplicate, Other: the keys of
+the `flag_reasons` registry; the mockup's Outdated and Broken link need two registry rows, a migration this item does not make) and an
+optional note (2000 characters, no control characters), then `POST /workbench/contract/flags`. A flag changes nothing about the item, so
+the done state is a line that links to Cleanup, kept in memory for that person, item and document until the page is left (closing and
+reopening the drawer shows it; no second flag); the toast names no title, note or id.
+
+- Mounted today in the citation drawer of the writing surface (`SourceDrawer`: "Flag this reference" for a `[n]` citation, "Flag this
+  source" for its source; a held source is not in the shared library and offers nothing). A claim view and the Source screen (Library,
+  phase 2) mount the same component. `flag-data.ts` also holds what Cleanup > Flagged by you needs: `readMyFlags()` (the caller's own list,
+  never `scope=all`) and `flagBackLink(from)` (a document by its opaque id, a source as `/library?source=<id>`).
+- The dialog, its draft and an answer still in flight belong to one person and one item: the state epoch (a different person on the page,
+  the shell calls `resetState()`) or a different item or origin remounts it, and the request is sent only if `whoami` still names the person
+  who opened it. Every refusal is one fixed sentence (a missing item and another person's are the same); the server's text is never shown.
+- Tests: `test/flag-buttons.test.tsx` and `e2e/flags.e2e.mjs` (`e2e/run-flags-e2e.ps1`, a free 10.250.9x.0/24 given as -Octet), both against ONE pair of
+  fakes, `e2e/flags-fake.mjs` (the flags routes and repo code) and `e2e/docs-fake.mjs`.
+- `/flag-harness.html` (dev-only, built only with `--build-arg FLAG_HARNESS=1`; the default image has none) lists the caller's own flags with the
+  link `flagBackLink` builds, as Cleanup > Flagged by you will; the e2e follows one. `e2e/run-flags-e2e.ps1 -Owner <id>` sets the harness owner label.
+- Known server defect, tracked as `rw-doc-path-spaces`: the flags route reads `from.ref` with the server's `documentPathsIn`, which stops at a space
+  or at `& , ' ( ) #`, so a flag made from a document in a folder named "Old notes" is refused (400) and the app says "not accepted". The fake
+  copies that scanner on purpose; the vitest case and the e2e step for it are marked expected-to-fail (`it.fails`, `xfail`) until that item lands.

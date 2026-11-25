@@ -1,0 +1,21 @@
+/* "Flag for cleanup" (rwr-flag-buttons). Tokens only; one column that never pushes the page sideways (min-width: 0 and
+   wrapping everywhere a person's words can be long). */
+.flag { display: flex; flex-direction: column; gap: 8px; min-width: 0; max-width: 100%; }
+.flag .btn { cursor: pointer; align-self: flex-start; min-height: 36px; height: auto; white-space: normal; text-align: center; }
+.flag .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+.flag-dlg { display: flex; flex-direction: column; gap: 10px; min-width: 0; box-sizing: border-box; padding: 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel-2); }
+.flag-form { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.flag-title { margin: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.flag-title:focus { outline: none; }
+.flag-promise { margin: 0; font-size: 13px; color: var(--fg-2); overflow-wrap: anywhere; }
+.flag-reasons { margin: 0; padding: 0; border: 0; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.flag-reasons legend { padding: 0; font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+.flag-reason { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); cursor: pointer; font-size: 14px; }
+.flag-reason.on { border-color: var(--accent); background: var(--accent-soft); }
+.flag-reason input { margin: 0; width: 18px; height: 18px; accent-color: var(--accent); }
+.flag-note { font-weight: 600; font-size: 13px; }
+.flag-dlg textarea { font: inherit; font-size: 14px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 8px; resize: vertical; background: var(--panel); color: var(--fg); width: 100%; box-sizing: border-box; min-width: 0; }
+.flag-problem { margin: 0; color: var(--danger); background: var(--danger-soft); border-radius: 6px; padding: 6px 10px; font-size: 13px; overflow-wrap: anywhere; }
+.flag-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.flag-done { margin: 0; }
+.flag-reason input:focus-visible, .flag-dlg textarea:focus-visible, .flag .btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }

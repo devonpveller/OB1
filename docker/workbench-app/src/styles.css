@@ -286,5 +286,6 @@ a.row:hover { background: var(--bg); }
 .drawer-quote { margin: 0; padding: 8px 12px; border-left: 3px solid var(--accent); background: var(--accent-soft); color: var(--fg); overflow-wrap: anywhere; }
 .drawer-hit { background: var(--amber-soft); color: var(--amber-text); padding: 6px 8px; border-radius: 6px; }
 .drawer .sec { padding: 6px 0 0; margin: 0; }
+.drawer-flags { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--line); padding-top: 10px; min-width: 0; }
 @media (max-width: 1000px) { .doc-cols { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 520px) { .doc-editor { padding: 10px 12px; } }

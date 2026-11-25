@@ -10,3 +10,6 @@ e2e
 # the shared fake intake back end is used by the vitest suite too (test/imports.test.tsx)
 !e2e/imports-fake.mjs
 !e2e/imports-fake.d.mts
+# the shared fake flags back end is used by the vitest suite too (test/flag-buttons.test.tsx)
+!e2e/flags-fake.mjs
+!e2e/flags-fake.d.mts

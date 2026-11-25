@@ -375,7 +375,7 @@ function Writing({ path, docRef, subject, first }: { path: string; docRef: strin
         </div>
         <InThisDoc />
       </div>
-      {drawer && <SourceDrawer key={drawer.kind + drawer.id} target={drawer} onClose={() => { setDrawer(null); view.current?.focus(); }} />}
+      {drawer && <SourceDrawer key={drawer.kind + drawer.id} target={drawer} docPath={path} subject={subject} onClose={() => { setDrawer(null); view.current?.focus(); }} />}
     </section>
   );
 }
