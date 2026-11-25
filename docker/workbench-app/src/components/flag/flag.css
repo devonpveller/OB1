@@ -4,6 +4,7 @@
 .flag .btn { cursor: pointer; align-self: flex-start; min-height: 36px; height: auto; white-space: normal; text-align: center; }
 .flag .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .flag-dlg { display: flex; flex-direction: column; gap: 10px; min-width: 0; box-sizing: border-box; padding: 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel-2); }
+.flag-form { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .flag-title { margin: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
 .flag-title:focus { outline: none; }
 .flag-promise { margin: 0; font-size: 13px; color: var(--fg-2); overflow-wrap: anywhere; }

@@ -121,5 +121,5 @@ the done state is a line (no second flag from the same page) that links to Clean
 - The dialog, its draft and an answer still in flight belong to one person and one item: the state epoch (a different person on the page,
   the shell calls `resetState()`) or a different item or origin remounts it, and the request is sent only if `whoami` still names the person
   who opened it. Every refusal is one fixed sentence (a missing item and another person's are the same); the server's text is never shown.
-- Tests: `test/flag-buttons.test.tsx` and `e2e/flags.e2e.mjs` (`e2e/run-flags-e2e.ps1`, subnet 10.250.95.0/24), both against ONE pair of
+- Tests: `test/flag-buttons.test.tsx` and `e2e/flags.e2e.mjs` (`e2e/run-flags-e2e.ps1`, subnet 10.250.96.0/24), both against ONE pair of
   fakes, `e2e/flags-fake.mjs` (the flags routes and repo code) and `e2e/docs-fake.mjs`.

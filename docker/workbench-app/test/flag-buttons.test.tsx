@@ -410,7 +410,7 @@ describe("the dialog's own behaviour", () => {
     hold = new Promise<void>((res) => { release = res; });
     fireEvent.click(screen.getByTestId("flag-send"));
     fireEvent.click(screen.getByTestId("flag-send")); // a disabled button takes no click ...
-    fireEvent.submit(screen.getByTestId("flag-dialog")); // ... and Enter in the note submits the form regardless of the button
+    fireEvent.submit(screen.getByTestId("flag-form")); // ... and Enter in the note submits the form regardless of the button
     await waitFor(() => expect(posts()).toHaveLength(1));
     await act(async () => { await new Promise((x) => setTimeout(x, 20)); });
     release();
@@ -431,6 +431,22 @@ describe("the dialog's own behaviour", () => {
     expect(screen.queryByTestId("flag-dialog")).toBeNull();
     expect(document.activeElement).toBe(screen.getByTestId("flag-open"));
     expect(posts()).toHaveLength(0);
+  });
+  it("Cancel and Escape discard the draft: the next open has no reason chosen and an empty note", async () => {
+    mount();
+    for (const how of ["cancel", "escape"]) {
+      fireEvent.click(screen.getByTestId("flag-open"));
+      choose("duplicate");
+      fireEvent.change(screen.getByTestId("flag-note"), { target: { value: MARK } });
+      if (how === "cancel") fireEvent.click(screen.getByTestId("flag-cancel"));
+      else fireEvent.keyDown(screen.getByTestId("flag-dialog"), { key: "Escape" });
+      expect(screen.queryByTestId("flag-dialog")).toBeNull();
+      fireEvent.click(screen.getByTestId("flag-open"));
+      expect((screen.getByTestId("flag-note") as HTMLTextAreaElement).value).toBe("");
+      expect((screen.getAllByRole("radio") as HTMLInputElement[]).some((x) => x.checked)).toBe(false);
+      expect(document.body.textContent).not.toContain(MARK);
+      fireEvent.click(screen.getByTestId("flag-cancel"));
+    }
   });
   it("Escape closes only the dialog, not the drawer around it", async () => {
     withChips(); await openDrawer();

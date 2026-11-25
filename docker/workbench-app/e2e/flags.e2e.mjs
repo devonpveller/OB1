@@ -43,6 +43,11 @@ const key = async (k, vk) => {
   await send("Input.dispatchKeyEvent", { type: "keyUp", key: k, code: k, windowsVirtualKeyCode: vk });
 };
 const esc = () => key("Escape", 27);
+// a key that types a character (Enter, Space) needs its text, or the page sees a raw key and no click
+const typed = async (k, vk, text) => {
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: k, code: k === " " ? "Space" : k, windowsVirtualKeyCode: vk, text });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: k, code: k === " " ? "Space" : k, windowsVirtualKeyCode: vk });
+};
 const until = async (x, n = 60) => { for (let i = 0; i < n; i++) { if (await ev(x)) return true; await sleep(150); } return false; };
 const settled = `!!document.querySelector('[data-testid=rail]') && !!document.querySelector('[data-testid=avatar]') && document.querySelectorAll('main [role=status]').length===0`;
 const go = async (path) => { events.length = 0; await send("Page.navigate", { url: origin + path }); await until(settled); await sleep(200); };
@@ -242,13 +247,17 @@ await stub("/__reset", "POST");
 await setMode("alice");
 await openDoc(); await openChip(0);
 await ev(`document.querySelector(${JSON.stringify(flagBtn("reference"))}).focus()`);
-await key("Enter", 13);
+await typed("Enter", 13, "\r");
 ok(await has("[data-testid=flag-dialog]"), "Enter on the button opens the dialog");
 await ev(`document.querySelector('[data-testid=flag-reason-wrong_claim]').focus()`);
-await key(" ", 32);
-await send("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 });
+await typed(" ", 32, " ");
+ok((await ev(`document.querySelector('input[type=radio]:checked')?.value`)) === "wrong_claim", "Space chooses the focused reason");
+await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 });
 await send("Input.dispatchKeyEvent", { type: "keyUp", key: "ArrowDown", code: "ArrowDown", windowsVirtualKeyCode: 40 });
-ok((await ev(`document.querySelector('input[type=radio]:checked')?.value`)) !== null, "a reason can be chosen from the keyboard");
+ok((await ev(`document.querySelector('input[type=radio]:checked')?.value`)) === "low_quality", "the arrow keys move the choice to the next reason");
+await ev(`document.querySelector('[data-testid=flag-send]').focus()`);
+await typed("Enter", 13, "\r");
+ok(await until(`!!document.querySelector('[data-testid=flag-done]')`) && (await db()).flags.length === 1 && (await db()).flags[0].reason === "low_quality", "Enter on Flag it sends the flag from the keyboard");
 
 console.log(fails === 0 ? "\nALL PASS" : `\n${fails} FAILED`);
 process.exit(fails === 0 ? 0 : 1);

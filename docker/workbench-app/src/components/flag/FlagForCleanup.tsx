@@ -68,7 +68,8 @@ function Flagger({ item, from, subject, what, label = "Flag for cleanup" }: Flag
     wasOpen.current = open;
   }, [open]);
 
-  const close = () => { setOpen(false); setProblem(null); };
+  // closing (Cancel, Escape) discards the draft: the next open starts empty
+  const close = () => { setOpen(false); setProblem(null); setReason(null); setNote(""); };
   const send = async () => {
     if (!reason || sending) return;
     if (CONTROL.test(note)) { setProblem(MSG.control); return; }
@@ -78,7 +79,7 @@ function Flagger({ item, from, subject, what, label = "Flag for cleanup" }: Flag
     if (!live.current) return; // a different person or item took the page: nothing more happens
     setSending(false);
     if (out.kind === "flagged") {
-      setOpen(false); setDone(true);
+      setOpen(false); setDone(true); setNote(""); setReason(null);
       toast({ message: "Flagged for cleanup. It is under Cleanup, Flagged by you." }); // no title, no note, no id
     } else setProblem(MSG[out.kind]);
   };
@@ -95,9 +96,9 @@ function Flagger({ item, from, subject, what, label = "Flag for cleanup" }: Flag
       <button type="button" className="btn sm" ref={opener} data-testid="flag-open" aria-haspopup="dialog" aria-expanded={open}
         onClick={() => setOpen(true)} disabled={open}>{label}</button>
       {open && (
-        <form className="flag-dlg" role="dialog" aria-modal="false" aria-labelledby={uid + "t"} aria-describedby={uid + "d"} data-testid="flag-dialog"
-          onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); if (!sending) close(); } }}
-          onSubmit={(e) => { e.preventDefault(); void send(); }}>
+        <div className="flag-dlg" role="dialog" aria-modal="false" aria-labelledby={uid + "t"} aria-describedby={uid + "d"} data-testid="flag-dialog"
+          onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); if (!sending) close(); } }}>
+        <form className="flag-form" data-testid="flag-form" onSubmit={(e) => { e.preventDefault(); void send(); }}>
           <h3 id={uid + "t"} tabIndex={-1} ref={head} className="flag-title">Flag {what} for cleanup</h3>
           <p id={uid + "d"} className="flag-promise" data-testid="flag-promise">
             {NOTHING_CHANGES} Flagging does not remove, hide or change {what}; it only puts it on your list under Cleanup. Only you and admins can see your flag.
@@ -121,6 +122,7 @@ function Flagger({ item, from, subject, what, label = "Flag for cleanup" }: Flag
             <button type="submit" className="btn sm pri" disabled={!reason || sending} data-testid="flag-send">{sending ? "Flagging..." : "Flag it"}</button>
           </div>
         </form>
+        </div>
       )}
     </div>
   );
