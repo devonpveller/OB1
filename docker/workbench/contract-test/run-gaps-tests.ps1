@@ -19,7 +19,7 @@
 #      incl. gaps_test.ts) and its test stage
 #   4. the lab: database (chain + fixtures.sql; the workbench as ob_app_memory, non-superuser), stub embedder, stub research
 #      service (stores each job in research_jobs), PostgREST + the OB1 rest Caddy, ONE workbench with WORKSPACE_IDENTITY_HEADER=X-Test-Sub
-#   5a. the gaps integration test (src/contracts/gaps_integration_test.ts: G1-G10); afterwards the workbench log is searched
+#   5a. the gaps integration test (src/contracts/gaps_integration_test.ts: G1-G11); afterwards the workbench log is searched
 #       for the planted marker prefixes (a gap's text is never logged)
 #   5b. the migration round trip: revert, the schema is the pre-650 schema (compared with a second database built WITHOUT 650),
 #       forward x2 (idempotent), revert again (same), forward again; the schema dump equals the original forward's
@@ -249,7 +249,7 @@ try {
   $null = Run-Detached "$P-wb" (@('--network-alias', 'openbrain-workbench') + $wbArgs + @($wbTag))
   Check (Wait-Http "http://$P-wb:8000/health" 90) "$P-wb is up"
 
-  Write-Host '[5a] the gaps integration test (G1-G10)'
+  Write-Host '[5a] the gaps integration test (G1-G11)'
   $o = Lab-Docker 1200 @('run', '--rm', '--label', $label, '--network', $net,
     '-e', "GAPS_TEST_BASE=http://$P-wb:8000", '-e', "GAPS_TEST_KEY=$key",
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
@@ -258,14 +258,14 @@ try {
   Save 'gaps-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||^G\d+:|error:|Assertion|=> ' }) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
-  if ($Red) { Check ($sum.Success -and [int]$sum.Groups[3].Value -ge 9) "RED: the route cases G1-G10 fail on the base $BaseSha ($($sum.Value))" }
-  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 11) "the gaps integration test ($($sum.Value))" }
+  if ($Red) { Check ($sum.Success -and [int]$sum.Groups[3].Value -ge 9) "RED: the route cases G1-G11 fail on the base $BaseSha ($($sum.Value))" }
+  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 12) "the gaps integration test ($($sum.Value))" }
   if (-not $Red) {
     $dblog = Dk logs $db
     $wblog = Dk logs "$P-wb"
-    $leak = @(($wblog -split "`n") | Where-Object { $_ -match 'G\dsecret|G\dmarker|G\dneeds|G\drot|G\ddup|G\ddis|G\dlocal' })
+    $leak = @(($wblog -split "`n") | Where-Object { $_ -imatch 'G\d+secret|G\d+marker|G\d+needs|G\d+rot|G\d+dup|G\d+dis|G\d+local' })
     Check ($leak.Count -eq 0) "the workbench log carries no gap text (planted markers G1..G7: $($leak.Count) lines)"
-    $dbleak = @(($dblog -split "`n") | Where-Object { $_ -match 'G\dsecret|G\dmarker' })
+    $dbleak = @(($dblog -split "`n") | Where-Object { $_ -imatch 'G\d+secret|G\d+marker' })
     Check ($dbleak.Count -eq 0) "the database log carries no marker ($($dbleak.Count) lines)"
   }
 

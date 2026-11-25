@@ -4,7 +4,7 @@
 // WORKSPACE_IDENTITY_HEADER=X-Test-Sub, the stub research service that stores a job in research_jobs, the stub embedder
 // that answers the same vector for every text). Never point it at a live stack.
 //
-// G1..G10 name the acceptance statements (test-plans/rwr-doc-gaps-api.md).
+// G1..G11 name the acceptance statements (test-plans/rwr-doc-gaps-api.md).
 // Environment: GAPS_TEST_BASE, GAPS_TEST_KEY, GAPS_TEST_SUB_HEADER (default X-Test-Sub), CONTRACT_TEST_DB_HOST/_PORT/_USER/_PASSWORD
 // (superuser: plants and snapshots).
 import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert@1";
@@ -36,6 +36,10 @@ const rnd = () => crypto.randomUUID().replace(/-/g, "").slice(0, 10);
 const A = `gap-a-${rnd()}`;
 const B = `gap-b-${rnd()}`;
 const GP = "/workbench/contract/gaps";
+// a marker is looked for in ANY letter case: the stored de-dup key (text_norm) is lower case
+const has = (body: string, marker: string) => body.toLowerCase().includes(marker.toLowerCase());
+// all but the last n characters (code points: never a lone surrogate)
+const head = (t: string, n: number) => Array.from(t).slice(0, -n).join("");
 const ABSENT = "9a900000-0000-4000-8000-0000000000ee";
 
 // deno-lint-ignore no-explicit-any
@@ -64,7 +68,7 @@ const VEC = (i: number) => "[" + Array.from({ length: 1024 }, (_, k) => (k === i
 
 // the stub research service stores each job it is asked for; these are the jobs of one test
 async function jobsFor(marker: string) {
-  return await sql<{ id: string; query: string; options: J }>(`SELECT id::text AS id, query, options FROM public.research_jobs WHERE query LIKE $1`, [`%${marker}%`]);
+  return await sql<{ id: string; query: string; options: J }>(`SELECT id::text AS id, query, options FROM public.research_jobs WHERE query ILIKE $1`, [`%${marker}%`]);
 }
 async function finish(jobId: string, status: string, filed: string[]) {
   await sql(
@@ -309,14 +313,14 @@ t("G5: two identities - B never sees A's gaps, counts, totals or the query text;
   const jobA = run.json.job_id as string;
   assertEquals((await call(B, "GET", `/workbench/contract/sessions/${jobA}`)).json.query ?? "", "");
   const sess = (await call(B, "GET", "/workbench/contract/sessions?limit=500")).json;
-  assert(!JSON.stringify(sess).includes(MARK), "B's session list carries no query text");
+  assert(!has(JSON.stringify(sess), MARK), "B's session list carries no query text");
   assertEquals((await call(A, "GET", `/workbench/contract/sessions/${jobA}`)).json.query.includes(MARK), true, "A reads their own run's query");
   const prompt = await sql<{ owner_sub: string }>(`SELECT owner_sub FROM public.research_prompts WHERE job_id = $1`, [jobA]);
   assertEquals(prompt.length, 1, "the prompt is recorded owner-scoped");
   // nothing B ever received carries A's marker or A's gap ids; no error text either
   const mine = seen[B].join("\n");
   for (const id of [ga.json.id, gb.json.id]) assert(!mine.includes(id), `B never received A's gap id ${id}`);
-  const onlyOwn = seen[B].filter((x) => x.includes(MARK));
+  const onlyOwn = seen[B].filter((x) => has(x, MARK));
   // the only bodies with the marker are the two B itself wrote (the add and its duplicate refusal naming B's own gap)
   assertEquals(onlyOwn.length, 2, "the marker came back only in B's own gap's bodies");
 });
@@ -352,7 +356,7 @@ t("G7: nothing private from this item appears on a shared surface (planted marke
     const s = await call(who, "GET", `/workbench/contract/search?q=${MARK}&limit=50`);
     // the search echoes the asked query; what it FOUND is what must carry nothing
     assertEquals(s.json.count, 0, `${who}: the shared search finds nothing for a gap's words`);
-    assert(!JSON.stringify(s.json.results).includes(MARK), `${who}: the shared search carries no gap text`);
+    assert(!has(JSON.stringify(s.json.results), MARK), `${who}: the shared search carries no gap text`);
   }
   // 2. shared rows: no shared table holds the marker. The only rows are the gap (its own table), the run's own query and
   //    its owner-scoped prompt, both of which the existing research path writes and which B cannot read (G5).
@@ -361,7 +365,7 @@ t("G7: nothing private from this item appears on a shared surface (planted marke
   for (const tb of shared) {
     const ex = (await sql<{ r: string | null }>(`SELECT to_regclass('public.${tb}')::text AS r`))[0].r;
     if (!ex) continue;
-    const n = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.${tb} x WHERE x::text LIKE $1`, [`%${MARK}%`]))[0].n;
+    const n = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.${tb} x WHERE x::text ILIKE $1`, [`%${MARK}%`]))[0].n;
     assertEquals(n, 0, `public.${tb} holds no gap text`);
   }
   const holders = (await sql<{ t: string }>(
@@ -369,19 +373,19 @@ t("G7: nothing private from this item appears on a shared surface (planted marke
       WHERE n.nspname = 'public' AND c.relkind = 'r'`)).map((r) => r.t);
   const hits: string[] = [];
   for (const tb of holders) {
-    const n = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public."${tb}" x WHERE x::text LIKE $1`, [`%${MARK}%`]))[0].n;
+    const n = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public."${tb}" x WHERE x::text ILIKE $1`, [`%${MARK}%`]))[0].n;
     if (n) hits.push(`${tb}:${n}`);
   }
   assertEquals(hits.sort(), ["document_gaps:2", "research_jobs:1", "research_prompts:1"], "the marker is in the gap table and in the run the existing research path owns - nowhere else");
   // 3. the run's prompt is owner-scoped: B's reads of it are empty, A's is whole
   const job = run.json.job_id as string;
   assertEquals((await call(B, "GET", `/workbench/contract/sessions/${job}`)).json.query ?? "", "");
-  assertEquals((await call(B, "GET", `/workbench/contract/jobs?limit=500`)).text.includes(MARK), false);
+  assertEquals((await call(B, "GET", `/workbench/contract/jobs?limit=500`)).text.toLowerCase().includes(MARK.toLowerCase()), false);
   // 4. the ops corpus: the wiki pages and the shared search read nothing of this table
-  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE content::text LIKE $1 OR title LIKE $1`, [`%${MARK}%`]).catch(() => [{ n: 0 }]))[0].n, 0);
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.wiki_pages WHERE content::text ILIKE $1 OR title ILIKE $1`, [`%${MARK}%`]).catch(() => [{ n: 0 }]))[0].n, 0);
   // 5. every body B received in the whole run carries no marker of A's (G5 checked the ids)
   // (B's own search for the words echoes them back as `query`; that is B's own text, not a finding)
-  assert(!seen[B].some((x) => x.includes(MARK) && !x.startsWith(`{"query":"${MARK}`)), "B received a body carrying A's marker");
+  assert(!seen[B].some((x) => has(x, MARK) && !x.toLowerCase().startsWith(`{"query":"${MARK}`.toLowerCase())), "B received a body carrying A's marker");
 });
 
 t("G8: bodies are strict, errors say nothing of other users, and the id and filter parameters are checked", async () => {
@@ -422,6 +426,51 @@ t("G10: a person can remove a gap that is not being researched, and a researchin
   await call(A, "POST", `${GP}/research`, { ids: [h.json.id] });
   assertEquals((await call(A, "DELETE", `${GP}/${h.json.id}`)).status, 409);
   assertEquals((await call(A, "PATCH", `${GP}/${h.json.id}`, { text: "changed" })).status, 409);
+});
+
+t("G11: long texts - 2000 CJK characters and 2000 four-byte emoji are added (201) and a repeat is a duplicate (409); a duplicate of a long text names the first", async () => {
+  const path = await docOf(A);
+  const cjk = Array.from({ length: 2000 }, (_, i) => String.fromCodePoint(0x4e00 + ((i * 7) % 2000))).join(""); // 2000 chars, 6000 bytes
+  const emoji = Array.from({ length: 2000 }, (_, i) => String.fromCodePoint(0x1f300 + (i % 400))).join(""); // 2000 chars, 8000 bytes
+  for (const [label, text] of [["CJK", cjk], ["emoji", emoji]] as const) {
+    const first = await mk(A, path, text);
+    assertEquals(first.status, 201, `${label}: ${first.text.slice(0, 200)}`);
+    assertEquals(Array.from(first.json.text as string).length, 2000, `${label}: the whole text is kept`);
+    const again = await mk(A, path, text);
+    assertEquals(again.status, 409, `${label} repeat: ${again.text.slice(0, 200)}`);
+    assertEquals(again.json.detail.existing.id, first.json.id, `${label}: the refusal names the first gap`);
+    // a duplicate of a long text in other spacing / punctuation is the same gap
+    const variant = await mk(A, path, `  ${text}.  `);
+    assertEquals(variant.status, 409, `${label} variant`);
+    assertEquals(variant.json.detail.existing.id, first.json.id);
+    // two long texts that differ only at the very end are two gaps (the key is the whole text, not a prefix)
+    const near = await mk(A, path, head(text, 1) + "Z");
+    assertEquals(near.status, 201, `${label}: a long text that differs at its last character is not a duplicate`);
+    // a long gap is dismissed and kept; its origin cannot bring it back
+    const sc = await mk(A, path, head(text, 2) + "QQ", { origin: "scan" });
+    assertEquals(sc.status, 201);
+    assertEquals((await call(A, "PATCH", `${GP}/${sc.json.id}`, { state: "dismissed" })).status, 200);
+    assertEquals((await mk(A, path, head(text, 2) + "qq", { origin: "scan" })).status, 409, `${label}: dismissed long text`);
+    // and it is researched like any other
+    const r = await call(A, "POST", `${GP}/research`, { ids: [first.json.id] });
+    assertEquals(r.status, 202, r.text.slice(0, 200));
+  }
+  // 2001 characters is refused (400), as before
+  assertEquals((await mk(A, path, "x".repeat(2001))).status, 400);
+  assertEquals((await mk(A, path, "\u{1F600}".repeat(2001))).status, 400);
+  // a rewording to a long text is checked the same way
+  const g = await mk(A, path, `short ${rnd()}`);
+  assertEquals((await call(A, "PATCH", `${GP}/${g.json.id}`, { text: cjk })).status, 409, "reworded into the long text of another gap");
+  // an invisible character does not make a second gap (the key ignores zero-width characters; the text is kept as typed)
+  const zw = await mk(A, path, `zero\u200bwidth ${rnd().slice(0, 4)} need`);
+  assertEquals(zw.status, 201);
+  const zwDup = await mk(A, path, zw.json.text.replace("\u200b", ""));
+  assertEquals(zwDup.status, 409, "a zero-width character inside the text is not a new gap");
+  assertEquals(zwDup.json.detail.existing.id, zw.json.id);
+  // a document path over 1024 bytes is refused 400 (the database index cannot hold it), never a 500
+  const long = path.replace(/\/[^/]+$/, "/" + "\u6587".repeat(400) + ".md");
+  const lp = await mk(A, long, "x");
+  assert([400, 404].includes(lp.status), `a very long path is refused, not a 500 (${lp.status})`);
 });
 
 Deno.test({ name: "G-close: close the pool", ignore, fn: async () => { await pool?.end(); }, sanitizeOps: false, sanitizeResources: false });
