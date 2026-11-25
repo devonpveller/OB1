@@ -14,6 +14,7 @@
 //                 queues research at once, or marks it deferred for an owner on a daily / weekly schedule
 import type { Db } from "../contracts/db.ts";
 import type { Identity } from "../middleware/identity.ts";
+import { writeReopened } from "../documents/trail.ts";
 
 export class IdeaError extends Error {
   constructor(readonly status: 400 | 404 | 409 | 502, msg: string, readonly detail: Record<string, unknown> = {}) { super(msg); }
@@ -221,6 +222,8 @@ export async function reopenIdea(db: Db, id: string, who: Identity): Promise<Arc
       }
       throw e;
     }
+    // rw-idea-reopen-trail: one owner-scoped line, in this transaction (it rolls back with a failed reopen)
+    await writeReopened(t, who.sub, who.sub, id);
     return { idea_id: id, status: was, archived: false };
   });
 }

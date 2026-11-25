@@ -126,3 +126,38 @@ Deno.test("rwr-idea-archive-api: only the write guard's own refusal becomes cann
   const r = await go(app(db), ID, "reopen");
   assertEquals(r.status, 500, "an unrelated permission error stays an internal error, not a 409 about promotion");
 });
+
+// ── rw-idea-reopen-trail: a reopen writes ONE owner-scoped trail line, through the tx handle, and a refused reopen writes none ──
+const trailWrites = (seen: { sql: string; args: unknown[] }[]) => seen.filter((s) => /INSERT INTO public\.user_document_trail/.test(s.sql));
+
+Deno.test("rw-idea-reopen-trail: reopen writes exactly one 'reopened' line: owner = actor = the caller, subject = the idea id, no text", async () => {
+  const { db, seen } = fakeDb({ status: "archived", archived_from: "dirty", owner: "operator" });
+  const r = await go(app(db), ID, "reopen");
+  assertEquals(r.status, 200, await r.clone().text());
+  const w = trailWrites(seen);
+  assertEquals(w.length, 1, "exactly one line");
+  assertEquals(w[0].args, ["operator", "operator", ID], "owner, actor (the seam's subject, not the header or body) and the idea id: nothing else");
+  assert(/'reopened'/.test(w[0].sql), "kind is reopened");
+  assert(!/title|summary|note/i.test(w[0].sql), "the statement names no text column");
+  assert(seen.indexOf(w[0]) > seen.findIndex((s) => /UPDATE public\.ideas SET status = \$2/.test(s.sql)), "after the idea is reopened, in the same transaction");
+});
+
+Deno.test("rw-idea-reopen-trail: a refused reopen (404 other user / missing, 409 not archived, 409 cannot-reopen) writes no trail line", async () => {
+  const cases = [
+    fakeDb(null),
+    fakeDb({ status: "researched", archived_from: null, owner: "someone-else" }),
+    fakeDb({ status: "new", archived_from: null, owner: "operator" }),
+    fakeDb({ status: "archived", archived_from: "promoted", owner: "operator" }, true),
+  ];
+  for (const c of cases) {
+    const r = await go(app(c.db), ID, "reopen");
+    assert(r.status === 404 || r.status === 409, `status ${r.status}`);
+    assertEquals(trailWrites(c.seen).length, 0);
+  }
+});
+
+Deno.test("rw-idea-reopen-trail: archive writes no trail line (other kinds are out of scope)", async () => {
+  const { db, seen } = fakeDb({ status: "researched", archived_from: null, owner: "operator" });
+  assertEquals((await go(app(db), ID, "archive")).status, 200);
+  assertEquals(trailWrites(seen).length, 0);
+});

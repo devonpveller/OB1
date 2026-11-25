@@ -297,7 +297,7 @@ function RemovedTab({ tick, refresh }: { tick: number; refresh: () => void }) {
       <Section id="archived" title="Archived documents" count={archived.length} read={docs} empty="You have no archived documents.">
         {archived.map((d) => <DocumentItem key={d.path} doc={d} refresh={refresh} ask={ask} />)}
       </Section>
-      <Section id="ideas" title="Archived ideas" count={archIdeas.length} read={ideas} empty="You have no archived ideas." note="Showing an idea again is not recorded in the Trail yet.">
+      <Section id="ideas" title="Archived ideas" count={archIdeas.length} read={ideas} empty="You have no archived ideas." note="Showing an idea again returns it to your ideas, and the Trail tab records it.">
         {archIdeas.map((i) => <IdeaItem key={i.id} idea={i} refresh={refresh} />)}
       </Section>
     </div>
@@ -305,7 +305,7 @@ function RemovedTab({ tick, refresh }: { tick: number; refresh: () => void }) {
 }
 
 // ---- the Trail tab (read only)
-type Item = { key: string; at: string; area: "Sources" | "Documents"; what: string; kind: string; subject: string; who: string; mine: boolean; note?: string };
+type Item = { key: string; at: string; area: "Sources" | "Documents" | "Ideas"; what: string; kind: string; subject: string; who: string; mine: boolean; note?: string };
 
 const SOURCE_WHAT: Record<string, string> = {
   suppressed: "Hidden", unlinked: "Cut loose", severed: "Connection cut", erased: "Erased for good", lifted: "Marker lifted",
@@ -316,6 +316,7 @@ const SOURCE_WHAT: Record<string, string> = {
 const DOC_WHAT: Record<string, string> = {
   delete_forever: "Deleted forever", empty_trash: "Trash emptied", nightly_expired: "Removed after 30 days in the trash",
   restored: "Shown again from the trash or archive", unarchived: "Taken out of the archive",
+  reopened: "Reopened an idea", // rw-idea-reopen-trail (slot 690): documents/trail.ts writeReopened; the line carries no idea text, so no title is shown
 };
 // Readable words for a line that only your own action log knows (cleanup action kinds).
 const ACTION_WORDS: Record<string, string> = {
@@ -359,7 +360,8 @@ function TrailTab({ tick, subject }: { tick: number; subject: string | null }) {
       docTrail.data.forEach((l, i) => {
         const nightly = l.actor === NIGHTLY, you = subject !== null && l.actor === subject;
         out.push({
-          key: "d" + i, at: l.at, area: "Documents", kind: l.kind, what: DOC_WHAT[l.kind] ?? "Changed", mine: you, subject: fileName(l.path),
+          key: "d" + i, at: l.at, area: l.kind === "reopened" ? "Ideas" : "Documents", kind: l.kind, what: DOC_WHAT[l.kind] ?? "Changed", mine: you,
+          subject: l.path === null ? "" : fileName(l.path), // a reopened line names nothing: no title, no link
           who: nightly ? "The nightly clean-up" : you ? "You" : "An administrator",
         });
       });
@@ -377,7 +379,7 @@ function TrailTab({ tick, subject }: { tick: number; subject: string | null }) {
   const shown = items.filter((i) => (show === "all" || i.area === show) && (what === "all" || i.kind === what) && (who === "all" || i.mine));
   const failed = [trail, mine, docTrail].filter((r) => r.state === "failed").length > 0;
   const loading = [trail, mine, docTrail].some((r) => r.state === "loading");
-  const kinds = ["suppressed", "unlinked", "severed", "erased", "lifted", "restored", "unarchived", "delete_forever", "empty_trash", "nightly_expired"];
+  const kinds = ["suppressed", "unlinked", "severed", "erased", "lifted", "restored", "unarchived", "reopened", "delete_forever", "empty_trash", "nightly_expired"];
   const labelOf = (k: string) => SOURCE_WHAT[k] ?? DOC_WHAT[k] ?? k;
 
   return (
@@ -387,7 +389,7 @@ function TrailTab({ tick, subject }: { tick: number; subject: string | null }) {
         <p className="meta">Nothing on this screen can change or delete a line. A Hidden line is read from the source's state now, so it goes when the source is shown again; the Shown again line stays. Your own documents appear here only to you.</p>
         <div className="rm-filters" role="group" aria-label="Filter the trail">
           <Choice legend="Show" name="f-show" value={show} onChange={setShow} testid="f-show"
-            options={[["all", "Sources and documents"], ["Sources", "Sources"], ["Documents", "Documents"]]} />
+            options={[["all", "Sources and documents"], ["Sources", "Sources"], ["Documents", "Documents"], ["Ideas", "Ideas"]]} />
           <Choice legend="What" name="f-what" value={what} onChange={setWhat} testid="f-what"
             options={[["all", "Everything"], ...kinds.map((k): [string, string] => [k, labelOf(k)])]} />
           <Choice legend="Who" name="f-who" value={who} onChange={setWho} testid="f-who" options={[["all", "Everyone"], ["me", "Only me"]]} />
@@ -400,7 +402,7 @@ function TrailTab({ tick, subject }: { tick: number; subject: string | null }) {
             {shown.map((i) => (
               <li key={i.key} data-testid="trail-line" data-kind={i.kind} data-who={i.who}>
                 <span className="meta">{when(i.at)}</span>
-                <span className="row-title">{i.what}: {i.subject}</span>
+                <span className="row-title">{i.subject ? `${i.what}: ${i.subject}` : i.what}</span>
                 <span className="pill">{i.who}</span>
                 {i.note && <span className="meta">Reason: {i.note}</span>}
               </li>

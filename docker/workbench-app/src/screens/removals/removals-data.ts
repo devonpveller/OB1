@@ -28,7 +28,8 @@ export type TrailEntry = {
 export type MyAction = { id: string; kind: string; sourceId: string | null; tombstoneId: string | null; at: string };
 export type DocItem = { title: string; path: string; updated: string; where: "live" | "trashed" | "archived" };
 export type IdeaItem = { id: string; title: string; status: string; updated: string; documentPath: string | null };
-export type DocTrailLine = { id: string; kind: string; path: string; actor: string; at: string };
+// path is null for a 'reopened' (idea) line: it names no document and carries no idea text (documents/trail.ts TrailLine)
+export type DocTrailLine = { id: string; kind: string; path: string | null; actor: string; at: string };
 
 // A 200 that is not the expected JSON (a login page, a wrong shape) is a FAILURE of the read, never an empty list.
 const listOf = (data: any, key: string): any[] => {
@@ -91,7 +92,7 @@ export async function readIdeas(): Promise<IdeaItem[]> {
 }
 export async function readDocTrail(): Promise<DocTrailLine[]> {
   const { data } = await api("GET", "/workbench/documents/trail?limit=500");
-  return listOf(data, "lines").map((l) => ({ id: str(l.id), kind: str(l.kind), path: str(l.path), actor: str(l.actor_sub), at: str(l.created_at) }));
+  return listOf(data, "lines").map((l) => ({ id: str(l.id), kind: str(l.kind), path: typeof l.path === "string" ? l.path : null, actor: str(l.actor_sub), at: str(l.created_at) }));
 }
 export type TombstoneFacts = { mayLift: boolean; byYou: boolean };
 export async function readTombstone(id: string): Promise<TombstoneFacts> {
