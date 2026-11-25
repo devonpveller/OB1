@@ -89,7 +89,9 @@ Deno.test("every request and response example validates against its zod schema",
     const route = d.route as J;
     const bodies: [string, J][] = [];
     const req = (route.request as J | undefined)?.body as J | undefined;
-    if (req) bodies.push([`${route.operationId} request`, (req.content as Record<string, J>)["application/json"]]);
+    // rwr-upload-sessions: a request body that is not JSON (an upload piece's raw bytes) has no JSON example to check
+    const reqJson = req ? (req.content as Record<string, J>)["application/json"] : undefined;
+    if (reqJson) bodies.push([`${route.operationId} request`, reqJson]);
     for (const [code, r] of Object.entries(route.responses as Record<string, J>)) {
       for (const [mime, m] of Object.entries((r.content ?? {}) as Record<string, J>)) {
         if (mime === "application/json") bodies.push([`${route.operationId} ${code}`, m]);

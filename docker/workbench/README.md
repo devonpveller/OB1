@@ -324,6 +324,29 @@ Deploy: `psql -f init-intake-queue.sql` BEFORE the new image (revert: `revert-in
 image with `POST /intake/fetch`; for the OWUI inlet, `owui=<key>` in `WORKSPACE_SERVICE_KEYS` and that key in the
 tool's `service_key` valve.
 
+### Upload sessions (rwr-upload-sessions, slot 610)
+
+A file above the add's own 25 MB goes up in pieces (`src/uploads/`, routes in `src/contracts/routes/uploads.ts`; the app's
+client is `workbench-app/src/lib/uploads.ts`). User-only (a service key gets 403); another person's upload is 404 `no such
+upload`, exactly as a missing one.
+
+| Route | What |
+|---|---|
+| `POST /workbench/contract/uploads` | start: `{filename, size, sha256}`; 413 over `UPLOAD_MAX_FILE_BYTES` (500 MB), 409 when the caller's unfinished uploads would pass `UPLOAD_MAX_UNFINISHED_BYTES` (1 GB) |
+| `GET /workbench/contract/uploads` | the caller's uploads, `unfinished_bytes` and the limits |
+| `GET /workbench/contract/uploads/{id}` | status: `received`, `next_offset` (where to resume), `missing`, `reason` |
+| `PUT /workbench/contract/uploads/{id}/pieces?offset=N` | one piece, raw bytes (`application/octet-stream`), at most `UPLOAD_MAX_PIECE_BYTES` (16 MB; the app sends 8 MB); an overlap is 409, a piece outside the file 416; the same offset and length again replaces it |
+| `POST /workbench/contract/uploads/{id}/finish` | `{refinery_id \| path, content_type?}`: missing bytes 409 (stays open); size or sha256 mismatch or a damaged piece 422 (fails, pieces removed); else ONE add job (202), whose file the add reads from the session |
+| `DELETE /workbench/contract/uploads/{id}` | cancel: the upload and its pieces are removed |
+
+The bytes are files on the workbench's own volume `openbrain-uploads` (`UPLOAD_DIR=/uploads`), never in the database and
+never served by any route; the rows (`upload_sessions`, `upload_session_pieces`) are readable by `ob_workbench` alone. A
+finished upload's file is removed once its source is held; an upload untouched for `UPLOAD_ABANDON_HOURS` (24) is removed
+with its pieces by the sweep (every `UPLOAD_SWEEP_MS`, 10 min), as is any folder on the volume that is no upload's.
+Lab: `contract-test/run-uploads-tests.ps1`. Deploy: `psql -f init-upload-sessions.sql` (after 480) BEFORE the new workbench
+image, then `check-upload-sessions.sql`; the viewer and the app image carry the forwarder's piece cap. Revert: the previous
+images, then `revert-upload-sessions.sql`.
+
 ## The retrieval contract (research-workbench P0)
 
 `src/contracts/` is the typed retrieval contract every panel and MCP client reads the

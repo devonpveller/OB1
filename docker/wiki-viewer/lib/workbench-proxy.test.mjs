@@ -86,6 +86,23 @@ test("rwr-intake-upload-cap: POST /workbench/intake/add takes 5 MB and 20 MB; ev
   }
 });
 
+test("rwr-upload-sessions: PUT contract/uploads/<id>/pieces takes an 8 MB piece; the other upload routes keep 1 MB", async () => {
+  const l = await lab();
+  try {
+    const id = "5e1d0c00-0000-4000-8000-000000000001";
+    const send = (method, path, mb) => fetch(`${l.front.url}${path}`, { method, body: Buffer.alloc(mb * 1024 * 1024 + 10, 120), headers: { origin: l.origin, "content-type": "application/octet-stream" } });
+    assert.equal((await send("PUT", `/workbench/contract/uploads/${id}/pieces?offset=0`, 8)).status, 201);
+    assert.equal((await send("PUT", `/workbench/contract/uploads/${id}/pieces`, 8)).status, 201);
+    for (const p of [`/workbench/contract/uploads`, `/workbench/contract/uploads/${id}`, `/workbench/contract/uploads/${id}/finish`,
+      `/workbench/contract/uploads/${id}/pieces/x`, `/workbench/contract/uploads/${id}/piecesx`, `/workbench/contract/other/${id}/pieces`]) {
+      assert.equal((await send("POST", p, 2)).status, 413, `${p} is not widened`);
+    }
+    assert.ok(l.seen.some((x) => x.url === `/workbench/contract/uploads/${id}/pieces?offset=0` && x.bytes === 8 * 1024 * 1024 + 10));
+  } finally {
+    l.close();
+  }
+});
+
 test("off unless both WORKBENCH_URL and WORKBENCH_KEY are set", () => {
   assert.equal(proxyConfig({}), null);
   assert.equal(proxyConfig({ WORKBENCH_URL: "http://wb:8000" }), null);

@@ -1,6 +1,6 @@
 // openbrain-workbench - the process: the app (src/app.ts) plus the vault repo, the nightly
 // empty-trash, the start-up reconcile and the server.
-import { app, docDeps, seam } from "./app.ts";
+import { app, docDeps, seam, uploadCfg, uploads } from "./app.ts";
 import { config } from "./config.ts";
 import { emptyDocumentsTrash, reconcileOnStart } from "./routes/documents.ts";
 import { ensureVaultRepo } from "./util/vault.ts";
@@ -48,6 +48,27 @@ try {
   if (n) console.log(`[intake] ${n} job(s) interrupted by the restart marked failed`);
 } catch (e) {
   console.error("[intake] the start-up sweep failed:", (e as Error).message);
+}
+
+// rwr-upload-sessions: a finish the last process did not complete reopens (before the listener); then the sweep removes
+// uploads untouched for UPLOAD_ABANDON_HOURS with their pieces, and any directory on the volume that is no session's
+try {
+  const n = await uploads.recoverOnStart();
+  if (n) console.log(`[uploads] ${n} finish(es) interrupted by the restart reopened`);
+} catch (e) {
+  console.error("[uploads] the start-up recovery failed:", (e as Error).message);
+}
+{
+  const sweepUploads = async () => {
+    try {
+      const r = await uploads.sweep();
+      if (r.sessions || r.orphans) console.log(`[uploads] sweep removed ${r.sessions} abandoned upload(s) and ${r.orphans} orphan folder(s), freeing ${r.bytes} bytes`);
+    } catch (e) {
+      console.error("[uploads] the sweep failed:", (e as Error).message);
+    }
+  };
+  sweepUploads();
+  setInterval(sweepUploads, uploadCfg.sweepMs);
 }
 
 // rw-identity-harden F-c: with sign-in configured, impersonations past their expiry end (recorded, one

@@ -422,6 +422,21 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     console.log(`sweep: B's intake add ${add.status}, B's import ${imp.status}`);
   }
   const bIntakeBefore = await sql(`SELECT id::text AS id, status, attempts FROM public.import_jobs WHERE id::text = ANY($1) ORDER BY id`, [Object.values(bIntake)]);
+  // rwr-upload-sessions (slot 610): B's upload in pieces - its file name and the bytes of its one piece are markers, and its id
+  // is tried in every parameter. A must not read, list, count, resume, finish or cancel it. Skipped where the base has no route.
+  const uploadMk = { name: `UploadNameSecret${rnd()}.pdf`, bytes: `UploadBytesSecret${rnd()}` };
+  let bUpload = "";
+  {
+    const piece = new TextEncoder().encode(`%PDF-1.4\n${uploadMk.bytes}\n`);
+    const st = await wb("POST", "/workbench/contract/uploads", { filename: uploadMk.name, size: piece.length + 100, sha256: "ab".repeat(32) }, B);
+    if (st.status === 201) {
+      bUpload = String(st.json.id);
+      const pr = await fetch(`${BASE}/workbench/contract/uploads/${bUpload}/pieces?offset=0`, { method: "PUT", headers: { "x-brain-key": KEY, "content-type": "application/octet-stream", ...B }, body: piece as unknown as BodyInit });
+      assertEquals(pr.status, 200, await pr.text());
+    }
+    console.log(`sweep: B's upload ${bUpload ? "planted (a name and a piece, both markers)" : `not planted (${st.status})`}`);
+  }
+  const bUploadBefore = bUpload ? await sql(`SELECT state, reason, updated_at::text AS u, (SELECT count(*)::int FROM public.upload_session_pieces p WHERE p.session_id = s.id) AS pieces FROM public.upload_sessions s WHERE id = $1::uuid`, [bUpload]) : [];
   // review RV1 (rw-p8a4-ideas): A's OWN refinery holds a shared (folded) source; B's research tree records a lead on it
   // and admits a marker URL found via that lead, and another found via it directly. A's refinery view lists A's user
   // sources with what was admitted found_via them - B's admissions must not be among them.
@@ -464,7 +479,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   }
   // the text marker only: the ids are tried as inputs (a job id is shared knowledge, and a refusal may echo its input)
   const markers: Record<string, string> = { ...M, ...(pv.pvMarker ? { pvMarker: pv.pvMarker } : {}), path: bPath, refinery: bRefinery, sub: bSub, attach: attachSecret, viaSecret,
-    ...(bIntake.add ? { intakeUrl: intakeMk.url, intakeAdd: bIntake.add } : {}), ...(bIntake.import ? { intakeFile: intakeMk.file, intakeImport: bIntake.import } : {}),
+    ...(bIntake.add ? { intakeUrl: intakeMk.url, intakeAdd: bIntake.add } : {}), ...(bUpload ? { uploadName: uploadMk.name, uploadBytes: uploadMk.bytes, uploadId: bUpload } : {}), ...(bIntake.import ? { intakeFile: intakeMk.file, intakeImport: bIntake.import } : {}),
     podPresenter: pod.presenter, podRequest: pod.request, podTurn: pod.turn, podTeam: pod.team, podRequestId: podReq.json.id,
     castStance: castMk.stance, castNotes: castMk.notes, castTopic: castMk.topic, castTeam: castMk.team, castBriefing: castMk.briefing, ...bCast,
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
@@ -513,7 +528,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // 1. TEMPLATED: B's ids and paths in every parameter, query and body field (the request gate)
   const LIFECYCLE_IRREVERSIBLE = ["/workbench/documents/delete-forever", "/workbench/documents/empty-trash"];
   let lifecycleTrashCalls = 0;
-  const ids = [bPath, bTrashed, bRefinery, bJob, bHeld, bRefId, bHeldRef, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob, ...Object.values(bCast)].filter(Boolean);
+  const ids = [bPath, bTrashed, bRefinery, bJob, bHeld, bRefId, bHeldRef, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob, ...Object.values(bCast), bUpload].filter(Boolean);
   const query = (v: string) => new URLSearchParams({
     path: bPath, ref: bPath, from: bPath, id: v, idea_id: bRefinery, refinery_id: bRefinery, job_id: bJob,
     source_id: bHeld || v, kind: "user_document", holder_kind: "user_document", format: "md", limit: "500", q: "fixture",
@@ -620,6 +635,11 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   }
   const bIntakeAfter = await sql(`SELECT id::text AS id, status, attempts FROM public.import_jobs WHERE id::text = ANY($1) ORDER BY id`, [Object.values(bIntake)]);
   assertEquals(bIntakeAfter, bIntakeBefore, "user A's calls left B's intake jobs as they were");
+  if (bUpload) {
+    const after = await sql(`SELECT state, reason, updated_at::text AS u, (SELECT count(*)::int FROM public.upload_session_pieces p WHERE p.session_id = s.id) AS pieces FROM public.upload_sessions s WHERE id = $1::uuid`, [bUpload]);
+    assertEquals(after, bUploadBefore, "user A's calls left B's upload as it was (not resumed, finished, cancelled or touched)");
+    console.log("sweep: B's upload untouched by A's calls (state, pieces, updated_at)");
+  }
   console.log(`sweep: B's intake jobs ${JSON.stringify(Object.keys(bIntake))} (A: 404 on each, by id, retry and cancel)`);
 
   // what a marker cannot show: WHICH references B's document holds (reference rows are shared

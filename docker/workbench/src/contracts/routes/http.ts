@@ -32,6 +32,9 @@ export interface ContractDeps {
   // user's / a missing one. Injected by src/app.ts, never imported here: documents/repo.ts pulls config.ts (DB_* read
   // at import) into the contract's module graph (see repo/trust.ts ownedDocument). Absent = every document is null.
   readOwnDocument?: (path: string, who: import("../../middleware/identity.ts").Identity) => Promise<{ path: string; content: string } | null>;
+  // rwr-upload-sessions: the caller's upload sessions (src/uploads/sessions.ts), built by src/app.ts with the intake add path
+  // injected; absent = the upload routes answer 503
+  uploads?: import("../../uploads/sessions.ts").UploadSessions;
 }
 
 export const PREFIX = "/workbench/contract";

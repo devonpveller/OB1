@@ -89,6 +89,24 @@ export async function api<T = any>(method: string, url: string, body?: unknown):
   return { status: r.status, data };
 }
 
+// rwr-upload-sessions: a PUT whose body is a file's raw bytes (one piece of an upload), through the same door and log.
+export async function putBytes<T = any>(url: string, bytes: Blob): Promise<{ status: number; data: T }> {
+  const target = guard(url);
+  log.push({ method: "PUT", url: target });
+  const r = await fetcher(target, {
+    method: "PUT", headers: { "content-type": "application/octet-stream" }, body: bytes, credentials: "same-origin", cache: "no-store",
+  });
+  const text = await r.text();
+  let data: any = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { text };
+  }
+  if (!r.ok) throw new ApiError(r.status, data);
+  return { status: r.status, data };
+}
+
 // A GET whose answer may be a FILE: the raw response, through the same door and the same log.
 export async function raw(url: string): Promise<Response> {
   const target = guard(url);

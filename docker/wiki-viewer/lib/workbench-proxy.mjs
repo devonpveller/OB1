@@ -43,7 +43,9 @@ const HOP = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-au
 // stays dropped as before (cfg.strip).
 const FORGEABLE = /^(remote-|x-remote-|x-forwarded-|x-real-ip$|forwarded$|x-original-|x-auth-request-)/;
 // rwr-intake-upload-cap: intake/add (exactly) joins the upload paths; the intake route's own 25 MB check is the real limit
-const UPLOAD = /^\/workbench\/(import(\/|$|\?)|sources\/[^/]+\/replace-from-upload|intake\/add(\?|$))/;
+// rwr-upload-sessions: a piece of an upload session (PUT contract/uploads/<id>/pieces); the workbench's own 16 MB piece
+// limit (UPLOAD_MAX_PIECE_BYTES) is the real one, the app sends 8 MB
+const UPLOAD = /^\/workbench\/(import(\/|$|\?)|sources\/[^/]+\/replace-from-upload|intake\/add(\?|$)|contract\/uploads\/[^/?]+\/pieces(\?|$))/;
 const MB = 1024 * 1024;
 
 const list = (v) => String(v || "").split(/[\s,]+/).map((x) => x.trim().toLowerCase()).filter(Boolean);

@@ -6655,6 +6655,243 @@
           "updated_at"
         ]
       },
+      "Upload": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "example": "open",
+            "description": "open takes pieces; finishing is being joined; done became an add job; failed says why in reason (an open string, never a closed list here)"
+          },
+          "received": {
+            "type": "integer",
+            "description": "bytes received in full"
+          },
+          "next_offset": {
+            "type": "integer",
+            "description": "the first byte not yet received: where a resumed upload continues (= size when complete)"
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UploadRange"
+            },
+            "description": "the first ranges not yet received (at most 20; missing_ranges is how many there are)"
+          },
+          "missing_ranges": {
+            "type": "integer"
+          },
+          "pieces": {
+            "type": "integer"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "description": "why the last finish was refused, or why the upload failed"
+          },
+          "job_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "the intake add job the upload became (kind add in /workbench/intake/jobs)"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "updated_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "expires_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "when an untouched upload is removed with its pieces"
+          }
+        },
+        "required": [
+          "id",
+          "filename",
+          "size",
+          "sha256",
+          "state",
+          "received",
+          "next_offset",
+          "missing",
+          "missing_ranges",
+          "pieces",
+          "reason",
+          "job_id",
+          "created_at",
+          "updated_at",
+          "expires_at"
+        ]
+      },
+      "UploadRange": {
+        "type": "object",
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "length": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          }
+        },
+        "required": [
+          "offset",
+          "length"
+        ]
+      },
+      "UploadStart": {
+        "type": "object",
+        "properties": {
+          "filename": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "example": "field-survey.pdf",
+            "description": "the file's name: one name, no folder"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "exclusiveMinimum": true,
+            "example": 209715200,
+            "description": "the file's length in bytes (at most the per-file limit)"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{64}$",
+            "example": "9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b",
+            "description": "the file's SHA-256, 64 hexadecimal characters; the finish checks it"
+          }
+        },
+        "required": [
+          "filename",
+          "size",
+          "sha256"
+        ]
+      },
+      "UploadList": {
+        "type": "object",
+        "properties": {
+          "uploads": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Upload"
+            },
+            "description": "the caller's own uploads, newest first"
+          },
+          "unfinished_bytes": {
+            "type": "integer",
+            "description": "the declared sizes of the caller's unfinished uploads, summed (counts against max_unfinished_bytes)"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/UploadLimits"
+          }
+        },
+        "required": [
+          "uploads",
+          "unfinished_bytes",
+          "limits"
+        ]
+      },
+      "UploadLimits": {
+        "type": "object",
+        "properties": {
+          "max_file_bytes": {
+            "type": "integer"
+          },
+          "max_unfinished_bytes": {
+            "type": "integer"
+          },
+          "max_piece_bytes": {
+            "type": "integer"
+          },
+          "piece_bytes": {
+            "type": "integer",
+            "description": "the piece size to send"
+          },
+          "abandon_hours": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_file_bytes",
+          "max_unfinished_bytes",
+          "max_piece_bytes",
+          "piece_bytes",
+          "abandon_hours"
+        ]
+      },
+      "UploadFinished": {
+        "type": "object",
+        "properties": {
+          "upload": {
+            "$ref": "#/components/schemas/Upload"
+          },
+          "job_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "upload",
+          "job_id"
+        ]
+      },
+      "UploadFinish": {
+        "type": "object",
+        "properties": {
+          "refinery_id": {
+            "type": "string",
+            "example": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+            "description": "the refinery it joins (as POST /workbench/intake/add)"
+          },
+          "path": {
+            "type": "string",
+            "description": "or the document whose refinery it joins"
+          },
+          "content_type": {
+            "type": "string",
+            "example": "pdf",
+            "description": "optional: what the file is declared to be (web_article | pdf)"
+          }
+        }
+      },
+      "UploadCancelled": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "cancelled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "cancelled"
+        ]
+      },
       "PrivateClaims": {
         "type": "object",
         "properties": {
@@ -16563,6 +16800,902 @@
           },
           "500": {
             "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/uploads": {
+      "post": {
+        "operationId": "startUpload",
+        "tags": [
+          "uploads"
+        ],
+        "summary": "start an upload of a large file in pieces (the caller's own)",
+        "description": "Declares the file's name, size and SHA-256. Refused over the per-file limit (413) or when the caller's unfinished uploads would pass their limit (409, with how much is in use). Then PUT the pieces, GET the status to resume, POST finish.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "filename": "field-survey.pdf",
+                "size": 1024,
+                "sha256": "9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/UploadStart"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "the new upload, open",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "5e1d0c00-0000-4000-8000-000000000001",
+                  "filename": "field-survey.pdf",
+                  "size": 1024,
+                  "sha256": "9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b",
+                  "state": "open",
+                  "received": 0,
+                  "next_offset": 0,
+                  "missing": [
+                    {
+                      "offset": 0,
+                      "length": 1024
+                    }
+                  ],
+                  "missing_ranges": 1,
+                  "pieces": 0,
+                  "reason": null,
+                  "job_id": null,
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z",
+                  "expires_at": "2026-10-18T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Upload"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "over a limit: the file (UPLOAD_MAX_FILE_BYTES) or one piece (UPLOAD_MAX_PIECE_BYTES)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "not a type the intake takes (a PDF or a saved web page)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "a piece outside the file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "uploads are not configured on this workbench",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listUploads",
+        "tags": [
+          "uploads"
+        ],
+        "summary": "the caller's own uploads and limits",
+        "description": "Never another person's: not listed, not counted, not in unfinished_bytes.",
+        "responses": {
+          "200": {
+            "description": "the caller's uploads",
+            "content": {
+              "application/json": {
+                "example": {
+                  "uploads": [
+                    {
+                      "id": "5e1d0c00-0000-4000-8000-000000000001",
+                      "filename": "field-survey.pdf",
+                      "size": 209715200,
+                      "sha256": "9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b",
+                      "state": "open",
+                      "received": 8388608,
+                      "next_offset": 8388608,
+                      "missing": [
+                        {
+                          "offset": 8388608,
+                          "length": 201326592
+                        }
+                      ],
+                      "missing_ranges": 1,
+                      "pieces": 1,
+                      "reason": null,
+                      "job_id": null,
+                      "created_at": "2026-10-17T12:00:00.000Z",
+                      "updated_at": "2026-10-17T12:00:00.000Z",
+                      "expires_at": "2026-10-18T12:00:00.000Z"
+                    }
+                  ],
+                  "unfinished_bytes": 209715200,
+                  "limits": {
+                    "max_file_bytes": 524288000,
+                    "max_unfinished_bytes": 1073741824,
+                    "max_piece_bytes": 16777216,
+                    "piece_bytes": 8388608,
+                    "abandon_hours": 24
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/UploadList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "over a limit: the file (UPLOAD_MAX_FILE_BYTES) or one piece (UPLOAD_MAX_PIECE_BYTES)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "not a type the intake takes (a PDF or a saved web page)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "a piece outside the file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "uploads are not configured on this workbench",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/uploads/{id}": {
+      "get": {
+        "operationId": "uploadStatus",
+        "tags": [
+          "uploads"
+        ],
+        "summary": "one upload's status: bytes received and where to resume",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "upload id"
+            },
+            "required": true,
+            "description": "upload id",
+            "name": "id",
+            "in": "path",
+            "example": "5e1d0c00-0000-4000-8000-000000000001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the upload",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "5e1d0c00-0000-4000-8000-000000000001",
+                  "filename": "field-survey.pdf",
+                  "size": 209715200,
+                  "sha256": "9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b",
+                  "state": "open",
+                  "received": 8388608,
+                  "next_offset": 8388608,
+                  "missing": [
+                    {
+                      "offset": 8388608,
+                      "length": 201326592
+                    }
+                  ],
+                  "missing_ranges": 1,
+                  "pieces": 1,
+                  "reason": null,
+                  "job_id": null,
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z",
+                  "expires_at": "2026-10-18T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Upload"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "over a limit: the file (UPLOAD_MAX_FILE_BYTES) or one piece (UPLOAD_MAX_PIECE_BYTES)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "not a type the intake takes (a PDF or a saved web page)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "a piece outside the file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "uploads are not configured on this workbench",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "cancelUpload",
+        "tags": [
+          "uploads"
+        ],
+        "summary": "cancel an unfinished upload: it and its pieces are removed",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "upload id"
+            },
+            "required": true,
+            "description": "upload id",
+            "name": "id",
+            "in": "path",
+            "example": "5e1d0c00-0000-4000-8000-000000000001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "removed",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "5e1d0c00-0000-4000-8000-000000000001",
+                  "cancelled": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/UploadCancelled"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "over a limit: the file (UPLOAD_MAX_FILE_BYTES) or one piece (UPLOAD_MAX_PIECE_BYTES)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "not a type the intake takes (a PDF or a saved web page)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "a piece outside the file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "uploads are not configured on this workbench",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/uploads/{id}/pieces": {
+      "put": {
+        "operationId": "putUploadPiece",
+        "tags": [
+          "uploads"
+        ],
+        "summary": "one piece of the file, at its byte offset",
+        "description": "The body is the piece's raw bytes (application/octet-stream), at most max_piece_bytes and inside the file. A piece that overlaps one already received is refused (409); the same offset and length again replaces it (a resend after a dropped answer). A piece that did not arrive in full is not kept: GET the status and send it again.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "upload id"
+            },
+            "required": true,
+            "description": "upload id",
+            "name": "id",
+            "in": "path",
+            "example": "5e1d0c00-0000-4000-8000-000000000001"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "the piece's first byte in the file"
+            },
+            "required": false,
+            "description": "the piece's first byte in the file",
+            "name": "offset",
+            "in": "query",
+            "example": "0"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the upload, with the piece",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "5e1d0c00-0000-4000-8000-000000000001",
+                  "filename": "field-survey.pdf",
+                  "size": 209715200,
+                  "sha256": "9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b",
+                  "state": "open",
+                  "received": 8388608,
+                  "next_offset": 8388608,
+                  "missing": [
+                    {
+                      "offset": 8388608,
+                      "length": 201326592
+                    }
+                  ],
+                  "missing_ranges": 1,
+                  "pieces": 1,
+                  "reason": null,
+                  "job_id": null,
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z",
+                  "expires_at": "2026-10-18T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Upload"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "over a limit: the file (UPLOAD_MAX_FILE_BYTES) or one piece (UPLOAD_MAX_PIECE_BYTES)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "not a type the intake takes (a PDF or a saved web page)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "a piece outside the file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "uploads are not configured on this workbench",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/uploads/{id}/finish": {
+      "post": {
+        "operationId": "finishUpload",
+        "tags": [
+          "uploads"
+        ],
+        "summary": "join the pieces, verify size and SHA-256, and add the file through the intake (one source)",
+        "description": "Missing bytes: 409 and the upload stays open. A size or SHA-256 that does not match, or a damaged piece: 422 and the upload fails with the reason (its pieces removed). The target and type rules are POST /workbench/intake/add's. On success the add job runs (/workbench/intake/jobs/add/{job_id}); a finish sent again answers the same job.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "upload id"
+            },
+            "required": true,
+            "description": "upload id",
+            "name": "id",
+            "in": "path",
+            "example": "5e1d0c00-0000-4000-8000-000000000001"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "refinery_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/UploadFinish"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "the add job the upload became",
+            "content": {
+              "application/json": {
+                "example": {
+                  "upload": {
+                    "id": "5e1d0c00-0000-4000-8000-000000000001",
+                    "filename": "field-survey.pdf",
+                    "size": 209715200,
+                    "sha256": "9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b9f2c3a1b",
+                    "state": "done",
+                    "received": 0,
+                    "next_offset": 0,
+                    "missing": [],
+                    "missing_ranges": 0,
+                    "pieces": 0,
+                    "reason": null,
+                    "job_id": "5e1d0c00-0000-4000-8000-0000000000a1",
+                    "created_at": "2026-10-17T12:00:00.000Z",
+                    "updated_at": "2026-10-17T12:00:00.000Z",
+                    "expires_at": "2026-10-18T12:00:00.000Z"
+                  },
+                  "job_id": "5e1d0c00-0000-4000-8000-0000000000a1"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/UploadFinished"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "over a limit: the file (UPLOAD_MAX_FILE_BYTES) or one piece (UPLOAD_MAX_PIECE_BYTES)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "not a type the intake takes (a PDF or a saved web page)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "416": {
+            "description": "a piece outside the file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "uploads are not configured on this workbench",
             "content": {
               "application/json": {
                 "schema": {

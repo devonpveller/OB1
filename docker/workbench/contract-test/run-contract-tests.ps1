@@ -420,10 +420,14 @@ try {
   # cleanup_integration_test.ts exercises them in run-workspace-tests.ps1) - the same five paths, counted here
   # rwr-research-start-api: POST /workbench/research and /workbench/research/preview (one operation each; dredd-hooks.js
   # isResearchStart skips exactly these two - they act through the research service, which this lab does not run)
+  # rwr-upload-sessions: dredd-hooks.js UPLOAD_BY_ID skips every operation on /uploads/{id}... (GET and DELETE on one path, the
+  # piece PUT, the finish POST: 4 operations over 3 paths) - counted by operation here
+  $uploadById = 0
+  foreach ($p in @($docJson.paths.PSObject.Properties | Where-Object { $_.Name -match '/uploads/\{id\}' })) { $uploadById += @($p.Value.PSObject.Properties).Count }
   $hookSkipped = @($docJson.paths.PSObject.Properties | Where-Object { $_.Name -match '/sessions/\{id\}/(steer|cancel)$' -or
     $_.Name -match '/cleanup/(sources/\{id\}/(sever|erase)|process-all|tombstones/\{id\}/lift|actions/\{id\})$' -or
     $_.Name -match '/private/(claims|jobs)/\{id\}$' -or
-    $_.Name -match '^/workbench/research(/preview)?$' }).Count + 2  # rw-owner-private-view: the owner-only by-id reads (PRIVATE_BY_ID); rwr-flags-api: +2 = GET and PATCH /flags/{id} (FLAG_BY_ID; one path, two operations)
+    $_.Name -match '^/workbench/research(/preview)?$' }).Count + 2 + $uploadById  # rw-owner-private-view: the owner-only by-id reads (PRIVATE_BY_ID); rwr-flags-api: +2 = GET and PATCH /flags/{id} (FLAG_BY_ID; one path, two operations)
   Check ($dm.Success -and $dm.Groups[2].Value -eq '0' -and $dm.Groups[3].Value -eq '0' -and [int]$dm.Groups[1].Value -eq ($ops - $hookSkipped)) "Dredd: $($dm.Value) (operations in the document: $ops; skipped by the hooks: $hookSkipped)"
 
   # ---------------------------------------------------------------- 6. eleven-router smoke

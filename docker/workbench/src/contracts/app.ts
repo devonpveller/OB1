@@ -13,6 +13,7 @@ import { registerCleanup } from "./routes/cleanup.ts";
 import { registerLibrary } from "./routes/library.ts";
 import { registerFlags } from "./routes/flags.ts";
 import { registerInlets } from "./routes/inlets.ts";
+import { registerUploads } from "./routes/uploads.ts";
 import { registerResearchStart } from "./routes/research_start.ts";
 import { registerIdeaCapture } from "./routes/idea_capture.ts";
 import { registerIdeaArchive } from "./routes/idea_archive.ts";
@@ -38,6 +39,7 @@ export function createContractApp(deps: ContractDeps) {
   registerLibrary(app, deps); // rwr-home round 4: the shared-library reads behind the Home library cards
   registerFlags(app, deps); // rwr-flags-api: flag for cleanup (per user)
   registerInlets(app, deps); // rwr-imports-server-api (slot 600): the caller's own inlet connections
+  registerUploads(app, deps); // rwr-upload-sessions (slot 610): the caller's own large-file uploads in pieces
   registerPrivate(app, deps); // rw-owner-private-view (slot 480): the owner's private views (no MCP tool)
   registerResearchStart(app, deps); // rwr-research-start-api: POST /workbench/research and /research/preview
   registerIdeaCapture(app, deps); // rwr-idea-capture-api: POST /workbench/ideas (owner = the seam's subject)

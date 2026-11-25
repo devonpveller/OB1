@@ -1737,6 +1737,65 @@ export type TrailEntry = {
   lifecycle: string; /** registry: source_states */
 };
 
+export type Upload = {
+  id: string;
+  filename: string;
+  size: number;
+  sha256: string;
+  state: string;
+  received: number;
+  next_offset: number;
+  missing: Array<UploadRange>;
+  missing_ranges: number;
+  pieces: number;
+  reason: string | null;
+  job_id: string | null;
+  created_at: string;
+  updated_at: string;
+  expires_at: string;
+};
+
+export type UploadCancelled = {
+  id: string;
+  cancelled: boolean;
+};
+
+export type UploadFinish = {
+  refinery_id?: string;
+  path?: string;
+  content_type?: string;
+};
+
+export type UploadFinished = {
+  upload: Upload;
+  job_id: string;
+};
+
+export type UploadLimits = {
+  max_file_bytes: number;
+  max_unfinished_bytes: number;
+  max_piece_bytes: number;
+  piece_bytes: number;
+  abandon_hours: number;
+};
+
+export type UploadList = {
+  uploads: Array<Upload>;
+  unfinished_bytes: number;
+  limits: UploadLimits;
+};
+
+export type UploadRange = {
+  offset: number;
+  length: number;
+};
+
+export type UploadStart = {
+  filename: string;
+  size: number;
+  sha256: string;
+};
+
 export type UserSource = {
   source_id: string;
   refinery_id: string;

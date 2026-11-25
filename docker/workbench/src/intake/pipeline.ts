@@ -26,11 +26,20 @@ import { type IntakeFetch, IntakeFetchError } from "./research_fetch.ts";
 
 export type Extract = (bytes: Uint8Array, filename: string) => Promise<{ markdown: string; title: string }>;
 
+// rwr-upload-sessions: a file that arrived in pieces is not copied into import_job_payloads (a 500 MB bytea would not
+// round-trip through the driver): the finished session's verified file stays on the workbench's upload volume, and the
+// add reads it from there. held() removes it once the source is held (as the payload row is deleted then).
+export interface UploadPayloads {
+  payloadOf(jobId: string): Promise<{ filename: string; bytes: Uint8Array; upload?: { id: string; size: number; sha256: string } } | null>;
+  held(jobId: string): Promise<void>;
+}
+
 export interface AddDeps {
   db: Db;
   rdeps: RefineryDeps;
   fetch: IntakeFetch | null; // null = the research service is not configured (503)
   extract: Extract;
+  uploads?: UploadPayloads;
 }
 
 // What a failed add records - a fixed text per cause (another service's words never land in the row).
@@ -119,7 +128,8 @@ export async function runAdd(deps: AddDeps, jobId: string): Promise<void> {
         input = { title: got.title || job.url, content: got.text, url: job.url, content_type: got.content_type };
       }
     } else {
-      const p = (await db.query<{ filename: string; bytes: Uint8Array }>(`SELECT filename, bytes FROM public.import_job_payloads WHERE job_id = $1`, [jobId]))[0];
+      const p: { filename: string; bytes: Uint8Array; upload?: { id: string; size: number; sha256: string } } | undefined = (await db.query<{ filename: string; bytes: Uint8Array }>(`SELECT filename, bytes FROM public.import_job_payloads WHERE job_id = $1`, [jobId]))[0] ??
+        (await deps.uploads?.payloadOf(jobId)) ?? undefined;
       if (!p) return void await fail("no_payload");
       const type = fileContentType(p.filename, p.bytes);
       if (!type) return void await fail("unsupported_type");
@@ -127,7 +137,8 @@ export async function runAdd(deps: AddDeps, jobId: string): Promise<void> {
       const ex = await deps.extract(p.bytes, p.filename).catch(() => null);
       if (!ex?.markdown?.trim()) return void await fail("extract_failed");
       input = { title: ex.title || p.filename, content: ex.markdown, content_type: type };
-      provenance = { file: p.filename };
+      // rwr-upload-sessions: a file that arrived in pieces names its upload and the size and sha256 the finish verified
+      provenance = p.upload ? { file: p.filename, upload: p.upload } : { file: p.filename };
     }
     if (!(await advance(db, jobId, "holding", ["fetching", "extracting"]))) return;
     const who = await actingFor(job);
@@ -138,6 +149,7 @@ export async function runAdd(deps: AddDeps, jobId: string): Promise<void> {
     const sourceId = (added as { source: { source_id: string } }).source.source_id;
     await db.query(`UPDATE public.import_jobs SET status = 'held', held_source_id = $2, error = NULL WHERE id = $1`, [jobId, sourceId]);
     await db.query(`DELETE FROM public.import_job_payloads WHERE job_id = $1`, [jobId]);
+    await deps.uploads?.held(jobId).catch((e) => console.error(`[intake] add ${jobId}: the upload's file was not removed:`, (e as Error).message));
   } catch (e) {
     if (e instanceof IntakeFetchError) return void await fail(e.code);
     if (e instanceof DocError || e instanceof NotFound || e instanceof Conflict) {

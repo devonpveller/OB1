@@ -17,8 +17,8 @@ import type { RefineryDeps } from "../documents/refinery.ts";
 import { ownedPath } from "../documents/repo.ts";
 import { DocError } from "../documents/repo.ts";
 import { type Identity, identityOf } from "../middleware/identity.ts";
-import { CONTENT_TYPE_LABELS, fileContentType, INTAKE_CONTENT_TYPES, isIntakeContentType } from "./content_types.ts";
-import { type Extract, runAdd } from "./pipeline.ts";
+import { CONTENT_TYPE_LABELS, fileContentType, INTAKE_CONTENT_TYPES, type IntakeContentType, isIntakeContentType } from "./content_types.ts";
+import { type AddDeps, type Extract, runAdd, type UploadPayloads } from "./pipeline.ts";
 import type { IntakeFetch } from "./research_fetch.ts";
 import * as repo from "./repo.ts";
 
@@ -30,6 +30,8 @@ export interface IntakeDeps {
   // an import's retry re-runs the import route's own pipeline (routes/import.ts)
   retryImport: (jobId: string, who: Identity) => Promise<void>;
   maxFileBytes?: number;
+  // rwr-upload-sessions: a finished upload session's file, read by the add pipeline when the job has no payload row
+  uploads?: UploadPayloads;
 }
 
 const str = (v: unknown) => (v == null ? "" : String(v));
@@ -50,11 +52,65 @@ async function refineriesOf(db: Db, sub: string) {
   );
 }
 
+// ── the add's checks and its one write, shared by POST /add and a finished upload session (rwr-upload-sessions) ──
+export interface AddRefusal {
+  status: 400 | 404 | 409 | 413 | 415 | 503;
+  body: Record<string, unknown>;
+}
+
+// WHERE an add lands: exactly one existing refinery of the subject's - named (refinery_id), or a document's (path)
+export async function addTarget(db: Db, who: Identity, refineryId: string, path: string): Promise<{ refineryId: string | null; docPath: string | null } | { refusal: AddRefusal }> {
+  if (refineryId && path) return { refusal: { status: 400, body: { error: "a refinery or a document, not both" } } };
+  if (!refineryId && !path) {
+    return { refusal: { status: 400, body: {
+      error: "choose the refinery it joins (a user add lands only in an existing idea refinery)", needs: "refinery_id",
+      refineries: await refineriesOf(db, who.sub),
+    } } };
+  }
+  try {
+    if (refineryId) {
+      const mine = await refineriesOf(db, who.sub);
+      if (!mine.some((x) => x.id === refineryId.toLowerCase())) return { refusal: { status: 404, body: { error: "no such refinery (an add joins one of your existing refineries)" } } };
+      return { refineryId: refineryId.toLowerCase(), docPath: null };
+    }
+    const docPath = await ownedPath(db, path, who);
+    const tethered = await db.query<{ id: string }>(
+      `SELECT l.refinery_id::text AS id FROM public.user_document_listings l JOIN public.ideas i ON i.id = l.refinery_id
+         LEFT JOIN public.refinery_state rs ON rs.refinery_id = i.id
+        WHERE l.path = $1 AND l.owner_sub = $2 AND rs.archived_at IS NULL`, [docPath, who.sub]);
+    if (!tethered.length) {
+      return { refusal: { status: 409, body: { error: "this document has no open refinery: open the document's refinery first (a user source lands only in an existing refinery)" } } };
+    }
+    return { refineryId: null, docPath };
+  } catch (e) {
+    if (e instanceof DocError) return { refusal: { status: e.status as 400 | 404 | 409, body: { error: e.message } } };
+    throw e;
+  }
+}
+
+// WHAT a file is, by the declared rule (a PDF or a saved web page), from its name and first bytes
+export function fileTypeOf(filename: string, head: Uint8Array, declared: string): { type: IntakeContentType } | { refusal: AddRefusal } {
+  const type = fileContentType(filename, head);
+  if (!type) return { refusal: { status: 415, body: { error: "a file add is a PDF or a saved web page (a YouTube transcript is added by its link)", content_types: INTAKE_CONTENT_TYPES } } };
+  if (declared && declared !== type) return { refusal: { status: 415, body: { error: `this file is a ${CONTENT_TYPE_LABELS[type]}, not ${declared}` } } };
+  return { type };
+}
+
+// the add's one write: the job row, as the identity seam's subject (inside the caller's transaction)
+export async function insertAddJob(t: Db, who: Identity, f: { url: string | null; filename: string | null; refineryId: string | null; docPath: string | null; declared: string | null }) {
+  return (await t.query<{ id: string; status: string }>(
+    `INSERT INTO public.import_jobs (status, mode, origin, owner_sub, actor_sub, actor_name, url, filename, refinery_id, doc_path, content_type)
+     VALUES ('queued', 'add', $1, $2, $3, $4, $5, $6, $7::uuid, $8, $9) RETURNING id::text AS id, status`,
+    [originOf(who), who.sub, who.actor, who.name, f.url, f.filename, f.refineryId, f.docPath, f.declared],
+  ))[0];
+}
+
 export function intakeRouter(deps: IntakeDeps) {
   const r = new Hono();
   const db = deps.db;
   const maxFile = deps.maxFileBytes ?? 25 * 1024 * 1024;
   const kindOf = (c: Context) => str(c.req.param("kind"));
+  const addDeps: AddDeps = { db, rdeps: deps.rdeps, fetch: deps.fetch, extract: deps.extract, uploads: deps.uploads };
 
   r.get("/content-types", (c) => c.json({
     content_types: INTAKE_CONTENT_TYPES.map((k) => ({ key: k, label: CONTENT_TYPE_LABELS[k], link: true, file: k !== "youtube_transcript" })),
@@ -100,7 +156,7 @@ export function intakeRouter(deps: IntakeDeps) {
         if (Number(job.detail.attempts ?? 1) >= repo.MAX_ATTEMPTS) return c.json({ error: repo.RETRIED_ALREADY }, 409);
         const moved = await db.query(repo.RETRY_MOVE_SQL, [job.id, repo.MAX_ATTEMPTS]);
         if (!moved.length) return c.json({ error: "the job moved on before it could be retried" }, 409);
-        if (job.kind === "add") runAdd({ db, rdeps: deps.rdeps, fetch: deps.fetch, extract: deps.extract }, job.id).catch(() => {});
+        if (job.kind === "add") runAdd(addDeps, job.id).catch(() => {});
         else deps.retryImport(job.id, who).catch(() => {});
       } else {
         await repo.retryQueue(db, job);
@@ -138,54 +194,26 @@ export function intakeRouter(deps: IntakeDeps) {
       if (!u || (u.protocol !== "http:" && u.protocol !== "https:")) return c.json({ error: "the link must be an http or https address" }, 400);
     }
     // WHERE it lands: exactly one existing refinery. The general add asks which; the contextual add has it.
-    if (refineryId && path) return c.json({ error: "a refinery or a document, not both" }, 400);
-    if (!refineryId && !path) {
-      return c.json({
-        error: "choose the refinery it joins (a user add lands only in an existing idea refinery)", needs: "refinery_id",
-        refineries: await refineriesOf(db, who.sub),
-      }, 400);
-    }
-    let docPath: string | null = null;
-    try {
-      if (refineryId) {
-        const mine = await refineriesOf(db, who.sub);
-        if (!mine.some((x) => x.id === refineryId.toLowerCase())) return c.json({ error: "no such refinery (an add joins one of your existing refineries)" }, 404);
-      } else {
-        docPath = await ownedPath(db, path, who);
-        const tethered = await db.query<{ id: string }>(
-          `SELECT l.refinery_id::text AS id FROM public.user_document_listings l JOIN public.ideas i ON i.id = l.refinery_id
-             LEFT JOIN public.refinery_state rs ON rs.refinery_id = i.id
-            WHERE l.path = $1 AND l.owner_sub = $2 AND rs.archived_at IS NULL`, [docPath, who.sub]);
-        if (!tethered.length) {
-          return c.json({ error: "this document has no open refinery: open the document's refinery first (a user source lands only in an existing refinery)" }, 409);
-        }
-      }
-    } catch (e) {
-      if (e instanceof DocError) return c.json({ error: e.message }, e.status as 400 | 404 | 409);
-      throw e;
-    }
+    const where = await addTarget(db, who, refineryId, path);
+    if ("refusal" in where) return c.json(where.refusal.body, where.refusal.status);
+    const docPath = where.docPath;
     let bytes: Uint8Array | null = null;
     if (file) {
       if (file.size > maxFile) return c.json({ error: `the file is larger than ${maxFile} bytes` }, 413);
       bytes = new Uint8Array(await file.arrayBuffer());
-      const type = fileContentType(file.name, bytes);
-      if (!type) return c.json({ error: "a file add is a PDF or a saved web page (a YouTube transcript is added by its link)", content_types: INTAKE_CONTENT_TYPES }, 415);
-      if (declared && declared !== type) return c.json({ error: `this file is a ${CONTENT_TYPE_LABELS[type]}, not ${declared}` }, 415);
-      declared = type;
+      const typed = fileTypeOf(file.name, bytes, declared);
+      if ("refusal" in typed) return c.json(typed.refusal.body, typed.refusal.status);
+      declared = typed.type;
     }
     if (url && !deps.fetch) {
       return c.json({ error: "the research service is not configured for the workspace (RESEARCH_URL, RESEARCH_WORKSPACE_KEY)" }, 503);
     }
     const job = await db.tx(async (t) => {
-      const row = (await t.query<{ id: string; status: string }>(
-        `INSERT INTO public.import_jobs (status, mode, origin, owner_sub, actor_sub, actor_name, url, filename, refinery_id, doc_path, content_type)
-         VALUES ('queued', 'add', $1, $2, $3, $4, $5, $6, $7::uuid, $8, $9) RETURNING id::text AS id, status`,
-        [originOf(who), who.sub, who.actor, who.name, url || null, file?.name ?? null, refineryId ? refineryId.toLowerCase() : null, docPath, declared || null],
-      ))[0];
+      const row = await insertAddJob(t, who, { url: url || null, filename: file?.name ?? null, refineryId: where.refineryId, docPath, declared: declared || null });
       if (file && bytes) await t.query(`INSERT INTO public.import_job_payloads (job_id, filename, bytes) VALUES ($1, $2, $3)`, [row.id, file.name, bytes]);
       return row;
     });
-    runAdd({ db, rdeps: deps.rdeps, fetch: deps.fetch, extract: deps.extract }, job.id).catch((e) =>
+    runAdd(addDeps, job.id).catch((e) =>
       console.error(`[intake] add ${job.id}:`, (e as Error).message));
     return c.json({ job_id: job.id, kind: "add", status: job.status, origin: originOf(who) }, 202);
   });

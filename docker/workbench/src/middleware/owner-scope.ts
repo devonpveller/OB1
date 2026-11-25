@@ -31,6 +31,8 @@ const TEXT_FIELDS = new Set(["content", "body", "text", "markdown", "exact", "no
 const UUID_IN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 // the documents API's own URL prefixes are routes, not vault paths
 const ROUTE_PREFIX = /^\/workbench\/(?:documents|contract\/documents)(?=\/|$)/;
+// rwr-upload-sessions: the one route whose body is a file's bytes (see requestStrings)
+export const UPLOAD_PIECE = /^\/workbench\/contract\/uploads\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/pieces$/i;
 
 export { documentPathsIn };
 
@@ -61,6 +63,10 @@ async function requestStrings(c: Context): Promise<string[]> {
   for (const vs of Object.values(c.req.queries())) out.push(...vs);
   if (!MUTATING(c.req.method)) return out;
   const media = (c.req.header("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  // rwr-upload-sessions: a piece of an upload is a file's raw bytes (up to 16 MB), streamed to the caller's own session
+  // and never read as a path or text by any route: exactly PUT .../uploads/<uuid>/pieces with application/octet-stream
+  // is not buffered here (its path and query above are still searched). Any other type there still gets the JSON rule.
+  if (c.req.method === "PUT" && media === "application/octet-stream" && UPLOAD_PIECE.test(route)) return out;
   const raw = await c.req.raw.clone().text();
   if (!raw.length) return out;
   const isJson = media === "application/json" || media.endsWith("+json");

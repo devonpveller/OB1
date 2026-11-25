@@ -46,7 +46,11 @@ import { notebooks } from "./routes/notebooks.ts";
 import { notes } from "./routes/notes.ts";
 import { sources, sourceCommit } from "./routes/sources.ts";
 import { imports, jobsRouter, retryImport, callExtract } from "./routes/import.ts";
-import { intakeRouter } from "./intake/routes.ts";
+import { addTarget, fileTypeOf, insertAddJob, intakeRouter } from "./intake/routes.ts";
+import { runAdd } from "./intake/pipeline.ts";
+import { uploadLimits } from "./uploads/limits.ts";
+import { uploadStore } from "./uploads/store.ts";
+import { uploadSessions } from "./uploads/sessions.ts";
 import { researchIntakeFetch } from "./intake/research_fetch.ts";
 import { grounding } from "./routes/grounding.ts";
 import { exporter } from "./routes/export.ts";
@@ -70,6 +74,7 @@ import { contractDeps } from "./contracts/wiring.ts";
 import { DocError, readDocument } from "./documents/repo.ts";
 import type { Identity } from "./middleware/identity.ts";
 import { privateViewsMode } from "./identity/private_view.ts";
+import { INTAKE_CONTENT_TYPES, isIntakeContentType } from "./intake/content_types.ts";
 
 // deno-postgres returns BIGINT columns (e.g. entities.id, thoughts.id) as JS
 // BigInt, which JSON.stringify cannot serialize → every response carrying one
@@ -105,9 +110,39 @@ const cdeps = {
     }
   },
 };
-const contract = createContractApp(cdeps);
 // research-workbench P2b: the documents API shares the contract's database seam and registry reader.
 export const docDeps = { db: cdeps.db, reg: cdeps.registry, embed: cdeps.embed, chunk: cdeps.chunk, research: researchClient(), refetch: refetchClient() };
+// rwr-upload-sessions: the caller's large-file uploads in pieces, on the workbench's own volume (UPLOAD_DIR), handed to the
+// intake add path below (the same target, type and job write as POST /workbench/intake/add) once complete and verified
+const intakeFetch = researchIntakeFetch();
+const intakeExtract = async (bytes: Uint8Array, filename: string) => {
+  const ex = await callExtract(bytes, filename);
+  return { markdown: ex.markdown, title: ex.title };
+};
+export const uploadCfg = uploadLimits();
+export const uploads = uploadSessions({
+  db: cdeps.db, store: uploadStore(uploadCfg.dir), limits: uploadCfg,
+  intake: {
+    target: async (who, t) => {
+      const where = await addTarget(cdeps.db, who, t.refinery_id, t.path);
+      if ("refusal" in where) return where.refusal;
+      if (t.content_type && !isIntakeContentType(t.content_type)) {
+        return { status: 415, body: { error: `not a declared content type: ${t.content_type}`, content_types: INTAKE_CONTENT_TYPES } };
+      }
+      return where;
+    },
+    fileType: (name, head, declared) => {
+      const r = fileTypeOf(name, head, declared);
+      return "refusal" in r ? r.refusal : r;
+    },
+    insertJob: (t, who, f) => insertAddJob(t, who, { url: null, filename: f.filename, refineryId: f.refineryId, docPath: f.docPath, declared: f.declared }),
+    run: (jobId) => {
+      runAdd({ db: cdeps.db, rdeps: docDeps, fetch: intakeFetch, extract: intakeExtract, uploads: uploads.payloads }, jobId).catch((e) =>
+        console.error(`[uploads] add ${jobId}:`, (e as Error).message));
+    },
+  },
+});
+const contract = createContractApp({ ...cdeps, uploads });
 const contractDoc = openApiDocument(contract);
 app.get("/openapi.json", (c) => c.json(contractDoc));
 
@@ -140,11 +175,7 @@ app.route("/workbench/jobs", jobsRouter(cdeps.db)); // P5 (rw-p5a-intake: the su
 // entity queues, their retry and cancel, and the one add path (the panel's general and contextual adds and
 // the OWUI inlet); a link is fetched through the research service's proxy-bound fetch only
 app.route("/workbench/intake", intakeRouter({
-  db: cdeps.db, rdeps: docDeps, fetch: researchIntakeFetch(), retryImport,
-  extract: async (bytes, filename) => {
-    const ex = await callExtract(bytes, filename);
-    return { markdown: ex.markdown, title: ex.title };
-  },
+  db: cdeps.db, rdeps: docDeps, fetch: intakeFetch, retryImport, extract: intakeExtract, uploads: uploads.payloads,
 }));
 app.route("/workbench/grounding", grounding); // P6
 app.route("/workbench/export", exporter); // P3.5 — pandoc note export

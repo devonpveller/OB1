@@ -57,6 +57,11 @@ const PRIVATE_BY_ID = /\/private\/(claims|jobs)\/\{id\}/;
 //    order (archive, then reopen), which leaves the idea as it was.
 const IDEA_REST = /\/ideas\/\{id\}\/(archive|reopen)/;
 
+// 9. rwr-upload-sessions (slot 610): an upload by id is a per-user row the fixture does not seed (the caller's own or 404), and a
+//    piece's body is raw bytes; GET / DELETE /uploads/{id}, PUT /uploads/{id}/pieces and POST /uploads/{id}/finish are exercised by
+//    src/uploads/uploads_integration_test.ts (run-uploads-tests.ps1). Start and list are checked here.
+const UPLOAD_BY_ID = /\/uploads\/\{id\}/;
+
 hooks.beforeEach((transaction, done) => {
   if (IDEA_REST.test(String(transaction.name || '')) && transaction.request && transaction.request.headers) {
     transaction.request.headers['X-Test-Sub'] = 'lab-ideas-0001';
@@ -68,7 +73,7 @@ hooks.beforeEach((transaction, done) => {
     transaction.request.headers['X-Test-Sub'] = 'lab-caster-0001';
   }
   const code = String(transaction.expected && transaction.expected.statusCode);
-  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || FLAG_BY_ID.test(String(transaction.name || '')) || PRIVATE_BY_ID.test(String(transaction.name || '')) || isResearchStart(transaction);
+  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || FLAG_BY_ID.test(String(transaction.name || '')) || PRIVATE_BY_ID.test(String(transaction.name || '')) || UPLOAD_BY_ID.test(String(transaction.name || '')) || isResearchStart(transaction);
   done();
 });
 
