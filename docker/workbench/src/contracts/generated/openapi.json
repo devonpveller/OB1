@@ -6614,6 +6614,227 @@
         },
         "additionalProperties": false
       },
+      "Gap": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "9a900000-0000-4000-8000-000000000001",
+            "description": "gap id"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "example": "documents/lab-user/notes.md",
+            "description": "the caller's own document this gap belongs to"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "what the document still needs; shown to its owner only"
+          },
+          "origin": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "gap_origins",
+            "example": "user",
+            "description": "A key of the `gap_origins` registry (GET /workbench/contract/registries/gap_origins)."
+          },
+          "state": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "gap_states",
+            "example": "open",
+            "description": "A key of the `gap_states` registry (GET /workbench/contract/registries/gap_states)."
+          },
+          "job_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "9a900000-0000-4000-8000-0000000000a1",
+            "description": "the research run the gap was queued in"
+          },
+          "covered_at": {
+            "type": "string",
+            "nullable": true,
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "updated_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "text",
+          "origin",
+          "state",
+          "job_id",
+          "covered_at",
+          "created_at",
+          "updated_at"
+        ]
+      },
+      "GapCreate": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "example": "documents/lab-user/notes.md",
+            "description": "the caller's own document"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "origin": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "gap_origins",
+            "example": "user",
+            "description": "A key of the `gap_origins` registry (GET /workbench/contract/registries/gap_origins)."
+          }
+        },
+        "required": [
+          "path",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "Gaps": {
+        "type": "object",
+        "properties": {
+          "gaps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Gap"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "description": "the caller's gaps matching the filter, not only this page"
+          },
+          "counts": {
+            "type": "object",
+            "properties": {
+              "open": {
+                "type": "integer"
+              },
+              "researching": {
+                "type": "integer"
+              },
+              "covered": {
+                "type": "integer"
+              },
+              "dismissed": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "open",
+              "researching",
+              "covered",
+              "dismissed"
+            ],
+            "additionalProperties": false,
+            "description": "the caller's own gaps per state (for the document asked, or all of theirs)"
+          }
+        },
+        "required": [
+          "gaps",
+          "total",
+          "counts"
+        ]
+      },
+      "GapResearchStarted": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "9a900000-0000-4000-8000-0000000000a1",
+            "description": "the ONE research run queued for the ticked gaps"
+          },
+          "gaps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Gap"
+            }
+          }
+        },
+        "required": [
+          "job_id",
+          "gaps"
+        ]
+      },
+      "GapResearch": {
+        "type": "object",
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "example": "9a900000-0000-4000-8000-000000000001",
+              "description": "a ticked gap id"
+            },
+            "minItems": 1,
+            "maxItems": 50,
+            "description": "the ticked gaps, all open, all of one document"
+          }
+        },
+        "required": [
+          "ids"
+        ],
+        "additionalProperties": false
+      },
+      "GapUpdate": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "state": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "gap_states",
+            "example": "dismissed",
+            "description": "open, covered or dismissed (the person's own marks); researching is only reached by researching the gap"
+          }
+        },
+        "additionalProperties": false
+      },
+      "GapDeleted": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "deleted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "deleted"
+        ]
+      },
       "InletConnections": {
         "type": "object",
         "properties": {
@@ -16436,6 +16657,632 @@
                 },
                 "schema": {
                   "$ref": "#/components/schemas/Flag"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/gaps": {
+      "post": {
+        "operationId": "gapCreate",
+        "tags": [
+          "gaps (documents)"
+        ],
+        "summary": "add a gap to one of the caller's own documents",
+        "description": "Text that matches (normalised) an open or researching gap of the same document is refused 409 and names that gap (detail.existing); so is text dismissed from the same origin. Nothing is added then. origin is a key of gap_origins (default user).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "path": "documents/lab-user/notes.md",
+                "text": "How does the pump hold pressure at altitude?"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/GapCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "the gap, recorded as the caller's",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "9a900000-0000-4000-8000-000000000001",
+                  "path": "documents/lab-user/notes.md",
+                  "text": "How does the pump hold pressure at altitude?",
+                  "origin": "user",
+                  "state": "open",
+                  "job_id": null,
+                  "covered_at": null,
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Gap"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "gapList",
+        "tags": [
+          "gaps (documents)"
+        ],
+        "summary": "the caller's own gaps, newest first (dismissed ones only when asked)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,4}$",
+              "description": "1-500, default 100"
+            },
+            "required": false,
+            "description": "1-500, default 100",
+            "name": "limit",
+            "in": "query",
+            "example": "100"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "only the gaps of this document (the caller's own)"
+            },
+            "required": false,
+            "description": "only the gaps of this document (the caller's own)",
+            "name": "path",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "description": "only gaps in this state (default: every state but dismissed)"
+            },
+            "required": false,
+            "description": "only gaps in this state (default: every state but dismissed)",
+            "name": "state",
+            "in": "query",
+            "example": "open"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the gaps, their total and per-state counts",
+            "content": {
+              "application/json": {
+                "example": {
+                  "gaps": [
+                    {
+                      "id": "9a900000-0000-4000-8000-000000000001",
+                      "path": "documents/lab-user/notes.md",
+                      "text": "How does the pump hold pressure at altitude?",
+                      "origin": "user",
+                      "state": "open",
+                      "job_id": null,
+                      "covered_at": null,
+                      "created_at": "2026-10-17T12:00:00.000Z",
+                      "updated_at": "2026-10-17T12:00:00.000Z"
+                    }
+                  ],
+                  "total": 1,
+                  "counts": {
+                    "open": 1,
+                    "researching": 0,
+                    "covered": 0,
+                    "dismissed": 0
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Gaps"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/gaps/research": {
+      "post": {
+        "operationId": "gapResearch",
+        "tags": [
+          "gaps (documents)"
+        ],
+        "summary": "research the ticked gaps in ONE run: one job, every ticked gap researching with that job id",
+        "description": "All ticked gaps must be the caller's own, open, and of one document; a gap of another user's is refused exactly as a missing one is (404 no such gap). The run goes through the existing research path (gap kind, the local model); a covered gap rotates out after the run ends and its question has a claim backed by two agreeing sources.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "ids": [
+                  "9a900000-0000-4000-8000-000000000001"
+                ]
+              },
+              "schema": {
+                "$ref": "#/components/schemas/GapResearch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "the one run, and the gaps now researching",
+            "content": {
+              "application/json": {
+                "example": {
+                  "job_id": "9a900000-0000-4000-8000-0000000000a1",
+                  "gaps": [
+                    {
+                      "id": "9a900000-0000-4000-8000-000000000001",
+                      "path": "documents/lab-user/notes.md",
+                      "text": "How does the pump hold pressure at altitude?",
+                      "origin": "user",
+                      "state": "researching",
+                      "job_id": "9a900000-0000-4000-8000-0000000000a1",
+                      "covered_at": null,
+                      "created_at": "2026-10-17T12:00:00.000Z",
+                      "updated_at": "2026-10-17T12:00:00.000Z"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/GapResearchStarted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "the research service is not configured or could not queue the run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/gaps/{id}": {
+      "get": {
+        "operationId": "gapGet",
+        "tags": [
+          "gaps (documents)"
+        ],
+        "summary": "one gap: the caller's own; another user's is not found",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "gap id"
+            },
+            "required": true,
+            "description": "gap id",
+            "name": "id",
+            "in": "path",
+            "example": "9a900000-0000-4000-8000-000000000001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the gap",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "9a900000-0000-4000-8000-000000000001",
+                  "path": "documents/lab-user/notes.md",
+                  "text": "How does the pump hold pressure at altitude?",
+                  "origin": "user",
+                  "state": "open",
+                  "job_id": null,
+                  "covered_at": null,
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Gap"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "gapUpdate",
+        "tags": [
+          "gaps (documents)"
+        ],
+        "summary": "reword the caller's own gap, or mark it open, covered or dismissed; another user's is not found",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "gap id"
+            },
+            "required": true,
+            "description": "gap id",
+            "name": "id",
+            "in": "path",
+            "example": "9a900000-0000-4000-8000-000000000001"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "state": "dismissed"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/GapUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "the gap, updated",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "9a900000-0000-4000-8000-000000000001",
+                  "path": "documents/lab-user/notes.md",
+                  "text": "How does the pump hold pressure at altitude?",
+                  "origin": "user",
+                  "state": "open",
+                  "job_id": null,
+                  "covered_at": null,
+                  "created_at": "2026-10-17T12:00:00.000Z",
+                  "updated_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/Gap"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "gapDelete",
+        "tags": [
+          "gaps (documents)"
+        ],
+        "summary": "remove the caller's own gap (a dismissed gap is kept; reopen it instead); another user's is not found",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "gap id"
+            },
+            "required": true,
+            "description": "gap id",
+            "name": "id",
+            "in": "path",
+            "example": "9a900000-0000-4000-8000-000000000001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "removed",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "9a900000-0000-4000-8000-000000000001",
+                  "deleted": true
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/GapDeleted"
                 }
               }
             }
