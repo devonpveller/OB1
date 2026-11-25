@@ -94,7 +94,7 @@ await stub("/__reset", "POST");
 await scheme("light");
 await setMode("alice");
 
-// ---- 1. the drawer of a citation offers the two flags; the dialog states the promise and the four reasons
+// ---- 1. the drawer of a citation offers the two flags; the dialog states the promise and the six reasons
 ok(await openDoc(), "alice's document opens in the writing surface");
 const itemsBefore = JSON.stringify((await db()).items);
 const refsBefore = JSON.stringify((await db()).refs);
@@ -106,7 +106,7 @@ ok(await has("[data-testid=flag-dialog]"), "the dialog opens");
 ok(/Nothing changes until it is decided\./.test(await text("[data-testid=flag-promise]")), "the dialog says: Nothing changes until it is decided.");
 ok(/Only you and admins can see your flag\./.test(await text("[data-testid=flag-promise]")), "...and who can see the flag");
 const reasons = JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('[data-testid=flag-reasons] input[type=radio]')].map(i=>[i.value, i.closest('label').textContent, i.checked]))`));
-ok(JSON.stringify(reasons) === JSON.stringify([["wrong_claim", "Wrong claim", false], ["low_quality", "Low quality", false], ["duplicate", "Duplicate", false], ["other", "Other", false]]), `the reason picker is exactly: Wrong claim, Low quality, Duplicate, Other (none chosen): ${JSON.stringify(reasons.map((r) => r[1]))}`);
+ok(JSON.stringify(reasons) === JSON.stringify([["wrong_claim", "Wrong claim", false], ["low_quality", "Low quality", false], ["duplicate", "Duplicate", false], ["outdated", "Outdated", false], ["broken_link", "Broken link", false], ["other", "Other", false]]), `the reason picker is exactly: Wrong claim, Low quality, Duplicate, Outdated, Broken link, Other (none chosen): ${JSON.stringify(reasons.map((r) => r[1]))}`);
 ok(await ev(`document.querySelector('[data-testid=flag-send]').disabled`) === true, "Flag it is off until a reason is chosen");
 ok(!(await has("select, datalist, [role=listbox], [role=combobox]")), "no select, datalist or listbox on the page");
 ok((await ev(`document.activeElement?.closest('[data-testid=flag-dialog]') !== null`)) === true, "focus is inside the dialog");

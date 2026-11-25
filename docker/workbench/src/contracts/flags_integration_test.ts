@@ -141,8 +141,13 @@ t("F3: each flag stores where it was made from and is listed with that link back
   assertEquals((await sql(`SELECT count(*)::int AS n FROM public.user_flags WHERE owner_sub = $1`, [B]))[0].n, 0);
 });
 
-t("F4: the reason is limited to the four values; anything else is refused", async () => {
-  for (const reason of ["wrong_claim", "low_quality", "duplicate", "other"]) assertEquals((await mk(A, { reason })).status, 201, reason);
+t("F4: the reason is limited to the six values; anything else is refused", async () => {
+  for (const reason of ["wrong_claim", "low_quality", "duplicate", "outdated", "broken_link", "other"]) {
+    const r = await mk(A, { reason });
+    assertEquals(r.status, 201, reason);
+    const back = await sql<{ reason: string }>(`SELECT reason FROM public.user_flags WHERE id = $1`, [r.json.id]);
+    assertEquals(back[0].reason, reason, "reads back with that reason");
+  }
   for (const bad of ["spam", "Duplicate", "wrong claim", "", "low_quality ", "OTHER", "null"]) {
     const r = await mk(A, { reason: bad });
     assert([400, 422].includes(r.status), `reason '${bad}' -> ${r.status}`);
@@ -160,7 +165,7 @@ t("F4: the reason is limited to the four values; anything else is refused", asyn
   assertEquals((await call(A, "POST", FL, undefined, "{nope")).status, 400);
   const own = await mk(A, { owner_sub: B });
   assertEquals(own.status, 400, "no user field is accepted");
-  const stored = await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.user_flags WHERE reason NOT IN ('wrong_claim','low_quality','duplicate','other')`);
+  const stored = await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.user_flags WHERE reason NOT IN ('wrong_claim','low_quality','duplicate','outdated','broken_link','other')`);
   assertEquals(stored[0].n, 0, "no row holds another reason");
 });
 
@@ -242,9 +247,9 @@ t("F7: the flag routes are in the served contract, and are not tools on the shar
   }
 });
 
-t("F8: the registries behind the four reasons are exactly four active keys", async () => {
+t("F8: the registry behind the reasons is exactly six active keys (slots 500 + 680)", async () => {
   const r = await sql<{ key: string }>(`SELECT key FROM public.contract_registry_entries WHERE registry = 'flag_reasons' AND retired_at IS NULL ORDER BY key`);
-  assertEquals(r.map((x) => x.key), ["duplicate", "low_quality", "other", "wrong_claim"]);
+  assertEquals(r.map((x) => x.key), ["broken_link", "duplicate", "low_quality", "other", "outdated", "wrong_claim"]);
 });
 
 t("R2: a NUL in a note is 400; an admin keeps from.ref of another user's document; a from source must exist", async () => {

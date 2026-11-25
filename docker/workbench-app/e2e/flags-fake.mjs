@@ -16,7 +16,7 @@
 //     compare them before and after.
 // Identity comes from the `who` the caller passes (the stub's mode), never from a body. The fake is not the server: the
 // server's own isolation is its lab's (contract-test/run-flags-tests.ps1).
-export const REASONS = ["wrong_claim", "low_quality", "duplicate", "other"];
+export const REASONS = ["wrong_claim", "low_quality", "duplicate", "outdated", "broken_link", "other"];
 export const ITEM_KINDS = ["source", "claim", "reference"];
 export const FROM_KINDS = ["document", "source"];
 export const STATES = ["open", "withdrawn"];

@@ -34,7 +34,7 @@ function recorder(rows: Record<string, unknown[]> = {}) {
 
 const entry = (registry: string, key: string) => ({ registry, key, version: 1, label: key, definition: {}, retired_at: null, superseded_by: null });
 const REG = [
-  ...["wrong_claim", "low_quality", "duplicate", "other"].map((k) => entry("flag_reasons", k)),
+  ...["wrong_claim", "low_quality", "duplicate", "outdated", "broken_link", "other"].map((k) => entry("flag_reasons", k)),
   ...["source", "claim", "reference"].map((k) => entry("flag_item_kinds", k)),
   ...["document", "source"].map((k) => entry("flag_from_kinds", k)),
   ...["open", "withdrawn"].map((k) => entry("flag_states", k)),
@@ -56,7 +56,7 @@ Deno.test("a flag writes only its own row: nothing is written to the flagged ite
   assert(log.every((l) => !/sources|claims|reference_records/.test(l) || /^SELECT EXISTS/.test(l)), "the item's table is only ever read");
 });
 
-Deno.test("a reason outside the four is refused before anything is written", async () => {
+Deno.test("a reason outside the six is refused before anything is written", async () => {
   const { db, log } = recorder();
   await assertRejects(
     () => createFlag(db, reader(db), WHO, { item_kind: "source", item_id: SRC, reason: "spam", from: { kind: "source", ref: SRC } }),
@@ -110,9 +110,19 @@ Deno.test("migration files: slot 500 is mounted, the revert undoes what the forw
     assert(fwd.includes(`('${r}',`), `${r} declared`);
     assert(rev.includes(`'${r}'`), `${r} removed by the revert`);
   }
-  // the four reasons, exactly
+  // slot 500 registers the first four reasons; slot 680 (init-flag-reasons-six.sql) adds outdated and broken_link
   const reasons = [...fwd.matchAll(/\('flag_reasons', '([a-z_]+)'/g)].map((m) => m[1]).sort();
   assertEquals(reasons, ["duplicate", "low_quality", "other", "wrong_claim"]);
+  // slot 680 (rwr-flag-reasons-six): the two more reasons, the compose mount, a revert that removes only them, a check
+  const d = new URL("../../../", import.meta.url);
+  const six = await Deno.readTextFile(new URL("init-flag-reasons-six.sql", d));
+  const sixRev = await Deno.readTextFile(new URL("revert-flag-reasons-six.sql", d));
+  assert(compose.includes("./init-flag-reasons-six.sql:/docker-entrypoint-initdb.d/680-init-flag-reasons-six.sql:ro"));
+  assertEquals((compose.match(/\/docker-entrypoint-initdb\.d\/680-/g) ?? []).length, 1);
+  assertEquals([...six.matchAll(/\('flag_reasons', '([a-z_]+)'/g)].map((m) => m[1]).sort(), ["broken_link", "outdated"]);
+  assert(/ON CONFLICT \(registry, key\) DO NOTHING/.test(six) && !/\b(CREATE|ALTER|DROP)\b/i.test(six.replace(/--.*$/gm, "")));
+  assert(sixRev.includes("'outdated'") && sixRev.includes("'broken_link'") && !sixRev.includes("'wrong_claim'") && !/DROP TABLE/i.test(sixRev));
+  await Deno.stat(new URL("check-flag-reasons-six.sql", d));
   // the forward touches no shared knowledge table
   assert(!/(ALTER|CREATE (OR REPLACE )?TRIGGER|UPDATE) .*public\.(sources|claims|reference_records)/i.test(fwd));
 });

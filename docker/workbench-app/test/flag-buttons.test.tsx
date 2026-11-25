@@ -93,21 +93,21 @@ const flagBox = (kind: string) => screen.getByTestId("drawer-flags").querySelect
 const opener = (kind: string) => within(flagBox(kind)).getByTestId("flag-open");
 const choose = (r: string) => fireEvent.click(screen.getByTestId(`flag-reason-${r}`));
 
-describe("acceptance 3: the reason picker offers exactly wrong claim, low quality, duplicate, other", () => {
-  it("four radio buttons in that order, none chosen, Flag it off until one is; never a select or a datalist", async () => {
+describe("acceptance 3: the reason picker offers exactly wrong claim, low quality, duplicate, outdated, broken link, other", () => {
+  it("six radio buttons in that order, none chosen, Flag it off until one is; never a select or a datalist", async () => {
     withChips(); await openDrawer();
     fireEvent.click(opener("reference"));
     const dlg = screen.getByTestId("flag-dialog");
     const radios = within(screen.getByTestId("flag-reasons")).getAllByRole("radio") as HTMLInputElement[];
-    expect(radios.map((r) => r.value)).toEqual(["wrong_claim", "low_quality", "duplicate", "other"]);
-    expect(within(screen.getByTestId("flag-reasons")).getAllByRole("radio").map((r) => (r.closest("label") as HTMLElement).textContent)).toEqual(["Wrong claim", "Low quality", "Duplicate", "Other"]);
+    expect(radios.map((r) => r.value)).toEqual(["wrong_claim", "low_quality", "duplicate", "outdated", "broken_link", "other"]);
+    expect(within(screen.getByTestId("flag-reasons")).getAllByRole("radio").map((r) => (r.closest("label") as HTMLElement).textContent)).toEqual(["Wrong claim", "Low quality", "Duplicate", "Outdated", "Broken link", "Other"]);
     expect(radios.some((r) => r.checked)).toBe(false);
     expect(dlg.querySelector("select, datalist, [role=listbox], [role=combobox]")).toBeNull();
     expect((screen.getByTestId("flag-send") as HTMLButtonElement).disabled).toBe(true);
     choose("duplicate");
     expect((screen.getByTestId("flag-send") as HTMLButtonElement).disabled).toBe(false);
   });
-  it("the four the app offers are the four keys of the server's registry (the fake's list is the route's)", () => {
+  it("the six the app offers are the six keys of the server's registry (the fake's list is the route's)", () => {
     expect(REASONS.map((r) => r.key)).toEqual(SERVER_REASONS);
   });
 });

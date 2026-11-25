@@ -4,7 +4,7 @@
 //
 // The rules this keeps (each has a test):
 //  - the dialog says, before anything is sent, that nothing changes until it is decided (and who can see the flag);
-//  - the reasons are exactly the four of flag-data.ts, as radio buttons (never a drop-down list); none is chosen for the person;
+//  - the reasons are exactly the six of flag-data.ts, as radio buttons (never a drop-down list); none is chosen for the person;
 //  - a flag changes nothing about the item, so there is nothing to undo: one flag per item, person and document for as long as
 //    the page lives (after it is made the button gives way to a line that says so and links to Cleanup, also when the drawer is
 //    closed and opened again), never two by a double click;

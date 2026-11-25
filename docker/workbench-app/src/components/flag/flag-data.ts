@@ -8,13 +8,15 @@ import { api, ApiError } from "../../lib/api";
 import { resolveDocument } from "../../lib/state";
 import { docHref } from "../../screens/documents/docs-data";
 
-// The four reasons the anchor allows, in the order they are shown: the keys are the flag_reasons registry's, the words are
-// the person's. (The Cleanup mockup also shows Outdated and Broken link: they need two registry rows, a migration this item
-// does not make - see the findings.)
+// The six reasons of the approved Cleanup mockup, in the order they are shown: the keys are the flag_reasons registry's
+// (slot 500, plus slot 680 for outdated and broken_link), the words are the person's. test/flag-reasons-catalog.test.ts
+// fails if this list and the registry's migrations ever differ.
 export const REASONS = [
   { key: "wrong_claim", label: "Wrong claim" },
   { key: "low_quality", label: "Low quality" },
   { key: "duplicate", label: "Duplicate" },
+  { key: "outdated", label: "Outdated" },
+  { key: "broken_link", label: "Broken link" },
   { key: "other", label: "Other" },
 ] as const;
 export type ReasonKey = (typeof REASONS)[number]["key"];
