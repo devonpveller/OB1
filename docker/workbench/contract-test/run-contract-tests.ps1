@@ -278,6 +278,50 @@ try {
   Save 'integration-test.log' $o
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0') "integration tests: $($sum.Value)"
+
+  # rwr-source-reader-api (slot 520): the source reader's integration test over database A - the workbench side as
+  # ob_app_memory, the planting (the owner-private stores no app role can read) as the superuser; then the migration's
+  # round trip: revert drops exactly the two owner read functions and leaves every other function, ACL and column as it
+  # was, and forward again puts back the same definitions and grants.
+  Write-Host '[4a2] rwr-source-reader-api: the reader integration test + the slot 520 forward/revert round trip (database A)'
+  $snapSql = Join-Path $env:TEMP "rwp0-sr-$rand-snap.sql"
+  [System.IO.File]::WriteAllText($snapSql, "SELECT md5(string_agg(x, '|' ORDER BY x)) FROM (SELECT p.oid::regprocedure::text || coalesce(p.proacl::text, '') || md5(pg_get_functiondef(p.oid)) AS x FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.prokind = 'f' AND p.proname NOT LIKE 'inlet_private_reader_%' UNION ALL SELECT table_name || '.' || column_name || ':' || data_type FROM information_schema.columns WHERE table_schema = 'public') q;`n", (New-Object System.Text.UTF8Encoding $false))
+  $readerSql = Join-Path $env:TEMP "rwp0-sr-$rand-reader.sql"
+  [System.IO.File]::WriteAllText($readerSql, "SELECT count(*) || ' ' || coalesce(md5(string_agg(p.oid::regprocedure::text || coalesce(p.proacl::text, '') || md5(pg_get_functiondef(p.oid)), '|' ORDER BY p.proname)), 'none') FROM pg_proc p WHERE p.proname LIKE 'inlet_private_reader_%';`n", (New-Object System.Text.UTF8Encoding $false))
+  $null = Dk cp $snapSql "${dbA}:/tmp/sr-snap.sql"; $null = Dk cp $readerSql "${dbA}:/tmp/sr-reader.sql"
+  $null = Dk cp (Join-Path $dockerDir 'init-source-reader.sql') "${dbA}:/tmp/sr-fwd.sql"
+  $null = Dk cp (Join-Path $dockerDir 'revert-source-reader.sql') "${dbA}:/tmp/sr-rev.sql"
+  # The lab creates ob_app_memory AFTER the initdb chain, so what slots 480 and 520 do only when that role exists (480: ob_workbench
+  # joins ob_app_memory) is not in place here, and ob_workbench has no password. A live apply happens with the roles in place and
+  # 480 first: give the lab role a password, re-run 480 (membership; the grants of PD1's two reads) and then 520 (its own grants),
+  # and run the reader's tests AS ob_workbench - the workbench's role once 480 is live.
+  $wbPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
+  $null = Dk cp (Join-Path $dockerDir 'init-owner-private-view.sql') "${dbA}:/tmp/sr-480.sql"
+  $null = Dk cp (Join-Path $dockerDir 'check-source-reader.sql') "${dbA}:/tmp/sr-check.sql"
+  $null = Dk exec $dbA psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/sr-480.sql
+  $null = Dk exec $dbA psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "ALTER ROLE ob_workbench PASSWORD '$wbPw'"
+  $null = Dk exec $dbA psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/sr-fwd.sql
+  $chk = (Dk exec $dbA psql -X -A -t -q -U postgres -d openbrain -f /tmp/sr-check.sql).Trim()
+  Save 'source-reader-check.log' $chk
+  Check ($chk -match 'check: OK') "check-source-reader.sql: ob_workbench alone executes the two reader functions ($(($chk -split "`n")[-1]))"
+  $o = Dk run --rm --label $label --network $net -e "CONTRACT_TEST_DB_HOST=$dbA" -e CONTRACT_TEST_DB_USER=ob_workbench `
+    -e "CONTRACT_TEST_DB_PASSWORD=$wbPw" -e SR_ADMIN_USER=postgres -e "SR_ADMIN_PASSWORD=$pw" `
+    $testTag deno test --allow-net --allow-env --allow-read src/contracts/source_reader_integration_test.ts
+  Save 'source-reader-integration.log' $o
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
+  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 7) "source reader integration tests: $($sum.Value)"
+  $psql = @('exec', $dbA, 'psql', '-U', 'postgres', '-d', 'openbrain', '-X', '-q', '-A', '-t', '-v', 'ON_ERROR_STOP=1')
+  $before = (Dk @psql -f /tmp/sr-snap.sql).Trim(); $readerBefore = (Dk @psql -f /tmp/sr-reader.sql).Trim()
+  $o = Dk @psql -f /tmp/sr-rev.sql; Save 'source-reader-revert.log' $o; $rcRev = $script:rc
+  $afterRev = (Dk @psql -f /tmp/sr-snap.sql).Trim(); $readerRev = (Dk @psql -f /tmp/sr-reader.sql).Trim()
+  $chkRev = (Dk @psql -f /tmp/sr-check.sql).Trim()
+  Check ($chkRev -match 'check: FAIL' -and $chkRev -match 'reader function MISSING') 'check-source-reader.sql reports both functions MISSING after the revert (it can fail)'
+  Check (($rcRev -eq 0) -and $readerRev -match '^0 ' -and $afterRev -eq $before) "slot 520 revert drops exactly the two reader functions (functions left: $readerRev; every other function, ACL and column unchanged: $($afterRev -eq $before))"
+  $o = Dk @psql -f /tmp/sr-fwd.sql; Save 'source-reader-forward.log' $o; $rcFwd = $script:rc
+  $afterFwd = (Dk @psql -f /tmp/sr-snap.sql).Trim(); $readerFwd = (Dk @psql -f /tmp/sr-reader.sql).Trim()
+  Check (($rcFwd -eq 0) -and $readerFwd -eq $readerBefore -and $afterFwd -eq $before) "slot 520 forward again restores the same two functions and grants (before: $readerBefore; after: $readerFwd) and changes nothing else"
+  $o = Dk @psql -f /tmp/sr-fwd.sql; $readerTwice = (Dk @psql -f /tmp/sr-reader.sql).Trim()
+  Check (($script:rc -eq 0) -and $readerTwice -eq $readerBefore) 'slot 520 forward is re-runnable (a second run changes nothing)'
   # The triage listing's SQL (openbrain-mcp suggestion-list.ts) over database A (rw-p0b-purge-door,
   # T2-3): one active and one suppressed source; the :wt image's cached deps, offline.
   $k8sDir = Join-Path $ob1 'integrations\kubernetes-deployment'
@@ -617,6 +661,7 @@ try {
   if (-not $KeepImages) { foreach ($i in $made.images) { $null = Dk rmi $i } }
   Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Item $callsDir -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item (Join-Path $env:TEMP "rwp0-sr-$rand-snap.sql"), (Join-Path $env:TEMP "rwp0-sr-$rand-reader.sql") -Force -ErrorAction SilentlyContinue
   # THE EVIDENCE GATE (T2-6): -Evidence has not been touched so far; now the guard runs over EVERY
   # capture the run made, and only if all pass are the staged logs (redacted) and the captures
   # published. A failing guard publishes nothing.

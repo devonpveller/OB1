@@ -16,6 +16,7 @@ import { registerInlets } from "./routes/inlets.ts";
 import { registerResearchStart } from "./routes/research_start.ts";
 import { registerIdeaCapture } from "./routes/idea_capture.ts";
 import { registerIdeaArchive } from "./routes/idea_archive.ts";
+import { registerSourceReader } from "./routes/source_reader.ts";
 import { tombstoneActorMask } from "./routes/actor_mask.ts";
 import { registerPrivate } from "./routes/private.ts";
 import { registerCast } from "./routes/cast.ts";
@@ -43,6 +44,7 @@ export function createContractApp(deps: ContractDeps) {
   registerIdeaCapture(app, deps); // rwr-idea-capture-api: POST /workbench/ideas (owner = the seam's subject)
   registerIdeaArchive(app, deps); // rwr-idea-archive-api: POST /workbench/ideas/{id}/archive and /reopen
   registerCast(app, deps); // rwr-cast-edit-api (slot 560): write presenters, voice links, teams and formats (per user; Q12 shared pool)
+  registerSourceReader(app, deps); // rwr-source-reader-api: the source reader's read
   app.openAPIRegistry.registerComponent("securitySchemes", "brainKey", {
     type: "apiKey", in: "header", name: "X-Brain-Key",
     description: "the shared secret the door injects (the viewer's /workbench forwarder; G7); the browser never holds it",
