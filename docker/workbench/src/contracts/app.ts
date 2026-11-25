@@ -19,6 +19,7 @@ import { registerIdeaArchive } from "./routes/idea_archive.ts";
 import { tombstoneActorMask } from "./routes/actor_mask.ts";
 import { registerPrivate } from "./routes/private.ts";
 import { registerCast } from "./routes/cast.ts";
+import { registerResearchRuns } from "./routes/research_runs.ts";
 
 export const CONTRACT_VERSION = "0.4.0"; // 0.2.0: P2a reference records; 0.3.0: P4b running sessions + P7a podcasts; 0.4.0: P8a core panels (source-states, the lift rule) + the cleanup view (additive)
 
@@ -42,6 +43,7 @@ export function createContractApp(deps: ContractDeps) {
   registerResearchStart(app, deps); // rwr-research-start-api: POST /workbench/research and /research/preview
   registerIdeaCapture(app, deps); // rwr-idea-capture-api: POST /workbench/ideas (owner = the seam's subject)
   registerIdeaArchive(app, deps); // rwr-idea-archive-api: POST /workbench/ideas/{id}/archive and /reopen
+  registerResearchRuns(app, deps); // rwr-research-runs (slot 640): the caller's own runs, archive / unarchive, the report as a document
   registerCast(app, deps); // rwr-cast-edit-api (slot 560): write presenters, voice links, teams and formats (per user; Q12 shared pool)
   app.openAPIRegistry.registerComponent("securitySchemes", "brainKey", {
     type: "apiKey", in: "header", name: "X-Brain-Key",

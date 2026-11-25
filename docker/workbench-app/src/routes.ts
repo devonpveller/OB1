@@ -9,6 +9,7 @@ import { Home } from "./screens/home/Home";
 import { Documents } from "./screens/documents/Documents";
 import { DocumentScreen, LegacyDocument } from "./screens/documents/DocumentScreen";
 import { StartResearch } from "./screens/research-start/StartResearch";
+import { Research } from "./screens/research/Research";
 
 export type Group = "everywhere" | "housekeeping";
 // What every screen is given. `params` holds the route's `:name` segments, decoded (so /documents/d/:ref with
@@ -27,7 +28,7 @@ export type RouteDef = {
 
 export const ROUTES: RouteDef[] = [
   { path: "/", label: "Home", group: "everywhere", phase: 0, will: "Ask the library, pick up where you left off, and see what is running.", inMenu: true, screen: Home },
-  { path: "/research", label: "Research", group: "everywhere", phase: 3, will: "Every research run as a tree of questions and branches.", inMenu: true },
+  { path: "/research", label: "Research", group: "everywhere", phase: 3, will: "Every research run as a tree of questions and branches.", inMenu: true, screen: Research },
   { path: "/chat", label: "Chat", group: "everywhere", phase: 4, will: "Chat about everything, a document, an idea or a research run.", inMenu: true },
   { path: "/documents", label: "Documents", group: "everywhere", phase: 1, will: "Your documents in folders: open, archive, restore.", inMenu: true, screen: Documents },
   { path: "/ideas", label: "Ideas", group: "everywhere", phase: 4, will: "Capture an idea and refine it with its sources.", inMenu: true },

@@ -10,7 +10,7 @@ const ok = (c, m) => { console.log((c ? "PASS " : "FAIL ") + m); if (!c) fails++
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const MENU = [
-  ["/", "Home", 0], ["/research", "Research", 3], ["/chat", "Chat", 4], ["/documents", "Documents", null], ["/ideas", "Ideas", 4],
+  ["/", "Home", 0], ["/research", "Research", null], ["/chat", "Chat", 4], ["/documents", "Documents", null], ["/ideas", "Ideas", 4],
   ["/podcasts", "Podcasts", 3], ["/library", "Library", 2], ["/imports", "Imports", 5], ["/removals", "Removals and trail", 5],
   ["/cleanup", "Cleanup", 5], ["/settings", "Settings", 6],
 ];
@@ -80,7 +80,7 @@ for (let i = 0; i < 20 && !(await ev(`!!document.querySelector('[data-testid=doc
 ok((await ev(`!!document.querySelector('[data-testid=document]') && !document.querySelector('[data-testid=not-found]')`)), "a deep link /documents/abc opens the document screen (which says there is no such document), not No such screen");
 
 // ---- 2. counts equal the stub's fixture (alice: 2 sessions, 1 retry job of 3, 3 sources + 1 candidate with evidence)
-await go("/research"); // not Home: Home makes its own reads
+await go("/podcasts"); // not Home and not Research: those make their own reads
 let c = JSON.parse(await ev(`JSON.stringify([...document.querySelectorAll('[data-testid^=count-]')].map(e=>[e.dataset.testid,e.textContent]))`));
 ok(JSON.stringify(c) === JSON.stringify([["count-research", "2 running"], ["count-imports", "1 failed"], ["count-cleanup", "4 to review"]]), `counts as the reads: ${JSON.stringify(c)}`);
 const lg = await stub("/__log");
@@ -92,7 +92,8 @@ ok(["/workbench/settings", "/workbench/documents/file", "/workbench/documents/st
 // the exact set: bar Home's own named reads (checked in home.e2e.mjs), the shell and the account read nothing beyond the
 // six and the account's three (settings, the locked document's file and state)
 const HOME_READS = ["/workbench/contract/documents", "/workbench/documents/folders", "/workbench/contract/ideas", "/workbench/contract/library/recent", "/workbench/contract/library/waiting-claims", "/workbench/contract/podcasts", "/workbench/contract/podcasts/requests", "/workbench/contract/search"];
-const shellReads = seenPaths.filter((p) => !HOME_READS.includes(p));
+// the Research screen's own read (the menu tour opens /research): checked in runs.e2e.mjs
+const shellReads = seenPaths.filter((p) => !HOME_READS.includes(p) && p !== "/workbench/contract/research/runs");
 ok(shellReads.join() === [...SIX, "/workbench/documents/file", "/workbench/documents/resolve", "/workbench/documents/state", "/workbench/settings"].sort().join(), `exactly those: the shell and the account read only the six and the four (the opaque id's resolve read is the deep link's): ${shellReads.join(", ")}`);
 
 // ---- 3. Ctrl+K opens, Esc closes, over every screen (real key events)
@@ -174,7 +175,7 @@ ok(b.av === "BB" && !/Alice/.test(b.body) && JSON.stringify(b.c) === JSON.string
 const heads = await stub("/__log");
 ok(heads.every((x) => !/alice|bob|operator|subject|user/i.test(x.url)), "no request URL names a person (the server decides who is asking)");
 // the HTTP cache must not have kept a read
-await go("/research");
+await go("/podcasts");
 const fromCache = events.filter((e) => e.method === "Network.responseReceived" && /\/workbench\//.test(e.params.response.url) && (e.params.response.fromDiskCache || e.params.response.fromServiceWorker));
 ok(fromCache.length === 0, "no /workbench/ read was answered from the browser's cache");
 const wbReqs = events.filter((e) => e.method === "Network.requestWillBeSent" && /\/workbench\//.test(e.params.request.url));

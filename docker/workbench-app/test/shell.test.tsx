@@ -105,7 +105,7 @@ describe("the counts match the reads (acceptance 2)", () => {
       sources: { total: 3 },
       candidates: [{ evidence: [{}] }, { evidence: [] }],
     });
-    window.history.pushState({}, "", "/research"); // not Home: Home makes its own reads (home.test.tsx)
+    window.history.pushState({}, "", "/podcasts"); // not Home and not Research: those make their own reads (home.test.tsx, research-runs.test.tsx)
     render(<App />);
     await waitFor(() => expect(screen.getByTestId("count-research").textContent).toBe("2 running"));
     expect(screen.getByTestId("count-imports").textContent).toBe("1 failed");

@@ -57,7 +57,17 @@ const PRIVATE_BY_ID = /\/private\/(claims|jobs)\/\{id\}/;
 //    order (archive, then reopen), which leaves the idea as it was.
 const IDEA_REST = /\/ideas\/\{id\}\/(archive|reopen)/;
 
+// 9. rwr-research-runs (slot 640): the runs routes act on a run of the caller's own; the fixture run f6100000-...-0001 is owned by
+//    the lab subject lab-runs-0001 (fixtures.sql), so every /research/runs operation is called as that subject (archive, then
+//    unarchive, in document order, leaves the run as it was). The report-as-document write is skipped: it writes a vault file the
+//    Dredd lab does not mount; src/contracts/research_runs_integration_test.ts (run-research-runs-tests.ps1) exercises it.
+const RUNS = /\/research\/runs/;
+const RUN_DOCUMENT = /\/research\/runs\/\{id\}\/document/;
+
 hooks.beforeEach((transaction, done) => {
+  if (RUNS.test(String(transaction.name || '')) && transaction.request && transaction.request.headers) {
+    transaction.request.headers['X-Test-Sub'] = 'lab-runs-0001';
+  }
   if (IDEA_REST.test(String(transaction.name || '')) && transaction.request && transaction.request.headers) {
     transaction.request.headers['X-Test-Sub'] = 'lab-ideas-0001';
   }
@@ -68,7 +78,7 @@ hooks.beforeEach((transaction, done) => {
     transaction.request.headers['X-Test-Sub'] = 'lab-caster-0001';
   }
   const code = String(transaction.expected && transaction.expected.statusCode);
-  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || FLAG_BY_ID.test(String(transaction.name || '')) || PRIVATE_BY_ID.test(String(transaction.name || '')) || isResearchStart(transaction);
+  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || FLAG_BY_ID.test(String(transaction.name || '')) || PRIVATE_BY_ID.test(String(transaction.name || '')) || RUN_DOCUMENT.test(String(transaction.name || '')) || isResearchStart(transaction);
   done();
 });
 

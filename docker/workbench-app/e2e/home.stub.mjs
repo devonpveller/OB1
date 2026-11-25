@@ -109,6 +109,7 @@ http.createServer((req, res) => {
   if (p === "/workbench/contract/podcasts") return mode === "broken" ? json({ error: "boom" }, 500) : json({ podcasts: f.episodes });
   if (p === "/workbench/contract/podcasts/requests") return json({ requests: f.requests });
   if (p === "/workbench/contract/sessions") return json({ sessions: f.sessions });
+  if (p === "/workbench/contract/research/runs") return json({ runs: [], counts: { running: 0, queued: 0, done: 0, stopped: 0, archived: 0, total: 0 } }); // the Research screen (a card title opens it)
   if (p === "/workbench/contract/library/recent") return json(emptyLibrary ? { days: 7, sources_total: 0, claims_total: 0, sources: [] } : LIB.recent);
   if (p === "/workbench/contract/library/waiting-claims") return json(emptyLibrary ? { total: 0, claims: [] } : LIB.waiting);
   if (p === "/workbench/contract/search") {

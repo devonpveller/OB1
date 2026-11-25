@@ -95,3 +95,41 @@ export async function raw(url: string): Promise<Response> {
   log.push({ method: "GET", url: target });
   return await fetcher(target, { method: "GET", credentials: "same-origin", cache: "no-store" });
 }
+
+// A GET whose answer is a server-sent event stream (rwr-research-runs): the same door, guard and log as every other call.
+// Calls `onEvent(name, data)` for each event until the stream ends, the signal aborts or an error ends it; resolves with
+// the HTTP status (0 when the request itself failed). Nothing is kept; a parse failure of one event is skipped.
+export async function apiStream(url: string, onEvent: (name: string, data: string) => void, signal: AbortSignal): Promise<number> {
+  const target = guard(url);
+  log.push({ method: "GET", url: target });
+  let r: Response;
+  try {
+    r = await fetcher(target, { method: "GET", headers: { accept: "text/event-stream" }, credentials: "same-origin", cache: "no-store", signal });
+  } catch {
+    return 0;
+  }
+  if (!r.ok || !r.body) { try { await r.body?.cancel(); } catch { /* nothing */ } return r.status; }
+  const reader = r.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i: number;
+      while ((i = buf.search(/\r?\n\r?\n/)) >= 0) {
+        const block = buf.slice(0, i);
+        buf = buf.slice(i).replace(/^\r?\n\r?\n/, "");
+        let name = "message";
+        const data: string[] = [];
+        for (const line of block.split(/\r?\n/)) {
+          if (line.startsWith("event:")) name = line.slice(6).trim();
+          else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+        }
+        if (data.length) onEvent(name, data.join("\n"));
+      }
+    }
+  } catch { /* aborted or the connection dropped: the caller decides whether to reconnect */ }
+  return r.status;
+}

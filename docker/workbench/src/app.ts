@@ -67,7 +67,7 @@ import { settingsRouter } from "./settings/routes.ts";
 import { refetchClient, researchClient } from "./documents/clients.ts";
 import { createContractApp, openApiDocument } from "./contracts/app.ts";
 import { contractDeps } from "./contracts/wiring.ts";
-import { DocError, readDocument } from "./documents/repo.ts";
+import { createDocument, DocError, readDocument } from "./documents/repo.ts";
 import type { Identity } from "./middleware/identity.ts";
 import { privateViewsMode } from "./identity/private_view.ts";
 
@@ -95,6 +95,11 @@ app.route("/workbench/health", health);
 const cbase = contractDeps();
 const cdeps = {
   ...cbase,
+  // rwr-research-runs: "open the report as a document" writes ONE new document in the caller's own folder
+  createOwnDocument: async (input: { title: string; body: string; fields: Record<string, string> }, who: Identity) => {
+    const d = await createDocument({ db: cbase.db, reg: cbase.registry }, { title: input.title, body: input.body, fields: input.fields }, who);
+    return { path: d.path };
+  },
   readOwnDocument: async (path: string, who: Identity) => {
     try {
       const d = await readDocument({ db: cbase.db, reg: cbase.registry }, path, who);

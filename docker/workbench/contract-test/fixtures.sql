@@ -83,6 +83,14 @@ INSERT INTO public.research_jobs (id, status, origin, query, thread_id, session_
    '88888888-8888-4888-8888-888888888888', '{"phase": "done", "message": "finished"}',
    '{"claims": [{"text": "Fixture claim"}], "cited_sources": ["11111111-1111-4111-8111-111111111111"], "gaps": ["what about erasure?"]}',
    '{"kind": "chat_id", "id": "owui-chat-fixture"}', 'owui-tool', now(), now());
+-- rwr-research-runs: a finished run of its own subject (lab-runs-0001) for the runs list / detail / archive / unarchive examples
+-- (archive then unarchive run in document order and leave it as it was). The prompt row is what makes the run the subject's.
+INSERT INTO public.research_jobs (id, status, origin, query, progress, result, caller, started_at, finished_at) VALUES
+  ('f6100000-0000-4000-8000-000000000001', 'done', 'owui', 'Fixture run question', '{"phase": "done", "message": "finished"}',
+   '{"synthesis": "Fixture run report.", "cited_sources": [{"title": "Active fixture source", "url": "https://example.org/active"}], "reuse_claims": [{"id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1", "text": "Fixture claim"}]}',
+   'owui-tool', now(), now());
+INSERT INTO public.research_prompts (job_id, owner_sub, actor_sub, prompt) VALUES
+  ('f6100000-0000-4000-8000-000000000001', 'lab-runs-0001', 'lab-runs-0001', 'Fixture run question');
 -- A revision carries the thought it was captured as; the memory-plane RLS (200-init-graph-
 -- plane-rls.sql) shows service_role only revisions whose thought it can see, as in production.
 INSERT INTO public.thoughts (id, content, exposure, metadata) VALUES

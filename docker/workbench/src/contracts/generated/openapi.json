@@ -7320,6 +7320,336 @@
           "archived"
         ]
       },
+      "ResearchRunList": {
+        "type": "object",
+        "properties": {
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResearchRunRow"
+            }
+          },
+          "counts": {
+            "$ref": "#/components/schemas/ResearchRunCounts"
+          }
+        },
+        "required": [
+          "runs",
+          "counts"
+        ]
+      },
+      "ResearchRunRow": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "f6100000-0000-4000-8000-000000000001",
+            "description": "uuid"
+          },
+          "question": {
+            "type": "string",
+            "description": "the run's root question (the boundary's public question for a started run)"
+          },
+          "topic": {
+            "type": "string",
+            "nullable": true,
+            "description": "the boundary's topic for a started run, else null"
+          },
+          "document": {
+            "type": "string",
+            "nullable": true,
+            "description": "the caller's own document the run was started from (its path), else null"
+          },
+          "status": {
+            "type": "string",
+            "example": "running",
+            "description": "the root job's own status (the job_states registry)"
+          },
+          "group": {
+            "type": "string",
+            "example": "running",
+            "description": "running | queued | done | stopped: the list's state group (open branches count as running)"
+          },
+          "branches": {
+            "type": "integer",
+            "description": "how many branches the tree has besides its root"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "finished_at": {
+            "type": "string",
+            "nullable": true,
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "archived": {
+            "type": "boolean"
+          },
+          "archived_at": {
+            "type": "string",
+            "nullable": true,
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "question",
+          "topic",
+          "document",
+          "status",
+          "group",
+          "branches",
+          "created_at",
+          "finished_at",
+          "archived",
+          "archived_at"
+        ]
+      },
+      "ResearchRunCounts": {
+        "type": "object",
+        "properties": {
+          "running": {
+            "type": "integer"
+          },
+          "queued": {
+            "type": "integer"
+          },
+          "done": {
+            "type": "integer"
+          },
+          "stopped": {
+            "type": "integer"
+          },
+          "archived": {
+            "type": "integer",
+            "description": "the caller's archived runs"
+          },
+          "total": {
+            "type": "integer",
+            "description": "the caller's runs that are not archived"
+          }
+        },
+        "required": [
+          "running",
+          "queued",
+          "done",
+          "stopped",
+          "archived",
+          "total"
+        ]
+      },
+      "ResearchRunDetail": {
+        "type": "object",
+        "properties": {
+          "run": {
+            "$ref": "#/components/schemas/ResearchRunRow"
+          },
+          "can_act": {
+            "type": "boolean",
+            "description": "the caller may steer or cancel from here (the sessions rule)"
+          },
+          "running": {
+            "type": "boolean"
+          },
+          "next_steering_point": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "step_id": {
+                "type": "string",
+                "nullable": true
+              },
+              "phase": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "step_id",
+              "phase"
+            ]
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResearchRunNode"
+            }
+          }
+        },
+        "required": [
+          "run",
+          "can_act",
+          "running",
+          "next_steering_point",
+          "nodes"
+        ]
+      },
+      "ResearchRunNode": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "99999999-9999-4999-8999-999999999999",
+            "description": "uuid"
+          },
+          "parent_job_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "99999999-9999-4999-8999-999999999999",
+            "description": "uuid"
+          },
+          "branch_kind": {
+            "type": "string",
+            "example": "root",
+            "description": "root | steer | gap | interhub | idea (P4a)"
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1,
+            "x-registry": "job_states",
+            "example": "running",
+            "description": "A key of the `job_states` registry (GET /workbench/contract/registries/job_states)."
+          },
+          "open": {
+            "type": "boolean",
+            "description": "queued or running"
+          },
+          "pending": {
+            "type": "boolean",
+            "description": "a branch (not the root) that has not started yet - a steer just accepted"
+          },
+          "rooted_step_id": {
+            "type": "string",
+            "nullable": true,
+            "description": "the step it was steered at; only for a viewer who may act"
+          },
+          "query": {
+            "type": "string",
+            "description": "the branch's question; empty on another user's session"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          },
+          "sources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResearchRunSource"
+            }
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResearchRunClaim"
+            }
+          },
+          "has_report": {
+            "type": "boolean",
+            "description": "this node's run finished with a report text"
+          }
+        },
+        "required": [
+          "id",
+          "parent_job_id",
+          "branch_kind",
+          "status",
+          "open",
+          "pending",
+          "rooted_step_id",
+          "query",
+          "created_at",
+          "sources",
+          "claims",
+          "has_report"
+        ]
+      },
+      "ResearchRunSource": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string",
+            "nullable": true
+          },
+          "stages": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "url",
+          "title",
+          "stages"
+        ]
+      },
+      "ResearchRunClaim": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "text"
+        ]
+      },
+      "ResearchRunArchived": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "f6100000-0000-4000-8000-000000000001",
+            "description": "uuid"
+          },
+          "archived": {
+            "type": "boolean"
+          },
+          "archived_at": {
+            "type": "string",
+            "nullable": true,
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "archived",
+          "archived_at"
+        ]
+      },
+      "ResearchRunDocument": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "example": "documents/alice/what-is-the-run.md",
+            "description": "the new document's path in the caller's own folder"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "title"
+        ]
+      },
       "CastVoices": {
         "type": "object",
         "properties": {
@@ -17720,6 +18050,515 @@
           },
           "500": {
             "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/research/runs": {
+      "get": {
+        "operationId": "researchRuns",
+        "tags": [
+          "research runs (rwr-research-runs)"
+        ],
+        "summary": "the caller's own research runs, with state counts (another person's runs are not listed, counted or hinted at)",
+        "description": "view=active (default) | archived | all. counts cover all of the caller's runs; archived runs are the caller's own view state (slot 640) and never another person's. Each run carries its root question, the boundary's topic, the document it was started from (the caller's own), its state group and its dates, so a screen can group by document, topic or date.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "active | archived | all"
+            },
+            "required": false,
+            "description": "active | archived | all",
+            "name": "view",
+            "in": "query",
+            "example": "active"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,4}$",
+              "description": "1-1000, default 200"
+            },
+            "required": false,
+            "description": "1-1000, default 200",
+            "name": "limit",
+            "in": "query",
+            "example": "200"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the caller's runs",
+            "content": {
+              "application/json": {
+                "example": {
+                  "runs": [
+                    {
+                      "id": "f6100000-0000-4000-8000-000000000001",
+                      "question": "How do the two sensors compare?",
+                      "topic": "sensors",
+                      "document": null,
+                      "status": "done",
+                      "group": "done",
+                      "branches": 1,
+                      "created_at": "2026-10-17T12:00:00.000Z",
+                      "finished_at": "2026-10-17T12:00:00.000Z",
+                      "archived": false,
+                      "archived_at": null
+                    }
+                  ],
+                  "counts": {
+                    "running": 0,
+                    "queued": 0,
+                    "done": 1,
+                    "stopped": 0,
+                    "archived": 0,
+                    "total": 1
+                  }
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchRunList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/research/runs/{id}": {
+      "get": {
+        "operationId": "researchRun",
+        "tags": [
+          "research runs (rwr-research-runs)"
+        ],
+        "summary": "one of the caller's runs: its tree, and for each node its sources and claims",
+        "description": "Another person's run, and a missing one, are the same 404. A claim that moved to its owner's private store (a claim drawn from a private report) is never listed or counted here.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "a research run (root job) id; the caller's own"
+            },
+            "required": true,
+            "description": "a research run (root job) id; the caller's own",
+            "name": "id",
+            "in": "path",
+            "example": "f6100000-0000-4000-8000-000000000001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the run",
+            "content": {
+              "application/json": {
+                "example": {
+                  "run": {
+                    "id": "f6100000-0000-4000-8000-000000000001",
+                    "question": "How do the two sensors compare?",
+                    "topic": "sensors",
+                    "document": null,
+                    "status": "done",
+                    "group": "done",
+                    "branches": 1,
+                    "created_at": "2026-10-17T12:00:00.000Z",
+                    "finished_at": "2026-10-17T12:00:00.000Z",
+                    "archived": false,
+                    "archived_at": null
+                  },
+                  "can_act": true,
+                  "running": false,
+                  "next_steering_point": null,
+                  "nodes": []
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchRunDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/research/runs/{id}/archive": {
+      "post": {
+        "operationId": "archiveResearchRun",
+        "tags": [
+          "research runs (rwr-research-runs)"
+        ],
+        "summary": "archive the caller's run: it leaves the caller's list only",
+        "description": "A per-user view state (slot 640). The run, its sources, claims and every other person's view of it are untouched. An already archived run is 409. Another person's run is 404.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "a research run (root job) id; the caller's own"
+            },
+            "required": true,
+            "description": "a research run (root job) id; the caller's own",
+            "name": "id",
+            "in": "path",
+            "example": "f6100000-0000-4000-8000-000000000001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the run's view state",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "f6100000-0000-4000-8000-000000000001",
+                  "archived": true,
+                  "archived_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchRunArchived"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/research/runs/{id}/unarchive": {
+      "post": {
+        "operationId": "unarchiveResearchRun",
+        "tags": [
+          "research runs (rwr-research-runs)"
+        ],
+        "summary": "unarchive the caller's run",
+        "description": "A per-user view state (slot 640). The run, its sources, claims and every other person's view of it are untouched. A run that is not archived is 409. Another person's run is 404.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "a research run (root job) id; the caller's own"
+            },
+            "required": true,
+            "description": "a research run (root job) id; the caller's own",
+            "name": "id",
+            "in": "path",
+            "example": "f6100000-0000-4000-8000-000000000001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the run's view state",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "f6100000-0000-4000-8000-000000000001",
+                  "archived": false,
+                  "archived_at": null
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchRunArchived"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/research/runs/{id}/document": {
+      "post": {
+        "operationId": "researchRunDocument",
+        "tags": [
+          "research runs (rwr-research-runs)"
+        ],
+        "summary": "open the run's report as a document: a new document in the caller's own folder",
+        "description": "The document is the caller's and private to them (a user document is never shared or ingested); nothing but the document and its own listing is written. A run with no report yet is 409; another person's run is 404.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "a research run (root job) id; the caller's own"
+            },
+            "required": true,
+            "description": "a research run (root job) id; the caller's own",
+            "name": "id",
+            "in": "path",
+            "example": "f6100000-0000-4000-8000-000000000001"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "the new document",
+            "content": {
+              "application/json": {
+                "example": {
+                  "path": "documents/fixture-run-report.md",
+                  "title": "How do the two sensors compare?"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchRunDocument"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "documents are not available here",
             "content": {
               "application/json": {
                 "schema": {

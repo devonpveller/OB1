@@ -31,6 +31,8 @@ export interface ContractDeps {
   // rwr-research-start-api: the signed-in owner's document (documents/repo.ts readDocument), or null for another
   // user's / a missing one. Injected by src/app.ts, never imported here: documents/repo.ts pulls config.ts (DB_* read
   // at import) into the contract's module graph (see repo/trust.ts ownedDocument). Absent = every document is null.
+  // rwr-research-runs: a new document in the signed-in owner's own folder (documents/repo.ts createDocument), injected the same way
+  createOwnDocument?: (input: { title: string; body: string; fields: Record<string, string> }, who: import("../../middleware/identity.ts").Identity) => Promise<{ path: string }>;
   readOwnDocument?: (path: string, who: import("../../middleware/identity.ts").Identity) => Promise<{ path: string; content: string } | null>;
 }
 

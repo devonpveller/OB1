@@ -1416,6 +1416,82 @@ export type ReportCredibility = {
   statement: string;
 };
 
+export type ResearchRunArchived = {
+  id: string;
+  archived: boolean;
+  archived_at: string | null;
+};
+
+export type ResearchRunClaim = {
+  id: string;
+  text: string;
+};
+
+export type ResearchRunCounts = {
+  running: number;
+  queued: number;
+  done: number;
+  stopped: number;
+  archived: number;
+  total: number;
+};
+
+export type ResearchRunDetail = {
+  run: ResearchRunRow;
+  can_act: boolean;
+  running: boolean;
+  next_steering_point: {
+    step_id: string | null;
+    phase: string;
+  } | null;
+  nodes: Array<ResearchRunNode>;
+};
+
+export type ResearchRunDocument = {
+  path: string;
+  title: string;
+};
+
+export type ResearchRunList = {
+  runs: Array<ResearchRunRow>;
+  counts: ResearchRunCounts;
+};
+
+export type ResearchRunNode = {
+  id: string;
+  parent_job_id: string | null;
+  branch_kind: string;
+  status: string; /** registry: job_states */
+  open: boolean;
+  pending: boolean;
+  rooted_step_id: string | null;
+  query: string;
+  created_at: string;
+  sources: Array<ResearchRunSource>;
+  claims: Array<ResearchRunClaim>;
+  has_report: boolean;
+};
+
+export type ResearchRunRow = {
+  id: string;
+  question: string;
+  topic: string | null;
+  document: string | null;
+  status: string;
+  group: string;
+  branches: number;
+  created_at: string;
+  finished_at: string | null;
+  archived: boolean;
+  archived_at: string | null;
+};
+
+export type ResearchRunSource = {
+  url: string;
+  title: string | null;
+  stages: Array<string>;
+};
+
 export type ResearchStartAttach = {
   kind: string;
   path?: string;

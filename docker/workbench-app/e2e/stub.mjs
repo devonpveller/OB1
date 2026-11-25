@@ -72,6 +72,7 @@ http.createServer((req, res) => {
   }
   // the Documents screen's two reads (rwr-docs-list; its own e2e is docs.e2e.mjs): nothing listed in this lab
   if (p === "/workbench/contract/documents") return json({ documents: [] });
+  if (p === "/workbench/contract/research/runs") return json({ runs: [], counts: { running: 0, queued: 0, done: 0, stopped: 0, archived: 0, total: 0 } }); // the Research screen's read (rwr-research-runs)
   if (p === "/workbench/documents/folders") return json({ root: "documents/k-7f3a", folders: [""] });
   if (p === "/workbench/documents/state") {
     const path = new URL(req.url, "http://x").searchParams.get("path");
