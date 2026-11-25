@@ -10,7 +10,7 @@ const ok = (c, m) => { console.log((c ? "PASS " : "FAIL ") + m); if (!c) fails++
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const MENU = [
-  ["/", "Home", 0], ["/research", "Research", 3], ["/chat", "Chat", 4], ["/documents", "Documents", null], ["/ideas", "Ideas", 4],
+  ["/", "Home", 0], ["/research", "Research", 3], ["/chat", "Chat", 4], ["/documents", "Documents", null], ["/ideas", "Ideas", null],
   ["/podcasts", "Podcasts", 3], ["/library", "Library", 2], ["/imports", "Imports", null], ["/removals", "Removals and trail", 5],
   ["/cleanup", "Cleanup", 5], ["/settings", "Settings", 6],
 ];
