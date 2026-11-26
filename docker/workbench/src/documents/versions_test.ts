@@ -417,3 +417,54 @@ Deno.test("restore: a request that answers 404 does not commit the caller's unsa
   assertEquals(await vlt.vaultRead(p), "UNSAVED TEXT\n");
   assertEquals((await v.listVersions(deps, p, A)).unsaved_changes, true);
 });
+
+// ── the coordinator's extra case: a note write (vaultCommit: `git add -A`, the whole tree, no lock) sweeps A's staged or
+// unsaved change into B's commit. A's reader must stay owner-correct; B must see none of A's history.
+async function noteWrite(text: string) {
+  await vlt.vaultWrite(`notes/b-note-${++doc}.md`, text);
+  await git("add", "-A");
+  await git("-c", `user.name=${B.name}`, "-c", "user.email=b@notes.local", "commit", "-q", "-m", `note: ${text}`);
+}
+
+Deno.test("a note write by B that sweeps A's staged move, A's unsaved text or A's removal: A's versions stay A's, B sees none of A's", async () => {
+  const NOTE = `B-NOTE-TEXT-${Date.now()}`;
+  // 1. A's document is moved to the trash with a staged `git mv`; B's note write commits the whole tree
+  const p1 = newPath();
+  for (let i = 1; i <= 3; i++) await put(p1, body(i), `documents: edit ${p1}`);
+  const t1 = `documents/${A.key}/.trash/${p1.split("/").pop()}`;
+  await vlt.vaultWrite(`${t1}.keep`, ""); // (the directory)
+  await Deno.remove(`${vault}/${t1}.keep`);
+  await git("mv", p1, t1);
+  await noteWrite(NOTE);
+  const l1 = await v.listVersions(deps, t1, A);
+  assertEquals([l1.total, l1.current_version], [3, 3]);
+  for (const x of l1.versions) assertEquals([x.author, x.message.startsWith("documents: ")], ["Alice", true], "A's own commits keep their author and message");
+  const c1 = await v.compareVersions(deps, t1, 1, 3, A);
+  assert(!JSON.stringify([l1, c1]).includes(NOTE) && !JSON.stringify([l1, c1]).includes("Bob") && !c1.diff.includes("notes/"), "nothing of B's note in A's answers");
+  assertEquals(c1.diff.match(/^diff --git .*/gm)?.length, 1, "one file in the diff");
+  // 2. A's unsaved text (a save without commit) is swept into B's note commit: a version made inside B's commit
+  const p2 = newPath();
+  for (let i = 1; i <= 2; i++) await put(p2, body(i), `documents: edit ${p2}`);
+  await vlt.vaultWrite(p2, "A's third text, saved but not committed\n");
+  await noteWrite(NOTE + "-2");
+  const l2 = await v.listVersions(deps, p2, A);
+  assertEquals([l2.total, l2.unsaved_changes], [3, false]);
+  const swept = l2.versions[0];
+  assertEquals([swept.version, swept.author, swept.message], [3, null, ""], "the version stays, B's authorship and B's message are withheld");
+  const c2 = await v.compareVersions(deps, p2, 2, 3, A);
+  assert(c2.diff.includes("A's third text") && !c2.diff.includes("notes/") && !JSON.stringify([l2, c2]).includes(NOTE), "compare shows only A's path and text");
+  // 3. A's document removed (staged git rm) and swept: gone for A and for B alike
+  const p3 = newPath();
+  await put(p3, body(1), `documents: edit ${p3}`);
+  await git("rm", "--quiet", "--", p3);
+  await noteWrite(NOTE + "-3");
+  const gone = [await v.listVersions(deps, p3, A).then(() => null, (e) => e), await v.listVersions(deps, p3, B).then(() => null, (e) => e)];
+  for (const e of gone) assert(e instanceof DocError && e.status === 404 && e.message === "no such document");
+  // B asks for every one of A's paths: all 404, the same as a missing path of B's
+  for (const target of [t1, p2, p3]) {
+    for (const fn of [() => v.listVersions(deps, target, B), () => v.listSnapshots(deps, target, B), () => v.compareVersions(deps, target, 1, 2, B)]) {
+      const e = await fn().then(() => null, (x) => x);
+      assert(e instanceof DocError && e.status === 404 && e.message === "no such document");
+    }
+  }
+});

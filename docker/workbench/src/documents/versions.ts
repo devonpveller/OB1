@@ -127,11 +127,15 @@ async function addSnapshot(deps: DocDeps, who: Identity, v: Version, name: strin
   return rows[0];
 }
 
-// A commit can carry more than one owner's files (see commitLocked), so what a commit SAYS is not always about this
-// document: its author is shown only when it is the caller's own name, and its message only when every document path
-// it names is a path this document has had.
+// A commit can carry more than one owner's files, and a writer that commits the whole tree (a note write, the
+// changes log, the wiki compile: `git add -A`) can sweep this document's staged or unsaved change into ITS commit. So
+// what a commit says is not always about this document: its author is shown only when it is the caller's own name, and
+// its message only when that commit is one the caller made through the documents API (author is the caller, message
+// starts "documents: ") and every document path it names is a path this document has had. A version made inside someone
+// else's commit stays a numbered version (the text did change) with its author and message withheld.
 const ownAuthor = (author: string, who: Identity) => (author === who.name ? author : null);
-function ownMessage(message: string, versions: Version[]): string {
+function ownMessage(message: string, author: string, versions: Version[], who: Identity): string {
+  if (author !== who.name || !message.startsWith("documents: ")) return "";
   const mine = new Set(versions.map((v) => v.path));
   for (const m of message.matchAll(/documents\/\S*/g)) if (!mine.has(m[0].replace(/\)+$/, ""))) return "";
   return message;
@@ -157,7 +161,7 @@ export async function listVersions(deps: DocDeps, path: string, who: Identity, o
     unsaved_changes: await pendingText(rel, versions),
     total: versions.length,
     versions: page.map((v) => ({
-      version: v.version, commit: v.commit, saved_at: v.date, author: ownAuthor(v.author, who), message: ownMessage(v.message, versions),
+      version: v.version, commit: v.commit, saved_at: v.date, author: ownAuthor(v.author, who), message: ownMessage(v.message, v.author, versions, who),
       snapshots: (snaps.get(`${v.commit}:${v.blob}`) ?? []).map((s) => snapshotOut(s, v.version)),
     })),
     next: older.length > limit ? page[page.length - 1].version : null,

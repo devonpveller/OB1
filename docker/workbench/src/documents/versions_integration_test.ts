@@ -431,3 +431,52 @@ t("V11: A's delete-forever racing B's create (and a hand-staged removal swept in
     await bSeesOnlyOwn(mk.json.path, await textOf(mk.json.path), same ? "no-such-marker-xyz" : aMark, `staged removal (same=${same})`);
   }
 });
+
+// V12: a note write by B (vaultCommit: `git add -A`, the whole tree, no lock) commits A's staged removal / move / unsaved text.
+// A's version list stays A's (no version authored by B shown, no B message, no B note text; compare names only A's path);
+// B sees none of A's history.
+t("V12: B's note commit sweeps A's staged move, A's unsaved text and A's staged removal: A's history stays owner-correct, B sees none of it", async () => {
+  const NOTE = `V12-NOTE-${run}`;
+  const note = async (text: string) => {
+    await Deno.mkdir(`${VAULT}/notes`, { recursive: true });
+    await Deno.writeTextFile(`${VAULT}/notes/v12-${crypto.randomUUID().slice(0, 6)}.md`, text);
+    await git("add", "-A");
+    await git("-c", "user.name=Bnote", "-c", "user.email=b@notes.local", "commit", "-q", "-m", `note: ${text}`);
+  };
+  // 1. a staged move to the trash, swept
+  const p1 = await docWith(A, `v12-move-${run}`, 3);
+  const t1 = p1.replace(`/documents/`, `/documents/`).replace(/(documents\/[^/]+\/)/, `$1.trash/`);
+  await Deno.mkdir(`${VAULT}/${t1.slice(0, t1.lastIndexOf("/"))}`, { recursive: true });
+  await git("mv", p1, t1);
+  await note(NOTE);
+  const l1 = await versions(t1, A);
+  assertEquals([l1.total, l1.current_version], [3, 3]);
+  const c1 = await call("GET", `${D}/compare?path=${q(t1)}&from=1&to=3`);
+  assertEquals(c1.status, 200, c1.text);
+  assert(!(JSON.stringify(l1) + c1.text).includes(NOTE) && !(JSON.stringify(l1) + c1.text).includes("Bnote") && !c1.json.diff.includes("notes/"), "nothing of B's note in A's answers");
+  // 2. A's unsaved text swept into B's commit: the version stays, its author and message are withheld
+  const p2 = await docWith(A, `v12-unsaved-${run}`, 2);
+  const put = await call("PUT", `${D}/file?path=${q(p2)}`, { content: `---\ntitle: u\n---\n\nV12-A-THIRD-${run}\n` });
+  assertEquals(put.status, 200, put.text);
+  await note(NOTE + "-2");
+  const l2 = await versions(p2, A);
+  assertEquals([l2.total, l2.unsaved_changes], [3, false]);
+  const swept = l2.versions[0] as unknown as { version: number; author: string | null; message: string };
+  assertEquals([swept.version, swept.author, swept.message], [3, null, ""]);
+  const c2 = await call("GET", `${D}/compare?path=${q(p2)}&from=2&to=3`);
+  assert(c2.json.diff.includes(`V12-A-THIRD-${run}`) && !c2.json.diff.includes("notes/") && !(JSON.stringify(l2) + c2.text).includes(NOTE));
+  // 3. a staged removal, swept: gone for both
+  const p3 = await docWith(A, `v12-rm-${run}`, 2);
+  await git("rm", "--quiet", "--", p3);
+  await note(NOTE + "-3");
+  const g = [await call("GET", `${D}/versions?path=${q(p3)}`), await call("GET", `${D}/versions?path=${q(p3)}`, undefined, B)];
+  assertEquals([g[0].status, g[0].text], [404, g[1].text === g[0].text ? g[0].text : "differs"]);
+  // B reads every one of A's paths: the answer of a missing path
+  const miss = await call("GET", `${D}/versions?path=${q(`documents/none-${run}/x.md`)}`, undefined, B);
+  for (const target of [t1, p2, p3]) {
+    for (const url of [`versions?path=${q(target)}`, `snapshots?path=${q(target)}`, `compare?path=${q(target)}&from=1&to=2`]) {
+      const r = await call("GET", `${D}/${url}`, undefined, B);
+      assertEquals([r.status, r.text], [miss.status, miss.text], url);
+    }
+  }
+});
