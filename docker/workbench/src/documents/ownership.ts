@@ -107,8 +107,11 @@ const isDocumentsPath = (p: string) => p.slice(0, DOCUMENTS_ROOT.length + 1).toL
 export async function ownsDocumentPaths(db: Db, paths: string[], who: Viewer): Promise<boolean> {
   const legacy: string[] = [];
   const bare: string[] = []; // exactly documents/<own key>: the caller's directory - or the cut of someone's file name (review B1)
-  for (const p of paths) {
-    if (!isDocumentsPath(p)) continue;
+  for (const raw of paths) {
+    if (!isDocumentsPath(raw)) continue;
+    // review 2 / B2: the listing rows (and so every comparison below) are lower-case `documents/`; a path that reached here through
+    // `Documents/` or `DOCUMENTS/` (case-insensitive mount) is judged as the same path with the root lower-cased, the rest byte-exact
+    const p = `${DOCUMENTS_ROOT}/${raw.slice(DOCUMENTS_ROOT.length + 1)}`;
     const parts = p.split("/");
     const seg = parts[1] ?? "";
     if (seg === who.key) {

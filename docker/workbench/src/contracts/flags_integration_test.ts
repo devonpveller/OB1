@@ -376,19 +376,21 @@ t("S6: legacy file `<own key><stop character>...` of another user - the caller g
     ["export", (p) => call(A6, "GET", `/workbench/export?path=${q(p)}&format=md`)],
   ];
   const bad: string[] = [];
-  for (const tail of AFTER_KEY) {
-    const theirs = `documents/${A6}${tail}`;
-    const gone = `documents/${A6}-nobody${tail}`;
-    await sql(`INSERT INTO public.user_document_listings (path, title, owner_sub) VALUES ($1, 'b', $2) ON CONFLICT (path) DO UPDATE SET owner_sub = EXCLUDED.owner_sub`, [theirs, B]);
+  // review 2 / B2: the same file named through a capitalised root (a case-insensitive vault mount); the listing row is lower-case
+  for (const [root, tail] of ["documents", "Documents", "DOCUMENTS"].flatMap((r) => AFTER_KEY.map((t) => [r, t] as const))) {
+    const row = `documents/${A6}${tail}`;
+    const theirs = `${root}/${A6}${tail}`;
+    const gone = `${root}/${A6}-nobody${tail}`;
+    await sql(`INSERT INTO public.user_document_listings (path, title, owner_sub) VALUES ($1, 'b', $2) ON CONFLICT (path) DO UPDATE SET owner_sub = EXCLUDED.owner_sub`, [row, B]);
     try {
       for (const [label, fn] of routes) {
         const f = await fn(theirs);
         const m = await fn(gone);
-        if (f.text.includes(S6_MARK)) bad.push(`${JSON.stringify(tail)} ${label}: B's CONTENT reached A: ${f.status} ${f.text.slice(0, 120)}`);
-        if (f.status !== m.status || f.text !== m.text.replaceAll(gone, theirs).replaceAll(q(gone), q(theirs))) bad.push(`${JSON.stringify(tail)} ${label}: foreign ${f.status} ${f.text.slice(0, 120)} | missing ${m.status} ${m.text.slice(0, 120)}`);
+        if (f.text.includes(S6_MARK)) bad.push(`${JSON.stringify(root + tail)} ${label}: B's CONTENT reached A: ${f.status} ${f.text.slice(0, 120)}`);
+        if (f.status !== m.status || f.text !== m.text.replaceAll(gone, theirs).replaceAll(q(gone), q(theirs))) bad.push(`${JSON.stringify(root + tail)} ${label}: foreign ${f.status} ${f.text.slice(0, 120)} | missing ${m.status} ${m.text.slice(0, 120)}`);
       }
     } finally {
-      await sql(`DELETE FROM public.user_document_listings WHERE path = $1`, [theirs]);
+      await sql(`DELETE FROM public.user_document_listings WHERE path = $1`, [row]);
     }
   }
   assertEquals(bad, []);

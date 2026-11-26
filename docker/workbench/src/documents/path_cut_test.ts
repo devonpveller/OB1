@@ -115,3 +115,34 @@ Deno.test("B1: a legacy root file named `<own key><stop character>...` is never 
     assertEquals(await owns(db, A, "documents/ak-a/x.md"), true);
   }
 });
+
+// Review 2 / B2: `documents/` in any letter case is a documents path (case-insensitive mounts), but the listing rows are lower-case:
+// `Documents/<key> notes.md` is cut to `Documents/<key>` and must still be judged against the lower-case row.
+Deno.test("B2: a capitalised root does not hide a legacy root file named `<own key><stop character>...`", async () => {
+  for (const root of ["Documents", "DOCUMENTS", "dOcUmEnTs"]) {
+    for (const tail of AFTER_KEY) {
+      const row = `documents/ak-a${tail}`;
+      const db = listings([{ path: row, owner_sub: "operator" }]);
+      assertEquals(await owns(db, A, `${root}/ak-a${tail}`), false, `A naming operator's ${root}/ak-a${JSON.stringify(tail)}`);
+      assertEquals(await owns(listings([]), A, `${root}/ak-a`), true);
+      assertEquals(await owns(db, A, `${root}/ak-a/x.md`), true);
+    }
+  }
+});
+
+Deno.test("B2: a capitalised root on a legacy .md path is matched against the lower-case listing rows", async () => {
+  const db = listings([
+    { path: "documents/team.md", owner_sub: "ak-b" },
+    { path: "documents/team.md copy.md", owner_sub: "ak-a" },
+    { path: "documents/solo.md", owner_sub: "ak-b" },
+    { path: "documents/.trash/gone.md", owner_sub: "ak-b" },
+    { path: "documents/.trash/gone.md,old.md", owner_sub: "ak-a" },
+  ]);
+  for (const root of ["Documents", "DOCUMENTS"]) {
+    assertEquals(await owns(db, B, `${root}/team.md copy.md`), false, `${root} cut of A's file`);
+    assertEquals(await owns(db, B, `${root}/team.md`), false, `${root} cut prefix`);
+    assertEquals(await owns(db, B, `${root}/.trash/gone.md,old.md`), false);
+    assertEquals(await owns(db, B, `${root}/solo.md`), true, "B's own legacy file through a capital root");
+    assertEquals(await owns(db, B, `${root}/none.md`), false);
+  }
+});
