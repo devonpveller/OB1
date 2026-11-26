@@ -1,0 +1,63 @@
+/* Accent colours (rwr-appearance). The person's accent is data-accent on <html> (none = teal, the default). Each accent has a
+   light and a dark set of three values: the accent itself (filled buttons), the strong one (links, the current menu item, the
+   focus ring) and the soft one (the current item's ground). test/accent-contrast.test.ts holds every pair to WCAG AA in both
+   modes, reading THIS file. The swatch variables always exist (the Settings swatches use them); an accent rule only points
+   --accent and friends at them, so one rule serves light, follow-the-device dark and explicit dark. Amber is darker than the
+   mockup's #b06a00: white on #b06a00 is under 4.5:1, so the offered amber is #9a5b00. */
+:root {
+  --swatch-teal: #0f6e6e;
+  --swatch-teal-strong: #0b5555;
+  --swatch-teal-soft: #e3f1f0;
+  --swatch-indigo: #4b47b0;
+  --swatch-indigo-strong: #3a3790;
+  --swatch-indigo-soft: #e8e7f6;
+  --swatch-amber: #9a5b00;
+  --swatch-amber-strong: #6e4100;
+  --swatch-amber-soft: #fbf1df;
+  --swatch-rose: #b03a5b;
+  --swatch-rose-strong: #8a2c47;
+  --swatch-rose-soft: #f9e6ec;
+  --swatch-slate: #3d4a55;
+  --swatch-slate-strong: #2b363f;
+  --swatch-slate-soft: #e6eaed;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --swatch-teal: #4fb3b0;
+    --swatch-teal-strong: #7fd0cd;
+    --swatch-teal-soft: #15302f;
+    --swatch-indigo: #9a97f0;
+    --swatch-indigo-strong: #b9b7f7;
+    --swatch-indigo-soft: #24234a;
+    --swatch-amber: #e0a23c;
+    --swatch-amber-strong: #f0c984;
+    --swatch-amber-soft: #33270f;
+    --swatch-rose: #ee8fa9;
+    --swatch-rose-strong: #f7b3c5;
+    --swatch-rose-soft: #3d1a26;
+    --swatch-slate: #9fb0bd;
+    --swatch-slate-strong: #c0ccd5;
+    --swatch-slate-soft: #232c33;
+  }
+}
+:root[data-theme="dark"] {
+  --swatch-teal: #4fb3b0;
+  --swatch-teal-strong: #7fd0cd;
+  --swatch-teal-soft: #15302f;
+  --swatch-indigo: #9a97f0;
+  --swatch-indigo-strong: #b9b7f7;
+  --swatch-indigo-soft: #24234a;
+  --swatch-amber: #e0a23c;
+  --swatch-amber-strong: #f0c984;
+  --swatch-amber-soft: #33270f;
+  --swatch-rose: #ee8fa9;
+  --swatch-rose-strong: #f7b3c5;
+  --swatch-rose-soft: #3d1a26;
+  --swatch-slate: #9fb0bd;
+  --swatch-slate-strong: #c0ccd5;
+  --swatch-slate-soft: #232c33;
+}
+:root[data-accent="indigo"] { --accent: var(--swatch-indigo); --accent-strong: var(--swatch-indigo-strong); --accent-soft: var(--swatch-indigo-soft); --focus: var(--swatch-indigo-strong); }
+:root[data-accent="amber"] { --accent: var(--swatch-amber); --accent-strong: var(--swatch-amber-strong); --accent-soft: var(--swatch-amber-soft); --focus: var(--swatch-amber-strong); }
+:root[data-accent="rose"] { --accent: var(--swatch-rose); --accent-strong: var(--swatch-rose-strong); --accent-soft: var(--swatch-rose-soft); --focus: var(--swatch-rose-strong); }
+:root[data-accent="slate"] { --accent: var(--swatch-slate); --accent-strong: var(--swatch-slate-strong); --accent-soft: var(--swatch-slate-soft); --focus: var(--swatch-slate-strong); }

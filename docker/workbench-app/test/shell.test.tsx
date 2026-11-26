@@ -115,7 +115,9 @@ describe("the counts match the reads (acceptance 2)", () => {
     // parts of the shell and can land later on a loaded host, so wait for the whole list rather than race it
     await waitFor(() => expect(seen.map((u) => u.split("?")[0]).sort()).toEqual([
       "/workbench/auth/me", "/workbench/contract/cleanup/reopen-candidates", "/workbench/contract/cleanup/sources",
-      "/workbench/contract/sessions", "/workbench/intake/jobs", "/workbench/settings", "/workbench/workspace/whoami"]), { timeout: 4000 });
+      "/workbench/contract/sessions", "/workbench/intake/jobs",
+      "/workbench/settings", "/workbench/settings", // the account state (lib/state.ts) and the person's look (lib/appearance.ts, rwr-appearance)
+      "/workbench/workspace/whoami"]), { timeout: 4000 });
     expect(requestLog().every((r) => r.method === "GET" && r.url.startsWith("/workbench/"))).toBe(true);
   });
   it("zero is shown as zero; a read that fails shows no count (never an invented one)", async () => {
