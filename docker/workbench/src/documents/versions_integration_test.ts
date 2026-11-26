@@ -480,3 +480,55 @@ t("V12: B's note commit sweeps A's staged move, A's unsaved text and A's staged 
     }
   }
 });
+
+// V13 (attempt 2): the vault lock covers every documents writer. delete-folder racing creates by both owners over HTTP: no
+// 500, no commit that carries two owners' files. And a move plus an edit that land in ONE commit (a note write's `git add -A`
+// between `git mv` and the commit): the history survives (within the owner), the edit is a version, B's name is withheld.
+t("V13: delete-folder racing creates by A and B: all succeed, no commit carries two owners' files; a move and an edit in one commit keep A's history", async () => {
+  const base = (await git("rev-parse", "HEAD")).trim(); // earlier cases make mixed commits on purpose
+  for (let round = 0; round < 6; round++) {
+    const folder = `v13f-${run}-${round}`;
+    assertEquals((await call("POST", `${D}/folders`, { path: folder })).status, 201);
+    await newDoc(A, `v13-in-folder-${run}-${round}`, "in the folder", folder);
+    const rs = await Promise.all([
+      call("DELETE", `${D}/folders`, { path: folder }),
+      ...[0, 1, 2, 3].map((i) => call("POST", D, { title: `v13-b-${run}-${round}-${i}`, body: "b" }, B)),
+      ...[0, 1].map((i) => call("POST", D, { title: `v13-a-${run}-${round}-${i}`, body: "a" })),
+    ]);
+    assertEquals(rs.map((r) => r.status), [200, 201, 201, 201, 201, 201, 201], `round ${round}: ${rs.filter((r) => r.status >= 400).map((r) => r.text).join(" | ")}`);
+  }
+  const log = (await git("log", "--name-only", "--format=%x1e%H", `${base}..HEAD`)).split("\x1e").filter((b) => b.trim());
+  for (const block of log) {
+    const owners = new Set(block.split("\n").slice(1).filter((l) => l.startsWith("documents/")).map((l) => l.split("/")[1]));
+    assert(owners.size <= 1, `a commit carries two owners' files: ${[...owners].join(",")}`);
+  }
+  // a move and an unsaved edit swept into one commit by a whole-tree writer
+  const long = "a long enough paragraph so that git pairs the renamed file with its old self\n".repeat(8);
+  const p = await newDoc(A, `v13-mvedit-${run}`, long);
+  for (let i = 2; i <= 3; i++) await edit(p, `---\ntitle: m\n---\n\nrev ${i}\n${long}`);
+  const t = p.replace(/(documents\/[^/]+\/)/, "$1.trash/");
+  await Deno.mkdir(`${VAULT}/${t.slice(0, t.lastIndexOf("/"))}`, { recursive: true });
+  await git("mv", p, t);
+  await Deno.writeTextFile(`${VAULT}/${t}`, `---\ntitle: m\n---\n\nrev 4\n${long}`);
+  await Deno.mkdir(`${VAULT}/notes`, { recursive: true });
+  await Deno.writeTextFile(`${VAULT}/notes/v13-${run}.md`, "a note by B");
+  await git("add", "-A");
+  await git("-c", "user.name=Bnote", "-c", "user.email=b@notes.local", "commit", "-q", "-m", "note: a note by B");
+  const l = await versions(t, A);
+  assertEquals(l.total, 4, "the history survives a rename-with-edit and the edit is a version");
+  const top = l.versions[0] as unknown as { author: string | null; message: string };
+  assertEquals([top.author, top.message], [null, ""]);
+});
+
+t("V11b: A's staged removal and B's create of BYTE-IDENTICAL text land in one commit: B has one version (the exact-bytes cross-owner pairing is never followed)", async () => {
+  const title = `v11b-same-${run}`;
+  const aPath = await newDoc(A, title, "identical body");
+  const tp = (await call("POST", `${D}/trash`, { path: aPath })).json.trashed as string;
+  const aText = await textOf(tp);
+  await git("rm", "--quiet", "--", tp); // staged: the whole-index commit of B's create carries it
+  const bPath = await newDoc(B, title, "identical body");
+  assertEquals(await textOf(bPath), aText, "byte-identical text");
+  assertEquals((await versions(bPath, B)).total, 1);
+  const r = await call("POST", `${D}/restore-version`, { path: bPath, version: 1 }, B);
+  assertEquals([r.status, r.json.unchanged], [200, true]);
+});

@@ -23,7 +23,7 @@ const US = "\x1f";
 // A document's commits, newest first, chased across the renames that brought it to `relPath` (a move, a trash, a
 // restore, an archive: each a `git mv` commit). NOT `git log --follow`: that also follows COPIES, so a new document
 // whose text equals another's would inherit the other's whole history. Here a commit that added the path counts as a
-// move only when it is an EXACT rename (the same blob) from a file in the SAME owner's tree, in that same commit
+// move only when it is a rename (git's -M, exact or with an edit) from a file in the SAME owner's tree, in that same commit
 // (see renamedInFrom); the chase then continues from that file's last commit before it. The chase stops at the commit that
 // created the file, or at a commit that deleted the path (what is older was another document). Never reads a
 // file's content; the blobs say whether the TEXT changed (`oldBlob === blob`: a move that left it alone).
@@ -75,15 +75,16 @@ export function ownerScope(path: string): string {
   return p[1];
 }
 
-// Did this commit move a file to `path`? ONLY an exact rename (git's -M100%: the blob is the same before and
-// after; every move, trash, restore and archive this app makes is one) whose source sits in the SAME owner's tree
-// is followed. A similarity pairing, or a pairing with another owner's file, is never a move of this document: a
-// commit can carry two owners' files (vaultCommitPath commits the whole index; the wiki compile runs `git add -A`),
-// and following a pairing across them would hand one user the other's history and text.
+// Did this commit move a file to `path`? A rename (git's -M: the same file, with or without an edit in the same commit)
+// whose source sits in the SAME owner's tree is followed. Every move, trash, restore and archive this app makes is an
+// exact rename, but a writer that commits the whole tree (a note write's `git add -A`) can land an edit in the same
+// commit as the move, and the history must survive that. A pairing with a file of ANOTHER owner is never a move of this
+// document, however similar or even identical the bytes: a commit can carry two owners' files, and following a pairing
+// across them would hand one user the other's history and text (ownerScope).
 // `-z` output: paths are NUL-terminated and never quoted, so a path with a quote, a backslash or any other
 // character git would quote still compares equal.
 async function renamedInFrom(hash: string, path: string): Promise<{ from: string; oldBlob: string } | null> {
-  const r = await git(["diff-tree", "--root", "-r", "-z", "-M100%", "--raw", "--no-abbrev", "--no-commit-id", hash]);
+  const r = await git(["diff-tree", "--root", "-r", "-z", "-M", "--raw", "--no-abbrev", "--no-commit-id", hash]);
   if (!r.ok) return null;
   const t = r.out.split("\0");
   for (let i = 0; i < t.length; i++) {
@@ -94,7 +95,7 @@ async function renamedInFrom(hash: string, path: string): Promise<{ from: string
       const from = t[i + 1] ?? "";
       const to = t[i + 2] ?? "";
       i += 2;
-      if (to === path && f[2] === f[3] && ownerScope(from) === ownerScope(to)) return { from, oldBlob: blobOf(f[2]) };
+      if (to === path && ownerScope(from) === ownerScope(to)) return { from, oldBlob: blobOf(f[2]) };
     } else {
       i += 1;
     }

@@ -468,3 +468,72 @@ Deno.test("a note write by B that sweeps A's staged move, A's unsaved text or A'
     }
   }
 });
+
+// ── attempt 2 of the tester ───────────────────────────────────────────────────────────────────────────────────────────
+Deno.test("a move and an edit that land in ONE commit (a note write's `git add -A` between git mv and the commit): the history survives, within the owner", async () => {
+  const long = "a long enough paragraph so that git pairs the renamed file with its old self\n".repeat(8);
+  const p = `documents/${A.key}/mv-edit-${++doc}.md`;
+  for (let i = 1; i <= 3; i++) await put(p, body(i) + long, `documents: edit ${p}`);
+  const t = `documents/${A.key}/.trash/${p.split("/").pop()}`;
+  await Deno.mkdir(`${vault}/documents/${A.key}/.trash`, { recursive: true });
+  await git("mv", p, t); // staged, not committed
+  await vlt.vaultWrite(t, body(4) + long); // A's unsaved edit of the moved file
+  await noteWrite("note by B that commits the whole tree"); // the whole tree: the move AND the edit in one commit
+  const vs = await v.versionsOf(t);
+  assertEquals(vs.map((x) => x.version), [1, 2, 3, 4], "history kept across a rename-with-edit, and the edit is one version");
+  assertEquals(vs[3].author, "Bob", "(the raw commit is B's; the reader withholds it:)");
+  const l = await v.listVersions(deps, t, A);
+  assertEquals([l.total, l.versions[0].author, l.versions[0].message], [4, null, ""]);
+  // a similar file of ANOTHER owner removed in the same commit is still not this document's history
+  const aFile = `documents/${A.key}/.trash/xo-${++doc}.md`;
+  for (let i = 1; i <= 2; i++) await put(aFile, body(i) + long, `documents: edit ${aFile}`);
+  const bNew = `documents/${B.key}/xo-${doc}.md`;
+  await git("rm", "--quiet", "--", aFile);
+  await vlt.vaultWrite(bNew, body(2) + long); // byte-identical to A's v2
+  await git("add", "-A");
+  await git("-c", "user.name=wiki", "-c", "user.email=w@x", "commit", "-q", "-m", "compile");
+  assertEquals((await v.versionsOf(bNew)).length, 1, "an identical file of another owner is not followed");
+});
+
+Deno.test("T2-U6: delete-folder racing creates, saves and a seed rollback: every vault commit holds one owner's files, nothing fails", async () => {
+  const docs = await import("./repo.ts");
+  const seed = await import("./seed.ts");
+  void seed; // seed.ts takes the same lock for its two commits (checked by the grep test below)
+  const base = (await git("rev-parse", "HEAD")).trim(); // earlier tests make mixed commits on purpose
+  for (let round = 0; round < 12; round++) {
+    const folder = `race${round}-${doc}`;
+    const keep = `documents/${A.key}/${folder}/.keep`;
+    await vlt.vaultWrite(keep, "");
+    await vlt.vaultCommitPath(keep, "documents: create folder", A.name);
+    await put(`documents/${A.key}/${folder}/f-${round}.md`, body(1), "documents: create");
+    const results = await Promise.allSettled([
+      docs.deleteFolder(deps, folder, A),
+      ...[0, 1, 2, 3].map((i) => docs.createDocument(deps, { title: `B race ${round} ${i}`, body: "b" }, B)),
+      ...[0, 1].map((i) => docs.createDocument(deps, { title: `A race ${round} ${i}`, body: "a" }, A)),
+    ]);
+    const failed = results.filter((r) => r.status === "rejected").map((r) => String((r as PromiseRejectedResult).reason).slice(0, 80));
+    assertEquals(failed, [], `round ${round}: no writer failed`);
+  }
+  // no commit carries files of two owners
+  const log = (await git("log", "--name-only", "--format=%x1e%H", `${base}..HEAD`)).split("\x1e").filter((b) => b.trim());
+  for (const block of log) {
+    const owners = new Set(block.split("\n").slice(1).filter((l) => l.startsWith("documents/")).map((l) => l.split("/")[1]));
+    assert(owners.size <= 1, `a commit carries two owners' files: ${[...owners].join(",")}`);
+  }
+});
+
+Deno.test("every vault commit the documents API makes goes through the vault git lock (no bare vaultCommitPath / gitRm / gitMv in documents/ or routes/documents*)", async () => {
+  const dirs = [new URL("./", import.meta.url), new URL("../routes/", import.meta.url)];
+  const bare: string[] = [];
+  for (const d of dirs) {
+    for await (const e of Deno.readDir(d)) {
+      if (!e.name.endsWith(".ts") || e.name.endsWith("_test.ts") || (d.pathname.endsWith("/routes/") && !e.name.startsWith("documents"))) continue;
+      const text = await Deno.readTextFile(new URL(e.name, d));
+      text.split("\n").forEach((line, i) => {
+        if (/^\s*\/\//.test(line) || /^import\b|^\s+gitMv, gitRm|^export function commitLocked/.test(line)) return;
+        if (/\b(vaultCommitPath|gitRm|gitMv|gitRmRecursive)\(/.test(line) && !/withPathLock\(VAULT_GIT|commitLocked/.test(line)) bare.push(`${e.name}:${i + 1}: ${line.trim().slice(0, 90)}`);
+      });
+    }
+  }
+  assertEquals(bare, [], "bare vault writers");
+});

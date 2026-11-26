@@ -187,7 +187,7 @@ export async function deleteFolder(deps: DocDeps, path: string, who: Identity) {
   if (!(await vaultExists(dir))) throw new DocError("no such folder", 404);
   const files = await documentFiles(dir);
   for (const f of files) await moveTo(deps, f, inSubtree(f, TRASH, who), `documents: trash ${f} (folder ${dir})`, who);
-  await gitRm(`${dir}/.keep`, `documents: delete folder ${dir}`, who.name);
+  await withPathLock(VAULT_GIT, () => gitRm(`${dir}/.keep`, `documents: delete folder ${dir}`, who.name));
   try {
     await Deno.remove(safeJoin(config.vault.gitDir, dir), { recursive: true });
   } catch { /* already gone */ }
