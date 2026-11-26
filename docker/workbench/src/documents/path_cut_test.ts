@@ -99,3 +99,19 @@ Deno.test("singleDocumentPath: exact lower-case documents/, no encoded dots, no 
   assertEquals(singleDocumentPath("documents/ak-a/..a/x.md"), "documents/ak-a/..a/x.md"); // dots inside a name are a name
   assertEquals(singleDocumentPath("documents/ak-a/100%2e5/x.md"), "documents/ak-a/100%2e5/x.md");
 });
+
+// Review 1 / B1: the own-key skip is for documents/<key>/... only. `documents/<key> notes.md` (a legacy root file of someone
+// else) is cut by the scanner to exactly `documents/<key>`, which the caller "owns" - unless the bare key is judged as a prefix.
+const AFTER_KEY = [" notes.md", ",old.md", "#1.md", " (copy).md", ")x.md", "'s.md", "&x.md", "?x.md", '"x.md', " notes.md", "　notes.md", "﻿notes.md"];
+Deno.test("B1: a legacy root file named `<own key><stop character>...` is never judged as the caller's own directory", async () => {
+  for (const tail of AFTER_KEY) {
+    const full = `documents/ak-a${tail}`;
+    const db = listings([{ path: full, owner_sub: "operator" }]);
+    assertEquals(await owns(db, A, full), false, `A naming operator's ${JSON.stringify(full)}`);
+    // the caller's own directory, and a file in it, stay theirs when no such neighbour exists
+    assertEquals(await owns(listings([]), A, "documents/ak-a"), true);
+    assertEquals(await owns(listings([]), A, "documents/ak-a/x.md"), true);
+    // and a file inside the own directory is theirs even where the neighbour exists (a slash is not a stop character)
+    assertEquals(await owns(db, A, "documents/ak-a/x.md"), true);
+  }
+});

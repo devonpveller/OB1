@@ -74,7 +74,7 @@ export async function createFlag(db: Db, reg: RegistryReader, who: Identity, b: 
   await requireRegistered(reg, REGISTRY.flagFromKinds, b.from.kind);
   const table = ITEM_TABLE[b.item_kind];
   if (!table) throw new BadRequest(`'${b.item_kind}' cannot be flagged`);
-  await checkFrom(db, who, b.from);
+  const fromRef = await checkFrom(db, who, b.from); // the validated path is what is stored (backslashes read as slashes)
   // rw-held-record-residuals (F4): a reference record whose target is another user's held source is part of that
   // held source - for the flagger it is a MISSING record (the same 404 'no such reference'), never an existence oracle
   const found = b.item_kind === "reference"
@@ -87,23 +87,25 @@ export async function createFlag(db: Db, reg: RegistryReader, who: Identity, b: 
   const r = await db.query<Raw>(
     `INSERT INTO public.user_flags (owner_sub, actor_sub, item_kind, item_id, reason, note, from_kind, from_ref)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING ${COLS}`,
-    [who.sub, who.actor, b.item_kind, b.item_id, b.reason, b.note ?? "", b.from.kind, b.from.ref],
+    [who.sub, who.actor, b.item_kind, b.item_id, b.reason, b.note ?? "", b.from.kind, fromRef],
   );
   return shape(r[0], false);
 }
 
 // Where the flag was made from must be the flagger's own: a document of theirs, or a source id.
-async function checkFrom(db: Db, who: Identity, from: { kind: string; ref: string }) {
+async function checkFrom(db: Db, who: Identity, from: { kind: string; ref: string }): Promise<string> {
   if (from.kind === "document") {
     // one field, one path: read whole (a folder name may hold a space or & , ' ( ) # ?), never scanned
     const path = singleDocumentPath(from.ref);
     if (path === null) throw new BadRequest("from.ref must be a path inside your own documents");
     if (!(await ownsDocumentPaths(db, [path], who))) throw new NotFound("no such document");
+    return path;
   } else {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(from.ref)) throw new BadRequest("from.ref must be a source id");
     // a shared source that exists: a private or held source id gets the same refusal as a missing one (no oracle)
     const r = await db.query<{ ok: boolean }>(`SELECT EXISTS (SELECT 1 FROM public.sources WHERE id = $1) AS ok`, [from.ref]);
     if (!r[0]?.ok) throw new NotFound("no such source");
+    return from.ref;
   }
 }
 

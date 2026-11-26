@@ -359,4 +359,35 @@ t("S5: legacy files - a path cut at a JavaScript-only space is never judged as t
   assertEquals(bad, []);
 });
 
+// S6 (review 1, B1): the own-key skip. B's LEGACY root file `documents/<A's key><stop>...` is cut by the scanner to exactly
+// `documents/<A's key>`, A's own directory. A naming B's file is the answer for a missing document on every route, never B's file.
+const AFTER_KEY = [" notes.md", ",old.md", "#1.md", " (copy).md", ")x.md", "'s.md", "&x.md", " notes.md"];
+t("S6: legacy file `<own key><stop character>...` of another user - the caller gets the missing-document answer on every route", async () => {
+  const q = encodeURIComponent;
+  const routes: [string, (p: string) => Promise<{ status: number; text: string }>][] = [
+    ["flag from", (p) => mk(A, { from: { kind: "document", ref: p } })],
+    ["holder references", (p) => call(A, "GET", `/workbench/contract/holders/user_document/references?ref=${q(p)}`)],
+    ["reference create", (p) => call(A, "POST", "/workbench/contract/references", { source_id: SRC, quote: "x", holder: { kind: "user_document", ref: p } })],
+    ["diff-check", (p) => call(A, "POST", "/workbench/contract/diff-check", { holder: { kind: "user_document", ref: p } })],
+    ["note-history", (p) => call(A, "GET", `/workbench/note-history?path=${q(p)}`)],
+    ["export", (p) => call(A, "GET", `/workbench/export?path=${q(p)}&format=md`)],
+  ];
+  const bad: string[] = [];
+  for (const tail of AFTER_KEY) {
+    const theirs = `documents/${A}${tail}`;
+    const gone = `documents/${A}-nobody${tail}`;
+    await sql(`INSERT INTO public.user_document_listings (path, title, owner_sub) VALUES ($1, 'b', $2)`, [theirs, B]);
+    try {
+      for (const [label, fn] of routes) {
+        const f = await fn(theirs);
+        const m = await fn(gone);
+        if (f.status !== m.status || f.text !== m.text.replaceAll(gone, theirs).replaceAll(q(gone), q(theirs))) bad.push(`${JSON.stringify(tail)} ${label}: foreign ${f.status} ${f.text.slice(0, 120)} | missing ${m.status} ${m.text.slice(0, 120)}`);
+      }
+    } finally {
+      await sql(`DELETE FROM public.user_document_listings WHERE path = $1`, [theirs]);
+    }
+  }
+  assertEquals(bad, []);
+});
+
 Deno.test({ name: "close the pool", ignore, sanitizeOps: false, sanitizeResources: false, fn: async () => { await pool?.end(); } });

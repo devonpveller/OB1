@@ -3,8 +3,8 @@
 // Rejects absolute paths and ANY `..` segment, so a request can never escape
 // its base dir (no `../../etc/...`).
 
-// Control chars (NUL .. US, 0x00-0x1f) are disallowed in any path segment.
-const CONTROL_CHARS = /[\x00-\x1f]/;
+// Control chars (NUL .. US, 0x00-0x1f, and DEL 0x7f) are disallowed in any path segment.
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/; // DEL too: one rule with singleDocumentPath (rw-doc-path-spaces)
 // a segment of only dots and percent-encoded dots (%2e, %252e, %25252e, ... any case)
 export const ENCODED_DOTS = /^(?:\.|%(?:25)*2e){1,2}$/i;
 

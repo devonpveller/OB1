@@ -106,28 +106,37 @@ const isDocumentsPath = (p: string) => p.slice(0, DOCUMENTS_ROOT.length + 1).toL
 
 export async function ownsDocumentPaths(db: Db, paths: string[], who: Viewer): Promise<boolean> {
   const legacy: string[] = [];
+  const bare: string[] = []; // exactly documents/<own key>: the caller's directory - or the cut of someone's file name (review B1)
   for (const p of paths) {
     if (!isDocumentsPath(p)) continue;
-    const seg = p.split("/")[1] ?? "";
-    if (seg === who.key) continue;
+    const parts = p.split("/");
+    const seg = parts[1] ?? "";
+    if (seg === who.key) {
+      // the own-key skip is for documents/<key>/... only: the key with nothing after it can be the scanner's cut of
+      // `documents/<key> notes.md` (a legacy root file of someone else), so it is a prefix like any other
+      if (parts.length <= 2) bare.push(p);
+      continue;
+    }
     if (seg.endsWith(".md") || seg.startsWith(".")) legacy.push(p);
     else return false;
   }
-  if (!legacy.length) return true;
+  if (!legacy.length && !bare.length) return true;
   const live = legacy.map((p) => p.replace(/^documents\/\.(?:trash|archive)\//i, "documents/"));
-  const rows = await db.query<{ path: string }>(
-    `SELECT path FROM public.user_document_listings WHERE owner_sub = $2 AND (path = ANY($1) OR path = ANY($3))`,
-    [legacy, who.sub, live],
-  );
-  const mine = new Set(rows.map((r) => r.path));
-  if (!legacy.every((p, i) => mine.has(p) || mine.has(live[i]))) return false;
+  if (legacy.length) {
+    const rows = await db.query<{ path: string }>(
+      `SELECT path FROM public.user_document_listings WHERE owner_sub = $2 AND (path = ANY($1) OR path = ANY($3))`,
+      [legacy, who.sub, live],
+    );
+    const mine = new Set(rows.map((r) => r.path));
+    if (!legacy.every((p, i) => mine.has(p) || mine.has(live[i]))) return false;
+  }
   // rw-doc-path-spaces: a path the scanner cut short (a space or " ' ? & # , ) in a file name) reaches here as its own
   // prefix. If that prefix is the caller's file but it is also the start, at one of those characters, of ANOTHER
   // user's path, the full path the route will read may be theirs: refuse, exactly as for a missing document.
   // The database only finds the other owners' paths that START with the prefix (starts_with is exact bytes); WHETHER the next
   // character is one the scanner stops at is decided HERE, by the scanner's own class (CUT_AFTER), because Postgres's \s
   // and JavaScript's \s are different sets (U+00A0, U+FEFF, U+202F, U+2007 ... are whitespace only to JavaScript).
-  const prefixes = [...new Set([...legacy, ...live])];
+  const prefixes = [...new Set([...legacy, ...live, ...bare])];
   const others = await db.query<{ path: string }>(
     `SELECT path FROM public.user_document_listings WHERE owner_sub <> $2
        AND EXISTS (SELECT 1 FROM unnest($1::text[]) AS pre WHERE starts_with(path, pre) AND length(path) > length(pre))`,

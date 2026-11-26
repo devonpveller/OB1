@@ -230,3 +230,13 @@ Deno.test("rw-doc-path-spaces: the 400 for a bad from.ref does not carry a docum
   const e = await assertRejects(() => createFlag(db, reader(db), WHO, { item_kind: "source", item_id: SRC, reason: "low_quality", from: { kind: "document", ref: "notes/x.md" } }));
   assert(!/documents\//i.test((e as Error).message), (e as Error).message);
 });
+
+Deno.test("rw-doc-path-spaces: the stored from.ref is the validated path (backslashes read as slashes), and DEL is refused by both path rules", async () => {
+  const params: unknown[][] = [];
+  const { db } = recorder();
+  const spy: Db = { query: <T>(sql: string, p?: unknown[]) => { if (/INSERT INTO public\.user_flags/.test(sql)) params.push(p ?? []); return db.query<T>(sql, p); }, tx: (fn) => fn(spy) };
+  await createFlag(spy, reader(spy), WHO, { item_kind: "source", item_id: SRC, reason: "low_quality", from: { kind: "document", ref: ["documents", WHO.key, "Old notes", "x.md"].join(String.fromCharCode(92)) } });
+  assertEquals(params[0][7], `documents/${WHO.key}/Old notes/x.md`);
+  const { safeRelPath } = await import("../util/paths.ts");
+  assertEquals((() => { try { safeRelPath("notes/a\u007fb.md"); return "allowed"; } catch { return "refused"; } })(), "refused");
+});
