@@ -184,9 +184,13 @@ Deno.test("T9: the queue routes are user-only; a quote that names a document pat
   const app = new Hono();
   app.use("*", ownerScope(noDb));
   app.post("/workbench/contract/documents/pending-refs", (c) => c.json({ ok: true }));
+  app.post("/workbench/contract/other-route", (c) => c.json({ ok: true }));
   const OWN = "documents/operator/notes.md"; // the seam's default identity (no sign-in) is 'operator'
   const post = (b: unknown) => app.request("/workbench/contract/documents/pending-refs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) });
   assertEquals((await post({ path: OWN, quote: "see documents/other-user/secret.md for details" })).status, 200);
+  // attempt 1 note: "quote" is a text field on the to-place routes ONLY, not on every route
+  const postOther = (b: unknown) => app.request("/workbench/contract/other-route", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) });
+  assertEquals((await postOther({ quote: "see documents/other-user/secret.md for details" })).status, 404, "elsewhere a quote is still searched for paths");
   assertEquals((await post({ path: OWN, section: "documents/other-user/secret.md" })).status, 404);
   assertEquals((await post({ path: "documents/other-user/secret.md", source_id: SRC })).status, 404);
   assert(documentPathsIn("documents/other-user/secret.md").length === 1);
@@ -216,4 +220,59 @@ Deno.test("T10: migration files: slot 630 is mounted, the forward is the FK-carr
   const stmts = rev.split(/\r?\n/).filter((l) => /^\s*(DROP|DELETE|ALTER|REVOKE|UPDATE)\b/i.test(l));
   assertEquals(stmts, ["DROP TABLE IF EXISTS public.document_pending_refs;"]);
   assert(/document_pending_refs/.test(chk) && /orphan_rows/.test(chk) && /cross_owner_rows/.test(chk) && /grants_exact/.test(chk));
+});
+
+Deno.test("T11 (attempt 1 D1): a long quote cannot hit a btree row limit: the duplicate key is md5(quote); the limit counts code points", async () => {
+  let fwd = "";
+  try {
+    fwd = await Deno.readTextFile(new URL("../../../init-document-toplace.sql", import.meta.url));
+  } catch { /* inside the image the migration is not in the build context */ }
+  if (fwd) {
+    assert(/CREATE UNIQUE INDEX IF NOT EXISTS uq_document_pending_refs_cite[^;]*md5\(quote\)/.test(fwd), "the unique key holds md5(quote), not the quote");
+    assert(!/uq_document_pending_refs_cite[^;]*,\s*quote\)/.test(fwd), "the raw quote is not in the index");
+  }
+  const base = { path: DOC, source_id: SRC, added_from: "source" };
+  assertEquals(PendingRefCreate.safeParse({ ...base, quote: "x".repeat(4000) }).success, true);
+  assertEquals(PendingRefCreate.safeParse({ ...base, quote: "x".repeat(4001) }).success, false);
+  assertEquals(PendingRefCreate.safeParse({ ...base, quote: "引".repeat(4000) }).success, true, "4000 CJK characters");
+  assertEquals(PendingRefCreate.safeParse({ ...base, quote: "\u{1F600}".repeat(4000) }).success, true, "4000 astral code points (8000 UTF-16 units)");
+  assertEquals(PendingRefCreate.safeParse({ ...base, quote: "\u{1F600}".repeat(4001) }).success, false);
+  // the key is a hash: the insert names md5(quote) as its conflict target
+  const { db, log } = recorder();
+  await addPendingRef(db, WHO, { path: DOC, claim_id: CLAIM, added_from: "claim", quote: "q" }).catch(() => {});
+  const ins = log.find((l) => /^INSERT INTO public\.document_pending_refs/.test(l.sql))!;
+  assert(/ON CONFLICT \(owner_sub, path, \(COALESCE\(source_id::text, 'claim:' \|\| claim_id::text\)\), md5\(quote\)\) DO NOTHING/.test(ins.sql), ins.sql);
+});
+
+Deno.test("T12 (attempt 1 D2): the bound is atomic: one transaction, an advisory lock on (owner, path), then the count, then the insert", async () => {
+  const { db, log, events } = recorder({ count: 0 });
+  await addPendingRef(db, WHO, { path: DOC, claim_id: CLAIM, added_from: "claim" });
+  const lock = log.findIndex((l) => /pg_advisory_xact_lock/.test(l.sql));
+  const count = log.findIndex((l) => /count\(\*\)::int AS n FROM public\.document_pending_refs/.test(l.sql));
+  const ins = log.findIndex((l) => /^INSERT INTO public\.document_pending_refs/.test(l.sql));
+  assert(lock >= 0 && count > lock && ins > count, `lock ${lock}, count ${count}, insert ${ins}`);
+  assertEquals(events, ["begin", "commit"], "count and insert share one transaction");
+  assert(log[lock].args.includes("user-a") && log[lock].args.includes(DOC), "keyed on the owner and the path");
+});
+
+Deno.test("T13 (attempt 1 note): the repository itself refuses another owner's document (not only the request gate)", async () => {
+  // a stateful fake: the listing row of DOC belongs to user-a
+  const mk = (): Db => {
+    const db: Db = {
+      query: <T>(sql: string, args: unknown[] = []) => {
+        const s = sql.replace(/\s+/g, " ").trim();
+        if (/FROM public\.user_document_listings WHERE path = \$1 AND owner_sub = \$2/.test(s)) return Promise.resolve([{ ok: args[0] === DOC && args[1] === "user-a" }] as T[]);
+        if (/count\(\*\)/.test(s)) return Promise.resolve([{ n: 0 }] as T[]);
+        return Promise.resolve([] as T[]);
+      },
+      tx: (fn) => fn(db),
+    };
+    return db;
+  };
+  const B2: Identity = { sub: "user-b", actor: "user-b", name: "B", key: "user-b" };
+  for (const e of [
+    await assertRejects(() => listPendingRefs(mk(), B2, DOC, 10), NotFound),
+    await assertRejects(() => addPendingRef(mk(), B2, { path: DOC, claim_id: CLAIM, added_from: "claim" }), NotFound),
+  ]) assertEquals((e as Error).message, NO_DOC);
+  assertEquals((await listPendingRefs(mk(), WHO, DOC, 10)).total, 0, "the owner is let through");
 });

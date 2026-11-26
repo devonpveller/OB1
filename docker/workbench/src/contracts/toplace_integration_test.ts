@@ -7,7 +7,7 @@
 // Callers: A is the lab's default identity (no header); B is a request with X-Test-Sub.
 // Environment: TOPLACE_TEST_BASE, TOPLACE_TEST_KEY, TOPLACE_TEST_VAULT, TOPLACE_TEST_SUB_HEADER (default X-Test-Sub),
 // CONTRACT_TEST_DB_HOST/_PORT/_USER/_PASSWORD (superuser: plants and snapshots).
-// P1..P8 name the acceptance statements (test-plans/rwr-doc-toplace-api.md).
+// P1..P9 name the acceptance statements (test-plans/rwr-doc-toplace-api.md).
 import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert@1";
 import { Pool } from "postgres";
 
@@ -118,6 +118,26 @@ t("P1: add a pending ref and list it for that document (a source with a quote, a
   // a quote that names a document path is text: it is stored, and listed back, for its owner
   const q = await add(A, p, { quote: "see documents/some-other/x.md for the original", source_id: SRC_WHOLE });
   assertEquals(q.status, 201, q.text);
+  // attempt 1 D1: a quote the schema accepts is accepted by the store: 4000 ASCII, 4000 CJK, 4000 astral code points (a btree
+  // row would have refused any of them at 2704 bytes); each lists back whole, a repeat is 409 naming ITS row, 4001 is 400
+  const pl = await newDoc(A, `toplace-p1long-${run}`);
+  const longs = ["x".repeat(4000), "引".repeat(4000), "\u{1F600}".repeat(4000), "y".repeat(3500) + "z".repeat(500)];
+  const ids: string[] = [];
+  for (const lq of longs) {
+    const r = await add(A, pl, { source_id: SRC_WHOLE, quote: lq });
+    assertEquals(r.status, 201, `${lq.length} units: ${r.text.slice(0, 200)}`);
+    assertEquals(r.json.quote, lq);
+    ids.push(r.json.id);
+  }
+  const ll = await list(A, pl);
+  assertEquals((ll.json.pending_refs as any[]).map((x) => x.quote), longs, "each long quote lists back whole");
+  for (let i = 0; i < longs.length; i++) {
+    const d = await add(A, pl, { source_id: SRC_WHOLE, quote: longs[i] });
+    assertEquals([d.status, d.json.detail.pending_ref_id], [409, ids[i]], "the 409 names the row with that very quote");
+  }
+  assertEquals((await add(A, pl, { source_id: SRC_WHOLE, quote: "x".repeat(4001) })).status, 400);
+  assertEquals((await add(A, pl, { source_id: SRC_WHOLE, quote: "\u{1F600}".repeat(4001) })).status, 400);
+  assertEquals((await rows(pl)).length, 4);
 });
 
 t("P2: placing at the cursor creates a pinned reference record and removes the row from the queue (chip, transclusion, claim)", async () => {
@@ -233,10 +253,11 @@ t("P3: trash then restore keeps the queue; a move, an archive and a folder trash
 t("P4: two identities, planted data: B never sees A's pending refs (list, add, place, delete, counts, nested fields, messages)", async () => {
   const markA = `MARKA-${rnd()}`;
   const markB = `MARKB-${rnd()}`;
+  const fromA = `marka-${rnd()}`; // attempt 1: a planted marker in added_from too (a lower-case label)
   const pa = await newDoc(A, `toplace-p4a-${run}`);
   const pb = await newDoc(B, `toplace-p4b-${run}`);
   const aRows = [
-    (await add(A, pa, { quote: QUOTE, section: markA })).json.id,
+    (await add(A, pa, { quote: QUOTE, section: markA, added_from: fromA })).json.id,
     (await call(A, "POST", PR, { path: pa, claim_id: CLAIM, section: markA, added_from: "claim" })).json.id,
     (await add(A, pa, { source_id: SRC_WHOLE, section: markA })).json.id,
   ] as string[];
@@ -283,13 +304,13 @@ t("P4: two identities, planted data: B never sees A's pending refs (list, add, p
   // A still reads all three, with the marker, and B's rows never appear for A
   const al = await list(A, pa);
   assertEquals(al.json.total, 3);
-  assert(al.text.includes(markA) && !al.text.includes(markB));
+  assert(al.text.includes(markA) && al.text.includes(fromA) && !al.text.includes(markB));
   // B cannot reach A's document through the documents API either (the queue is not a way round the owner scope)
   assertEquals((await call(B, "POST", `${D}/trash`, { path: pa })).text, NO_DOC);
   // nothing B received, in any call of this whole file, carries A's marker or A's row ids
   assert(seen.length > 10, "B's responses were kept");
   for (const s of seen) {
-    if (s.includes(markA)) assert(false, "A's marker reached a response of B's");
+    if (s.includes(markA) || s.includes(fromA)) assert(false, "A's marker reached a response of B's");
     for (const id of aRows) if (s.includes(id)) assert(false, "A's row id reached a response of B's");
   }
 });
@@ -297,8 +318,9 @@ t("P4: two identities, planted data: B never sees A's pending refs (list, add, p
 t("P5: nothing private from this item appears on a shared surface (a planted marker: tables, shared search, shared reads, the vault)", async () => {
   const mark = `PLANT-${rnd()}-QUOTE`;
   const markS = `PLANT-${rnd()}-SECTION`;
+  const markF = `plant-${rnd()}-from`; // added_from is a lower-case label
   const p = await newDoc(A, `toplace-p5-${run}`);
-  assertEquals((await add(A, p, { source_id: SRC_WHOLE, quote: "", section: markS, added_from: "chat" })).status, 201);
+  assertEquals((await add(A, p, { source_id: SRC_WHOLE, quote: "", section: markS, added_from: markF })).status, 201);
   // a quote that is in the source (placeable) carrying the marker is not possible, so plant it in the quote of a claim cite
   const pq = await call(A, "POST", PR, { path: p, claim_id: CLAIM, quote: mark, added_from: "claim" });
   assertEquals(pq.status, 201, pq.text);
@@ -309,7 +331,7 @@ t("P5: nothing private from this item appears on a shared surface (a planted mar
   let read = 0;
   for (const tb of tables) {
     try {
-      const n = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public."${tb}" x WHERE x::text LIKE $1 OR x::text LIKE $2`, [`%${mark}%`, `%${markS}%`]))[0].n;
+      const n = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public."${tb}" x WHERE x::text LIKE $1 OR x::text LIKE $2 OR x::text LIKE $3`, [`%${mark}%`, `%${markS}%`, `%${markF}%`]))[0].n;
       read++;
       if (n) hits.push(`${tb}:${n}`);
     } catch { /* an unreadable table is counted below */ }
@@ -321,7 +343,7 @@ t("P5: nothing private from this item appears on a shared surface (a planted mar
     for (const path of [`/workbench/search?q=${mark.slice(0, 16)}`, `/workbench/search?q=${markS.slice(0, 16)}`, `/workbench/contract/search?q=${mark.slice(0, 16)}`,
       `/workbench/contract/documents`, `/workbench/contract/sources`, `/workbench/documents/references?path=${encodeURIComponent(p)}`, `/workbench/contract/timeline`]) {
       const r = await call(who, "GET", path);
-      assert(!r.text.includes(mark) && !r.text.includes(markS), `${path} (${who === A ? "A" : "B"}) carries a planted marker`);
+      assert(!r.text.includes(mark) && !r.text.includes(markS) && !r.text.includes(markF), `${path} (${who === A ? "A" : "B"}) carries a planted marker`);
     }
   }
   // 3. the vault (the shared files): the document is untouched, no file anywhere holds a marker
@@ -334,7 +356,7 @@ t("P5: nothing private from this item appears on a shared surface (a planted mar
       else if (e.isFile) {
         files++;
         const txt = await Deno.readTextFile(f).catch(() => "");
-        assert(!txt.includes(mark) && !txt.includes(markS), `${f} holds a planted marker`);
+        assert(!txt.includes(mark) && !txt.includes(markS) && !txt.includes(markF), `${f} holds a planted marker`);
       }
     }
   }
@@ -342,7 +364,7 @@ t("P5: nothing private from this item appears on a shared surface (a planted mar
   assert(files > 0, "the vault was scanned");
   // the markers are there for their owner (the test would pass vacuously otherwise)
   const own = await list(A, p);
-  assert(own.text.includes(mark) && own.text.includes(markS));
+  assert(own.text.includes(mark) && own.text.includes(markS) && own.text.includes(markF));
   // the workbench log is searched by the runner (it holds the same markers' prefix: PLANT-)
 });
 
@@ -403,6 +425,20 @@ t("P8: the placement and the removal are one step: two callers placing one row g
   const held = await sql(`SELECT 1 FROM public.reference_holders WHERE holder_ref = $1`, [p]);
   assertEquals(held.length, 1, "one reference was placed");
   assertEquals((await rows(p)).length, 0);
+});
+
+t("P9: the bound holds under parallel adds (attempt 1 D2): 199 rows and eight adds at once end at exactly 200", async () => {
+  for (let round = 0; round < 3; round++) {
+    const p = await newDoc(A, `toplace-p9-${round}-${run}`);
+    const owner = (await sql<{ owner_sub: string }>(`SELECT owner_sub FROM public.user_document_listings WHERE path = $1`, [p]))[0].owner_sub;
+    await sql(
+      `INSERT INTO public.document_pending_refs (owner_sub, actor_sub, path, claim_id, quote, added_from)
+       SELECT $1, $1, $2, $3::uuid, 'bulk-' || g, 'bulk' FROM generate_series(1, 199) g`, [owner, p, CLAIM]);
+    const rs = await Promise.all([1, 2, 3, 4, 5, 6, 7, 8].map((i) => add(A, p, { source_id: SRC_WHOLE, quote: `par-${i}` })));
+    assertEquals(rs.map((r) => r.status).sort(), [201, 409, 409, 409, 409, 409, 409, 409], JSON.stringify(rs.map((r) => r.status)));
+    assertEquals((await rows(p)).length, 200, "never above the bound");
+    assert(rs.filter((r) => r.status === 409).every((r) => r.json.error.includes("queue is full")));
+  }
 });
 
 Deno.test({ name: "pool close", ignore, fn: async () => { await pool!.end(); }, sanitizeOps: false, sanitizeResources: false });

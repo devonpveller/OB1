@@ -25,7 +25,7 @@
 #      incl. toplace_test.ts) and its test stage (and the viewer, for the sweep)
 #   4. the lab: database (chain; then 630 applied by psql -f, as live; fixtures.sql), stub embedder, stub research service,
 #      PostgREST + the OB1 rest Caddy, ONE workbench (vault = a temp dir, WORKSPACE_IDENTITY_HEADER=X-Test-Sub)
-#   5a. src/contracts/toplace_integration_test.ts (P1-P8) against the workbench; the planted markers searched in its log
+#   5a. src/contracts/toplace_integration_test.ts (P1-P9) against the workbench; the planted markers searched in its log
 #   5b. the migration: forward x2 (identical dump), revert (the dump is BYTE-IDENTICAL to the pre-630 baseline), revert twice,
 #       forward again (identical to the first forward); a second database from the full chain (630 mounted) has the same
 #       schema; check-document-toplace.sql OK, and FAIL on a planted cross-owner row; the app role's rights are exact
@@ -289,7 +289,7 @@ try {
   Check (Wait-Http "http://$P-wb:8000/health" 90) 'the workbench is up'
   if (-not $Red -and -not $NoSweep) { Check (Wait-Http "http://$P-viewer:8080/workspace/" 90) 'the front door (the viewer) answers' }
 
-  Write-Host '[5a] the to-place integration test (P1-P8): add, list, place, trash / restore / move / delete forever, two users with planted data, shared surfaces, bounds, one-step placement'
+  Write-Host '[5a] the to-place integration test (P1-P9): add, list, place, trash / restore / move / delete forever, two users with planted data, shared surfaces, bounds, one-step placement'
   $itArgs = @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
     '-e', "TOPLACE_TEST_KEY=$key", '-e', 'TOPLACE_TEST_VAULT=/vault', '-e', 'WIKI_GIT_DIR=/vault',
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw")
@@ -306,15 +306,15 @@ try {
   Save 'toplace-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||error:|Assertion|=> ' }) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   if ($Red) {
-    # the base has no routes: P1-P5, P7 and P8 fail (P6 reads the database, this tree's chain, and the pool close pass)
-    Check ($sum.Success -and [int]$sum.Groups[3].Value -ge 7) "RED: the route cases fail on the base $BaseSha ($($sum.Value); failed: $($r5.failed -join ','))"
-  } else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 9) "the to-place integration test ($($sum.Value))" }
+    # the base has no routes: P1-P5 and P7-P9 fail (P6 reads the database, this tree's chain, and the pool close pass)
+    Check ($sum.Success -and [int]$sum.Groups[3].Value -ge 8) "RED: the route cases fail on the base $BaseSha ($($sum.Value); failed: $($r5.failed -join ','))"
+  } else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 10) "the to-place integration test ($($sum.Value))" }
   if (-not $sum.Success -or $sum.Groups[1].Value -ne 'ok') { Save 'toplace-integration-tail.log' (($clean -split "`n" | Select-Object -Last 60) -join "`n") }
 
   if (-not $Red) {
     # the planted markers (the test's PLANT- / MARKA- / MARKB-, the bulk quotes, the document titles) are fixed prefixes: none may reach the workbench's log
     $wlog = Dk logs "$P-wb"
-    $hits = @($wlog -split "`n" | Where-Object { $_ -match 'PLANT-|MARKA-|MARKB-|bulk-[0-9]|toplace-p[0-9]' })
+    $hits = @($wlog -split "`n" | Where-Object { $_ -match 'PLANT-|MARKA-|MARKB-|marka-|plant-[0-9a-f]+-from|bulk-[0-9]|par-[0-9]|toplace-p[0-9]' })
     Check ($hits.Count -eq 0) "no planted marker, quote or document title in the workbench log ($($hits.Count) hits)"
     Save 'workbench-marker-hits.log' ($hits -join "`n")
 
@@ -429,12 +429,13 @@ try {
   if ($Mutate -and -not $Red) {
     Write-Host '[5m] mutation proofs: the integration test against deliberately broken copies of the item (each must FAIL a named case)'
     $mut = @(
-      @{ id = 'M1'; file = 'src/contracts/repo/pending_refs.ts'; find = 'DELETE FROM public.document_pending_refs WHERE id = $1 AND owner_sub = $2 RETURNING id::text AS id'; repl = 'DELETE FROM public.document_pending_refs WHERE id = $1 RETURNING id::text AS id'; want = 'P4'; what = 'the delete route drops the owner filter' },
-      @{ id = 'M2'; file = 'src/contracts/repo/pending_refs.ts'; find = 'WHERE path = $1 AND owner_sub = $2) AS ok'; repl = 'WHERE path = $1) AS ok'; want = 'P4'; what = 'the document check drops the owner (list and add on another user document)' },
+      @{ id = 'M1'; file = 'src/contracts/repo/pending_refs.ts'; find = 'DELETE FROM public.document_pending_refs WHERE id = $1 AND owner_sub = $2 RETURNING id::text AS id'; repl = 'DELETE FROM public.document_pending_refs WHERE id = $1 AND $2::text IS NOT NULL RETURNING id::text AS id'; want = 'P4'; what = 'the delete route''s owner filter is a no-op (the query stays valid)' },
+      @{ id = 'M2'; file = 'src/contracts/repo/pending_refs.ts'; find = 'DELETE FROM public.document_pending_refs WHERE id = $1 AND owner_sub = $2 RETURNING ${COLS}'; repl = 'DELETE FROM public.document_pending_refs WHERE id = $1 AND $2::text IS NOT NULL RETURNING ${COLS}'; want = 'P4'; what = 'place''s owner filter is a no-op (the query stays valid): B places A''s row' },
       @{ id = 'M3'; file = 'src/contracts/repo/pending_refs.ts'; find = 'const UUIDISH = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;'; repl = 'const UUIDISH = /^/;'; want = 'P4'; what = 'a malformed id reaches the database (a different answer from a missing row)' },
       @{ id = 'M4'; file = 'src/contracts/repo/pending_refs.ts'; find = 'DELETE FROM public.document_pending_refs WHERE id = $1 AND owner_sub = $2 RETURNING ${COLS}'; repl = 'SELECT ${COLS} FROM public.document_pending_refs WHERE id = $1 AND owner_sub = $2'; want = 'P2'; what = 'place no longer removes the row from the queue' },
       @{ id = 'M5'; file = 'src/contracts/repo/pending_refs.ts'; find = 'if (!row) throw new NotFound(NO_REF);'; repl = 'if (!row) throw new NotFound("no pending reference " + id);'; want = 'P4'; what = 'a refusal names the id it was given (not byte-identical to a missing one)' },
-      @{ id = 'M6'; file = 'src/contracts/repo/pending_refs.ts'; find = 'if (n >= MAX_PER_DOCUMENT)'; repl = 'if (false)'; want = 'P7'; what = 'the per-document bound is gone' }
+      @{ id = 'M6'; file = 'src/contracts/repo/pending_refs.ts'; find = 'if (n >= MAX_PER_DOCUMENT)'; repl = 'if (false)'; want = 'P7'; what = 'the per-document bound is gone' },
+      @{ id = 'M11'; file = 'src/contracts/repo/pending_refs.ts'; find = 'await t.query(`SELECT pg_advisory_xact_lock(hashtextextended($1 || ''|'' || $2, 630))`, [who.sub, rel]);'; repl = ''; want = 'P9'; what = 'the advisory lock is gone (count and insert race)' }
     )
     $mutRoot = Join-Path $env:TEMP "$P-mut"; $script:made.dirs += $mutRoot
     foreach ($m in $mut) {
