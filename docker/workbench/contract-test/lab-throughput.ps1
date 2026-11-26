@@ -45,7 +45,7 @@ function Get-LabFileSha256([string]$Path) {
 # Returns @{ refused = '' | reason; mode = landing|green|red|mutant; sweep = bool; note = the line to print }.
 function Resolve-LabRun {
   param([bool]$Red = $false, [bool]$Landing = $false, [bool]$NoSweep = $false, [bool]$Sweep = $false,
-        [bool]$Mutant = $false, [string[]]$WbMount = @(), [bool]$SkipGate = $false)
+        [bool]$Mutant = $false, [string[]]$WbMount = @(), [bool]$SkipGate = $false, [bool]$Prebuilt = $false)
   $r = @{ refused = ''; mode = 'green'; sweep = $false; note = '' }
   $mounts = @($WbMount | Where-Object { $_ })
   if ($Red) { $r.mode = 'red' } elseif ($Mutant -or $mounts.Count) { $r.mode = 'mutant' }
@@ -54,6 +54,9 @@ function Resolve-LabRun {
     if ($Mutant -or $mounts.Count) { $r.refused = 'a landing run takes no -Mutant / -WbMount (it tests the tree as it is)'; return $r }
     if ($SkipGate) { $r.refused = 'a landing run never uses a skip-gate image (-SkipGate): the full unit gate runs for every landing image'; return $r }
     if ($NoSweep) { $r.refused = 'a landing run always runs the isolation sweep: -NoSweep is refused'; return $r }
+    # test attempt 2, A8: a landing tests the tree as it is, so it builds (or reuses, labels and content checked) its own
+    # images; it never takes whatever happens to sit under the run's tags
+    if ($Prebuilt) { $r.refused = 'a landing run builds or reuses its own images of the tree under test: -Prebuilt is refused'; return $r }
     $r.mode = 'landing'; $r.sweep = $true
     $r.note = 'RUN MODE landing: the isolation sweep runs (always, for a landing)'
     return $r
@@ -113,12 +116,81 @@ function Get-LabImageLabels([string]$Tag) {
   if ($j) { foreach ($p in $j.PSObject.Properties) { $h[$p.Name] = [string]$p.Value } }
   return $h
 }
-# What the image itself says about its unit gate: 'full' (/app/.test-gate-passed and no .test-gate-skipped), 'skipped'
-# (the skipped marker and no passed marker), 'none', 'both', or 'error' (not runnable). One `docker run --rm --network
-# none`; the label is only a hint, because a `FROM <skip image>` + `LABEL ai-stack.lab.gate=full` (or an empty label)
-# forges it (rw-lab-throughput test attempt 1, D1).
-function Get-LabGateMarkers([string]$Tag) {
-  $o = Dk run --rm --network none --entrypoint sh $Tag -c 'p=0; s=0; [ -f /app/.test-gate-passed ] && p=1; [ -e /app/.test-gate-skipped ] && s=1; echo "gate-markers p=$p s=$s"'
+# THREAT MODEL of the green guard (rw-lab-throughput attempt 3, after test attempt 2's D1-bis). The rule it holds: a lab
+# never reports green on code that did not pass the full unit gate, or on a tree other than the one under test.
+#   It DEFENDS against the ordinary failures: a stale or foreign image under the run's tag (an earlier tip's :wt-<id>,
+#   another tester's images, an older tree's reuse tag), a tag re-pointed between the check and the run (the check
+#   resolves the tag to an image ID ONCE and the runner runs that ID, never the tag again), a skip-gate image, and an
+#   image whose source was changed after its gate ran (FROM <full image> + COPY <mutant> - its /app/src no longer equals
+#   the tree's).
+#   It does NOT defend against a deliberate forger who can build images on this daemon: labels and the gate markers are
+#   written by the build, so a FROM <skip image of THIS tree> + RUN touch /app/.test-gate-passed passes - the code is the
+#   tree's own, only the claim that its unit gate ran is false. Whoever can run `docker build` here can also run anything
+#   else on this host; the guard keeps honest runs honest, it is not a sandbox.
+$script:LabDirtyLabel = 'ai-stack.lab.dirty'
+# The inputs of the workbench image (the Dockerfile's COPY sources): a change anywhere else in OB1 never makes it dirty.
+$script:LabWbInputs = @('docker/workbench/Dockerfile', 'docker/workbench/deno.json', 'docker/workbench/deno.lock', 'docker/workbench/THIRD-PARTY-NOTICES.md',
+  'docker/workbench/gate', 'docker/workbench/csl', 'docker/workbench/src')
+
+# The image ID ('sha256:<64 hex>') a tag or ID resolves to now, or ''.
+function Resolve-LabImageId([string]$Ref) {
+  $o = "$(Dk image inspect --format '{{.Id}}' $Ref)".Trim()
+  if ($script:rc -ne 0 -or $o -notmatch '^sha256:[0-9a-f]{64}$') { return '' }
+  return $o
+}
+# The tree under test: OB1 HEAD's tree, and whether the workbench inputs differ from it (tracked or untracked).
+function Get-LabTreeUnderTest([string]$Ob1) {
+  $tree = "$(& git -C $Ob1 rev-parse 'HEAD^{tree}' 2>$null)".Trim()
+  $inputs = @($script:LabWbInputs)
+  $st = (@(& git -C $Ob1 status --porcelain --untracked-files=all -- @inputs 2>$null) -join "`n").Trim()
+  return @{ tree = $tree; dirty = [bool]$st; status = $st }
+}
+# What the tree says /app/src must hold: './<path>' -> sha256 of the file with CR removed (the working tree, which is the
+# committed tree when Get-LabTreeUnderTest says clean). Kind 'runtime' drops what the Dockerfile's app-src stage deletes
+# (every *_test.ts and src/export/credentials_oracle.ts); 'test' is the whole of src.
+function Get-LabSrcExpected([string]$Ob1, [string]$Kind) {
+  $h = @{}
+  $latin1 = [System.Text.Encoding]::GetEncoding(28591)
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  try {
+    foreach ($rel in @(& git -C $Ob1 ls-files -- 'docker/workbench/src' 2>$null)) {
+      $r = "$rel".Trim(); if (-not $r) { continue }
+      $inSrc = $r.Substring('docker/workbench/src/'.Length)
+      if ($Kind -eq 'runtime' -and ($inSrc -match '_test\.ts$' -or $inSrc -eq 'export/credentials_oracle.ts')) { continue }
+      # Latin-1 maps every byte to one char and back, so this drops exactly the CR bytes, fast
+      $raw = $latin1.GetString([System.IO.File]::ReadAllBytes((Join-Path $Ob1 ($r -replace '/', '\'))))
+      $h["./$inSrc"] = [System.BitConverter]::ToString($sha.ComputeHash($latin1.GetBytes($raw.Replace("`r", '')))).Replace('-', '').ToLower()
+    }
+  } finally { $sha.Dispose() }
+  return $h
+}
+# What the image holds in /app/src: './<path>' -> sha256 with CR removed, from one `docker run --rm --network none`.
+function Get-LabImageSrc([string]$Id) {
+  $o = Dk run --rm --network none --entrypoint sh $Id -c 'cd /app/src && find . -type f | LC_ALL=C sort | while IFS= read -r f; do printf "src-file %s %s\n" "$(tr -d "\r" < "$f" | sha256sum | cut -d" " -f1)" "$f"; done; echo src-end'
+  if ($script:rc -ne 0 -or ($o | Out-String) -notmatch 'src-end') { return $null }
+  $h = @{}
+  foreach ($l in (($o | Out-String) -split "`n")) { if ($l -match '^src-file ([0-9a-f]{64}) (\./.+?)\s*$') { $h[$Matches[2]] = $Matches[1] } }
+  return $h
+}
+# '' when the image's /app/src is the tree's (every expected file present with the same content; for the runtime image no
+# extra file either), else the first differences.
+function Test-LabImageSrc([string]$Id, [string]$Ob1, [string]$Kind) {
+  $want = Get-LabSrcExpected $Ob1 $Kind
+  if (-not $want.Count) { return "no tracked source under docker/workbench/src in $Ob1" }
+  $have = Get-LabImageSrc $Id
+  if ($null -eq $have) { return 'its /app/src could not be read' }
+  $bad = @()
+  foreach ($k in ($want.Keys | Sort-Object)) {
+    if (-not $have.ContainsKey($k)) { $bad += "missing $k" } elseif ($have[$k] -ne $want[$k]) { $bad += "differs $k" }
+  }
+  if ($Kind -eq 'runtime') { foreach ($k in ($have.Keys | Sort-Object)) { if (-not $want.ContainsKey($k)) { $bad += "extra $k" } } }
+  if ($bad.Count) { return "its /app/src is not the tree's ($($bad.Count) difference(s): $(($bad | Select-Object -First 4) -join ', '))" }
+  return ''
+}
+# What the image itself says about its unit gate: 'full' (/app/.test-gate-passed and no .test-gate-skipped), 'skipped',
+# 'none', 'both', or 'error' (not runnable). A self-attestation: see the threat model above.
+function Get-LabGateMarkers([string]$Ref) {
+  $o = Dk run --rm --network none --entrypoint sh $Ref -c 'p=0; s=0; [ -f /app/.test-gate-passed ] && p=1; [ -e /app/.test-gate-skipped ] && s=1; echo "gate-markers p=$p s=$s"'
   if ($script:rc -ne 0) { return 'error' }
   $m = ([regex]'gate-markers p=([01]) s=([01])').Match(($o | Out-String))
   if (-not $m.Success) { return 'error' }
@@ -128,20 +200,32 @@ function Get-LabGateMarkers([string]$Tag) {
   if ($pm -and $sm) { return 'both' }
   return 'none'
 }
-# Throws (after a FAIL line) unless $Tag's unit gate ran: the passed marker present and the skipped marker absent INSIDE
-# the image, and a label that does not say skipped. An unset label (an image from before rw-lab-throughput) passes only
-# on the marker. A green or landing run calls it on every workbench image it is about to run.
-function Assert-LabGreenImage([string]$Tag, [string]$Mode) {
-  $l = Get-LabImageLabels $Tag
-  if ($null -eq $l) { Fail "the green-image guard could not inspect $Tag"; throw "guard: $Tag not inspectable" }
+# The green / landing guard. Resolves $Tag to an image ID ONCE, checks THAT image and returns its ID - the caller runs the
+# ID, never the tag again (test attempt 2, A7). Refuses (FAIL, then throw) unless:
+#   the tree under test is clean in the workbench inputs (a green run tests a committed tree);
+#   the image's ai-stack.lab.tree is that tree and it is not labelled dirty (A6, A6b, A8: stale and foreign images);
+#   its gate markers say full and its label does not say skipped (D1);
+#   its /app/src equals the tree's, file by file (A5: code put on a full image after its gate ran). $Kind: runtime | test.
+function Assert-LabGreenImage([string]$Tag, [string]$Mode, [string]$Ob1, [string]$Kind = 'runtime') {
+  $refuse = { param($why) Fail "REFUSED: $Tag is not this tree's full-gate image ($why) and this is a $Mode run - a green or landing run only ever runs an image of the tree under test whose unit gate ran"; throw "guard: $Tag refused in a $Mode run: $why" }
+  if (-not $Ob1) { & $refuse 'the guard was given no OB1 tree to bind the image to' }
+  $id = Resolve-LabImageId $Tag
+  if (-not $id) { Fail "the green-image guard could not inspect $Tag"; throw "guard: $Tag not inspectable" }
+  $tut = Get-LabTreeUnderTest $Ob1
+  if (-not $tut.tree) { & $refuse "the tree under test in $Ob1 cannot be read" }
+  if ($tut.dirty) { & $refuse "the tree under test has uncommitted changes in the workbench inputs ($(($tut.status -split "`n" | Select-Object -First 3) -join '; ')): a green or landing run tests a committed tree" }
+  $l = Get-LabImageLabels $id
+  if ($null -eq $l) { & $refuse "image $id cannot be inspected" }
+  $t = $l[$script:LabTreeLabel]
+  if ($t -ne $tut.tree) { & $refuse "it was built from tree '$(if ($t) { $t } else { '<no ai-stack.lab.tree label>' })', the tree under test is $($tut.tree)" }
+  if ($l[$script:LabDirtyLabel] -eq '1') { & $refuse 'it was built from a dirty working tree (ai-stack.lab.dirty=1)' }
   $g = $l[$script:LabGateLabel]
-  $mk = Get-LabGateMarkers $Tag
-  if ($g -eq 'skipped' -or $mk -ne 'full') {
-    $why = if ($mk -ne 'full') { "its gate markers say '$mk' (want /app/.test-gate-passed and no /app/.test-gate-skipped)" } else { "$($script:LabGateLabel)=skipped" }
-    Fail "REFUSED: $Tag is not a full-gate image ($why; label $($script:LabGateLabel)='$g') and this is a $Mode run - a green or landing run only ever uses an image whose unit gate ran"
-    throw "guard: $Tag is not a full-gate image in a $Mode run"
-  }
-  Pass "the green-image guard: $Tag ran its unit gate (/app/.test-gate-passed present, no skipped marker; label $($script:LabGateLabel)=$(if ($g) { $g } else { '<unset: built before rw-lab-throughput>' }))"
+  $mk = Get-LabGateMarkers $id
+  if ($g -eq 'skipped' -or $mk -ne 'full') { & $refuse "its gate markers say '$mk' (want /app/.test-gate-passed and no /app/.test-gate-skipped); label $($script:LabGateLabel)='$g'" }
+  $src = Test-LabImageSrc $id $Ob1 $Kind
+  if ($src) { & $refuse $src }
+  Pass "the green-image guard: $Tag = $id (tree $($tut.tree.Substring(0, 12)), gate markers full, /app/src = the tree's, $Kind) - the run uses this ID"
+  return $id
 }
 
 # ---- part 1: a skip-gate Dockerfile for a tree that predates WORKBENCH_TEST_GATE (a red base) ---------------------------
@@ -259,6 +343,9 @@ function Invoke-LabImage {
   }
   if ($ReuseOnly) { return @{ tag = ''; reused = $false; rc = 1; log = ''; key = $key } }
   $a = @('build', '--label', $label, '--label', "$($script:LabTreeLabel)=$($key.tree)", '--label', "$($script:LabArgsLabel)=$($key.args)")
+  # a build of a dirty working tree is stamped so; the green guard never accepts it (test attempt 2: HEAD's tree was
+  # stamped on a dirty build)
+  if ($key.dirty) { $a += @('--label', "$($script:LabDirtyLabel)=1") }
   foreach ($k in ($ba.Keys | Sort-Object)) { $a += @('--build-arg', "$k=$($ba[$k])") }
   if ($Target) { $a += @('--target', $Target) }
   $a += $Extra
@@ -325,8 +412,19 @@ function Initialize-LabDbTemplate([string]$PgImage, [string]$StageDir, [string]$
       if ($l["$($script:LabTplLabel).pin"] -ne $Pin) { $bad += "pin $($l["$($script:LabTplLabel).pin"]) (want $Pin)" }
       if ($l["$($script:LabTplLabel).digest"] -ne $digest) { $bad += "digest $($l["$($script:LabTplLabel).digest"]) (want $digest)" }
       if (-not $bad.Count) {
-        $ready = Dk run --rm --network none -v "${vol}:/t:ro" --entrypoint cat $PgImage /t/READY
-        if ($script:rc -ne 0 -or ($ready | Out-String).Trim() -ne "$Pin $digest") { $bad += 'no READY marker naming this pin and digest (an interrupted build)' }
+        # only a READY that is really absent or names another pin/digest rebuilds the shared template; a docker failure
+        # (a timeout on a loaded host, a daemon hiccup) is retried, and if it persists the run replays its chain instead -
+        # it never deletes a template it could not read
+        $readyState = 'unknown'
+        for ($try = 1; $try -le 3 -and $readyState -eq 'unknown'; $try++) {
+          $ready = Dk run --rm --network none -v "${vol}:/t:ro" --entrypoint sh $PgImage -c 'if [ -f /t/READY ]; then echo "ready-file $(cat /t/READY)"; else echo ready-absent; fi'
+          $rt = ($ready | Out-String)
+          if ($script:rc -eq 0 -and $rt -match 'ready-absent') { $readyState = 'absent' }
+          elseif ($script:rc -eq 0 -and $rt -match 'ready-file (.+)') { $readyState = $(if ($Matches[1].Trim() -eq "$Pin $digest") { 'ok' } else { 'other' }) }
+          elseif ($try -lt 3) { Write-Host "  DB TEMPLATE: reading $vol's READY marker failed (rc $($script:rc)) - retrying"; Start-Sleep -Seconds (5 * $try) }
+        }
+        if ($readyState -eq 'unknown') { $res.refused = "the READY marker of $vol could not be read (docker rc $($script:rc), 3 tries) - not used and NOT removed"; return $res }
+        if ($readyState -ne 'ok') { $bad += "no READY marker naming this pin and digest ($readyState; an interrupted build)" }
       }
       if (-not $bad.Count) {
         $res.log = (Dk run --rm --network none -v "${vol}:/t:ro" --entrypoint cat $PgImage /t/initdb.log | Out-String)
@@ -460,10 +558,20 @@ function Invoke-LabWorkbenchImages {
     $vt = ([regex]'Tests\s+(\d+) passed').Match($vclean)
     if ($vt.Success) { Pass "workspace unit tests in the image build: $($vt.Groups[1].Value) passed" }
     $res.viewer = $v.tag; if (-not $v.reused) { $res.built += 'viewer' }
+    $vid = Resolve-LabImageId $v.tag
+    if (-not $vid) { Fail "could not resolve $($v.tag) to an image ID"; return $res }
     if ($v.tag -notmatch ':wt-tree-') { $script:made.images += $v.tag }
+    $res.viewer = $vid
   }
   if ($Run.mode -eq 'green' -or $Run.mode -eq 'landing') {
-    try { Assert-LabGreenImage $res.wb $Run.mode; Assert-LabGreenImage $res.test $Run.mode } catch { return $res }
+    try { $res.wb = Assert-LabGreenImage $res.wb $Run.mode $Ob1 'runtime'; $res.test = Assert-LabGreenImage $res.test $Run.mode $Ob1 'test' } catch { return $res }
+  } else {
+    # red / mutant: no gate guard, but the run still uses the image IDs resolved here, never a tag that can move
+    foreach ($k in @('wb', 'test')) {
+      $rid = Resolve-LabImageId $res[$k]
+      if (-not $rid) { Fail "could not resolve $($res[$k]) to an image ID"; return $res }
+      $res[$k] = $rid
+    }
   }
   Write-Host "  IMAGES: built $(if ($res.built.Count) { $res.built -join ', ' } else { 'nothing (all reused)' })"
   $res.ok = $true

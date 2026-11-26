@@ -291,6 +291,14 @@ try {
     if ($script:rc -ne 0) { throw 'build research' }
     $script:made.images += $rsTag
   }
+  if ($Red) {
+    # rw-lab-throughput attempt 3: the run uses image IDs resolved once, never a tag that can move (test attempt 2, A7)
+    foreach ($v in @('wbTag', 'viewerTag', 'rsTag', 'wbTestTag')) {
+      $rid = Resolve-LabImageId (Get-Variable -Name $v -ValueOnly)
+      if (-not $rid) { throw "could not resolve `$$v to an image ID" }
+      Set-Variable -Name $v -Value $rid
+    }
+  }
   $itMount = if ($Red -and $RedCases) { @('-v', "$(Join-Path $wb 'src/identity/identity_integration_test.ts'):/app/src/identity/identity_integration_test.ts:ro") } else { @() }
 
   # ---------------------------------------------------------------- 5. the lab

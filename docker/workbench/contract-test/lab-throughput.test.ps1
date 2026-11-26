@@ -25,38 +25,69 @@ function Pass([string]$m) { $script:lines += "PASS  $m" }
 function Fail([string]$m) { $script:lines += "FAIL  $m"; $script:fail++ }
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
 $label = 'ai-stack.harness.owner=wt-unit'
-$script:images = @{}       # tag -> @{ labels }
+$script:images = @{}       # tag -> image record @{ id; labels; markers; src } (two tags may share one record)
 $script:builds = @()       # every build's arg list
 $script:gateAware = $true  # a Dockerfile that knows WORKBENCH_TEST_GATE (false = an older tree)
+$script:fakeOb1 = ''       # the repo a fake build copies /app/src from (Get-LabSrcExpected)
 $script:rc = 0
 $script:lastTimeout = 0
+$script:idN = 0
+function New-FakeId { $script:idN++; return ('sha256:' + ('{0:x64}' -f $script:idN)) }
+function Find-FakeImage([string]$ref) {
+  if ($script:images.ContainsKey($ref)) { return $script:images[$ref] }
+  foreach ($r in $script:images.Values) { if ($r.id -eq $ref) { return $r } }
+  return $null
+}
+$script:vols = @{}         # volume -> labels
+$script:volRm = @()        # every volume rm
+$script:readyMode = 'ok'   # the template READY read: ok | fail (a docker error / timeout)
+$script:readyContent = ''
 function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
   $script:rc = 0
+  if ($a[0] -eq 'volume' -and $a[1] -eq 'inspect') {
+    if ($script:vols.ContainsKey($a[-1])) { return ($script:vols[$a[-1]] | ConvertTo-Json -Compress) }
+    $script:rc = 1; return 'Error: no such volume'
+  }
+  if ($a[0] -eq 'volume' -and $a[1] -eq 'rm') { $script:volRm += $a[-1]; $script:vols.Remove($a[-1]); return '' }
+  if ($a[0] -eq 'run' -and ($a -join ' ') -match '/t/READY') {
+    if ($script:readyMode -eq 'fail') { $script:rc = 124; return 'TIMEOUT after 300s' }
+    if (($a -join ' ') -match 'ready-file') { return "ready-file $($script:readyContent)" }
+    return $script:readyContent
+  }
+  if ($a[0] -eq 'run' -and ($a -join ' ') -match '/t/initdb\.log') { return 'PostgreSQL init process complete' }
+  if ($a[0] -eq 'logs') { return 'PostgreSQL init process complete' }   # a (re)built template's init container
   if ($a[0] -eq 'image' -and $a[1] -eq 'inspect') {
-    $t = $a[-1]
-    if (-not $script:images.ContainsKey($t)) { $script:rc = 1; return "Error: No such image: $t" }
-    if (($a -join ' ') -match '\{\{\.Id\}\}') { return [string]$script:images[$t].id }
-    return ($script:images[$t].labels | ConvertTo-Json -Compress)
+    $r = Find-FakeImage $a[-1]
+    if (-not $r) { $script:rc = 1; return "Error: No such image: $($a[-1])" }
+    if (($a -join ' ') -match '\{\{\.Id\}\}') { return [string]$r.id }
+    return ($r.labels | ConvertTo-Json -Compress)
   }
   if ($a[0] -eq 'run' -and $a -contains '--rm' -and $a -contains 'sh') {
-    # the gate-marker probe: what the image holds in /app
-    $t = $a[[array]::IndexOf($a, 'sh') + 1]
-    if (-not $script:images.ContainsKey($t)) { $script:rc = 125; return "Unable to find image '$t'" }
-    $mk = [string]$script:images[$t].markers
+    $r = Find-FakeImage $a[[array]::IndexOf($a, 'sh') + 1]
+    if (-not $r) { $script:rc = 125; return 'Unable to find image' }
+    $cmd = $a[-1]
+    if ($cmd -match 'src-file') {
+      # the /app/src probe: one line per file, then the end marker
+      $out = @(); foreach ($k in ($r.src.Keys | Sort-Object)) { $out += "src-file $($r.src[$k]) $k" }
+      return (($out + 'src-end') -join "`n")
+    }
+    $mk = [string]$r.markers
     return ('gate-markers p={0} s={1}' -f $(if ($mk -match 'p') { 1 } else { 0 }), $(if ($mk -match 's') { 1 } else { 0 }))
   }
   if ($a[0] -eq 'build') {
     $script:lastTimeout = $TimeoutSec
     $script:builds += , $a
-    $labels = [ordered]@{}; $tag = ''; $gate = ''
+    $labels = [ordered]@{}; $tag = ''; $gate = ''; $target = ''
     for ($i = 0; $i -lt $a.Count; $i++) {
       if ($a[$i] -eq '--label') { $kv = $a[$i + 1]; $j = $kv.IndexOf('='); $labels[$kv.Substring(0, $j)] = $kv.Substring($j + 1) }
       if ($a[$i] -eq '--build-arg' -and $a[$i + 1] -like 'WORKBENCH_TEST_GATE=*') { $gate = $a[$i + 1].Substring(20) }
+      if ($a[$i] -eq '--target') { $target = $a[$i + 1] }
       if ($a[$i] -eq '-t') { $tag = $a[$i + 1] }
     }
     if ($script:gateAware) { $labels['ai-stack.lab.gate'] = $(if ($gate) { $gate } else { 'full' }) }
+    $src = @{}; if ($script:fakeOb1) { $src = Get-LabSrcExpected $script:fakeOb1 $(if ($target -eq 'test') { 'test' } else { 'runtime' }) }
     # the markers a real build leaves: the skipped marker only when the Dockerfile knew the arg and was told to skip
-    $script:images[$tag] = @{ labels = $labels; markers = $(if ($script:gateAware -and $gate -eq 'skipped') { 's' } else { 'p' }) }
+    $script:images[$tag] = @{ id = (New-FakeId); labels = $labels; markers = $(if ($script:gateAware -and $gate -eq 'skipped') { 's' } else { 'p' }); src = $src }
     return 'built'
   }
   return ''
@@ -128,36 +159,114 @@ try {
   $m = Get-LabWbMountArgs @("src/repo/gaps.ts=$mut", "src/repo/gaps.ts=$mut") $fakeWb
   Ok ($m.refused -match 'twice') 'the same target twice is refused'
 
-  # ---- T3: the green-image guard --------------------------------------------------------------------------------------
+  # ---- T3: the green-image guard (attempt 3: the image ID, the tree, the gate markers, /app/src) -----------------------
   Write-Host '[T3] Assert-LabGreenImage'
-  $script:images['openbrain-workbench:wt-unit'] = @{ labels = @{ 'ai-stack.lab.gate' = 'skipped' }; markers = 's' }
-  $script:images['openbrain-workbench:wt-unit-full'] = @{ labels = @{ 'ai-stack.lab.gate' = 'full' }; markers = 'p' }
-  $script:images['openbrain-workbench:wt-unit-old'] = @{ labels = @{ 'org.opencontainers.image.revision' = 'x' }; markers = 'p' }
-  # attempt 1 D1: a skip image rebuilt FROM itself with a forged label, or with the label emptied / stripped
-  $script:images['openbrain-workbench:wt-unit-forged'] = @{ labels = @{ 'ai-stack.lab.gate' = 'full' }; markers = 's' }
-  $script:images['openbrain-workbench:wt-unit-empty'] = @{ labels = @{ 'ai-stack.lab.gate' = '' }; markers = 's' }
-  $script:images['openbrain-workbench:wt-unit-stripped'] = @{ labels = @{ 'x' = 'y' }; markers = 's' }
-  $script:images['openbrain-workbench:wt-unit-nomarker'] = @{ labels = @{ 'x' = 'y' }; markers = '' }
-  $script:images['openbrain-workbench:wt-unit-both'] = @{ labels = @{ 'ai-stack.lab.gate' = 'full' }; markers = 'ps' }
-  $f0 = $script:fail; $threw = $false
-  try { Assert-LabGreenImage 'openbrain-workbench:wt-unit' 'green' } catch { $threw = $true }
-  Ok ($threw -and $script:fail -eq $f0 + 1 -and $script:lines[-1] -match 'REFUSED: .*not a full-gate image') 'a skip-gate image FAILS the green guard and stops the run'
-  $f0 = $script:fail; $threw = $false
-  try { Assert-LabGreenImage 'openbrain-workbench:wt-unit' 'landing' } catch { $threw = $true }
-  Ok ($threw -and $script:fail -eq $f0 + 1) 'and the landing guard'
-  $f0 = $script:fail; $threw = $false
-  try { Assert-LabGreenImage 'openbrain-workbench:wt-unit-full' 'green'; Assert-LabGreenImage 'openbrain-workbench:wt-unit-old' 'green' } catch { $threw = $true }
-  Ok (-not $threw -and $script:fail -eq $f0) 'a full-gate image and an image from before the label pass'
-  $f0 = $script:fail; $threw = $false
-  try { Assert-LabGreenImage 'openbrain-workbench:absent' 'green' } catch { $threw = $true }
-  Ok ($threw -and $script:fail -eq $f0 + 1) 'an image that cannot be inspected fails closed'
-  foreach ($c in @(@('forged', 'a forged label (gate=full) over the skipped marker'), @('empty', 'an EMPTY label over the skipped marker'),
-      @('stripped', 'a stripped label (unset) over the skipped marker'), @('nomarker', 'an unset label and no passed marker'),
-      @('both', 'both markers'))) {
-    $f0 = $script:fail; $threw = $false
-    try { Assert-LabGreenImage "openbrain-workbench:wt-unit-$($c[0])" 'green' } catch { $threw = $true }
-    Ok ($threw -and $script:fail -eq $f0 + 1 -and $script:lines[-1] -match 'gate markers') "D1 attack refused by the markers inside the image: $($c[1])"
+  # run against an OLDER helper (-Helper <copy>) the attack cases must FAIL one by one, not crash: give the test what it
+  # needs to set the cases up (the expected /app/src, an ID resolver) when the helper lacks them
+  if (-not (Get-Command Get-LabSrcExpected -ErrorAction SilentlyContinue)) {
+    function Get-LabSrcExpected([string]$Ob1, [string]$Kind) {
+      $h = @{}; $sha = [System.Security.Cryptography.SHA256]::Create(); $l1 = [System.Text.Encoding]::GetEncoding(28591)
+      foreach ($r in @(& git -C $Ob1 ls-files -- 'docker/workbench/src')) {
+        $in = "$r".Substring('docker/workbench/src/'.Length)
+        if ($Kind -eq 'runtime' -and ($in -match '_test\.ts$' -or $in -eq 'export/credentials_oracle.ts')) { continue }
+        $raw = $l1.GetString([System.IO.File]::ReadAllBytes((Join-Path $Ob1 $r)))
+        $h["./$in"] = [System.BitConverter]::ToString($sha.ComputeHash($l1.GetBytes($raw.Replace("`r", '')))).Replace('-', '').ToLower()
+      }
+      return $h
+    }
   }
+  if (-not (Get-Command Resolve-LabImageId -ErrorAction SilentlyContinue)) {
+    function Resolve-LabImageId([string]$Ref) { $o = "$(Dk image inspect --format '{{.Id}}' $Ref)".Trim(); if ($script:rc -ne 0) { return '' }; return $o }
+  }
+  $guardTakesTree = (Get-Command Assert-LabGreenImage).Parameters.ContainsKey('Ob1')
+  if (-not $guardTakesTree) { Write-Host '  NOTE  this helper''s guard takes no OB1 tree (an older helper): the cases below show what it lets through' }
+  $r3 = Join-Path $root 'ob1-t3'; New-Item -ItemType Directory -Force (Join-Path $r3 'docker\workbench\src\export') | Out-Null
+  $g3 = { param([string[]]$x) $p = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; try { & git -C $r3 @x 2>&1 | Out-Null } finally { $ErrorActionPreference = $p } }
+  & $g3 @('init', '-q'); & $g3 @('config', 'user.email', 't@example.invalid'); & $g3 @('config', 'user.name', 't'); & $g3 @('config', 'commit.gpgsign', 'false')
+  [System.IO.File]::WriteAllText((Join-Path $r3 'docker\workbench\Dockerfile'), "FROM x`n")
+  [System.IO.File]::WriteAllText((Join-Path $r3 'docker\workbench\src\a.ts'), "export const a = 1;`r`n")
+  [System.IO.File]::WriteAllText((Join-Path $r3 'docker\workbench\src\a_test.ts'), "test`n")
+  [System.IO.File]::WriteAllText((Join-Path $r3 'docker\workbench\src\export\credentials_oracle.ts'), "oracle`n")
+  & $g3 @('add', '-A'); & $g3 @('commit', '-q', '-m', 'one')
+  $tree3 = "$(& git -C $r3 rev-parse 'HEAD^{tree}')".Trim()
+  $wantRt = Get-LabSrcExpected $r3 'runtime'; $wantTs = Get-LabSrcExpected $r3 'test'
+  Ok ($wantRt.Count -eq 1 -and $wantRt.ContainsKey('./a.ts') -and $wantTs.Count -eq 3) "the expected /app/src: runtime drops *_test.ts and the oracle ($($wantRt.Count) / $($wantTs.Count) files)"
+  $crlfFree = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::ASCII.GetBytes("export const a = 1;`n"))).Replace('-', '').ToLower()
+  Ok ($wantRt['./a.ts'] -eq $crlfFree) 'a file is hashed with its CR bytes removed (a CRLF checkout equals the LF image copy)'
+  function New-Img([string]$tag, [hashtable]$o) {
+    $lb = @{ 'ai-stack.lab.gate' = 'full'; 'ai-stack.lab.tree' = $tree3 }
+    if ($o.ContainsKey('labels')) { $lb = $o.labels }
+    $src = @{}; foreach ($k in $(if ($o.kind -eq 'test') { $wantTs.Keys } else { $wantRt.Keys })) { $src[$k] = $(if ($o.kind -eq 'test') { $wantTs[$k] } else { $wantRt[$k] }) }
+    if ($o.mutate) { $src['./a.ts'] = ('0' * 64) }
+    if ($o.extra) { $src['./evil.ts'] = ('1' * 64) }
+    $script:images[$tag] = @{ id = (New-FakeId); labels = $lb; markers = $(if ($o.ContainsKey('markers')) { $o.markers } else { 'p' }); src = $src }
+  }
+  function Try-Guard([string]$tag, [string]$mode = 'green', [string]$kind = 'runtime') {
+    $f0 = $script:fail; $id = ''; $threw = $false
+    try { if ($guardTakesTree) { $id = Assert-LabGreenImage $tag $mode $r3 $kind } else { $id = Assert-LabGreenImage $tag $mode } } catch { $threw = $true }
+    return @{ threw = $threw; id = [string]$id; fails = $script:fail - $f0; line = $script:lines[-1] }
+  }
+  New-Img 'wb:good' @{}; New-Img 'wb:good-test' @{ kind = 'test' }
+  $x = Try-Guard 'wb:good'
+  Ok (-not $x.threw -and $x.id -eq $script:images['wb:good'].id -and $x.id -match '^sha256:') "this tree's full-gate runtime image passes and the guard RETURNS ITS IMAGE ID ($(([string]$x.id + (" " * 19)).Substring(0, 19))...)"
+  $x = Try-Guard 'wb:good-test' 'landing' 'test'
+  Ok (-not $x.threw -and $x.id -eq $script:images['wb:good-test'].id) 'and the test stage (its *_test.ts and the oracle included), for a landing'
+  $x = Try-Guard 'wb:good' 'green' 'test'
+  Ok ($x.threw -and $x.line -match 'missing \./a_test\.ts') 'a runtime image offered as the test stage is refused (its tests are missing)'
+  foreach ($c in @(
+      @('skip', @{ labels = @{ 'ai-stack.lab.gate' = 'skipped'; 'ai-stack.lab.tree' = $tree3 }; markers = 's' }, 'gate markers', 'a skip-gate image'),
+      @('forged', @{ markers = 's' }, 'gate markers', 'D1: a forged label (gate=full) over the skipped marker'),
+      @('empty', @{ labels = @{ 'ai-stack.lab.gate' = ''; 'ai-stack.lab.tree' = $tree3 }; markers = 's' }, 'gate markers', 'D1: an EMPTY label over the skipped marker'),
+      @('nomarker', @{ markers = '' }, 'gate markers', 'no passed marker'),
+      @('both', @{ markers = 'ps' }, 'gate markers', 'both markers'),
+      @('a4', @{ labels = @{ 'ai-stack.lab.gate' = 'full'; 'ai-stack.lab.tree' = ('e' * 40) }; markers = 'p'; mutate = $true }, 'built from tree', 'A4: forged markers on another tree''s skip image'),
+      @('a5', @{ mutate = $true }, 'differs \./a\.ts', 'A5: a full-gate image of this tree with mutant code copied on top'),
+      @('a5x', @{ extra = $true }, 'extra \./evil\.ts', 'A5: a full-gate image with an extra module added'),
+      @('a6', @{ labels = @{ 'ai-stack.lab.gate' = 'full'; 'ai-stack.lab.tree' = ('2' * 40) } }, 'built from tree', 'A6: a full-gate image of an older tree of this branch'),
+      @('a6b', @{ labels = @{ 'org.opencontainers.image.revision' = 'a155c44b' } }, 'no ai-stack.lab.tree label', 'A6b: another tester''s image with no tree label (built before rw-lab-throughput)'),
+      @('dirty', @{ labels = @{ 'ai-stack.lab.gate' = 'full'; 'ai-stack.lab.tree' = $tree3; 'ai-stack.lab.dirty' = '1' } }, 'dirty working tree', 'an image built from a dirty working tree'))) {
+    New-Img "wb:$($c[0])" $c[1]
+    $x = Try-Guard "wb:$($c[0])"
+    Ok ($x.threw -and $x.fails -eq 1 -and $x.line -match $c[2]) "REFUSED: $($c[3])"
+  }
+  $x = Try-Guard 'wb:absent'
+  Ok ($x.threw -and $x.fails -eq 1) 'an image that cannot be inspected fails closed'
+  $f0 = $script:fail; $threw = $false
+  try { if ($guardTakesTree) { $null = Assert-LabGreenImage 'wb:good' 'green' '' } else { $null = Assert-LabGreenImage 'wb:good' 'green' } } catch { $threw = $true }
+  Ok ($threw -and $script:fail -eq $f0 + 1) 'the guard refuses when it is given no OB1 tree to bind to'
+  # the tree under test is dirty: no green at all
+  [System.IO.File]::WriteAllText((Join-Path $r3 'docker\workbench\src\a.ts'), "export const a = 2;`n")
+  $x = Try-Guard 'wb:good'
+  Ok ($x.threw -and $x.line -match 'uncommitted changes') 'with uncommitted changes in the workbench inputs, a green run is refused (it tests a committed tree)'
+  & $g3 @('checkout', '--', 'docker/workbench/src/a.ts')
+  [System.IO.File]::WriteAllText((Join-Path $r3 'NOTES.md'), "outside the inputs`n")
+  $x = Try-Guard 'wb:good'
+  Ok (-not $x.threw) 'an untracked file OUTSIDE the workbench inputs does not make the tree dirty'
+  Remove-Item -Force (Join-Path $r3 'NOTES.md')
+  # A7: the ID is what the run uses; re-pointing the tag afterwards does not change what was checked
+  $x = Try-Guard 'wb:good'
+  New-Img 'wb:swap' @{ labels = @{ 'ai-stack.lab.gate' = 'skipped'; 'ai-stack.lab.tree' = $tree3 }; markers = 's' }
+  $script:images['wb:good-kept'] = $script:images['wb:good']   # a real daemon keeps the checked image by its ID
+  $script:images['wb:good'] = $script:images['wb:swap']
+  Ok ($x.id -ne (Resolve-LabImageId 'wb:good') -and (Resolve-LabImageId $x.id) -eq $x.id) 'A7: after the tag is re-pointed, the checked ID still names the checked image (the run uses the ID)'
+  $helperT = [System.IO.File]::ReadAllText($Helper)
+  Ok ($helperT -match [regex]::Escape("`$res.wb = Assert-LabGreenImage `$res.wb `$Run.mode `$Ob1 'runtime'") -and $helperT -match [regex]::Escape("`$res.test = Assert-LabGreenImage `$res.test `$Run.mode `$Ob1 'test'")) 'A7: Invoke-LabWorkbenchImages hands the runner the checked IDs'
+  foreach ($rn in @('run-docs-lifecycle-tests.ps1', 'run-panels-tests.ps1', 'run-room-tests.ps1')) {
+    $rt = [System.IO.File]::ReadAllText((Join-Path $here $rn))
+    Ok ($rt -match [regex]::Escape("`$wbTag = Assert-LabGreenImage `$wbTag `$run.mode `$ob1 'runtime'") -and $rt -match [regex]::Escape("`$wbTestTag = Assert-LabGreenImage `$wbTestTag `$run.mode `$ob1 'test'") -and $rt -match '-Prebuilt \$Prebuilt') "A7/A8: $rn runs the checked IDs of its -Prebuilt images and passes -Prebuilt to Resolve-LabRun"
+  }
+  $allRunners = @(Get-ChildItem $here -Filter 'run-*.ps1' | Where-Object { [System.IO.File]::ReadAllText($_.FullName) -match 'Assert-LabGreenImage' })
+  $bare = @($allRunners | Where-Object { [System.IO.File]::ReadAllText($_.FullName) -match '(?m)^\s*(if \(.*\) \{ )?Assert-LabGreenImage ' })
+  Ok ($bare.Count -eq 0) "no runner calls the guard without running the ID it returns ($(($bare | ForEach-Object { $_.Name }) -join ', '))"
+  # A8: a landing never takes prebuilt images
+  $r = $null; try { $r = Resolve-LabRun -Landing $true -Prebuilt $true } catch { }
+  Ok ($r -and $r.refused -match '-Prebuilt is refused') "A8: -Landing -Prebuilt is refused ($(if ($r) { $r.refused } else { 'Resolve-LabRun takes no -Prebuilt' }))"
+  $r = $null; try { $r = Resolve-LabRun -Prebuilt $true } catch { }
+  Ok ($r -and -not $r.refused) 'a green -Prebuilt run is still allowed (its images then face the guard)'
+  # the documented residual (threat model): a deliberate forger of THIS tree's own skip image with a fake passed marker
+  New-Img 'wb:residual' @{ markers = 'p' }
+  $x = Try-Guard 'wb:residual'
+  Write-Host "  INFO  threat model residual: a same-tree skip image with a FORGED passed marker is indistinguishable here ($(if ($x.threw) { 'refused' } else { 'accepted' })): its code is the tree's; only its claim that the gate ran is false"
 
   # ---- T4: image reuse by tree ----------------------------------------------------------------------------------------
   Write-Host '[T4] Invoke-LabImage: reuse by tree hash + args digest'
@@ -325,6 +434,20 @@ try {
   } finally { $env:PATH = $oldPath }
   Ok ([System.IO.File]::ReadAllText((Join-Path $here 'run-docs-lifecycle-tests.ps1')) -notmatch '(?m)^\s*& tar ') 'no wired runner calls a bare tar for the red archive (docs-lifecycle)'
 
+  # ---- T11: the DB template's READY read (attempt 3: a docker failure is retried, never a delete) ------------------
+  Write-Host '[T11] Initialize-LabDbTemplate: a READY read that fails is retried and never deletes the shared template'
+  $st11 = Join-Path $root 'stage11'; New-Item -ItemType Directory -Force $st11 | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $st11 '010-a.sql'), "select 1;`n")
+  $pin11 = 'a' * 40; $dig11 = Get-LabChainDigest $st11 'pg:x'
+  $vol11 = "ob1-dbtpl-$($pin11.Substring(0, 12))-$($dig11.Substring(0, 12))"
+  $script:vols[$vol11] = @{ 'ai-stack.lab.dbtpl' = '1'; 'ai-stack.lab.dbtpl.pin' = $pin11; 'ai-stack.lab.dbtpl.digest' = $dig11 }
+  $script:readyMode = 'fail'; $script:volRm = @()
+  $t11 = Initialize-LabDbTemplate 'pg:x' $st11 $pin11
+  Ok ($t11.refused -match 'could not be read' -and $script:volRm.Count -eq 0 -and $script:vols.ContainsKey($vol11)) "a READY read that keeps failing is refused (the run replays) and the template is NOT removed ($($t11.refused))"
+  $script:readyMode = 'ok'; $script:readyContent = "$pin11 $dig11"
+  $t11 = Initialize-LabDbTemplate 'pg:x' $st11 $pin11
+  Ok (-not $t11.refused -and -not $t11.built -and $script:volRm.Count -eq 0) 'a READY that reads fine is used as before'
+
   # ---- T8: the build lease (the REAL lease.ps1, a scratch lock dir) -----------------------------------------------------
   Write-Host '[T8] Invoke-LabBuildLease'
   $stack = Join-Path $root 'stack'; $ah = Join-Path $stack 'scripts\agent-harness'
@@ -353,6 +476,8 @@ try {
   $env:OB1_LAB_BUILD_LEASE = 'off'
   $out = Invoke-LabBuildLease 'wt-unit' (Join-Path $stack 'OB1') { 'unthrottled' }
   Ok ($out -eq 'unthrottled') 'OB1_LAB_BUILD_LEASE=off builds without the lease'
+} catch {
+  Ok $false "the test stopped: $_"
 } finally {
   Remove-Item Env:AI_STACK_LEASE_DIR, Env:OB1_LAB_BUILD_LEASE, Env:OB1_LAB_BUILD_WAIT_MIN -ErrorAction SilentlyContinue
   Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue

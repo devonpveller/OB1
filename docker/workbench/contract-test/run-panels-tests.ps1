@@ -72,7 +72,7 @@ if ($w) { Write-Host "REFUSED: $w"; exit 2 }
 $subnets = Split-HarnessSubnet $Subnet
 if ($Evidence -and (Test-Path $Evidence) -and @(Get-ChildItem -Force $Evidence).Count) { Write-Host "REFUSED: -Evidence $Evidence is not empty"; exit 2 }
 . (Join-Path $PSScriptRoot 'lab-throughput.ps1')
-$run = Resolve-LabRun -Red $Red -Landing $Landing -NoSweep $NoSweep -Sweep $Sweep -Mutant $Mutant -WbMount $WbMount -SkipGate $SkipGate
+$run = Resolve-LabRun -Red $Red -Landing $Landing -NoSweep $NoSweep -Sweep $Sweep -Mutant $Mutant -WbMount $WbMount -SkipGate $SkipGate -Prebuilt $Prebuilt
 if ($run.refused) { Write-Host "REFUSED: $($run.refused)"; exit 2 }
 if ($Prebuilt -and $SkipGate) { Write-Host 'REFUSED: -SkipGate builds an image; -Prebuilt uses images already built'; exit 2 }
 $NoSweep = -not $run.sweep
@@ -261,7 +261,15 @@ try {
       $script:made.images += $viewerTag
     }
   }
-  if ($Prebuilt -and ($run.mode -eq 'green' -or $run.mode -eq 'landing')) { Assert-LabGreenImage $wbTag $run.mode; Assert-LabGreenImage $wbTestTag $run.mode }
+  if ($Prebuilt) {
+    # rw-lab-throughput attempt 3 (test attempt 2, A6/A6b/A7): a prebuilt image is resolved to its ID once and the run uses
+    # that ID; a green run takes it only when it is this tree's full-gate image (tree label, gate markers, /app/src)
+    if ($run.mode -eq 'green' -or $run.mode -eq 'landing') { $wbTag = Assert-LabGreenImage $wbTag $run.mode $ob1 'runtime'; $wbTestTag = Assert-LabGreenImage $wbTestTag $run.mode $ob1 'test' }
+    else {
+      $wbTag = Resolve-LabImageId $wbTag; $wbTestTag = Resolve-LabImageId $wbTestTag
+      if (-not $wbTag -or -not $wbTestTag) { throw 'could not resolve the prebuilt images to image IDs' }
+    }
+  }
   if ($BuildOnly) { $KeepImages = $true; Write-Host '  -BuildOnly: images built and kept; no lab ran'; throw 'BUILD-ONLY' }
 
   # ---------------------------------------------------------------- 4. the lab

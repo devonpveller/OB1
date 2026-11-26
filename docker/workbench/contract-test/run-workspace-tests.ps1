@@ -360,6 +360,12 @@ try {
     if ($t.rc -ne 0) { throw 'images' }
     if ($t.tag -notmatch ':wt-tree-') { $script:made.images += $t.tag }
     $wbTestTag = $t.tag
+    # rw-lab-throughput attempt 3: the run uses image IDs resolved once, never a tag that can move (test attempt 2, A7)
+    foreach ($v in @('wbTag', 'viewerTag', 'wbTestTag')) {
+      $rid = Resolve-LabImageId (Get-Variable -Name $v -ValueOnly)
+      if (-not $rid) { throw "could not resolve `$$v to an image ID" }
+      Set-Variable -Name $v -Value $rid
+    }
   } else {
     $img = Invoke-LabWorkbenchImages -Run $run -Ob1 $ob1 -Wb $wb -Sha $sha -BaseSha $BaseSha -Short $short -Owner $Id -P $P `
       -SkipGate $SkipGate -NoReuse $NoReuse -Viewer $true -ViewerDir $viewerDir -GateNote ', grammar, hub clustering, contracts, export'

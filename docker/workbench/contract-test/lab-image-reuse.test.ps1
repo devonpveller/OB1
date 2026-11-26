@@ -39,7 +39,7 @@ function Dk { Lab-Docker 300 ([string[]]$args) }
 $env:OB1_LAB_BUILD_LEASE = 'off'   # a two-line image; the build lease is proved by lab-throughput.test.ps1 T8
 
 $root = Join-Path $env:TEMP ('labreuse-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
-$repo = Join-Path $root 'ob1'; $ctx = Join-Path $repo 'docker\probe'
+$repo = Join-Path $root 'ob1'; $ctx = Join-Path $repo 'docker\workbench'   # laid out like the workbench: the guard binds docker/workbench/src
 New-Item -ItemType Directory -Force $ctx | Out-Null
 $tags = @()
 function G([string[]]$x) { $p = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; try { & git -C $repo @x 2>&1 | Out-Null } finally { $ErrorActionPreference = $p } }
@@ -48,11 +48,13 @@ try {
   $null = Dk image inspect $BaseImage
   if ($script:rc -ne 0) { Fail "the base image $BaseImage is not local (this test pulls nothing)"; throw 'no base' }
   G @('init', '-q'); G @('config', 'user.email', 't@example.invalid'); G @('config', 'user.name', 't'); G @('config', 'commit.gpgsign', 'false')
-  [System.IO.File]::WriteAllText((Join-Path $ctx 'Dockerfile'), "FROM $BaseImage`nARG WORKBENCH_TEST_GATE=full`nLABEL ai-stack.lab.gate=`"`${WORKBENCH_TEST_GATE}`"`nRUN mkdir -p /app && if [ `"`$WORKBENCH_TEST_GATE`" = skipped ]; then touch /app/.test-gate-skipped; else touch /app/.test-gate-passed; fi`nCOPY v.txt /v.txt`n")
-  [System.IO.File]::WriteAllText((Join-Path $ctx 'v.txt'), "one`n")
+  New-Item -ItemType Directory -Force (Join-Path $ctx 'src') | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $ctx 'Dockerfile'), "FROM $BaseImage`nARG WORKBENCH_TEST_GATE=full`nLABEL ai-stack.lab.gate=`"`${WORKBENCH_TEST_GATE}`"`nCOPY src /app/src`nRUN if [ `"`$WORKBENCH_TEST_GATE`" = skipped ]; then touch /app/.test-gate-skipped; else touch /app/.test-gate-passed; fi && find /app/src -name '*_test.ts' -delete`n")
+  [System.IO.File]::WriteAllText((Join-Path $ctx 'src\a.ts'), "export const v = 'one';`n")
+  [System.IO.File]::WriteAllText((Join-Path $ctx 'src\a_test.ts'), "test`n")
   G @('add', '-A'); G @('commit', '-q', '-m', 'one')
   $sha1 = "$(& git -C $repo rev-parse HEAD)".Trim()
-  $c = @{ Repo = 'lab-reuse-probe'; Context = $ctx; Ob1 = $repo; BuildArgs = @{ OB1_SHA = $sha1 }; DirtyPaths = @('docker/probe'); OwnerTag = 'lab-reuse-probe:wt-x'; Owner = $Id; GateImage = $true }
+  $c = @{ Repo = 'lab-reuse-probe'; Context = $ctx; Ob1 = $repo; BuildArgs = @{ OB1_SHA = $sha1 }; DirtyPaths = @('docker/workbench'); OwnerTag = 'lab-reuse-probe:wt-x'; Owner = $Id; GateImage = $true }
 
   Write-Host '[R1] the same tree twice'
   $r1 = Invoke-LabImage @c; $tags += $r1.tag
@@ -64,7 +66,7 @@ try {
   Check ($l['ai-stack.lab.tree'] -eq $r1.key.tree -and $l['ai-stack.lab.args'] -eq $r1.key.args -and $l['ai-stack.lab.gate'] -eq 'full') 'the image carries the full tree hash, the args digest and gate=full'
 
   Write-Host '[R2] another tree'
-  [System.IO.File]::WriteAllText((Join-Path $ctx 'v.txt'), "two`n"); G @('commit', '-q', '-am', 'two')
+  [System.IO.File]::WriteAllText((Join-Path $ctx 'src\a.ts'), "export const v = 'two';`n"); G @('commit', '-q', '-am', 'two')
   $sha2 = "$(& git -C $repo rev-parse HEAD)".Trim()
   $c2 = $c.Clone(); $c2.BuildArgs = @{ OB1_SHA = $sha2 }
   $r3 = Invoke-LabImage @c2; $tags += $r3.tag
@@ -92,7 +94,7 @@ try {
   Check ($doorText -match [regex]::Escape("--format '{{json .Config.Labels}}' ([string]`$svcCfg.image)") -and $doorText -match "if \(\`$gateLabel -eq 'skipped'\)") 'ob1-deploy.ps1 carries that read and the refusal'
   $o = Dk tag $r5.tag 'lab-reuse-probe:local'
   Check ($script:rc -ne 0 -and $o -match 'REFUSED') 'the lab shim refuses to tag it :local'
-  try { Assert-LabGreenImage $r5.tag 'green'; Fail 'the green guard let a skip-gate image through' } catch { Pass 'the green guard refuses it for a green run (the FAIL line above is the guard speaking)'; $script:fail-- ; $script:n-- }
+  try { $null = Assert-LabGreenImage $r5.tag 'green' $repo 'runtime'; Fail 'the green guard let a skip-gate image through' } catch { Pass 'the green guard refuses it for a green run (the FAIL line above is the guard speaking)'; $script:fail-- ; $script:n-- }
 
   Write-Host '[R5] attempt 1 D1: a forged or stripped label over a skip image, on a real daemon'
   $forgeDir = Join-Path $root 'forge'; New-Item -ItemType Directory -Force $forgeDir | Out-Null
@@ -103,10 +105,23 @@ try {
     $fl = Get-LabImageLabels $ft
     Check ($script:rc -eq 0 -and $fl['ai-stack.lab.gate'] -ne 'skipped') "the $($c[0]) image's label no longer says skipped ('$($fl['ai-stack.lab.gate'])')"
     Check ((Get-LabGateMarkers $ft) -eq 'skipped') "but its gate markers still say skipped (/app/.test-gate-skipped inside)"
-    try { Assert-LabGreenImage $ft 'green'; Fail "the green guard ACCEPTED the $($c[0]) image" } catch { Pass "the green guard refuses the $($c[0]) image by its markers (the FAIL line above is the guard speaking)"; $script:fail--; $script:n-- }
+    try { $null = Assert-LabGreenImage $ft 'green' $repo 'runtime'; Fail "the green guard ACCEPTED the $($c[0]) image" } catch { Pass "the green guard refuses the $($c[0]) image by its markers (the FAIL line above is the guard speaking)"; $script:fail--; $script:n-- }
   }
-  try { Assert-LabGreenImage $r3.tag 'green' } catch { Fail "the green guard refused a real full-gate image ($($r3.tag))" }
-  Check ((Get-LabGateMarkers $r3.tag) -eq 'full') 'control: a real full-gate image holds the passed marker only, and passes'
+  $goodId = ''
+  try { $goodId = Assert-LabGreenImage $r3.tag 'green' $repo 'runtime' } catch { Fail "the green guard refused a real full-gate image ($($r3.tag))" }
+  Check ((Get-LabGateMarkers $r3.tag) -eq 'full' -and $goodId -match '^sha256:[0-9a-f]{64}$') "control: this tree's real full-gate image passes, and the guard returns its ID ($goodId)"
+
+  Write-Host '[R6] attempt 2 D1-bis on a real daemon: code on a full image (A5), another tree (A6), a tag swapped after the check (A7)'
+  $a5Dir = Join-Path $root 'a5'; New-Item -ItemType Directory -Force $a5Dir | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $a5Dir 'a.ts'), "export const v = 'MUTANT';`n")
+  [System.IO.File]::WriteAllText((Join-Path $a5Dir 'Dockerfile'), "FROM $($r3.tag)`nCOPY a.ts /app/src/a.ts`n")
+  $a5 = 'lab-reuse-probe:wt-a5'; $null = Dk build --label $label -t $a5 $a5Dir; $tags += $a5
+  Check ((Get-LabGateMarkers $a5) -eq 'full' -and (Get-LabImageLabels $a5)['ai-stack.lab.tree'] -eq $r3.key.tree) 'A5 planted: every label and marker of this tree''s full image, with mutant code copied on top'
+  try { $null = Assert-LabGreenImage $a5 'green' $repo 'runtime'; Fail 'the green guard ACCEPTED code copied onto a full image (A5)' } catch { Pass 'A5: refused by /app/src (the FAIL line above is the guard speaking)'; $script:fail--; $script:n-- }
+  try { $null = Assert-LabGreenImage $r1.tag 'green' $repo 'runtime'; Fail 'the green guard ACCEPTED the first tree''s image for the second tree (A6)' } catch { Pass 'A6: the first tree''s full-gate image is refused for the second tree (the FAIL line above is the guard speaking)'; $script:fail--; $script:n-- }
+  $null = Dk tag $r5.tag $r3.tag
+  $now = Resolve-LabImageId $r3.tag
+  Check ($now -ne $goodId -and (Resolve-LabImageId $goodId) -eq $goodId -and (Get-LabGateMarkers $goodId) -eq 'full') "A7: after the tag is re-pointed ($($r3.tag) -> the skip image), the checked ID still names the checked full-gate image - the runner runs that ID"
 } catch {
   Fail "the run stopped: $_"
 } finally {
