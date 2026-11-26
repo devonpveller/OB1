@@ -359,7 +359,11 @@ function Invoke-LabBuildLease([string]$Owner, [string]$Ob1, [scriptblock]$Build)
       if ($lrc -eq 0) { $held = $true; Write-Host "  BUILD LEASE: $(($o -split ' \| ')[0])"; break }
       if ($lrc -ne 3) { Write-Host "  BUILD LEASE: lease.ps1 answered rc $lrc ($o) - building without it"; break }
       if ([DateTime]::UtcNow -ge $deadline) { throw "no build slot within $waitMin min (lease.ps1 -Status -Class build)" }
-      Write-Host '  BUILD LEASE: both build slots are taken - waiting (polls once a minute)'
+      # say WHY (attempt 6): a deploy holding a plane -Exclusive, or both slots taken
+      $why = @($o -split ' \| ' | Where-Object { $_ -match '^WAIT' } | Select-Object -First 1)
+      if ($o -match 'EXCLUSIVELY') { Write-Host "  BUILD LEASE: a plane is held EXCLUSIVELY by a deploy - waiting until it is released (polls once a minute): $($why -join '')" }
+      elseif ($o -match 'is full') { Write-Host '  BUILD LEASE: both build slots are taken - waiting (polls once a minute)' }
+      else { Write-Host "  BUILD LEASE: waiting (polls once a minute): $($why -join '')" }
       Start-Sleep -Seconds 60
     }
   } finally { Pop-Location }

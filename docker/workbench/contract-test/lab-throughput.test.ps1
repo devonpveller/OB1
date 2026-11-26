@@ -533,9 +533,17 @@ try {
     $now = [int64][System.DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     foreach ($i in 1, 2) { ([ordered]@{ name = "build.$i"; owner = "wt-other$i"; worktree = ''; thread = ''; taken_at = $now; ttl_min = 60; pid = 1 } | ConvertTo-Json) | Set-Content -Encoding ASCII (Join-Path $lockDir "build.$i.json") }
     $env:OB1_LAB_BUILD_WAIT_MIN = '1'
-    $script:ranBuild = $false; $threw = $false; $t0 = Get-Date
-    try { $null = Invoke-LabBuildLease 'wt-unit' (Join-Path $stack 'OB1') { $script:ranBuild = $true } } catch { $threw = $true }
-    Ok ($threw -and -not $script:ranBuild -and ((Get-Date) - $t0).TotalSeconds -ge 55) "with both build slots taken the build WAITS (never runs), then gives up at the bound ($([int]((Get-Date) - $t0).TotalSeconds) s)"
+    $script:ranBuild = $false; $script:t8threw = $false; $t0 = Get-Date
+    $msgs = @(& { try { $null = Invoke-LabBuildLease 'wt-unit' (Join-Path $stack 'OB1') { $script:ranBuild = $true } } catch { $script:t8threw = $true } } 6>&1 | ForEach-Object { "$_" })
+    Ok ($script:t8threw -and -not $script:ranBuild -and ((Get-Date) - $t0).TotalSeconds -ge 55) "with both build slots taken the build WAITS (never runs), then gives up at the bound ($([int]((Get-Date) - $t0).TotalSeconds) s)"
+    Ok (@($msgs | Where-Object { $_ -match 'both build slots are taken' }).Count -ge 1) 'and its wait message says both build slots are taken'
+    # T8b (attempt 6): the wait caused by a deploy holding a plane -Exclusive says so (not "both build slots are taken")
+    Remove-Item -Force (Join-Path $lockDir 'build.*.json')
+    ([ordered]@{ name = 'open-brain'; owner = 'wt-deploy'; worktree = ''; thread = ''; taken_at = $now; ttl_min = 60; pid = 1; exclusive = $true } | ConvertTo-Json) | Set-Content -Encoding ASCII (Join-Path $lockDir 'open-brain.json')
+    $script:ranBuild = $false; $script:t8threw = $false
+    $msgs = @(& { try { $null = Invoke-LabBuildLease 'wt-unit' (Join-Path $stack 'OB1') { $script:ranBuild = $true } } catch { $script:t8threw = $true } } 6>&1 | ForEach-Object { "$_" })
+    Ok ($script:t8threw -and -not $script:ranBuild -and @($msgs | Where-Object { $_ -match 'held EXCLUSIVELY by a deploy' }).Count -ge 1 -and @($msgs | Where-Object { $_ -match 'both build slots' }).Count -eq 0) "T8b: with a plane held -Exclusive the build WAITS and the message names the exclusive deploy ($(@($msgs | Where-Object { $_ -match 'BUILD LEASE' })[0]))"
+    Remove-Item -Force (Join-Path $lockDir 'open-brain.json')
     Remove-Item Env:OB1_LAB_BUILD_WAIT_MIN
   }
   $env:OB1_LAB_BUILD_LEASE = 'off'
