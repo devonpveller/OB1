@@ -337,20 +337,6 @@ try {
   $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb; Save 'build-workbench-test.log' ($o -split "`n" | Select-Object -Last 40 | Out-String)
   Check ($script:rc -eq 0) "$wbTestTag (the test stage) built"
   $script:made.images += $wbTestTag
-  # rwr-appearance [5j4]: the five Appearance keys (slot 700) over the real workbench and database: the catalog, every offered
-  # choice, odd-typed values, the saved-themes cap of 10 (a 400), versions that never go back, two identities
-  Write-Host '[5j4] the Appearance keys integration test (theme / accent / density / text size / saved themes: the cap, odd values, the database guard, two users)'
-  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
-    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
-    '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
-    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/settings/appearance_integration_test.ts')
-  $clean = ($o -replace '\x1b\[[0-9;]*m', '')
-  Save 'appearance-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|Values are not equal|\[Diff\]|^\s+[-+]' }) -join "`n")
-  foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
-  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
-  if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the Appearance integration test fails on the base ($($sum.Value))" }
-  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the Appearance integration test ($($sum.Value))" }
-
   if (-not $Red) {
     # rw-settings-store [5k]: the idea refinery's own image (its Dockerfile: dependencies cached, deno check)
     $o = DkLong build --label $label -t $refTag (Join-Path $ob1 'integrations/openbrain-idea-refinery'); Save 'build-refinery.log' ($o -split "`n" | Select-Object -Last 20 | Out-String)
@@ -552,6 +538,20 @@ try {
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
   if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the settings tags integration test fails on the base ($($sum.Value))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the settings tags integration test ($($sum.Value))" }
+
+  # rwr-appearance [5j4]: the five Appearance keys (slot 700) over the real workbench and database: the catalog, every offered
+  # choice, odd-typed values, the saved-themes cap of 10 (a 400), versions that never go back, two identities
+  Write-Host '[5j4] the Appearance keys integration test (theme / accent / density / text size / saved themes: the cap, odd values, the database guard, two users)'
+  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
+    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
+    '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/settings/appearance_integration_test.ts')
+  $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+  Save 'appearance-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|Values are not equal|\[Diff\]|^\s+[-+]' }) -join "`n")
+  foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+  if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the Appearance integration test fails on the base ($($sum.Value))" }
+  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[2].Value -gt 0 -and [int]$sum.Groups[3].Value -eq 0) "the Appearance integration test ($($sum.Value))" }
 
   if (-not $Red) {
     # rw-settings-store [5k]: "a stored refinery value is what the service reads on its next run" - the REAL refinery
@@ -1504,7 +1504,7 @@ try {
     Check (($rv7[1] -replace '^\[[^\]]*\] ', '') -eq ($rv7[2] -replace '^\[[^\]]*\] ', '') -and ($rv7[1] -replace '^\[[^\]]*\] ', '') -replace ' \| values \d+$', '' -eq ($rv7[5] -replace '^\[[^\]]*\] ', '' -replace ' \| values \d+$', '')) '[5m4] slot 700: a second init changes nothing, init again restores the same catalog'
     $null = & $q "DELETE FROM public.user_settings WHERE owner_sub = 'ap-revert-$rand'"
     $null = Dk cp (Join-Path $dockerDir 'check-appearance.sql') "${db}:/tmp/chk700.sql"
-    $co = Dk exec $db psql -U postgres -d openbrain -X -tA -F '|' -v ON_ERROR_STOP=1 -f /tmp/chk700.sql
+    $co = @((Dk exec $db psql -U postgres -d openbrain -X -tA -F '|' -v ON_ERROR_STOP=1 -f /tmp/chk700.sql) -split "`n" | Where-Object { $_ -ne '' })
     Save 'check-appearance.log' ($co -join "`n")
     Check ($script:rc -eq 0 -and @($co | Where-Object { $_ -match '\|t$' }).Count -eq 6 -and @($co | Where-Object { $_ -match '\|f$' }).Count -eq 0) '[5m4] check-appearance.sql (read-only) reports six checks, all true'
   }
