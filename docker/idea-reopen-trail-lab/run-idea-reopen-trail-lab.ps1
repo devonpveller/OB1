@@ -58,7 +58,7 @@ function Dump {
 $catSql = @"
 SELECT 'relacl|' || coalesce(relacl::text, 'NULL') FROM pg_class WHERE oid='public.user_document_trail'::regclass
 UNION ALL SELECT 'policy|' || polname || '|' || polcmd::text FROM pg_policy WHERE polrelid='public.user_document_trail'::regclass
-UNION ALL SELECT 'trigger|' || tgname || '|' || tgenabled FROM pg_trigger WHERE tgrelid='public.user_document_trail'::regclass AND NOT tgisinternal
+UNION ALL SELECT 'trigger|' || tgname || '|' || tgenabled::text FROM pg_trigger WHERE tgrelid='public.user_document_trail'::regclass AND NOT tgisinternal
 UNION ALL SELECT 'seqacl|' || coalesce(relacl::text,'NULL') FROM pg_class WHERE oid='public.user_document_trail_id_seq'::regclass
 ORDER BY 1
 "@
@@ -141,7 +141,7 @@ try {
   $null = Q "ALTER TABLE public.user_document_trail DISABLE TRIGGER trg_user_document_trail_no_delete; DELETE FROM public.user_document_trail WHERE owner_sub = 'lab-m'; ALTER TABLE public.user_document_trail ENABLE TRIGGER trg_user_document_trail_no_delete"
   $r = PsqlFile $f690
   Check ($r.rc -eq 0 -and (Dump) -eq $post1) 'applying 690 again puts the shape CHECK back (schema identical to after the first run)'
-  $null = Q "ALTER TABLE public.user_document_trail DROP CONSTRAINT user_document_trail_kind_check; ALTER TABLE public.user_document_trail ADD CONSTRAINT user_document_trail_kind_check CHECK (kind IN ('delete_forever','empty_trash','nightly_expired','restored','unarchived'))"
+  $null = Q "ALTER TABLE public.user_document_trail DROP CONSTRAINT user_document_trail_kind_check; ALTER TABLE public.user_document_trail ADD CONSTRAINT user_document_trail_kind_check CHECK (kind IN ('delete_forever','empty_trash','nightly_expired','restored','unarchived')) NOT VALID"
   Check ((Refused "INSERT INTO public.user_document_trail (owner_sub, actor_sub, kind, idea_id) VALUES ('lab-m','lab-m','reopened','$IDEA')") -match 'violates check constraint') 'MUTANT kind CHECK left narrow: the reopened line is refused (the app write would fail)'
   $mchk = RunCheck
   Check ($mchk -match 'kind_check_without_reopened=1' -and $mchk -match 'check: FAIL') 'and the check script reports FAIL for it'
