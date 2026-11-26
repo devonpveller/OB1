@@ -12928,16 +12928,16 @@
                     {
                       "key": "refinery.dormancy_days",
                       "value": {
-                        "days": 14
+                        "mount": "media"
                       },
                       "is_default": true,
                       "version": 0,
                       "updated_at": null,
                       "updated_by": null,
                       "resolved": {
-                        "path": null,
+                        "path": "/mounts/media",
                         "reachable": false,
-                        "via": "value"
+                        "via": "mount:media"
                       }
                     }
                   ]
@@ -13030,16 +13030,16 @@
                 "example": {
                   "key": "refinery.dormancy_days",
                   "value": {
-                    "days": 14
+                    "mount": "media"
                   },
                   "is_default": true,
                   "version": 0,
                   "updated_at": null,
                   "updated_by": null,
                   "resolved": {
-                    "path": null,
+                    "path": "/mounts/media",
                     "reachable": false,
-                    "via": "value"
+                    "via": "mount:media"
                   }
                 },
                 "schema": {
@@ -13126,7 +13126,7 @@
             "application/json": {
               "example": {
                 "value": {
-                  "days": 21
+                  "path": "/mounts/media/alt"
                 },
                 "by": "dredd"
               },
@@ -13144,16 +13144,16 @@
                 "example": {
                   "key": "refinery.dormancy_days",
                   "value": {
-                    "days": 21
+                    "path": "/mounts/media/alt"
                   },
                   "is_default": false,
                   "version": 1,
                   "updated_at": "2026-10-17T12:00:00.000Z",
                   "updated_by": "dredd",
                   "resolved": {
-                    "path": null,
+                    "path": "/mounts/media/alt",
                     "reachable": false,
-                    "via": "value"
+                    "via": "path"
                   }
                 },
                 "schema": {
