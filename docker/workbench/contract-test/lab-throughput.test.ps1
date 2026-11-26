@@ -42,13 +42,18 @@ $script:vols = @{}         # volume -> labels
 $script:volRm = @()        # every volume rm
 $script:readyMode = 'ok'   # the template READY read: ok | fail (a docker error / timeout)
 $script:readyContent = ''
+$script:volInspectFail = 0  # how many volume inspects time out next (review 1, D-R1)
+$script:volRmNoop = $false  # a volume rm that leaves the volume there
+$script:volCreate = @()     # every volume create
 function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
   $script:rc = 0
   if ($a[0] -eq 'volume' -and $a[1] -eq 'inspect') {
+    if ($script:volInspectFail -gt 0) { $script:volInspectFail--; $script:rc = 124; return 'TIMEOUT after 300s: docker volume inspect' }
     if ($script:vols.ContainsKey($a[-1])) { return ($script:vols[$a[-1]] | ConvertTo-Json -Compress) }
     $script:rc = 1; return 'Error: no such volume'
   }
-  if ($a[0] -eq 'volume' -and $a[1] -eq 'rm') { $script:volRm += $a[-1]; $script:vols.Remove($a[-1]); return '' }
+  if ($a[0] -eq 'volume' -and $a[1] -eq 'rm') { $script:volRm += $a[-1]; if (-not $script:volRmNoop) { $script:vols.Remove($a[-1]) }; return '' }
+  if ($a[0] -eq 'volume' -and $a[1] -eq 'create') { $script:volCreate += $a[-1]; return $a[-1] }
   if ($a[0] -eq 'run' -and ($a -join ' ') -match '/t/READY') {
     if ($script:readyMode -eq 'fail') { $script:rc = 124; return 'TIMEOUT after 300s' }
     if (($a -join ' ') -match 'ready-file') { return "ready-file $($script:readyContent)" }
@@ -491,6 +496,22 @@ try {
   $script:readyMode = 'ok'; $script:readyContent = "$pin11 $dig11"
   $t11 = Initialize-LabDbTemplate 'pg:x' $st11 $pin11
   Ok (-not $t11.refused -and -not $t11.built -and $script:volRm.Count -eq 0) 'a READY that reads fine is used as before'
+  # T11b (review 1, D-R1): a volume inspect that fails is never read as "absent"
+  Write-Host '[T11b] Initialize-LabDbTemplate: a failing volume inspect refuses, creates nothing and removes nothing'
+  $script:volInspectFail = 1; $script:volRm = @(); $script:volCreate = @()
+  $t11 = Initialize-LabDbTemplate 'pg:x' $st11 $pin11
+  Ok ($t11.refused -match 'could not be read' -and $script:volRm.Count -eq 0 -and $script:volCreate.Count -eq 0 -and $script:vols.ContainsKey($vol11)) "a timed-out inspect (rc 124) of the existing template is refused: no create, no rm, the template untouched ($($t11.refused))"
+  $script:volInspectFail = 0
+  $t11 = Initialize-LabDbTemplate 'pg:x' $st11 $pin11
+  Ok (-not $t11.refused -and -not $t11.built -and $script:volRm.Count -eq 0) 'the next run (the inspect works again) uses the same template'
+  # a template read and found wrong is replaced, but only after its removal is confirmed
+  $script:vols[$vol11]['ai-stack.lab.dbtpl.pin'] = ('c' * 40); $script:volRmNoop = $true; $script:volRm = @(); $script:volCreate = @()
+  $t11 = Initialize-LabDbTemplate 'pg:x' $st11 $pin11
+  Ok ($t11.refused -match 'could not be removed' -and $script:volCreate.Count -eq 0) "a wrong template whose removal does not take is not rebuilt over ($($t11.refused))"
+  $script:volRmNoop = $false; $script:vols[$vol11]['ai-stack.lab.dbtpl.pin'] = $pin11
+  $helperA = [System.IO.File]::ReadAllText($Helper)
+  $rmLines = @(($helperA -split "`n") | Where-Object { $_ -match 'Dk volume rm -f \$vol\b' })
+  Ok ($rmLines.Count -ge 1 -and @($rmLines | Where-Object { $_ -notmatch 'if \(\$created\)' -and $_ -notmatch 'a template READ and found wrong' }).Count -le 1) "every failure-path rm of the template is behind `$created (only the confirmed-wrong replacement removes unconditionally; $($rmLines.Count) rm lines)"
 
   # ---- T8: the build lease (the REAL lease.ps1, a scratch lock dir) -----------------------------------------------------
   Write-Host '[T8] Invoke-LabBuildLease'

@@ -130,6 +130,22 @@ function Get-LabImageLabels([string]$Tag) {
 #   placed outside /app, in the dependency cache or the system image). Labels and in-image checks cannot stop whoever
 #   controls the build; whoever can run `docker build` here can run anything on this host. The guard keeps honest runs
 #   honest; it is not a sandbox.
+#   ALSO OUT OF SCOPE (review 1, stated so a tester judges against them, not around them):
+#   - the viewer's FILES are not compared: it is bound by its tree label (docker/wiki-viewer and recipes/ clean,
+#     ai-stack.lab.tree = the tree under test, not dirty) and pinned by ID; a layer built by hand FROM a tree-labelled
+#     viewer inherits those labels - deliberate crafting, a residual;
+#   - the recipes/ bind mount: the workbench and the sweep container mount the WORKING TREE's OB1/recipes at /recipes at
+#     run time (deno.json maps @shared/slug to /recipes/_shared/slug.mjs); that is not image content, and a green run
+#     without the viewer does not dirty-check it, so uncommitted changes under recipes/_shared can reach a green run, as
+#     before this item (FOLLOW-UP, not built: add recipes/_shared to the green-run dirty check);
+#   - companion images by tag: the research image (identity, sessions) and the refinery image (workspace) are built
+#     fresh in every run under the run's own :wt-<id> tag from the working tree, never reused or taken -Prebuilt (those
+#     runners refuse -Prebuilt); they run by tag, are not ID-pinned and not dirty-checked - uncommitted changes in
+#     integrations/research-service or integrations/openbrain-idea-refinery, or a concurrent writer of the run's own
+#     owner tag, are outside the guard, as before this item;
+#   - build args: the guard does not read ai-stack.lab.args. The only gate-relevant arg, WORKBENCH_TEST_GATE, is checked
+#     by the in-image markers; OB1_SHA is a stamp; PANDOC_* / TYPST_* are SHA-pinned and land outside /app; an image
+#     built by hand with other args under this tree's labels is crafted - a residual.
 #   NOT WIRED: run-cast-tests.ps1, run-flags-tests.ps1, run-inlets-tests.ps1 and run-private-report-claims-lab.ps1 still
 #   build and run their own images without this guard (their -Prebuilt takes the tag as it is). They are out of scope
 #   of this item until they adopt lab-throughput.ps1.
@@ -439,6 +455,18 @@ function Get-LabVolumeLabels([string]$Vol) {
   if ($j) { foreach ($p in $j.PSObject.Properties) { $h[$p.Name] = [string]$p.Value } }
   return $h
 }
+# One read of a volume, three answers (review 1, D-R1): 'present' (with its labels), 'absent' ONLY when docker says
+# "no such volume", and 'error' for anything else (a timeout, a daemon error) - an error is never read as absent.
+function Get-LabVolumeState([string]$Vol) {
+  $o = (Dk volume inspect --format '{{json .Labels}}' $Vol | Out-String)
+  if ($script:rc -eq 0) {
+    $h = @{}
+    try { $j = $o.Trim() | ConvertFrom-Json; if ($j) { foreach ($p in $j.PSObject.Properties) { $h[$p.Name] = [string]$p.Value } } } catch { }
+    return @{ state = 'present'; labels = $h; why = '' }
+  }
+  if ($o -match '(?i)no such volume') { return @{ state = 'absent'; labels = $null; why = '' } }
+  return @{ state = 'error'; labels = $null; why = "docker volume inspect rc $($script:rc): $(($o.Trim() -split "`n")[0])" }
+}
 # Builds (once) or verifies the template for ($Pin, the staged chain). Returns @{ vol; built; log; refused }. The init log
 # is kept inside the volume (initdb.log) so a cloned lab checks the same log a replayed one would.
 function Initialize-LabDbTemplate([string]$PgImage, [string]$StageDir, [string]$Pin) {
@@ -453,8 +481,13 @@ function Initialize-LabDbTemplate([string]$PgImage, [string]$StageDir, [string]$
   }
   if (-not $fs) { $res.refused = "the template lock $lockPath stayed held for 15 min"; return $res }
   try {
-    $l = Get-LabVolumeLabels $vol
-    if ($null -ne $l) {
+    # review 1 (D-R1): only a volume THIS call created is ever removed on a failure below; a read that fails is refused,
+    # never taken as "absent" (docker volume create on an existing name silently reuses it)
+    $created = $false
+    $vs = Get-LabVolumeState $vol
+    if ($vs.state -eq 'error') { $res.refused = "the template volume $vol could not be read ($($vs.why)) - not used, not created, NOT removed"; return $res }
+    $l = $vs.labels
+    if ($vs.state -eq 'present') {
       $bad = @()
       if ($l[$script:LabTplLabel] -ne '1') { $res.refused = "volume $vol exists but is not a lab DB template (no $($script:LabTplLabel)=1) - not used, not removed"; return $res }
       if ($l["$($script:LabTplLabel).pin"] -ne $Pin) { $bad += "pin $($l["$($script:LabTplLabel).pin"]) (want $Pin)" }
@@ -480,22 +513,27 @@ function Initialize-LabDbTemplate([string]$PgImage, [string]$StageDir, [string]$
         return $res
       }
       Write-Host "  DB TEMPLATE REFUSED: $vol carries $($bad -join '; ') - it is NOT used; rebuilding it"
+      # a template READ and found wrong (another pin or digest, no READY) is replaced; its removal is checked before the
+      # create, so a create can never land on (and later delete) a volume that is still there
       $null = Dk volume rm -f $vol
+      $vs2 = Get-LabVolumeState $vol
+      if ($vs2.state -ne 'absent') { $res.refused = "the wrong template $vol could not be removed ($(if ($vs2.why) { $vs2.why } else { 'it is still there' })) - not rebuilt"; return $res }
     }
     $null = Dk volume create --label "$($script:LabTplLabel)=1" --label "$($script:LabTplLabel).pin=$Pin" --label "$($script:LabTplLabel).digest=$digest" $vol
     if ($script:rc -ne 0) { $res.refused = "could not create $vol"; return $res }
+    $created = $true
     $init = "$vol-init"
     $tplPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
     $null = Dk rm -f $init
     $null = Dk run -d --name $init --label $label --network none -e "POSTGRES_PASSWORD=$tplPw" -e 'POSTGRES_DB=openbrain' -e 'PGDATA=/var/lib/postgresql/data/pgdata' `
       -v "${vol}:/var/lib/postgresql/data" -v "${StageDir}:/docker-entrypoint-initdb.d:ro" $PgImage
-    if ($script:rc -ne 0) { $null = Dk volume rm -f $vol; $res.refused = "the template's init container did not start"; return $res }
+    if ($script:rc -ne 0) { if ($created) { $null = Dk volume rm -f $vol }; $res.refused = "the template's init container did not start"; return $res }
     $ok = $false
     for ($i = 0; $i -lt 300; $i++) { if ((Dk logs $init) -match 'PostgreSQL init process complete') { $ok = $true; break }; Start-Sleep -Seconds 2 }
     for ($i = 0; $ok -and $i -lt 60; $i++) { $null = Dk exec $init pg_isready -h 127.0.0.1 -U postgres -d openbrain; if ($script:rc -eq 0) { break }; Start-Sleep -Seconds 2 }
     $log = Dk logs $init
     $null = Dk stop -t 60 $init
-    if (-not $ok) { $null = Dk rm -f $init; $null = Dk volume rm -f $vol; $res.refused = 'the template chain did not finish initdb'; $res.log = $log; return $res }
+    if (-not $ok) { $null = Dk rm -f $init; if ($created) { $null = Dk volume rm -f $vol }; $res.refused = 'the template chain did not finish initdb'; $res.log = $log; return $res }
     $tmp = Join-Path $env:TEMP "$vol-initdb.log"
     [System.IO.File]::WriteAllText($tmp, (($log | Out-String) -replace "`r", ''), (New-Object System.Text.UTF8Encoding $false))
     $null = Dk cp $tmp "${init}:/var/lib/postgresql/data/initdb.log"
@@ -504,7 +542,7 @@ function Initialize-LabDbTemplate([string]$PgImage, [string]$StageDir, [string]$
     $cpRc = $script:rc
     Remove-Item -Force $tmp -ErrorAction SilentlyContinue
     $null = Dk rm -f $init
-    if ($cpRc -ne 0) { $null = Dk volume rm -f $vol; $res.refused = 'could not write the template READY marker'; return $res }
+    if ($cpRc -ne 0) { if ($created) { $null = Dk volume rm -f $vol }; $res.refused = 'could not write the template READY marker'; return $res }
     $res.built = $true; $res.log = ($log | Out-String)
     Write-Host "  DB TEMPLATE BUILT: $vol (pin $($Pin.Substring(0, 12)), chain digest $($digest.Substring(0, 12)); replayed once)"
     return $res
