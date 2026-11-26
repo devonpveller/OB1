@@ -232,6 +232,11 @@ function Build-At([string]$sha, [string]$tag, [string]$ctxRel, [string]$what, [s
     # Windows' own tar: a GNU tar first on PATH (Git Bash) reads 'C:\...' as a remote host
     & (Join-Path $env:SystemRoot 'System32/tar.exe') -xf $tar -C $tree
     Remove-Item -Force $tar
+    if ($SkipGate) {
+      # rw-lab-throughput: a red-base image skips the base's unit gate (the archive copy only, never the working tree)
+      $w = Convert-LabDockerfileSkipGate (Join-Path $tree 'docker\workbench\Dockerfile') $ob1
+      if ($w) { throw "RED -SkipGate: $w" }
+    }
   }
   $args2 = @('build', '--label', $label, '--build-arg', "OB1_SHA=$sha", '-t', $tag)
   if ($what -eq 'viewer') { $args2 += @('--build-context', "recipes=$(Join-Path $tree 'recipes')") }

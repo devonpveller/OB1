@@ -63,13 +63,16 @@ function Resolve-LabRun {
     return $r
   }
   if ($Sweep -and $NoSweep) { $r.refused = '-Sweep and -NoSweep together'; return $r }
-  if ($Sweep -and $r.mode -ne 'green') { $r.refused = "-Sweep is for a green developer run; a $($r.mode) run ends on the known base red"; return $r }
+  # -Sweep on a red run keeps the runners' RED sweep assertions reachable (run-identity-tests.ps1 "RED: the signed-in sweep
+  # fails on the base", run-workspace-tests.ps1 "RED: the isolation sweep finds user B's context on the base"). A mutant
+  # run has no sweep assertion of its own.
+  if ($Sweep -and $r.mode -eq 'mutant') { $r.refused = '-Sweep is for a green or red run; a mutant run proves its own case'; return $r }
   if ($Sweep) {
     $r.sweep = $true
     $r.note = "RUN MODE $($r.mode): the isolation sweep runs (-Sweep)"
   } else {
     $why = if ($NoSweep) { '-NoSweep' } else { 'the default for developer, mutant and red runs' }
-    $r.note = "RUN MODE $($r.mode): SWEEP SKIPPED ($why; the sweep runs once per landing: -Landing always sweeps, -Sweep opts a developer run in)"
+    $r.note = "RUN MODE $($r.mode): SWEEP SKIPPED ($why; the sweep runs once per landing: -Landing always sweeps, -Sweep opts a developer or red run in)"
   }
   return $r
 }
@@ -110,17 +113,35 @@ function Get-LabImageLabels([string]$Tag) {
   if ($j) { foreach ($p in $j.PSObject.Properties) { $h[$p.Name] = [string]$p.Value } }
   return $h
 }
-# Throws (after a FAIL line) when $Tag carries ai-stack.lab.gate=skipped; a green or landing run calls it on every
-# workbench image it is about to run.
+# What the image itself says about its unit gate: 'full' (/app/.test-gate-passed and no .test-gate-skipped), 'skipped'
+# (the skipped marker and no passed marker), 'none', 'both', or 'error' (not runnable). One `docker run --rm --network
+# none`; the label is only a hint, because a `FROM <skip image>` + `LABEL ai-stack.lab.gate=full` (or an empty label)
+# forges it (rw-lab-throughput test attempt 1, D1).
+function Get-LabGateMarkers([string]$Tag) {
+  $o = Dk run --rm --network none --entrypoint sh $Tag -c 'p=0; s=0; [ -f /app/.test-gate-passed ] && p=1; [ -e /app/.test-gate-skipped ] && s=1; echo "gate-markers p=$p s=$s"'
+  if ($script:rc -ne 0) { return 'error' }
+  $m = ([regex]'gate-markers p=([01]) s=([01])').Match(($o | Out-String))
+  if (-not $m.Success) { return 'error' }
+  $pm = $m.Groups[1].Value -eq '1'; $sm = $m.Groups[2].Value -eq '1'
+  if ($pm -and -not $sm) { return 'full' }
+  if ($sm -and -not $pm) { return 'skipped' }
+  if ($pm -and $sm) { return 'both' }
+  return 'none'
+}
+# Throws (after a FAIL line) unless $Tag's unit gate ran: the passed marker present and the skipped marker absent INSIDE
+# the image, and a label that does not say skipped. An unset label (an image from before rw-lab-throughput) passes only
+# on the marker. A green or landing run calls it on every workbench image it is about to run.
 function Assert-LabGreenImage([string]$Tag, [string]$Mode) {
   $l = Get-LabImageLabels $Tag
   if ($null -eq $l) { Fail "the green-image guard could not inspect $Tag"; throw "guard: $Tag not inspectable" }
   $g = $l[$script:LabGateLabel]
-  if ($g -eq 'skipped') {
-    Fail "REFUSED: $Tag is a skip-gate image ($($script:LabGateLabel)=skipped) and this is a $Mode run - a green or landing run only ever uses an image whose unit gate ran"
-    throw "guard: skip-gate image $Tag in a $Mode run"
+  $mk = Get-LabGateMarkers $Tag
+  if ($g -eq 'skipped' -or $mk -ne 'full') {
+    $why = if ($mk -ne 'full') { "its gate markers say '$mk' (want /app/.test-gate-passed and no /app/.test-gate-skipped)" } else { "$($script:LabGateLabel)=skipped" }
+    Fail "REFUSED: $Tag is not a full-gate image ($why; label $($script:LabGateLabel)='$g') and this is a $Mode run - a green or landing run only ever uses an image whose unit gate ran"
+    throw "guard: $Tag is not a full-gate image in a $Mode run"
   }
-  Pass "the green-image guard: $Tag is not a skip-gate image ($($script:LabGateLabel)=$(if ($g) { $g } else { '<unset: built before rw-lab-throughput, the gate ran>' }))"
+  Pass "the green-image guard: $Tag ran its unit gate (/app/.test-gate-passed present, no skipped marker; label $($script:LabGateLabel)=$(if ($g) { $g } else { '<unset: built before rw-lab-throughput>' }))"
 }
 
 # ---- part 1: a skip-gate Dockerfile for a tree that predates WORKBENCH_TEST_GATE (a red base) ---------------------------
@@ -185,7 +206,7 @@ function Invoke-LabBuildLease([string]$Owner, [string]$Ob1, [scriptblock]$Build)
   Push-Location $stack   # lease.ps1 finds the shared lock dir from the ai-stack checkout, never from the OB1 submodule
   try {
     while ($true) {
-      $o = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $lease -Acquire -Class build -Owner $Owner -TtlMin 90 2>&1 | ForEach-Object { "$_" }) -join ' | '
+      $o = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $lease -Acquire -Class build -Owner $Owner -TtlMin ([int][Math]::Ceiling((Get-LabBuildTimeoutSec) / 60) + 30) 2>&1 | ForEach-Object { "$_" }) -join ' | '
       $lrc = $LASTEXITCODE
       if ($lrc -eq 0) { $held = $true; Write-Host "  BUILD LEASE: $(($o -split ' \| ')[0])"; break }
       if ($lrc -ne 3) { Write-Host "  BUILD LEASE: lease.ps1 answered rc $lrc ($o) - building without it"; break }
@@ -228,6 +249,7 @@ function Invoke-LabImage {
       if ($l[$script:LabTreeLabel] -ne $key.tree) { $bad += "$($script:LabTreeLabel)=$($l[$script:LabTreeLabel]) (want $($key.tree))" }
       if ($l[$script:LabArgsLabel] -ne $key.args) { $bad += "$($script:LabArgsLabel)=$($l[$script:LabArgsLabel]) (want $($key.args))" }
       if ($GateImage -and $l[$script:LabGateLabel] -ne $wantGate) { $bad += "$($script:LabGateLabel)=$($l[$script:LabGateLabel]) (want $wantGate)" }
+      if ($GateImage -and -not $bad.Count) { $mk = Get-LabGateMarkers $tag; if ($mk -ne $wantGate) { $bad += "gate markers '$mk' inside the image (want $wantGate)" } }
       if (-not $bad.Count) {
         Write-Host "  IMAGE REUSED: $tag (tree $($key.tree.Substring(0, 12)), args $($key.args.Substring(0, 12)) - labels checked; no build)"
         return @{ tag = $tag; reused = $true; rc = 0; log = ''; key = $key }
@@ -247,6 +269,8 @@ function Invoke-LabImage {
     $l = Get-LabImageLabels $tag
     $g = if ($l) { $l[$script:LabGateLabel] } else { '' }
     if ($SkipGate -and $g -ne 'skipped') { Fail "the skip-gate build of $tag carries $($script:LabGateLabel)='$g', not 'skipped'"; $brc = 1 }
+    $mk = Get-LabGateMarkers $tag
+    if ($mk -ne $wantGate) { Fail "the build of $tag has gate markers '$mk' inside, not '$wantGate'"; $brc = 1 }
     if (-not $SkipGate -and $g -eq 'skipped') { Fail "the full-gate build of $tag carries $($script:LabGateLabel)=skipped"; $brc = 1 }
   }
   $script:rc = $brc
@@ -266,6 +290,9 @@ function Set-LabDbPassword([string]$Db, [string]$Pw) {
 # ---- part 3: the DB template ---------------------------------------------------------------------------------------------
 # The chain digest: every staged file name and its sha256, sorted, and the postgres image reference.
 function Get-LabChainDigest([string]$StageDir, [string]$PgImage) {
+  # the image ID when it is local (a re-pushed tag under the same reference is another image); the reference otherwise
+  $pgId = "$(Dk image inspect --format '{{.Id}}' $PgImage)".Trim()
+  if ($script:rc -eq 0 -and $pgId -match '^sha256:[0-9a-f]{64}$') { $PgImage = $pgId }
   $lines = @(Get-ChildItem -LiteralPath $StageDir -File | Sort-Object Name | ForEach-Object { "$($_.Name) $(Get-LabFileSha256 $_.FullName)" })
   return (Get-LabSha256 ((@("pg=$PgImage") + $lines) -join "`n"))
 }

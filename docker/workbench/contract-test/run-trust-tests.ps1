@@ -159,7 +159,7 @@ function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
 }
 function Dk { Lab-Docker 300 ([string[]]$args) }
 # builds: the workbench's test gate renders PDFs; with other lab runs sharing the daemon it can pass 40 min
-function DkLong { Lab-Docker 5400 ([string[]]$args) }
+function DkLong { Lab-Docker (Get-LabBuildTimeoutSec) ([string[]]$args) }
 
 # the shim's own RED: each refused shape is refused before docker runs
 $shimCases = @(

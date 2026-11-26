@@ -182,7 +182,7 @@ function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
   return (($out.Result + $err.Result) -replace "`r", '').TrimEnd()
 }
 function Dk { Lab-Docker 300 ([string[]]$args) }
-function DkLong { Lab-Docker 5400 ([string[]]$args) }  # image builds: the shared Docker host may be busy with other labs
+function DkLong { Lab-Docker (Get-LabBuildTimeoutSec) ([string[]]$args) }  # image builds: the shared Docker host may be busy with other labs
 
 $shimCases = @(
   @('run', '-p', '8080:8080', 'x'), @('run', '--network', 'ai-stack_app-net', 'x'), @('network', 'create', '--driver', 'macvlan', 'n'),

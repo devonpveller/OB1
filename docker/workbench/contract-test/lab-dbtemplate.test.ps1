@@ -86,12 +86,22 @@ function Save-Diff([string]$a, [string]$b, [string]$name) {
   Write-Host "    (first differences: $f)"
 }
 
-$pin = "$(& git -C $ob1 rev-parse HEAD)".Trim()
+# rw-lab-throughput test attempt 1 (D3): the proof never touches the LIVE template of this pin. Every template it builds,
+# plants or removes is under a SCRATCH pin (a random 40-hex 'd3...' that is no commit), so its volume name is its own; the
+# live one (ob1-dbtpl-<HEAD12>-<digest12>) is inspected before and after and must be unchanged (or still absent).
+$livePin = "$(& git -C $ob1 rev-parse HEAD)".Trim()
+$pin = 'd3' + (-join ((48..57 + 97..102) | Get-Random -Count 38 | ForEach-Object { [char]$_ }))
+while ($pin.Length -lt 40) { $pin += '0' }
 try {
-  Write-Host "== lab-dbtemplate.test  owner=$Id  pin=$($pin.Substring(0, 12))"
+  Write-Host "== lab-dbtemplate.test  owner=$Id  scratch pin=$($pin.Substring(0, 12)) (the live pin $($livePin.Substring(0, 12)) is only inspected)"
   $stage = Join-Path $env:TEMP "$P-stage"; $nFull = Stage-Chain $stage
   $stageShort = Join-Path $env:TEMP "$P-stage-short"; $nShort = Stage-Chain $stageShort 1
   Check ($nFull -gt 60 -and $nShort -eq $nFull - 1) "the chain from docker-compose.yml: $nFull migrations (and $nShort without the last)"
+  $liveVol = "ob1-dbtpl-$($livePin.Substring(0, 12))-$((Get-LabChainDigest $stage $PgImage).Substring(0, 12))"
+  $liveBefore = "$(Dk volume inspect --format '{{.CreatedAt}} {{json .Labels}}' $liveVol)".Trim()
+  $liveExisted = ($script:rc -eq 0)
+  Write-Host "  the live template $liveVol $(if ($liveExisted) { 'exists' } else { 'is absent' }) before the proof"
+  Check ($liveVol -ne "ob1-dbtpl-$($pin.Substring(0, 12))-$((Get-LabChainDigest $stage $PgImage).Substring(0, 12))") 'the scratch template has its own volume name, never the live one'
 
   Write-Host '[D1] the comparator can fail (red first): the chain without its last slot dumps differently'
   $logR = Start-Replay "$P-replay" $stage
@@ -140,11 +150,12 @@ try {
   Check ((Get-LabChainDigest $otherStage $PgImage) -ne $tpl.digest) 'another chain has another digest, so another template name'
 
   Write-Host '[D3] a template labelled for another pin is never used'
+  if ($tpl.vol -eq $liveVol -or $tpl.vol -notmatch "^ob1-dbtpl-$($pin.Substring(0, 12))-") { throw "refusing to plant over $($tpl.vol): not the scratch template" }
   $null = Dk volume rm -f $tpl.vol
   $null = Dk volume create --label 'ai-stack.lab.dbtpl=1' --label "ai-stack.lab.dbtpl.pin=$('0' * 40)" --label "ai-stack.lab.dbtpl.digest=$($tpl.digest)" $tpl.vol
   $tpl3 = Initialize-LabDbTemplate $PgImage $stage $pin
   $l3 = Get-LabVolumeLabels $tpl.vol
-  Check (-not $tpl3.refused -and $tpl3.built -and $l3['ai-stack.lab.dbtpl.pin'] -eq $pin) 'a planted template volume with another pin label is refused and rebuilt for this pin'
+  Check (-not $tpl3.refused -and $tpl3.built -and $l3['ai-stack.lab.dbtpl.pin'] -eq $pin) 'a planted template volume with another pin label is refused and rebuilt for this (scratch) pin'
   $null = Dk volume rm -f $tpl.vol
   $null = Dk volume create --label 'ai-stack.lab.dbtpl=1' --label "ai-stack.lab.dbtpl.pin=$pin" --label "ai-stack.lab.dbtpl.digest=$($tpl.digest)" $tpl.vol
   $tpl4 = Initialize-LabDbTemplate $PgImage $stage $pin
@@ -156,11 +167,15 @@ try {
   Check ($tpl5.refused -match 'not a lab DB template' -and $null -ne $l5 -and -not $l5.ContainsKey('ai-stack.lab.dbtpl')) 'a volume that is not a lab template is refused - not used and not removed'
   $null = Dk volume rm -f $tpl.vol
   if ($KeepTemplate) { $tpl6 = Initialize-LabDbTemplate $PgImage $stage $pin; Check (-not $tpl6.refused) "kept: $($tpl6.vol)" }
+  $liveAfter = "$(Dk volume inspect --format '{{.CreatedAt}} {{json .Labels}}' $liveVol)".Trim()
+  $liveNow = ($script:rc -eq 0)
+  Check ($liveNow -eq $liveExisted -and (-not $liveExisted -or $liveAfter -eq $liveBefore)) "the live template $liveVol is untouched ($(if ($liveExisted) { 'same CreatedAt and labels' } else { 'still absent' }))"
 } catch {
   Fail "the run stopped: $_"
 } finally {
   foreach ($c in $script:made.containers) { $null = Dk rm -f -v $c }
   foreach ($v in $script:made.vols) { $null = Dk volume rm -f $v }
+  if ($tpl -and $tpl.vol -and $tpl.vol -match "^ob1-dbtpl-$($pin.Substring(0, 12))-" -and -not $KeepTemplate) { $null = Dk volume rm -f $tpl.vol }
   $left = (Dk ps -a --filter "label=$label" --format '{{.Names}}' | Out-String).Trim()
   Check (-not $left) "no container labelled $Id is left ($left)"
   $leftVol = (Dk volume ls --filter "label=$label" --format '{{.Name}}' | Out-String).Trim()

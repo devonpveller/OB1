@@ -21,7 +21,8 @@ function Fail([string]$m) { $script:n++; Write-Host "  FAIL  $m"; $script:fail++
 function Check([bool]$ok, [string]$m) { if ($ok) { Pass $m } else { Fail $m } }
 function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
   $all = $a -join ' '
-  if ($a[0] -in @('run', 'network', 'compose', 'push') -or $all -match '(^|[\s/=])[^\s]*:local(\s|$)') { Write-Host "  SHIM REFUSED: docker $all"; $script:rc = 2; return 'REFUSED' }
+  # run: only the gate-marker probe shape (--rm, --network none)
+  if (($a[0] -eq 'run' -and -not ($a -contains '--rm' -and $a -contains 'none')) -or $a[0] -in @('network', 'compose', 'push') -or $all -match '(^|[\s/=])[^\s]*:local(\s|$)') { Write-Host "  SHIM REFUSED: docker $all"; $script:rc = 2; return 'REFUSED' }
   if ($a[0] -eq 'build') { for ($i = 0; $i -lt $a.Count; $i++) { if ($a[$i] -eq '-t' -and $a[$i + 1] -notmatch '^lab-reuse-probe:wt-') { $script:rc = 2; return 'REFUSED tag' } } }
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = 'docker'
@@ -47,7 +48,7 @@ try {
   $null = Dk image inspect $BaseImage
   if ($script:rc -ne 0) { Fail "the base image $BaseImage is not local (this test pulls nothing)"; throw 'no base' }
   G @('init', '-q'); G @('config', 'user.email', 't@example.invalid'); G @('config', 'user.name', 't'); G @('config', 'commit.gpgsign', 'false')
-  [System.IO.File]::WriteAllText((Join-Path $ctx 'Dockerfile'), "FROM $BaseImage`nARG WORKBENCH_TEST_GATE=full`nLABEL ai-stack.lab.gate=`"`${WORKBENCH_TEST_GATE}`"`nCOPY v.txt /v.txt`n")
+  [System.IO.File]::WriteAllText((Join-Path $ctx 'Dockerfile'), "FROM $BaseImage`nARG WORKBENCH_TEST_GATE=full`nLABEL ai-stack.lab.gate=`"`${WORKBENCH_TEST_GATE}`"`nRUN mkdir -p /app && if [ `"`$WORKBENCH_TEST_GATE`" = skipped ]; then touch /app/.test-gate-skipped; else touch /app/.test-gate-passed; fi`nCOPY v.txt /v.txt`n")
   [System.IO.File]::WriteAllText((Join-Path $ctx 'v.txt'), "one`n")
   G @('add', '-A'); G @('commit', '-q', '-m', 'one')
   $sha1 = "$(& git -C $repo rev-parse HEAD)".Trim()
@@ -92,6 +93,20 @@ try {
   $o = Dk tag $r5.tag 'lab-reuse-probe:local'
   Check ($script:rc -ne 0 -and $o -match 'REFUSED') 'the lab shim refuses to tag it :local'
   try { Assert-LabGreenImage $r5.tag 'green'; Fail 'the green guard let a skip-gate image through' } catch { Pass 'the green guard refuses it for a green run (the FAIL line above is the guard speaking)'; $script:fail-- ; $script:n-- }
+
+  Write-Host '[R5] attempt 1 D1: a forged or stripped label over a skip image, on a real daemon'
+  $forgeDir = Join-Path $root 'forge'; New-Item -ItemType Directory -Force $forgeDir | Out-Null
+  foreach ($c in @(@('forged', 'LABEL ai-stack.lab.gate=full'), @('empty', 'LABEL ai-stack.lab.gate='))) {
+    [System.IO.File]::WriteAllText((Join-Path $forgeDir 'Dockerfile'), "FROM $($r5.tag)`n$($c[1])`n")
+    $ft = "lab-reuse-probe:wt-$($c[0])"
+    $null = Dk build --label $label -t $ft $forgeDir; $tags += $ft
+    $fl = Get-LabImageLabels $ft
+    Check ($script:rc -eq 0 -and $fl['ai-stack.lab.gate'] -ne 'skipped') "the $($c[0]) image's label no longer says skipped ('$($fl['ai-stack.lab.gate'])')"
+    Check ((Get-LabGateMarkers $ft) -eq 'skipped') "but its gate markers still say skipped (/app/.test-gate-skipped inside)"
+    try { Assert-LabGreenImage $ft 'green'; Fail "the green guard ACCEPTED the $($c[0]) image" } catch { Pass "the green guard refuses the $($c[0]) image by its markers (the FAIL line above is the guard speaking)"; $script:fail--; $script:n-- }
+  }
+  try { Assert-LabGreenImage $r3.tag 'green' } catch { Fail "the green guard refused a real full-gate image ($($r3.tag))" }
+  Check ((Get-LabGateMarkers $r3.tag) -eq 'full') 'control: a real full-gate image holds the passed marker only, and passes'
 } catch {
   Fail "the run stopped: $_"
 } finally {

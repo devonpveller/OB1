@@ -280,6 +280,10 @@ function Build-At([string]$sha, [string]$tag, [string]$target, [string]$what) {
     & git -C $ob1 archive --format=tar -o $tar $sha
     & (Join-Path $env:SystemRoot 'System32\tar.exe') -xf $tar -C $tree  # the Windows tar (rw-p8a4-ideas: a GNU tar on PATH reads C: as a host)
     Remove-Item -Force $tar
+    if ($SkipGate) {
+      $w = Convert-LabDockerfileSkipGate (Join-Path $tree 'docker\workbench\Dockerfile') $ob1
+      if ($w) { throw "RED -SkipGate: $w" }
+    }
     if ($WalkOff) {
       # the base predates the switch: one line after the route runs, so the walk can be turned off
       $os = Join-Path $tree 'docker/workbench/src/middleware/owner-scope.ts'
@@ -340,14 +344,27 @@ try {
 
   # ---------------------------------------------------------------- 3. images
   Write-Host '[3] images'
-  $img = Invoke-LabWorkbenchImages -Run $run -Ob1 $ob1 -Wb $wb -Sha $sha -BaseSha $BaseSha -Short $short -Owner $Id -P $P `
-    -SkipGate $SkipGate -NoReuse $NoReuse -Viewer (-not $Red) -ViewerDir $viewerDir -GateNote ', grammar, hub clustering, contracts, export'
-  if (-not $img.ok) { throw 'images' }
-  $wbTag = $img.wb; $wbTestTag = $img.test; if ($img.viewer) { $viewerTag = $img.viewer }
   if ($Red) {
+    # RED: the base workbench and viewer through Build-At, as before (it carries the -WalkOff patch of the base's
+    # owner scope; with -SkipGate it also skips the base workbench's unit gate in the archive copy). The test stage is
+    # this tree's, through the helper (reused from a green build of the same tree).
+    $o = Invoke-LabBuildLease $Id $ob1 { Build-At $BaseSha $wbTag '' 'workbench' }; Save 'build-workbench-base.log' $o
+    Check ($script:rc -eq 0) "RED: $wbTag built from OB1 $BaseSha$(if ($SkipGate) { ' (its unit gate SKIPPED: a red-base image)' })"
+    $script:made.images += $wbTag
     $o = Invoke-LabBuildLease $Id $ob1 { Build-At $BaseSha $viewerTag '' 'viewer' }; Save 'build-viewer-base.log' ($o -split "`n" | Select-Object -Last 60 | Out-String)
     Check ($script:rc -eq 0) "RED: $viewerTag built from OB1 $BaseSha"
     $script:made.images += $viewerTag
+    $t = Invoke-LabImage -Repo 'openbrain-workbench' -Context $wb -Ob1 $ob1 -BuildArgs @{ OB1_SHA = $sha } -Target 'test' -KeyParts @('ctx=docker/workbench') -DirtyPaths @('docker/workbench') `
+      -OwnerTag $wbTestTag -Owner $Id -GateImage -NoReuse:$NoReuse
+    Check ($t.rc -eq 0) "$($t.tag) (this tree's test stage): $(if ($t.reused) { 'reused' } else { 'built' })"
+    if ($t.rc -ne 0) { throw 'images' }
+    if ($t.tag -notmatch ':wt-tree-') { $script:made.images += $t.tag }
+    $wbTestTag = $t.tag
+  } else {
+    $img = Invoke-LabWorkbenchImages -Run $run -Ob1 $ob1 -Wb $wb -Sha $sha -BaseSha $BaseSha -Short $short -Owner $Id -P $P `
+      -SkipGate $SkipGate -NoReuse $NoReuse -Viewer $true -ViewerDir $viewerDir -GateNote ', grammar, hub clustering, contracts, export'
+    if (-not $img.ok) { throw 'images' }
+    $wbTag = $img.wb; $wbTestTag = $img.test; if ($img.viewer) { $viewerTag = $img.viewer }
   }
   if (-not $Red) {
     # rw-settings-store [5k]: the idea refinery's own image (its Dockerfile: dependencies cached, deno check)

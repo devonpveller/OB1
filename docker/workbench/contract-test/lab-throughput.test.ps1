@@ -29,14 +29,24 @@ $script:images = @{}       # tag -> @{ labels }
 $script:builds = @()       # every build's arg list
 $script:gateAware = $true  # a Dockerfile that knows WORKBENCH_TEST_GATE (false = an older tree)
 $script:rc = 0
+$script:lastTimeout = 0
 function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
   $script:rc = 0
   if ($a[0] -eq 'image' -and $a[1] -eq 'inspect') {
     $t = $a[-1]
     if (-not $script:images.ContainsKey($t)) { $script:rc = 1; return "Error: No such image: $t" }
+    if (($a -join ' ') -match '\{\{\.Id\}\}') { return [string]$script:images[$t].id }
     return ($script:images[$t].labels | ConvertTo-Json -Compress)
   }
+  if ($a[0] -eq 'run' -and $a -contains '--rm' -and $a -contains 'sh') {
+    # the gate-marker probe: what the image holds in /app
+    $t = $a[[array]::IndexOf($a, 'sh') + 1]
+    if (-not $script:images.ContainsKey($t)) { $script:rc = 125; return "Unable to find image '$t'" }
+    $mk = [string]$script:images[$t].markers
+    return ('gate-markers p={0} s={1}' -f $(if ($mk -match 'p') { 1 } else { 0 }), $(if ($mk -match 's') { 1 } else { 0 }))
+  }
   if ($a[0] -eq 'build') {
+    $script:lastTimeout = $TimeoutSec
     $script:builds += , $a
     $labels = [ordered]@{}; $tag = ''; $gate = ''
     for ($i = 0; $i -lt $a.Count; $i++) {
@@ -45,7 +55,8 @@ function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
       if ($a[$i] -eq '-t') { $tag = $a[$i + 1] }
     }
     if ($script:gateAware) { $labels['ai-stack.lab.gate'] = $(if ($gate) { $gate } else { 'full' }) }
-    $script:images[$tag] = @{ labels = $labels }
+    # the markers a real build leaves: the skipped marker only when the Dockerfile knew the arg and was told to skip
+    $script:images[$tag] = @{ labels = $labels; markers = $(if ($script:gateAware -and $gate -eq 'skipped') { 's' } else { 'p' }) }
     return 'built'
   }
   return ''
@@ -87,7 +98,11 @@ try {
   $r = Resolve-LabRun -Sweep $true
   Ok ($r.sweep -and $r.note -match 'sweep runs \(-Sweep\)') 'a developer run opts in with -Sweep'
   $r = Resolve-LabRun -Sweep $true -Red $true
-  Ok ([bool]$r.refused) '-Sweep on a red run is refused (it ends on the known base red)'
+  Ok (-not $r.refused -and $r.sweep -and $r.mode -eq 'red' -and $r.note -match 'RUN MODE red: the isolation sweep runs') 'a red run opts in with -Sweep (the RED sweep assertions of identity and workspace stay reachable; attempt 1 D2)'
+  $r = Resolve-LabRun -Red $true
+  Ok (-not $r.sweep) 'a red run still skips the sweep by default'
+  $r = Resolve-LabRun -Sweep $true -Mutant $true
+  Ok ([bool]$r.refused) '-Sweep on a mutant run is refused'
   $r = Resolve-LabRun -Sweep $true -NoSweep $true
   Ok ([bool]$r.refused) '-Sweep with -NoSweep is refused'
 
@@ -115,12 +130,18 @@ try {
 
   # ---- T3: the green-image guard --------------------------------------------------------------------------------------
   Write-Host '[T3] Assert-LabGreenImage'
-  $script:images['openbrain-workbench:wt-unit'] = @{ labels = @{ 'ai-stack.lab.gate' = 'skipped' } }
-  $script:images['openbrain-workbench:wt-unit-full'] = @{ labels = @{ 'ai-stack.lab.gate' = 'full' } }
-  $script:images['openbrain-workbench:wt-unit-old'] = @{ labels = @{ 'org.opencontainers.image.revision' = 'x' } }
+  $script:images['openbrain-workbench:wt-unit'] = @{ labels = @{ 'ai-stack.lab.gate' = 'skipped' }; markers = 's' }
+  $script:images['openbrain-workbench:wt-unit-full'] = @{ labels = @{ 'ai-stack.lab.gate' = 'full' }; markers = 'p' }
+  $script:images['openbrain-workbench:wt-unit-old'] = @{ labels = @{ 'org.opencontainers.image.revision' = 'x' }; markers = 'p' }
+  # attempt 1 D1: a skip image rebuilt FROM itself with a forged label, or with the label emptied / stripped
+  $script:images['openbrain-workbench:wt-unit-forged'] = @{ labels = @{ 'ai-stack.lab.gate' = 'full' }; markers = 's' }
+  $script:images['openbrain-workbench:wt-unit-empty'] = @{ labels = @{ 'ai-stack.lab.gate' = '' }; markers = 's' }
+  $script:images['openbrain-workbench:wt-unit-stripped'] = @{ labels = @{ 'x' = 'y' }; markers = 's' }
+  $script:images['openbrain-workbench:wt-unit-nomarker'] = @{ labels = @{ 'x' = 'y' }; markers = '' }
+  $script:images['openbrain-workbench:wt-unit-both'] = @{ labels = @{ 'ai-stack.lab.gate' = 'full' }; markers = 'ps' }
   $f0 = $script:fail; $threw = $false
   try { Assert-LabGreenImage 'openbrain-workbench:wt-unit' 'green' } catch { $threw = $true }
-  Ok ($threw -and $script:fail -eq $f0 + 1 -and $script:lines[-1] -match 'REFUSED: .*skip-gate image') 'a skip-gate image FAILS the green guard and stops the run'
+  Ok ($threw -and $script:fail -eq $f0 + 1 -and $script:lines[-1] -match 'REFUSED: .*not a full-gate image') 'a skip-gate image FAILS the green guard and stops the run'
   $f0 = $script:fail; $threw = $false
   try { Assert-LabGreenImage 'openbrain-workbench:wt-unit' 'landing' } catch { $threw = $true }
   Ok ($threw -and $script:fail -eq $f0 + 1) 'and the landing guard'
@@ -130,6 +151,13 @@ try {
   $f0 = $script:fail; $threw = $false
   try { Assert-LabGreenImage 'openbrain-workbench:absent' 'green' } catch { $threw = $true }
   Ok ($threw -and $script:fail -eq $f0 + 1) 'an image that cannot be inspected fails closed'
+  foreach ($c in @(@('forged', 'a forged label (gate=full) over the skipped marker'), @('empty', 'an EMPTY label over the skipped marker'),
+      @('stripped', 'a stripped label (unset) over the skipped marker'), @('nomarker', 'an unset label and no passed marker'),
+      @('both', 'both markers'))) {
+    $f0 = $script:fail; $threw = $false
+    try { Assert-LabGreenImage "openbrain-workbench:wt-unit-$($c[0])" 'green' } catch { $threw = $true }
+    Ok ($threw -and $script:fail -eq $f0 + 1 -and $script:lines[-1] -match 'gate markers') "D1 attack refused by the markers inside the image: $($c[1])"
+  }
 
   # ---- T4: image reuse by tree ----------------------------------------------------------------------------------------
   Write-Host '[T4] Invoke-LabImage: reuse by tree hash + args digest'
@@ -157,6 +185,11 @@ try {
   $script:images[$i1.tag].labels['ai-stack.lab.args'] = ('f' * 64)
   $i3b = Invoke-LabImage @common
   Ok (-not $i3b.reused -and $script:builds.Count -eq 3) 'a planted tag with a wrong args label is NOT reused'
+  # attempt 1 D1 / U8 case 4: every label right, but the image holds the skipped marker (a skip image relabelled full)
+  $script:images[$i1.tag].markers = 's'
+  $i3c = Invoke-LabImage @common
+  Ok (-not $i3c.reused -and $script:builds.Count -eq 4 -and $script:images[$i1.tag].markers -eq 'p') 'a reuse tag with the right labels but the skipped marker inside is NOT reused: rebuilt'
+  $script:builds = @($script:builds[0..2])
   # another tree
   [System.IO.File]::WriteAllText((Join-Path $repo 'docker\workbench\a.txt'), "two`n")
   & $g @('commit', '-q', '-am', 'two')
@@ -198,7 +231,7 @@ try {
   $c6 = $c2.Clone(); $c6.SkipGate = $true; $c6.NoReuse = $true
   $f0 = $script:fail
   $i12 = Invoke-LabImage @c6
-  Ok ($i12.rc -ne 0 -and $script:fail -eq $f0 + 1) 'a skip-gate build whose image is not labelled skipped fails (an older Dockerfile)'
+  Ok ($i12.rc -ne 0 -and $script:fail -ge $f0 + 1) 'a skip-gate build whose image is not labelled skipped (and holds the passed marker) fails (an older Dockerfile)'
   $script:gateAware = $true
   # the shim's tag rule
   Ok ((Test-LabBuildTag 'openbrain-workbench:wt-unit' 'unit') -and (Test-LabBuildTag 'openbrain-workbench:wt-unit-test' 'unit') -and (Test-LabBuildTag $i1.tag 'unit')) 'the shim accepts the run''s :wt-<id> tags and a :wt-tree- reuse tag'
@@ -250,6 +283,47 @@ try {
   Rename-Item (Join-Path $st '020-b.sql') '030-b.sql'
   Ok ((Get-LabChainDigest $st 'pg:16') -ne $d2) 'a moved slot changes the digest'
   Ok ((Get-LabChainDigest $st 'pg:17') -ne (Get-LabChainDigest $st 'pg:16')) 'another postgres image changes the digest'
+  $script:images['pg:16'] = @{ labels = @{}; id = ('sha256:' + ('a' * 64)) }
+  $dA = Get-LabChainDigest $st 'pg:16'
+  $script:images['pg:16'].id = ('sha256:' + ('b' * 64))
+  $dB = Get-LabChainDigest $st 'pg:16'
+  $script:images['pg:other-name'] = @{ labels = @{}; id = ('sha256:' + ('b' * 64)) }
+  Ok ($dA -ne $dB -and $dB -eq (Get-LabChainDigest $st 'pg:other-name')) 'the digest follows the postgres image ID, not its reference (a re-pushed tag is another template)'
+
+  # ---- T9: the build bound and the build lease's TTL ---------------------------------------------------------------
+  Write-Host '[T9] Get-LabBuildTimeoutSec'
+  Remove-Item Env:OB1_LAB_BUILD_TIMEOUT_SEC -ErrorAction SilentlyContinue
+  Ok ((Get-LabBuildTimeoutSec) -eq 5400) 'the default build bound is 5400 s (the old 2400 s killed a cold build at 100 % host CPU)'
+  $env:OB1_LAB_BUILD_TIMEOUT_SEC = '7'
+  Ok ((Get-LabBuildTimeoutSec) -eq 7) 'OB1_LAB_BUILD_TIMEOUT_SEC overrides it'
+  foreach ($badv in @('0', '-5', 'abc', '')) { $env:OB1_LAB_BUILD_TIMEOUT_SEC = $badv; Ok ((Get-LabBuildTimeoutSec) -eq 5400) "a bad override '$badv' falls back to 5400" }
+  $env:OB1_LAB_BUILD_TIMEOUT_SEC = '4321'
+  $c9 = $common.Clone(); $c9.NoReuse = $true
+  $null = Invoke-LabImage @c9
+  Ok ($script:lastTimeout -eq 4321) "Invoke-LabImage builds under the bound (Lab-Docker saw $($script:lastTimeout) s)"
+  Remove-Item Env:OB1_LAB_BUILD_TIMEOUT_SEC
+  $helperText = [System.IO.File]::ReadAllText($Helper)
+  Ok ($helperText -match [regex]::Escape('-TtlMin ([int][Math]::Ceiling((Get-LabBuildTimeoutSec) / 60) + 30)')) 'the build lease TTL is the build bound + 30 min (longer than any build)'
+  foreach ($rn in @('run-docs-lifecycle-tests.ps1', 'run-identity-tests.ps1', 'run-panels-tests.ps1', 'run-room-tests.ps1', 'run-sessions-tests.ps1', 'run-trust-tests.ps1', 'run-workspace-tests.ps1')) {
+    $rt = [System.IO.File]::ReadAllText((Join-Path $here $rn))
+    Ok ($rt -match 'function DkLong \{ Lab-Docker \(Get-LabBuildTimeoutSec\)' -and $rt -notmatch 'function DkLong \{ Lab-Docker \d') "$rn builds under Get-LabBuildTimeoutSec"
+  }
+
+  # ---- T10: the Windows tar under a Git Bash PATH ------------------------------------------------------------------
+  Write-Host '[T10] Get-LabTar'
+  $gitUsr = 'C:\Program Files\Git\usr\bin'
+  $oldPath = $env:PATH
+  try {
+    if (Test-Path (Join-Path $gitUsr 'tar.exe')) { $env:PATH = "$gitUsr;$env:PATH" }
+    $tarExe = Get-LabTar
+    Ok ($tarExe -match '(?i)System32\\tar\.exe$') "Get-LabTar picks Windows tar even with Git's usr\bin first on PATH ($tarExe)"
+    $arcSrc = Join-Path $root 'tarsrc'; New-Item -ItemType Directory -Force $arcSrc | Out-Null; [System.IO.File]::WriteAllText((Join-Path $arcSrc 'f.txt'), "x`n")
+    $arc = Join-Path $root 'a.tar'; $out = Join-Path $root 'tarout'; New-Item -ItemType Directory -Force $out | Out-Null
+    & $tarExe -cf $arc -C $arcSrc f.txt 2>$null
+    & (Get-LabTar) -xf $arc -C $out 2>$null
+    Ok (Test-Path (Join-Path $out 'f.txt')) 'it unpacks an archive named by a C:\ path'
+  } finally { $env:PATH = $oldPath }
+  Ok ([System.IO.File]::ReadAllText((Join-Path $here 'run-docs-lifecycle-tests.ps1')) -notmatch '(?m)^\s*& tar ') 'no wired runner calls a bare tar for the red archive (docs-lifecycle)'
 
   # ---- T8: the build lease (the REAL lease.ps1, a scratch lock dir) -----------------------------------------------------
   Write-Host '[T8] Invoke-LabBuildLease'
