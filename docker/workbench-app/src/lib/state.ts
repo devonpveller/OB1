@@ -19,6 +19,7 @@
 // (stateEpoch() unchanged?) can tell it must not restore the previous person's document.
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { api, ApiError } from "./api";
+import { forgetSettingsRead, readSettings } from "./settings-read";
 
 export const UI_KEYS = {
   lockedDocument: "ui.locked_document",
@@ -151,7 +152,7 @@ function pick(settings: SettingOut[], key: UiKey): { value: unknown; version: nu
 }
 
 export async function loadUiState(): Promise<UiState> {
-  const { data } = await api<{ settings?: SettingOut[] }>("GET", "/workbench/settings");
+  const data = (await readSettings()) as { settings?: SettingOut[] };
   const list = Array.isArray(data.settings) ? data.settings : [];
   const lock = pick(list, UI_KEYS.lockedDocument);
   const last = pick(list, UI_KEYS.lastDocument);
@@ -268,6 +269,7 @@ export function subscribeState(f: () => void): () => void {
 // Forget everything held for the person on this page. LOCAL ONLY: nothing is written to the account.
 export function resetState() {
   epoch++;
+  forgetSettingsRead();
   locked = null; last = null; startScreen = null; recent = [];
   ver = { [UI_KEYS.lockedDocument]: 0, [UI_KEYS.lastDocument]: 0, [UI_KEYS.startScreen]: 0, [UI_KEYS.recent]: 0 };
   chains = {};

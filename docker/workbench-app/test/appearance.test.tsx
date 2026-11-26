@@ -57,6 +57,11 @@ async function openSettings(person = "u-alice") {
   fireEvent.click(await screen.findByRole("button", { name: "Appearance" }));
   return await screen.findByTestId("appearance");
 }
+// a button of the panel is switched off while its own request runs (so a second click cannot double-send): wait for it, then click
+const press = async (scope: HTMLElement, name: string) => {
+  await waitFor(() => expect((within(scope).getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(false));
+  fireEvent.click(within(scope).getByRole("button", { name }));
+};
 const radio = (name: string) => screen.getByRole("radio", { name });
 const choose = async (name: string) => { fireEvent.click(radio(name)); await act(async () => { await new Promise((r) => setTimeout(r, 20)); }); };
 
@@ -117,7 +122,7 @@ describe("odd-typed, unknown and stale stored values never break the page", () =
     expect(look()).toEqual({ theme: null, accent: null, density: null, size: null });
     expect(within(ap).getAllByTestId("saved-theme").map((e) => e.getAttribute("data-name"))).toEqual(["Old"]);
     // applying it uses what still exists and falls back for what does not
-    fireEvent.click(within(ap).getByRole("button", { name: "Apply Old" }));
+    await press(ap, "Apply Old");
     await waitFor(() => expect(look()).toEqual({ theme: "dark", accent: null, density: "compact", size: "18" }));
   });
 
@@ -125,10 +130,10 @@ describe("odd-typed, unknown and stale stored values never break the page", () =
     const ap = await openSettings();
     const name = within(ap).getByRole("textbox", { name: /name for this theme/i });
     fireEvent.change(name, { target: { value: "Gone soon" } });
-    fireEvent.click(within(ap).getByRole("button", { name: "Save as theme" }));
+    await press(ap, "Save as theme");
     await within(ap).findByTestId("saved-theme");
     FAKE.plant("u-alice", "ui.saved_themes", []); // "another device" deleted it
-    fireEvent.click(within(ap).getByRole("button", { name: "Apply Gone soon" }));
+    await press(ap, "Apply Gone soon");
     await waitFor(() => expect(within(ap).queryAllByTestId("saved-theme")).toHaveLength(0));
     expect(within(ap).getByTestId("ap-error").textContent).toMatch(/no longer|another device|changed/i);
   });
@@ -165,7 +170,7 @@ describe("storage that is unavailable or throws", () => {
     const ap = await openSettings();
     await choose("Dark"); await choose("Indigo"); await choose("Compact"); await choose("16 px");
     fireEvent.change(within(ap).getByRole("textbox", { name: /name for this theme/i }), { target: { value: "My private reading look" } });
-    fireEvent.click(within(ap).getByRole("button", { name: "Save as theme" }));
+    await press(ap, "Save as theme");
     await within(ap).findByTestId("saved-theme");
     const keys = (s: Storage) => Array.from({ length: s.length }, (_, i) => s.key(i));
     expect(keys(window.localStorage)).toEqual(["workbench.theme"]);
@@ -181,6 +186,38 @@ describe("storage that is unavailable or throws", () => {
     await openSettings();
     await waitFor(() => expect(html().getAttribute("data-theme")).toBe("light"));
     expect(window.localStorage.getItem("workbench.theme")).toBe("light");
+  });
+
+  it("a server that does not hold the appearance keys yet (the migration is not applied) never clears the page's own theme cache", async () => {
+    window.localStorage.setItem("workbench.theme", "dark");
+    html().setAttribute("data-theme", "dark");
+    FAKE.registry.splice(0, FAKE.registry.length, ...FAKE.registry.filter((k) => !k.key.startsWith("ui.") || k.key === "ui.start_screen"));
+    who = "u-alice"; connect();
+    await loadAppearance();
+    expect(getAppearance().status).toBe("ready");
+    expect(html().getAttribute("data-theme")).toBe("dark");
+    expect(window.localStorage.getItem("workbench.theme")).toBe("dark");
+  });
+
+  it("the shell and the account state share ONE read of the settings list while it is in flight, and a person change never shares it", async () => {
+    const urls: string[] = [];
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    setFetcher(async (url) => {
+      urls.push(url);
+      await held;
+      return new Response(JSON.stringify({ admin: false, settings: [] }), { status: 200 });
+    });
+    const { readSettings, forgetSettingsRead } = await import("../src/lib/settings-read");
+    const a = readSettings(); const b = readSettings();
+    expect(urls).toEqual(["/workbench/settings"]);
+    forgetSettingsRead();                       // a different person: the next caller asks again
+    const c = readSettings();
+    expect(urls).toEqual(["/workbench/settings", "/workbench/settings"]);
+    release();
+    await Promise.all([a, b, c]);
+    await readSettings();                       // a finished read is never reused
+    expect(urls).toHaveLength(3);
   });
 
   it("an account with no stored theme clears a stale cache (the cache is not the truth)", async () => {
@@ -294,10 +331,10 @@ describe("3. 'Workbench default' restores every default", () => {
     fireEvent.click(within(ap).getByRole("radio", { name: "documents" }));
     await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
     fireEvent.change(within(ap).getByRole("textbox", { name: /name for this theme/i }), { target: { value: "Keep me" } });
-    fireEvent.click(within(ap).getByRole("button", { name: "Save as theme" }));
+    await press(ap, "Save as theme");
     await within(ap).findByTestId("saved-theme");
     expect(stored("u-alice", "ui.start_screen")).toBe("documents");
-    fireEvent.click(within(ap).getByRole("button", { name: "Workbench default" }));
+    await press(ap, "Workbench default");
     await waitFor(() => expect(look()).toEqual({ theme: null, accent: null, density: null, size: null }));
     for (const k of ["ui.theme", "ui.accent", "ui.density", "ui.text_size", "ui.start_screen"]) expect(stored("u-alice", k), k).toBeUndefined();
     expect(window.localStorage.getItem("workbench.theme")).toBeNull();
@@ -310,7 +347,7 @@ describe("3. 'Workbench default' restores every default", () => {
   it("on an account that has stored nothing it sends no request at all", async () => {
     const ap = await openSettings();
     const before = FAKE.wire.length;
-    fireEvent.click(within(ap).getByRole("button", { name: "Workbench default" }));
+    await press(ap, "Workbench default");
     await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
     expect(FAKE.wire.length).toBe(before);
   });
@@ -321,14 +358,14 @@ describe("saved themes (per account, at most 10)", () => {
     const ap = await openSettings();
     await choose("Dark"); await choose("Slate"); await choose("Compact"); await choose("15 px");
     fireEvent.change(within(ap).getByRole("textbox", { name: /name for this theme/i }), { target: { value: "Night reading" } });
-    fireEvent.click(within(ap).getByRole("button", { name: "Save as theme" }));
+    await press(ap, "Save as theme");
     await within(ap).findByTestId("saved-theme");
     expect(stored("u-alice", "ui.saved_themes")).toEqual([{ name: "Night reading", theme: "dark", accent: "slate", density: "compact", text_size: "15" }]);
     await choose("Light"); await choose("Teal"); await choose("Comfortable"); await choose("14 px (default)");
-    fireEvent.click(within(ap).getByRole("button", { name: "Apply Night reading" }));
+    await press(ap, "Apply Night reading");
     await waitFor(() => expect(look()).toEqual({ theme: "dark", accent: "slate", density: "compact", size: "15" }));
     await waitFor(() => expect(["ui.theme", "ui.accent", "ui.density", "ui.text_size"].map((k) => stored("u-alice", k)), JSON.stringify(FAKE.wire.filter((w) => w.method !== "GET").map((w) => w.method + " " + w.url + " " + w.status))).toEqual(["dark", "slate", "compact", "15"]));
-    fireEvent.click(within(ap).getByRole("button", { name: "Delete Night reading" }));
+    await press(ap, "Delete Night reading");
     await waitFor(() => expect(within(ap).queryAllByTestId("saved-theme")).toHaveLength(0));
     expect(stored("u-alice", "ui.saved_themes")).toEqual([]);
   });
@@ -337,7 +374,7 @@ describe("saved themes (per account, at most 10)", () => {
     const ap = await openSettings();
     for (let i = 1; i <= SAVED_CAP; i++) {
       fireEvent.change(within(ap).getByRole("textbox", { name: /name for this theme/i }), { target: { value: "Theme " + i } });
-      fireEvent.click(within(ap).getByRole("button", { name: "Save as theme" }));
+      await press(ap, "Save as theme");
       await waitFor(() => expect(within(ap).getAllByTestId("saved-theme")).toHaveLength(i));
     }
     expect(within(ap).getByTestId("ap-count").textContent).toMatch(/10 of 10/);
@@ -360,7 +397,7 @@ describe("saved themes (per account, at most 10)", () => {
     const ap = await openSettings();
     const put = async (name: string) => {
       fireEvent.change(within(ap).getByRole("textbox", { name: /name for this theme/i }), { target: { value: name } });
-      fireEvent.click(within(ap).getByRole("button", { name: "Save as theme" }));
+      await press(ap, "Save as theme");
       await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
     };
     for (const bad of ["", "   ", "x".repeat(41), "sk-live-abc123", "bell\u0007"]) {

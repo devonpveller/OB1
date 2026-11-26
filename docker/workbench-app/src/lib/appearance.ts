@@ -17,6 +17,7 @@
 // bumps an epoch, so a read or a save that was in flight for them lands on nothing and never writes to the next person.
 import { useSyncExternalStore } from "react";
 import { api, ApiError } from "./api";
+import { forgetSettingsRead, readSettings } from "./settings-read";
 import { applyTheme, readTheme, type ThemeChoice } from "./theme";
 
 export const APPEARANCE_KEYS = {
@@ -140,6 +141,7 @@ export function useAppearance(): Snapshot { return useSyncExternalStore(subscrib
 // The browser's theme cache goes too (it was the earlier person's).
 export function resetAppearance() {
   epoch++;
+  forgetSettingsRead();
   subject = null;
   versions = {}; touched = {}; chains = {};
   snap = { look: { ...DEFAULT_LOOK }, saved: [], status: "idle", error: null, stored: { theme: false, accent: false, density: false, textSize: false } };
@@ -162,7 +164,7 @@ export async function loadAppearance(): Promise<void> {
   const my = epoch;
   snap.status = "loading"; emit();
   try {
-    const { data } = await api<{ settings?: Row[] }>("GET", "/workbench/settings");
+    const data = (await readSettings()) as { settings?: Row[] };
     if (epoch !== my) return;
     const rows = Array.isArray(data.settings) ? data.settings : [];
     for (const r of rows) if (r && typeof r.key === "string" && Object.values(APPEARANCE_KEYS).includes(r.key as never)) versions[r.key] = typeof r.version === "number" ? r.version : 0;
@@ -171,6 +173,10 @@ export async function loadAppearance(): Promise<void> {
     const stored = { ...snap.stored };
     for (const k of LOOK_KEYS) {
       if (touched[KEY_OF[k]]) continue; // changed on this page since: newer than the read
+      if (!rowOf(rows, KEY_OF[k])) { // a server that does not hold the key (the migration is not applied): keep what the page has
+        if (k === "theme") next.theme = readTheme(); // i.e. the first-paint cache, as it was before this feature
+        continue;
+      }
       (next as any)[k] = look[k];
       stored[k] = valueOf(rows, KEY_OF[k]) !== undefined;
     }
