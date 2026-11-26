@@ -151,8 +151,21 @@ FROM app AS test
 # research-workbench P5a (rw-p5a-intake) adds src/intake/: the five queues' state machines, the declared content
 # types, the research service's intake fetch client against a loopback stub and the seam's OWUI inlet rule (pure);
 # its integration test is skipped here (no INTAKE_TEST_BASE); contract-test/run-workspace-tests.ps1 runs it.
-RUN deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/routes/idea_schedule_test.ts src/routes/error_bodies_test.ts src/util/ src/contracts/ src/export/ src/documents/ src/identity/ src/fetch-gate/ src/sessions/ src/rooms/ src/intake/ src/ideas/ src/settings/ \
-  && touch /app/.test-gate-passed
+# rw-lab-throughput: WORKBENCH_TEST_GATE=skipped skips THIS gate - for a lab's red-base and mutant images ONLY (the
+# lab runs the gate on the green image of the same work). The default, full, runs the gate unchanged. The value is
+# stamped on the image as the label ai-stack.lab.gate (full | skipped) and the marker file says which ran
+# (.test-gate-passed | .test-gate-skipped). The contract-test runners refuse a skipped image for a green or landing
+# run (contract-test/lab-throughput.ps1) and scripts/stack/ob1-deploy.ps1 refuses to deploy one. Any other value
+# fails the build.
+ARG WORKBENCH_TEST_GATE=full
+LABEL ai-stack.lab.gate="${WORKBENCH_TEST_GATE}"
+RUN case "$WORKBENCH_TEST_GATE" in \
+      full) deno test --allow-net --allow-env --allow-read --allow-write --allow-run src/routes/search_test.ts src/routes/graph_test.ts src/routes/nav_test.ts src/routes/idea_schedule_test.ts src/routes/error_bodies_test.ts src/util/ src/contracts/ src/export/ src/documents/ src/identity/ src/fetch-gate/ src/sessions/ src/rooms/ src/intake/ src/ideas/ src/settings/ \
+        && touch /app/.test-gate-passed ;; \
+      skipped) echo "TEST GATE SKIPPED (WORKBENCH_TEST_GATE=skipped): a lab red-base or mutant image, never green, never :local" \
+        && echo skipped > /app/.test-gate-skipped ;; \
+      *) echo "WORKBENCH_TEST_GATE must be full or skipped (got '$WORKBENCH_TEST_GATE')" >&2; exit 1 ;; \
+    esac
 
 FROM test AS parity
 # WeasyPrint (BSD-3-Clause) - the PDF engine the export used before P6a - only to render the
@@ -173,7 +186,10 @@ FROM base AS runtime
 COPY --from=runtime-deps /app/src ./src
 COPY --from=runtime-deps /app/deno.lock ./deno.lock
 COPY --from=runtime-deps ${DENO_DIR} ${DENO_DIR}
-COPY --from=test /app/.test-gate-passed /app/.test-gate-passed
+# the gate marker (.test-gate-passed, or .test-gate-skipped for a lab skip-gate image) and the test stage's label
+ARG WORKBENCH_TEST_GATE=full
+LABEL ai-stack.lab.gate="${WORKBENCH_TEST_GATE}"
+COPY --from=test /app/.test-gate-* /app/
 
 # Runs as root: the workbench WRITES the shared vault (notes, the Changes log,
 # and image assets under /wiki/assets), which the root-running wiki-service

@@ -786,3 +786,40 @@ own REST door).
   openbrain-podcast images; rollback = the previous images first, then `revert-cast.sql` (the schema dump afterwards is
   byte-identical to the one before; it discards the new fields' values). `check-cast.sql` is the read-only check. Lab:
   `contract-test/run-cast-tests.ps1` (two identities C1-C12, the marker sweep, the 560 round trip, Dredd over the cast routes).
+
+## Lab throughput: the contract-test runners (rw-lab-throughput)
+
+The disposable lab runners under `contract-test/` share `contract-test/lab-throughput.ps1`. Wired today:
+`run-docs-lifecycle-tests.ps1`, `run-identity-tests.ps1`, `run-panels-tests.ps1`, `run-room-tests.ps1`,
+`run-sessions-tests.ps1`, `run-trust-tests.ps1` and `run-workspace-tests.ps1`. The other runners keep their own builds
+until they adopt it; a new runner should start from `run-docs-lifecycle-tests.ps1`.
+
+- **The unit gate.** `WORKBENCH_TEST_GATE` defaults to `full`: the in-build `deno test` runs exactly as before, the
+  image gets the label `ai-stack.lab.gate=full` and the marker `/app/.test-gate-passed`. `skipped` skips the gate. It is
+  for a red-base or mutant image ONLY: the image gets the label `ai-stack.lab.gate=skipped` and the marker
+  `/app/.test-gate-skipped`. Any other value fails the build. Three things refuse a skipped image. A runner refuses
+  `-SkipGate` on a green or landing run, and `Assert-LabGreenImage` refuses a skipped image before a green or landing
+  run uses it. The lab shim refuses any `:local` tag. `scripts/stack/ob1-deploy.ps1` refuses a skipped image after
+  its build, before anything starts.
+- **`-WbMount 'src/<path>=<host file>'`** mounts one mutated source file, read-only, over the lab workbench's copy. A
+  mutant run then needs no build, because it reuses the green image of the same tree. The file must exist in the tree,
+  must not be a test, and must differ from the original.
+- **Image reuse.** Builds are tagged `<repo>:wt-tree-<tree12>-<args12>` and labelled `ai-stack.lab.tree` (the full OB1
+  tree hash) and `ai-stack.lab.args` (the build-args digest). A later run on the same tree with the same arguments
+  reuses the tag after checking both labels. A tag whose labels differ is rebuilt, never used. A dirty build context
+  is never keyed: it builds under `:wt-<id>` as before, and so does `-NoReuse`.
+- **The DB template.** The staged initdb chain is replayed once into a volume `ob1-dbtpl-<pin12>-<digest12>`. The
+  volume is labelled with the OB1 pin and the chain digest, which covers the file names, their contents and the
+  postgres image. Each lab clones that volume (`-NoDbTemplate` replays the chain instead). A label mismatch, or a
+  missing READY marker, forces a rebuild. The lab's own slot, revert and round-trip steps run on the clone as before.
+  `lab-dbtemplate.test.ps1` proves a clone's schema dump byte-identical to a replayed one.
+- **The sweep, once per landing.** Developer, mutant and red runs skip the isolation sweep by default, and each says so
+  on its `RUN MODE` line. `-Landing` always sweeps and refuses `-NoSweep`, `-Red`, `-Mutant`, `-WbMount` and
+  `-SkipGate`. `-Sweep` opts a developer run in.
+- **The build lease.** Every image build holds one slot of the ai-stack harness `build` class (`lease.ps1 -Class
+  build`, 2 slots). If both are taken it waits, polling once a minute. `OB1_LAB_BUILD_LEASE=off` skips the lease. A lab
+  test on prebuilt images takes `lease.ps1 -Class plane` (5 slots).
+- **The cache.** Reuse tags and templates stay between runs on purpose. `contract-test/lab-cache.ps1` lists them, and
+  `-Prune [-OlderThanHours N | -All]` removes them; the next run rebuilds what it needs.
+- **Proofs.** `lab-throughput.test.ps1` is hermetic (no docker). `lab-image-reuse.test.ps1` and
+  `lab-dbtemplate.test.ps1` use docker, with `--network none` only and labelled resources.
