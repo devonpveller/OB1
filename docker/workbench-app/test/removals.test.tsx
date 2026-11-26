@@ -141,7 +141,11 @@ function stub() {
     if (m && method === "POST") {
       const i = IDEAS[who].find((x) => x.id === m![1]); if (!i) return j({ error: "no such idea" }, 404);
       if (i.status !== "archived") return j({ error: "not archived" }, 409);
-      i.status = "engaged"; return j({ idea_id: i.id, status: "engaged", archived: false });
+      // REAL (rw-idea-reopen-trail, ideas/repo.ts reopenIdea -> documents/trail.ts writeReopened): one owner-scoped line, kind 'reopened',
+      // no path and no idea text; the same line is written by documents/refinery.ts reopenRefinery. A refused reopen (404, 409) writes none.
+      i.status = "engaged";
+      DTRAIL[who].unshift({ id: "lo" + ++seq, kind: "reopened", path: null, idea_id: i.id, actor_sub: "u-" + who, trashed_at: null, created_at: new Date().toISOString() });
+      return j({ idea_id: i.id, status: "engaged", archived: false });
     }
     if (path === "/workbench/documents/delete-forever" && method === "POST") {
       if (body.confirm !== true) return j({ error: "confirm" }, 400);
@@ -578,7 +582,8 @@ describe("review D1: every archived idea reopens by its id, with or without a do
     await open("bob");
     const row = within(sec("ideas")).getByTestId("row-idea");
     expect(row.textContent).not.toMatch(/no document/i);
-    expect(sec("ideas").textContent).toMatch(/not recorded in the Trail yet/); // operator exception 2026-11-25: the screen does not claim a line
+    expect(sec("ideas").textContent).not.toMatch(/not recorded in the Trail/); // the rwr-removals exception is gone: the server writes the line
+    expect(sec("ideas").textContent).toMatch(/the Trail tab records it/);
     fireEvent.click(within(row).getByTestId("show-again"));
     await waitFor(() => expect(within(sec("ideas")).getByTestId("empty-ideas")).toBeTruthy());
     const post = calls.find((c) => c.method === "POST")!;
@@ -593,6 +598,27 @@ describe("review D1: every archived idea reopens by its id, with or without a do
     fireEvent.click(within(within(sec("ideas")).getByTestId("row-idea")).getByTestId("show-again"));
     await waitFor(() => expect(screen.getByTestId("row-error").textContent).toMatch(/no longer possible.*Nothing was changed/));
     expect(document.body.textContent).not.toMatch(/SECRET|ALPHA/);
+  });
+  it("rw-idea-reopen-trail: Show it again leaves one 'Reopened an idea' line for you, none for the other person, and no idea text", async () => {
+    await open("alice");
+    fireEvent.click(within(within(sec("ideas")).getByTestId("row-idea")).getByTestId("show-again"));
+    await waitFor(() => expect(within(sec("ideas")).getByTestId("empty-ideas")).toBeTruthy());
+    await goTrail();
+    const mineLines = lines().filter((l) => /Reopened an idea/.test(l));
+    expect(mineLines.length).toBe(1);
+    expect(mineLines[0]).toMatch(/You/);
+    expect(mineLines[0]).not.toMatch(/ALPHA parked idea|i1/); // the line names no idea text
+    expect(within(screen.getByTestId("trail-tab")).queryAllByTestId("trail-line").some((l) => l.getAttribute("data-kind") === "reopened")).toBe(true);
+    cleanup(); who = "bob";
+    await open("bob"); await goTrail();
+    expect(lines().some((l) => /Reopened an idea/.test(l))).toBe(false);
+  });
+  it("rw-idea-reopen-trail: a refused reopen leaves no line (the fake writes none, as the server)", async () => {
+    await open("alice");
+    const { api } = await import("../src/lib/api");
+    await expect(api("POST", "/workbench/ideas/i2/reopen", {})).rejects.toMatchObject({ status: 409 });
+    await expect(api("POST", "/workbench/ideas/i9/reopen", {})).rejects.toMatchObject({ status: 404 });
+    expect(DTRAIL.alice.some((l) => l.kind === "reopened")).toBe(false);
   });
   it("the real route's refusals: another user's idea is 404, an idea that is not archived is 409 (the fake behaves as the server)", async () => {
     await open("alice");

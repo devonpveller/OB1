@@ -376,6 +376,52 @@ t("I9b: archiving a PROMOTED refinery and reopening it restores the promotion (t
   assertEquals((await ideaRow(id)).status, "promoted");
 });
 
+t("I9c (fix round 2): a PROMOTED refinery comes back 'promoted' through every route that reopens it - refinery open, start-refinery, the unarchive door - with one line each", async () => {
+  for (const route of ["open", "start", "unarchive"]) {
+    const id = await captured(sub(A), `promoted-${route} ${rnd()}`);
+    const s = await call("POST", "/workbench/documents/seed", { idea_id: id });
+    assertEquals(s.status, 201, s.text);
+    let path = s.json.path as string;
+    if (route === "unarchive") {
+      const ar = await call("POST", "/workbench/documents/archive", { path });
+      assertEquals(ar.status, 200, ar.text);
+      path = ar.json.archived as string;
+    } else {
+      assertEquals((await call("POST", "/workbench/documents/refinery/archive", { path })).status, 200);
+    }
+    assertEquals((await ideaRow(id)).status, "archived", route);
+    const o = await call("POST", route === "unarchive" ? "/workbench/documents/unarchive" : `/workbench/documents/refinery/${route}`, { path });
+    assertEquals(o.status, 200, `${route}: ${o.text}`);
+    assertEquals((await ideaRow(id)).status, "promoted", `${route}: the state it was archived from`);
+    assertEquals((await reopenedFor(sub(A), id)).length, 1, `${route}: one line`);
+  }
+});
+
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+t("TX10 (race, from the attempt-2 tester): start-refinery racing an archived refinery - start||start, start||open, start||by-id, staggered - writes one line and says reopened once", async () => {
+  const bad: string[] = [];
+  const offs = [0, 0, 2, 5, 10, 20, 0, 3];
+  for (const kind of ["start-start", "start-open", "start-byid"]) {
+    for (let i = 0; i < 8; i++) {
+      const { path, id } = await docRefinery(A, `tx10 ${kind} ${rnd()}`);
+      assertEquals((await call("POST", "/workbench/documents/refinery/archive", { path })).json.archived, true);
+      const startC = () => call("POST", "/workbench/documents/refinery/start", { path });
+      const other = kind === "start-start" ? startC : kind === "start-open"
+        ? () => call("POST", "/workbench/documents/refinery/open", { path }) : () => call("POST", `/workbench/ideas/${id}/reopen`, {});
+      const rs = await Promise.all([startC(), sleepMs(offs[i]).then(other)]);
+      const n = (await reopenedFor(sub(A), id)).length;
+      const trues = rs.filter((r) => r.status === 200 && r.json.reopened === true).length;
+      const byIdWon = kind === "start-byid" && rs[1].status === 200;
+      const okTrue = kind === "start-byid" ? trues + (byIdWon ? 1 : 0) === 1 : trues === 1;
+      if (n !== 1 || !okTrue || rs[0].status !== 200 || (kind !== "start-byid" && rs[1].status !== 200)) {
+        bad.push(`${kind} r${i}: ${n} lines ${rs.map((r) => `${r.status}/${r.json.reopened}`).join(" ")}`);
+      }
+      assertEquals((await ideaRow(id)).status !== "archived", true, "idea is open afterwards");
+    }
+  }
+  assertEquals(bad, []);
+});
+
 // ── acceptance 4: the user source list ───────────────────────────────────────────────────────────────────
 t("I10: every user-added source is listed with its fold status, scoped corroboration and found_via trail; a held one goes with no tombstone", async () => {
   const { path, id } = await docRefinery(A, `sources ${rnd()}`);
@@ -1123,6 +1169,104 @@ t("AR2: a document-tethered idea archives by id the same way the document route 
   assertEquals((await call("POST", "/workbench/documents/refinery/archive", { path })).json.archived, true, "the document route agrees");
   assertEquals((await call("POST", `/workbench/ideas/${id}/reopen`, {})).status, 200);
   assertEquals((await ideaRow(id)).status, before);
+});
+
+// -- rw-idea-reopen-trail: a reopen leaves ONE owner-scoped trail line (kind 'reopened', subject = the idea id, no text) ------
+const trailRows = (owner: string) => sql<Record<string, any>>(`SELECT * FROM public.user_document_trail WHERE owner_sub = $1 ORDER BY id`, [owner]);
+const rowJson = (r: unknown) => JSON.stringify(r, (_k, v) => (typeof v === "bigint" ? v.toString() : v)); // the id is a BIGINT
+const reopenedFor = async (owner: string, id: string) => (await trailRows(owner)).filter((r) => r.kind === "reopened" && r.idea_id === id);
+
+t("RT1: POST /ideas/{id}/reopen writes one line for the caller (actor = the caller, no idea text); a refused reopen writes none", async () => {
+  const MARK = `PLANTEDMARK${rnd()}`;
+  const id = await captured(sub(A), `${MARK} title`, `${MARK} statement`);
+  assertEquals((await call("POST", `/workbench/ideas/${id}/reopen`, {})).status, 409, "not archived");
+  assertEquals((await reopenedFor(sub(A), id)).length, 0, "a 409 writes no line");
+  assertEquals((await call("POST", `/workbench/ideas/${id}/archive`, {})).status, 200);
+  assertEquals((await reopenedFor(sub(A), id)).length, 0, "archive writes no reopened line");
+  // B: the same 404 as a missing idea, and no line anywhere
+  const missing = await call("POST", `/workbench/ideas/${crypto.randomUUID()}/reopen`, {}, B);
+  const foreign = await call("POST", `/workbench/ideas/${id}/reopen`, {}, B);
+  assertEquals([foreign.status, foreign.text], [missing.status, missing.text], "B reopening A's idea answers like a missing idea");
+  assertEquals(foreign.status, 404);
+  assertEquals((await reopenedFor(sub(A), id)).length + (await reopenedFor(sub(B), id)).length, 0, "no line in either trail");
+  assertEquals((await ideaRow(id)).status, "archived", "A's idea stays archived");
+  // A reopens: exactly one line
+  const ok = await call("POST", `/workbench/ideas/${id}/reopen`, {});
+  assertEquals(ok.status, 200, ok.text);
+  const lines = await reopenedFor(sub(A), id);
+  assertEquals(lines.length, 1);
+  assertEquals([lines[0].owner_sub, lines[0].actor_sub, lines[0].path, lines[0].document_id, lines[0].trashed_at], [sub(A), sub(A), null, null, null]);
+  assertEquals((await reopenedFor(sub(B), id)).length, 0);
+  assert(!rowJson(lines[0]).includes(MARK) && !ok.text.includes(MARK), "the planted marker is in neither the trail row nor the response");
+  assertEquals((await call("POST", `/workbench/ideas/${id}/reopen`, {})).status, 409, "a second reopen is refused");
+  assertEquals((await reopenedFor(sub(A), id)).length, 1, "and writes no second line");
+  // the read: A sees the line (no marker), B's trail never shows A's lines
+  const ta = await call("GET", "/workbench/documents/trail?limit=500", undefined, A);
+  assertEquals(ta.status, 200, ta.text);
+  assert(ta.json.lines.some((l: any) => l.kind === "reopened" && l.idea_id === id && l.path === null), "A's trail shows it");
+  assert(!ta.text.includes(MARK), "the trail response carries no idea text");
+  const tb = await call("GET", "/workbench/documents/trail?limit=500", undefined, B);
+  assert(!tb.text.includes(id), "B's trail never shows A's line");
+});
+
+t("RT2: the refinery open writes one line when it reopens an archived refinery, none otherwise, none for another user", async () => {
+  const MARK = `PLANTEDMARK${rnd()}`;
+  const { path, id } = await docRefinery(A, `${MARK} rt2`);
+  assertEquals((await call("POST", "/workbench/documents/refinery/open", { path })).json.reopened, false);
+  assertEquals((await reopenedFor(sub(A), id)).length, 0, "opening an open refinery writes no line");
+  assertEquals((await call("POST", "/workbench/documents/refinery/archive", { path })).json.archived, true);
+  const foreign = await call("POST", "/workbench/documents/refinery/open", { path }, B);
+  assert(foreign.status === 404, `B: ${foreign.status} ${foreign.text}`);
+  assertEquals((await reopenedFor(sub(A), id)).length + (await reopenedFor(sub(B), id)).length, 0, "B's refused open writes no line");
+  const o = await call("POST", "/workbench/documents/refinery/open", { path });
+  assertEquals([o.status, o.json.reopened], [200, true], o.text);
+  const lines = await reopenedFor(sub(A), id);
+  assertEquals(lines.length, 1);
+  assertEquals([lines[0].actor_sub, lines[0].path], [sub(A), null]);
+  assert(!rowJson(lines[0]).includes(MARK) && !o.text.includes(MARK), "no idea text in the row or the response");
+  assertEquals((await call("POST", "/workbench/documents/refinery/open", { path })).json.reopened, false);
+  assertEquals((await reopenedFor(sub(A), id)).length, 1, "a second open writes no second line");
+});
+
+t("RT4 (race, fix round 1): two concurrent refinery opens of an archived refinery write exactly one line; one answers reopened:true", async () => {
+  const bad: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    const { path, id } = await docRefinery(A, `rt4 ${rnd()}`);
+    assertEquals((await call("POST", "/workbench/documents/refinery/archive", { path })).json.archived, true);
+    const rs = await Promise.all([call("POST", "/workbench/documents/refinery/open", { path }), call("POST", "/workbench/documents/refinery/open", { path })]);
+    const n = (await reopenedFor(sub(A), id)).length;
+    const won = rs.filter((r) => r.status === 200 && r.json.reopened === true).length;
+    if (n !== 1 || won !== 1 || rs.some((r) => r.status !== 200)) bad.push(`round ${i}: ${n} lines, ${rs.map((r) => `${r.status}/${r.json.reopened}`).join(" ")}`);
+  }
+  assertEquals(bad, []);
+});
+
+t("RT5 (race, fix round 1): POST /ideas/{id}/reopen racing a refinery open writes exactly one line, and the loser says so", async () => {
+  const bad: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    const { path, id } = await docRefinery(A, `rt5 ${rnd()}`);
+    assertEquals((await call("POST", "/workbench/documents/refinery/archive", { path })).json.archived, true);
+    const [byId, open] = await Promise.all([call("POST", `/workbench/ideas/${id}/reopen`, {}), call("POST", "/workbench/documents/refinery/open", { path })]);
+    const n = (await reopenedFor(sub(A), id)).length;
+    const byIdWon = byId.status === 200, openWon = open.status === 200 && open.json.reopened === true;
+    if (n !== 1 || byIdWon === openWon || (!byIdWon && byId.status !== 409) || open.status !== 200) {
+      bad.push(`round ${i}: ${n} lines, idea ${byId.status}, open ${open.status}/${open.json.reopened}`);
+    }
+  }
+  assertEquals(bad, []);
+});
+
+t("RT3: the table refuses a malformed reopened line (a path, a document id, no idea id) and a removal line with an idea id", async () => {
+  const bad = async (text: string, args: unknown[]) => {
+    try { await sql(text, args); return ""; } catch (e) { return String((e as { fields?: { code?: string } }).fields?.code ?? e); }
+  };
+  const ins = `INSERT INTO public.user_document_trail (owner_sub, actor_sub, kind, idea_id, path, document_id) VALUES ($1, $1, $2, $3, $4, $5)`;
+  assertEquals(await bad(ins, ["rt3", "reopened", crypto.randomUUID(), "documents/x/y.md", null]), "23514", "reopened with a path");
+  assertEquals(await bad(ins, ["rt3", "reopened", crypto.randomUUID(), null, crypto.randomUUID()]), "23514", "reopened with a document id");
+  assertEquals(await bad(ins, ["rt3", "reopened", null, null, null]), "23514", "reopened with no idea id");
+  assertEquals(await bad(ins, ["rt3", "restored", crypto.randomUUID(), "documents/x/y.md", null]), "23514", "a put-back line with an idea id");
+  assertEquals(await bad(ins, ["rt3", "restored", null, null, null]), "23514", "a put-back line with no path");
+  assertEquals((await trailRows("rt3")).length, 0);
 });
 
 t("AR3: scheduled research stops while the idea is archived; a reopened idea can be researched again", async () => {

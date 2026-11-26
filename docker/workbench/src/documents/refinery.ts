@@ -30,6 +30,7 @@ import { parseDocument } from "./grammar.ts";
 import { FOREIGN_HELD_TARGET, FOREIGN_IDEA } from "./ownership.ts";
 import { listingRow, type OutboundLink, syncListing } from "./listing.ts";
 import { DocError, ownedPath, readDocument } from "./repo.ts";
+import { writeReopened } from "./trail.ts";
 import { HOLDER_KIND } from "./paths.ts";
 import { gateErrorBody, isGateError } from "../fetch-gate/client.ts";
 
@@ -106,15 +107,30 @@ export async function reopenRefinery(deps: RefineryDeps, path: string, who: Iden
   const rel = await ownedPath(deps.db, path, who);
   const { refinery } = await tetheredRefinery(deps.db, rel);
   if (!refinery) throw new DocError("this document has no refinery; start one", 404);
+  let reopened = false;
   if (refinery.archived_at) {
-    await deps.db.tx(async (t) => {
-      await t.query(`UPDATE public.refinery_state SET archived_at = NULL, archived_from = NULL WHERE refinery_id = $1`, [refinery.id]);
-      await t.query(`UPDATE public.ideas SET status = $2, updated_at = now() WHERE id = $1`, [refinery.id, refinery.archived_from ?? "engaged"]);
+    // The archived state read above is an unlocked hint. The truth is decided here, under the idea row's lock (the same lock
+    // POST /ideas/{id}/reopen takes, so the two routes serialise): the conditional UPDATE returns a row only for the call that
+    // really cleared the stamp, and only that call sets the status and writes the line (rw-idea-reopen-trail, fix round 1).
+    reopened = await deps.db.tx(async (t) => {
+      await t.query(`SELECT 1 FROM public.ideas WHERE id = $1::uuid AND owner_sub = $2 FOR UPDATE`, [refinery.id, who.sub]);
+      // The stamp to restore is read BEFORE the UPDATE: an UPDATE's RETURNING gives the NEW row, where archived_from is already NULL.
+      const was = (await t.query<{ archived_from: string | null }>(
+        `SELECT archived_from FROM public.refinery_state WHERE refinery_id = $1::uuid`, [refinery.id]))[0]?.archived_from ?? null;
+      const cleared = await t.query(
+        `UPDATE public.refinery_state SET archived_at = NULL, archived_from = NULL
+          WHERE refinery_id = $1::uuid AND archived_at IS NOT NULL RETURNING refinery_id`,
+        [refinery.id],
+      );
+      if (!cleared.length) return false; // another call reopened it first: nothing to do, no line
+      await t.query(`UPDATE public.ideas SET status = $2, updated_at = now() WHERE id = $1`, [refinery.id, was ?? "engaged"]);
+      await writeReopened(t, who.sub, who.sub, refinery.id); // rw-idea-reopen-trail: only a refinery that really was archived
+      return true;
     });
   }
   // pick up what the document linked while the refinery rested
   const listed = await relist(deps, rel, who);
-  return { refinery_id: refinery.id, archived: false, reopened: !!refinery.archived_at, picked: listed?.links.length ?? 0 };
+  return { refinery_id: refinery.id, archived: false, reopened, picked: listed?.links.length ?? 0 };
 }
 
 // ── user sources ──────────────────────────────────────────────────────────────────────────
