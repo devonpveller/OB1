@@ -3,7 +3,7 @@
 // (lib/appearance.ts), so it follows the person to every device. Built from the approved mockup (draft 5, Settings >
 // Appearance): the same labels and descriptions, and a radio group wherever the mockup had a short list (never a native
 // <select>: one-picker rule). The start screen row is the frame's own generic row, passed in as children.
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { TagChip } from "./TagChip";
 import { resetSetting, type Setting } from "./settings-data";
 import {
@@ -56,7 +56,8 @@ export function Appearance({ rows, onRow, children }: { rows: Setting[]; onRow: 
   const { look, saved, stored } = ap;
   const full = saved.length >= SAVED_CAP;
 
-  const run = async (f: () => Promise<unknown>) => { setBusy(true); try { await f(); } finally { setBusy(false); } };
+  const busyRef = useRef(false); // a second Enter before the first save's render finds the button still enabled
+  const run = async (f: () => Promise<unknown>) => { if (busyRef.current) return; busyRef.current = true; setBusy(true); try { await f(); } finally { busyRef.current = false; setBusy(false); } };
   const pick = (patch: Partial<Look>) => void chooseLook(patch);
   const resetAll = () => void run(async () => {
     await resetToWorkbenchDefault();

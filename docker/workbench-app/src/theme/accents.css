@@ -3,7 +3,7 @@
    focus ring) and the soft one (the current item's ground). test/accent-contrast.test.ts holds every pair to WCAG AA in both
    modes, reading THIS file. The swatch variables always exist (the Settings swatches use them); an accent rule only points
    --accent and friends at them, so one rule serves light, follow-the-device dark and explicit dark. Amber is darker than the
-   mockup's #b06a00: white on #b06a00 is under 4.5:1, so the offered amber is #9a5b00. */
+   mockup's #b06a00: white on #b06a00 is 4.28:1, under 4.5:1, so the offered amber is #9a5b00. */
 :root {
   --swatch-teal: #0f6e6e;
   --swatch-teal-strong: #0b5555;

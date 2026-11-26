@@ -31,7 +31,10 @@ export const REGISTRY = [
 ];
 
 const BAD_CHAR = /[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁠-⁤⁦-⁩﻿]/;
-const CRED = /(^|[^A-Za-z0-9])(sk-|sk_|ghp_|gho_|github_pat_|xox[abpr]-|AKIA|AIza|ya29\.|eyJ)|(^|[^a-z0-9])bearer\s/i;
+// slot 700's rules: prefixes case-SENSITIVE (`~`), `bearer` case-insensitive (`~*`); btrim strips only the ASCII space; length() is code points
+const CRED_PREFIX = /(^|[^A-Za-z0-9])(sk-|sk_|ghp_|gho_|github_pat_|xox[abpr]-|AKIA|AIza|ya29\.|eyJ)/;
+const CRED_BEARER = /(^|[^a-z0-9])bearer\s/i;
+const btrim = (x) => x.replace(/^ +| +$/g, "");
 // jsonb's text for a value, only its length matters (the 4096 cap): close enough for the sizes the tests use
 const jlen = (v) => JSON.stringify(v).length;
 
@@ -52,13 +55,13 @@ export function problem(k, value) {
       const bad = value.some((e) => {
         if (!e || typeof e !== "object" || Array.isArray(e)) return true;
         if (Object.keys(e).some((x) => !["name", "theme", "accent", "density", "text_size"].includes(x))) return true;
-        if (typeof e.name !== "string" || e.name.trim() === "" || e.name.length > (v.max_name ?? 40)) return true;
-        if (BAD_CHAR.test(e.name) || CRED.test(e.name)) return true;
+        if (typeof e.name !== "string" || btrim(e.name) === "" || Array.from(e.name).length > (v.max_name ?? 40)) return true;
+        if (BAD_CHAR.test(e.name) || CRED_PREFIX.test(e.name) || CRED_BEARER.test(e.name)) return true;
         return !(typeof e.theme === "string" && v.themes.includes(e.theme) && typeof e.accent === "string" && v.accents.includes(e.accent)
           && typeof e.density === "string" && v.densities.includes(e.density) && typeof e.text_size === "string" && v.text_sizes.includes(e.text_size));
       });
       if (bad) return 'every saved theme is {"name": short text, "theme", "accent", "density", "text_size"} using the offered choices';
-      if (new Set(value.map((e) => e.name.trim().toLowerCase())).size !== value.length) return "two saved themes cannot have the same name";
+      if (new Set(value.map((e) => btrim(e.name).toLowerCase())).size !== value.length) return "two saved themes cannot have the same name";
       return null;
     }
     default: return `${k.key} has a type this store cannot hold`;

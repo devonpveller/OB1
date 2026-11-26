@@ -11,7 +11,7 @@ import { Settings } from "../src/screens/settings/Settings";
 import { setFetcher, clearRequestLog } from "../src/lib/api";
 import { resetState } from "../src/lib/state";
 import {
-  DEFAULT_LOOK, ACCENTS, SAVED_CAP, getAppearance, loadAppearance, chooseLook, saveTheme, resetAppearance, parseLook, parseSaved, syncAppearanceSubject,
+  DEFAULT_LOOK, ACCENTS, SAVED_CAP, getAppearance, loadAppearance, chooseLook, saveTheme, deleteSavedTheme, applySavedTheme, resetAppearance, parseLook, parseSaved, syncAppearanceSubject,
 } from "../src/lib/appearance";
 import { createFake, OFFERED, type Fake } from "../e2e/appearance-fake.mjs";
 
@@ -582,5 +582,103 @@ describe("the Settings section itself", () => {
     await waitFor(() => expect(html().getAttribute("data-accent")).toBe("indigo"));
     expect(stored("u-alice", "ui.accent")).toBe("indigo");
     expect(within(ap).getByTestId("ap-error").textContent).toMatch(/another browser|changed/i);
+  });
+});
+
+describe("review 1: R1 (a person switch during Apply) and the saved-theme read/write rules of slot 700", () => {
+  const T = { name: "Work", theme: "dark", accent: "rose", density: "compact", text_size: "18" };
+  const EMOJI = (n: number) => "\u{1F600}".repeat(n);
+  const boot = async () => {
+    connect();
+    syncAppearanceSubject("u-alice");
+    await waitFor(() => expect(getAppearance().status).toBe("ready"));
+  };
+  const savedNames = () => (FAKE.store.get("u-alice|ui.saved_themes")?.value as { name: string }[]).map((t) => t.name);
+
+  it("R1: Apply for Alice whose pre-apply read FAILS after the person became Bob writes nothing to Bob's account and changes nothing on his page", async () => {
+    FAKE.plant("u-alice", "ui.saved_themes", [T]);
+    await boot();
+    let fail: () => void = () => {};
+    const held = new Promise<void>((_, rej) => { fail = () => rej(new Error("network down")); });
+    held.catch(() => {});
+    hold = (method, url) => (method === "GET" && url === "/workbench/settings" && who === "u-alice" ? held : null);
+    const pending = applySavedTheme("Work");        // Alice's read is held
+    who = "u-bob";
+    syncAppearanceSubject("u-bob");
+    hold = null;
+    await waitFor(() => expect(getAppearance().status).toBe("ready"));
+    fail();                                          // now the read fails
+    expect(await pending).toBe(false);
+    await act(async () => { await new Promise((r) => setTimeout(r, 30)); });
+    for (const k of ["ui.theme", "ui.accent", "ui.density", "ui.text_size"]) expect(FAKE.store.has("u-bob|" + k)).toBe(false);
+    expect(getAppearance().look).toEqual(DEFAULT_LOOK);
+    expect(html().hasAttribute("data-accent")).toBe(false);
+  });
+
+  it("R1: the same with a read that SUCCEEDS after the switch", async () => {
+    FAKE.plant("u-alice", "ui.saved_themes", [T]);
+    await boot();
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => { release = r; });
+    hold = (method, url) => (method === "GET" && url === "/workbench/settings" && who === "u-alice" ? held : null);
+    const pending = applySavedTheme("Work");
+    who = "u-bob";
+    syncAppearanceSubject("u-bob");
+    hold = null;
+    await waitFor(() => expect(getAppearance().status).toBe("ready"));
+    release();
+    expect(await pending).toBe(false);
+    for (const k of ["ui.theme", "ui.accent", "ui.density", "ui.text_size"]) expect(FAKE.store.has("u-bob|" + k)).toBe(false);
+  });
+
+  it("F2: a stored 21-emoji name (21 code points, 42 UTF-16 units) is kept and survives the next save and delete", async () => {
+    FAKE.plant("u-alice", "ui.saved_themes", [{ ...T, name: EMOJI(21) }]);
+    await boot();
+    expect(getAppearance().saved.map((t) => t.name)).toEqual([EMOJI(21)]);
+    expect((await saveTheme("Other")).ok).toBe(true);
+    expect(savedNames()).toEqual([EMOJI(21), "Other"]);
+    expect(await deleteSavedTheme("Other")).toBe(true);
+    expect(savedNames()).toEqual([EMOJI(21)]);
+  });
+
+  it("F2: a name of 41 code points is still refused", async () => {
+    await boot();
+    expect((await saveTheme(EMOJI(41))).ok).toBe(false);
+  });
+
+  it("F3: 'Work' and 'Work'+NBSP are two themes to the server (btrim strips only the ASCII space); both are kept and survive a save", async () => {
+    FAKE.plant("u-alice", "ui.saved_themes", [T, { ...T, name: "Work\u00a0" }]);
+    await boot();
+    expect(getAppearance().saved.map((t) => t.name)).toEqual(["Work", "Work\u00a0"]);
+    expect((await saveTheme("Other")).ok).toBe(true);
+    expect(savedNames()).toEqual(["Work", "Work\u00a0", "Other"]);
+  });
+
+  it("F3: 'Work' and ' work ' (ASCII spaces) are the same name for the page, as for the server", async () => {
+    FAKE.plant("u-alice", "ui.saved_themes", [T]);
+    await boot();
+    expect((await saveTheme(" work ")).ok).toBe(false);
+  });
+
+  it("F7: credential prefixes are case-sensitive like the server's: 'Aizawa days' saves and a stored 'Aizawa' survives; 'AIza' and 'Bearer' are still refused", async () => {
+    FAKE.plant("u-alice", "ui.saved_themes", [{ ...T, name: "Aizawa" }]);
+    await boot();
+    expect(getAppearance().saved.map((t) => t.name)).toEqual(["Aizawa"]);
+    expect((await saveTheme("Aizawa days")).ok).toBe(true);
+    expect(savedNames()).toEqual(["Aizawa", "Aizawa days"]);
+    expect((await saveTheme("my AIza key")).ok).toBe(false);
+    expect((await saveTheme("my Bearer token")).ok).toBe(false);
+  });
+
+  it("parseSaved keeps every entry slot 700 accepts, unchanged (names are not trimmed on read)", () => {
+    const list = [{ ...T, name: " Work " }, { ...T, name: "Eyjafjallajokull" }, { ...T, name: EMOJI(40) }];
+    expect(parseSaved(list).map((t) => t.name)).toEqual([" Work ", "Eyjafjallajokull", EMOJI(40)]);
+  });
+
+  it("F1: two quick saves of the same name send one write: the second is judged again inside the queue", async () => {
+    await boot();
+    const [a, b] = await Promise.all([saveTheme("Same"), saveTheme("Same")]);
+    expect([a.ok, b.ok].sort()).toEqual([false, true]);
+    expect(savedNames()).toEqual(["Same"]);
   });
 });

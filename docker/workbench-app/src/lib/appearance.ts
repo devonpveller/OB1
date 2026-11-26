@@ -74,14 +74,20 @@ export function parseLook(rows: Row[]): Look {
 
 // C0 + DEL + C1 controls, the bidi controls and the zero-width / invisible characters (the registry's rule for text)
 const BAD_CHAR = /[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁠-⁤⁦-⁩﻿]/;
-const CREDENTIAL = /(^|[^A-Za-z0-9])(sk-|sk_|ghp_|gho_|github_pat_|xox[abpr]-|AKIA|AIza|ya29\.|eyJ)|(^|[^a-z0-9])bearer\s/i;
+// slot 700's rules, exactly: the prefixes are case-SENSITIVE (`~`), only `bearer` is case-insensitive (`~*`)
+const CRED_PREFIX = /(^|[^A-Za-z0-9])(sk-|sk_|ghp_|gho_|github_pat_|xox[abpr]-|AKIA|AIza|ya29\.|eyJ)/;
+const CRED_BEARER = /(^|[^a-z0-9])bearer\s/i;
+// btrim() strips only the ASCII space; length() counts code points; the duplicate test is lower(btrim())
+export const btrim = (v: string) => v.replace(/^ +| +$/g, "");
+const cpLen = (v: string) => Array.from(v).length;
+export const nameKey = (v: string) => btrim(v).toLowerCase();
 
 // why a saved theme's name is refused, or null
 export function nameProblem(name: unknown): string | null {
-  if (typeof name !== "string" || name.trim() === "") return "Give the theme a name.";
-  if (name.length > NAME_MAX) return `A name is at most ${NAME_MAX} characters.`;
+  if (typeof name !== "string" || btrim(name) === "") return "Give the theme a name.";
+  if (cpLen(name) > NAME_MAX) return `A name is at most ${NAME_MAX} characters.`;
   if (BAD_CHAR.test(name)) return "A name has no control or invisible characters.";
-  if (CREDENTIAL.test(name)) return "That looks like a credential; secrets are not stored in a name.";
+  if (CRED_PREFIX.test(name) || CRED_BEARER.test(name)) return "That looks like a credential; secrets are not stored in a name.";
   return null;
 }
 
@@ -93,9 +99,9 @@ export function parseSaved(v: unknown): SavedTheme[] {
     if (!e || typeof e !== "object" || Array.isArray(e)) continue;
     const o = e as Record<string, unknown>;
     if (nameProblem(o.name) !== null) continue;
-    const name = (o.name as string).trim();
-    if (seen.has(name.toLowerCase())) continue;
-    seen.add(name.toLowerCase());
+    const name = o.name as string; // kept exactly as stored: the next write sends it back unchanged
+    if (seen.has(nameKey(name))) continue;
+    seen.add(nameKey(name));
     out.push({ name, look: { theme: themeOf(o.theme), accent: accentOf(o.accent), density: densityOf(o.density), textSize: sizeOf(o.text_size) } });
     if (out.length === SAVED_CAP) break;
   }
@@ -273,12 +279,18 @@ export async function saveTheme(name: string): Promise<{ ok: true } | { ok: fals
   const refuse = (m: string) => { snap.error = m; emit(); return { ok: false as const, message: m }; };
   const problem = nameProblem(name);
   if (problem) return refuse(problem);
-  const clean = name.trim();
-  if (snap.saved.some((t) => t.name.toLowerCase() === clean.toLowerCase())) return refuse(`You already have a theme called "${clean}".`);
-  if (snap.saved.length >= SAVED_CAP) return refuse(`You can keep ${SAVED_CAP} saved themes. Delete one first.`);
+  const clean = btrim(name);
+  const dupOrFull = (): string | null =>
+    snap.saved.some((t) => nameKey(t.name) === nameKey(clean)) ? `You already have a theme called "${clean}".`
+    : snap.saved.length >= SAVED_CAP ? `You can keep ${SAVED_CAP} saved themes. Delete one first.` : null;
+  const first = dupOrFull();
+  if (first) return refuse(first);
   let res: { ok: true } | { ok: false; message: string } = { ok: false, message: "not saved" };
   await push(APPEARANCE_KEYS.saved, async () => {
     if (epoch !== my) return;
+    // re-judged inside the queue: an earlier queued save (a double Enter) may have taken the name or the last place
+    const again = dupOrFull();
+    if (again) { res = { ok: false, message: again }; snap.error = again; emit(); return; }
     res = await writeSaved(my, [...snap.saved, { name: clean, look: { ...snap.look } }]);
   });
   return res;
@@ -312,6 +324,9 @@ export async function applySavedTheme(name: string): Promise<boolean> {
       return false;
     }
   } catch { /* the read failed: apply what this page holds; the writes below report any trouble */ }
+  // the person may have changed while the read was out (a failed read lands here too): chooseLook takes the NEW epoch,
+  // so without this check the earlier person's saved look would be applied and stored for the next one
+  if (epoch !== my) return false;
   return chooseLook(t.look);
 }
 

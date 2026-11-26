@@ -1488,12 +1488,13 @@ try {
     $fn550 = & $apFn
     $chk550 = & $apChk
     $keys550 = & $q $keysMd5
-    $null = & $q "INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('ap-revert-$rand', 'ui.theme', '""dark""') ON CONFLICT DO NOTHING"
+    $apSeeded = -1 # set right after the FIRST init (the key row the value points to exists only while slot 700 is applied; [5m] left it reverted)
     $rv7 = @("after slots 400 + 490 + 550: $f550 | keys $(& $apKeys)")
     foreach ($f in @('init-appearance.sql', 'init-appearance.sql', 'revert-appearance.sql', 'revert-appearance.sql', 'init-appearance.sql')) {
       $null = Dk cp (Join-Path $dockerDir $f) "${db}:/tmp/rv700.sql"
       $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv700.sql
       $rv7 += "[$f] exit $($script:rc)$(if ($o -match 'ERROR') { ': ' + (($o -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ') }) -> $(& $fp) | keys $(& $apKeys) | fn $(& $apFn) | check $(& $apChk) | values $(& $q "SELECT count(*) FROM public.user_settings WHERE key IN ('ui.theme','ui.accent','ui.density','ui.text_size','ui.saved_themes')")"
+      if ($apSeeded -lt 0) { $apSeeded = [int](& $q "WITH i AS (INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('ap-revert-$rand', 'ui.theme', '""dark""') ON CONFLICT DO NOTHING RETURNING 1) SELECT count(*) FROM i") }
     }
     Save 'revert-appearance.log' ($rv7 -join "`n")
     foreach ($l in $rv7) { Write-Host "    $l" }
@@ -1501,7 +1502,9 @@ try {
     Check (@($rv7 | Where-Object { $_ -match '^\[.*\] exit 0 ' }).Count -eq 5) '[5m4] slot 700: all five runs exit 0'
     Check ($rv7[1] -match 'keys 5 ' -and $rv7[1] -notmatch "-> $f550 ") '[5m4] slot 700 changes the catalog (five keys, the type, the function)'
     Check ($rv7[3] -match "-> $f550 \| keys 0 \| fn $fn550 \| check $chk550 \| values 0" -and $rv7[4] -match "-> $f550 \| keys 0 \| fn $fn550 \| check $chk550 \| values 0") '[5m4] slot 700: after the revert (and again) the catalog, setting_problem() and the type CHECK are exactly as after slots 400 + 490 + 550, and the stored values are gone (documented)'
-    Check (($rv7[1] -replace '^\[[^\]]*\] ', '') -eq ($rv7[2] -replace '^\[[^\]]*\] ', '') -and ($rv7[1] -replace '^\[[^\]]*\] ', '') -replace ' \| values \d+$', '' -eq ($rv7[5] -replace '^\[[^\]]*\] ', '' -replace ' \| values \d+$', '')) '[5m4] slot 700: a second init changes nothing, init again restores the same catalog'
+    Check ($apSeeded -eq 1) '[5m4] the seed value (ui.theme for a scratch owner) was inserted after the first init: 1 row, not refused by the key table (a seed that inserts 0 rows would make the next check vacuous)'
+    Check ($rv7[2] -match '\| values 1$' -and $rv7[1] -match '\| values 0$') '[5m4] slot 700: the seeded value is stored while slot 700 is applied (values 1 after the second init)'
+    Check ((($rv7[1] -replace '^\[[^\]]*\] ', '') -replace ' \| values \d+$', '') -eq (($rv7[2] -replace '^\[[^\]]*\] ', '') -replace ' \| values \d+$', '') -and ($rv7[1] -replace '^\[[^\]]*\] ', '') -replace ' \| values \d+$', '' -eq ($rv7[5] -replace '^\[[^\]]*\] ', '' -replace ' \| values \d+$', '')) '[5m4] slot 700: a second init changes nothing, init again restores the same catalog'
     $null = & $q "DELETE FROM public.user_settings WHERE owner_sub = 'ap-revert-$rand'"
     $null = Dk cp (Join-Path $dockerDir 'check-appearance.sql') "${db}:/tmp/chk700.sql"
     $co = @((Dk exec $db psql -U postgres -d openbrain -X -tA -F '|' -v ON_ERROR_STOP=1 -f /tmp/chk700.sql) -split "`n" | Where-Object { $_ -ne '' })
