@@ -534,6 +534,27 @@ export type DiffCheckResult = {
   lifecycle: string | null; /** registry: source_states */
 };
 
+export type Dismissal = {
+  id: string;
+  kind: string; /** registry: dismissal_kinds */
+  ref: string;
+  created_at: string;
+};
+
+export type DismissalCreate = {
+  kind: string; /** registry: dismissal_kinds */
+  ref: string;
+};
+
+export type DismissalRemoved = {
+  id: string;
+};
+
+export type Dismissals = {
+  dismissals: Array<Dismissal>;
+  total: number;
+};
+
 export type DocumentCoverage = {
   path: string;
   computed_at: string;

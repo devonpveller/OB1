@@ -12,6 +12,7 @@ import { Imports } from "./screens/imports/Imports";
 import { StartResearch } from "./screens/research-start/StartResearch";
 import { Ideas } from "./screens/ideas/Ideas";
 import { RemovalsScreen } from "./screens/removals/Removals";
+import { CleanupScreen } from "./screens/cleanup/Cleanup";
 import { Settings } from "./screens/settings/Settings";
 
 export type Group = "everywhere" | "housekeeping";
@@ -39,7 +40,7 @@ export const ROUTES: RouteDef[] = [
   { path: "/library", label: "Library", group: "everywhere", phase: 2, will: "Sources and claims: browse, check quality, add to a document.", inMenu: true },
   { path: "/imports", label: "Imports", group: "housekeeping", phase: 5, will: "Bring links and files in, and see what happened to each.", inMenu: true, screen: Imports },
   { path: "/removals", label: "Removals and trail", group: "housekeeping", phase: 5, will: "What was removed, when, and why.", inMenu: true, screen: RemovalsScreen },
-  { path: "/cleanup", label: "Cleanup", group: "housekeeping", phase: 5, will: "Sources waiting to be cleaned up.", inMenu: true },
+  { path: "/cleanup", label: "Cleanup", group: "housekeeping", phase: 5, will: "Sources waiting to be cleaned up.", inMenu: true, screen: CleanupScreen },
   { path: "/settings", label: "Settings", group: "housekeeping", phase: 6, will: "Your account, privacy and preferences.", inMenu: true, screen: Settings },
   // not in the menu
   { path: "/documents/d/:ref", label: "Document", phase: 1, will: "The writing surface, with its references, topics and history.", inMenu: false, screen: DocumentScreen },

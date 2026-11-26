@@ -53,6 +53,8 @@ export const REGISTRY = {
   flagItemKinds: "flag_item_kinds",
   flagFromKinds: "flag_from_kinds",
   flagStates: "flag_states",
+  // rwr-cleanup (init-cleanup-dismissals.sql, slot 700): what a person can tell Cleanup not to show again
+  dismissalKinds: "dismissal_kinds",
   // rwr-cast-edit-api (init-cast.sql, slot 560): the cast model's new fields
   podcastFormatKinds: "podcast_format_kinds",
   podcastFormatUses: "podcast_format_uses",
