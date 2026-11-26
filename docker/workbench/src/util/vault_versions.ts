@@ -1,5 +1,6 @@
 // Git reads for a document's versions (rwr-doc-versions-api). Read-only: nothing here writes the vault.
 import { git } from "./vault.ts";
+import { liveRel } from "../documents/paths.ts";
 
 // One commit of a file's history, as git's raw diff reports it: the path the file had in that commit, its blob
 // before and after, and the status letter (A, M, or R for a commit that moved the file in from `from`).
@@ -27,7 +28,7 @@ const US = "\x1f";
 // (see renamedInFrom); the chase then continues from that file's last commit before it. The chase stops at the commit that
 // created the file, or at a commit that deleted the path (what is older was another document). Never reads a
 // file's content; the blobs say whether the TEXT changed (`oldBlob === blob`: a move that left it alone).
-export async function vaultFileCommits(relPath: string): Promise<FileCommit[]> {
+export async function vaultFileCommits(relPath: string, legacyOwnerOk?: LegacyOwnerCheck): Promise<FileCommit[]> {
   const out: FileCommit[] = [];
   let path = relPath;
   let rev = "HEAD";
@@ -48,7 +49,7 @@ export async function vaultFileCommits(relPath: string): Promise<FileCommit[]> {
       if (status === "D") return out; // deleted here: what is older was another document
       const c: FileCommit = { hash, author, date, message, status, path, oldBlob: blobOf(f[2]), blob: blobOf(f[3]) };
       if (status === "A") {
-        const moved = await renamedInFrom(hash, path);
+        const moved = await renamedInFrom(hash, path, message, legacyOwnerOk);
         if (moved) {
           out.push({ ...c, status: "R", from: moved.from, oldBlob: moved.oldBlob });
           next = { rev: `${hash}~1`, path: moved.from };
@@ -75,6 +76,22 @@ export function ownerScope(path: string): string {
   return p[1];
 }
 
+// Is a rename pairing `from` -> `to` provably ONE owner's document moving? Only inside documents/. A path outside it (notes/,
+// content/, anything else) is never followed into or out of documents/. documents/<key>/... pairs only within the same key. A
+// LEGACY pairing (scope '': documents/<file>.md, documents/.trash|.archive/...: no key, many listing owners share it) is
+// followed only for the app's own trash, restore or archive move of the SAME file: both sides have one live path
+// (liveRel(from) === liveRel(to)), so a different legacy name, a note or a wiki file is never taken for a move.
+// The route layer's proof that a LEGACY pairing (scope '': no owner key in the path) is the requesting owner's own file moving:
+// it gets the pairing's two paths and the commit subject. Without one, a legacy pairing is never followed (history lost, never leaked).
+export type LegacyOwnerCheck = (from: string, to: string, message: string) => Promise<boolean>;
+
+export function sameOwnerMove(from: string, to: string): boolean {
+  if (!from.startsWith("documents/") || !to.startsWith("documents/")) return false;
+  const s = ownerScope(from);
+  if (s !== ownerScope(to)) return false;
+  return s !== "" || liveRel(from) === liveRel(to);
+}
+
 // Did this commit move a file to `path`? A rename (git's -M: the same file, with or without an edit in the same commit)
 // whose source sits in the SAME owner's tree is followed. Every move, trash, restore and archive this app makes is an
 // exact rename, but a writer that commits the whole tree (a note write's `git add -A`) can land an edit in the same
@@ -83,7 +100,7 @@ export function ownerScope(path: string): string {
 // across them would hand one user the other's history and text (ownerScope).
 // `-z` output: paths are NUL-terminated and never quoted, so a path with a quote, a backslash or any other
 // character git would quote still compares equal.
-async function renamedInFrom(hash: string, path: string): Promise<{ from: string; oldBlob: string } | null> {
+async function renamedInFrom(hash: string, path: string, message: string, legacyOwnerOk?: LegacyOwnerCheck): Promise<{ from: string; oldBlob: string } | null> {
   const r = await git(["diff-tree", "--root", "-r", "-z", "-M", "--raw", "--no-abbrev", "--no-commit-id", hash]);
   if (!r.ok) return null;
   const t = r.out.split("\0");
@@ -95,7 +112,11 @@ async function renamedInFrom(hash: string, path: string): Promise<{ from: string
       const from = t[i + 1] ?? "";
       const to = t[i + 2] ?? "";
       i += 2;
-      if (to === path && ownerScope(from) === ownerScope(to)) return { from, oldBlob: blobOf(f[2]) };
+      if (to === path && sameOwnerMove(from, to)) {
+        // keyed pairings are the owner's by the path; a legacy one has no key in it, so the caller must prove whose file `from` was
+        if (ownerScope(from) === "" && !(legacyOwnerOk && (await legacyOwnerOk(from, to, message)))) continue;
+        return { from, oldBlob: blobOf(f[2]) };
+      }
     } else {
       i += 1;
     }

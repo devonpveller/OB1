@@ -21,7 +21,7 @@ import { afterWrite, commitLocked, DocError, ownedPath, sha256, type DocDeps } f
 import { isArchived, isTrashed } from "./paths.ts";
 import { withPathLock } from "./path_lock.ts";
 import { vaultExists, vaultRead, vaultWrite } from "../util/vault.ts";
-import { vaultBlob, vaultDiff, vaultFileCommits, vaultWorkingBlob } from "../util/vault_versions.ts";
+import { type LegacyOwnerCheck, vaultBlob, vaultDiff, vaultFileCommits, vaultWorkingBlob } from "../util/vault_versions.ts";
 
 export interface Version {
   version: number;
@@ -51,13 +51,39 @@ const noSnapshot = () => new DocError("no such snapshot", 404);
 
 // ── the numbering ─────────────────────────────────────────────────────────────────────────────
 // The commits that changed this file's text, oldest first, numbered from 1.
-export async function versionsOf(rel: string): Promise<Version[]> {
+// A legacy file (documents/<file>.md, its .trash/.archive: no owner key in the path) is followed across a rename only when it is
+// provably the caller's own file moving (legacyOwnerCheck); without `ctx` no legacy pairing is followed.
+export async function versionsOf(rel: string, ctx?: { db: DocDeps["db"]; who: Identity }): Promise<Version[]> {
   const out: Version[] = [];
-  for (const c of (await vaultFileCommits(rel)).reverse()) {
+  for (const c of (await vaultFileCommits(rel, ctx && legacyOwnerCheck(ctx.db, ctx.who))).reverse()) {
     if (!c.blob || c.blob === c.oldBlob) continue; // a move (or a mode change): the text is the same
     out.push({ version: out.length + 1, commit: c.hash, blob: c.blob, path: c.path, author: c.author, date: c.date, message: c.message });
   }
   return out;
+}
+
+// Is a legacy pairing from -> to the caller's own file moving? Both must hold:
+//  1. the commit is the app's own move of `from` (subject `documents: trash|restore|archive|unarchive|move <from>`; the app
+//     moves a file only after checking the mover owns `from`). A whole-tree sweep (wiki compile, a note write) is not: its
+//     pairing of one legacy file with another is never a move, so history is lost there, never leaked.
+//  2. no other owner is on record for `from`: a listing row at `from`, or the removal trail's line for it, names someone else
+//     (the listing row's owner is the owner of a legacy file). A failed lookup means not established: not followed.
+export function legacyOwnerCheck(db: DocDeps["db"], who: Identity): LegacyOwnerCheck {
+  return async (from, _to, message) => {
+    const m = /^documents: (trash|restore|archive|unarchive|move) (.+?)(?: -> .*| \(folder .*\))?$/.exec(message);
+    if (!m || m[2] !== from) return false;
+    try {
+      for (const sql of [
+        `SELECT owner_sub FROM public.user_document_listings WHERE path = $1`,
+        `SELECT owner_sub FROM public.user_document_trail WHERE path = $1`,
+      ]) {
+        for (const r of (await db.query(sql, [from])) as { owner_sub: string }[]) if (r.owner_sub !== who.sub) return false;
+      }
+    } catch {
+      return false;
+    }
+    return true;
+  };
 }
 
 async function loadDocument(deps: DocDeps, path: string, who: Identity) {
@@ -74,10 +100,10 @@ async function pendingText(rel: string, versions: Version[]): Promise<boolean> {
 }
 
 // Commit the text the file has now as a version (if it differs from the last one); the new list.
-async function settle(rel: string, versions: Version[], who: Identity): Promise<Version[]> {
+async function settle(deps: DocDeps, rel: string, versions: Version[], who: Identity): Promise<Version[]> {
   if (!(await pendingText(rel, versions))) return versions;
   await commitLocked(rel, `documents: edit ${rel}`, who.name);
-  return await versionsOf(rel);
+  return await versionsOf(rel, { db: deps.db, who });
 }
 
 // ── snapshots (the table) ─────────────────────────────────────────────────────────────────────
@@ -150,7 +176,7 @@ export const LIMIT_MAX = 500;
 // document has (the caller's own).
 export async function listVersions(deps: DocDeps, path: string, who: Identity, opts: { limit?: number; before?: number | null } = {}) {
   const rel = await loadDocument(deps, path, who);
-  const versions = await versionsOf(rel);
+  const versions = await versionsOf(rel, { db: deps.db, who });
   const snaps = await snapshotsAmong(deps, who, versions);
   const limit = Math.min(Math.max(opts.limit ?? LIMIT_DEFAULT, 1), LIMIT_MAX);
   const older = versions.filter((v) => opts.before == null || v.version < opts.before).reverse();
@@ -171,7 +197,7 @@ export async function listVersions(deps: DocDeps, path: string, who: Identity, o
 // Every snapshot of this document, newest first.
 export async function listSnapshots(deps: DocDeps, path: string, who: Identity) {
   const rel = await loadDocument(deps, path, who);
-  const versions = await versionsOf(rel);
+  const versions = await versionsOf(rel, { db: deps.db, who });
   const snaps = await snapshotsAmong(deps, who, versions);
   const all: ReturnType<typeof snapshotOut>[] = [];
   for (const v of versions) for (const s of snaps.get(`${v.commit}:${v.blob}`) ?? []) all.push(snapshotOut(s, v.version));
@@ -202,8 +228,8 @@ export async function createSnapshot(deps: DocDeps, input: { path: string; name:
   const name = cleanName(input.name);
   const want = input.version == null ? null : versionNumber(input.version, "version");
   return await withPathLock(rel, async () => {
-    let versions = await versionsOf(rel);
-    if (want == null) versions = await settle(rel, versions, who);
+    let versions = await versionsOf(rel, { db: deps.db, who });
+    if (want == null) versions = await settle(deps, rel, versions, who);
     const v = want == null ? versions[versions.length - 1] : versions.find((x) => x.version === want);
     if (!v) throw noVersion();
     const s = await addSnapshot(deps, who, v, name, "named");
@@ -230,7 +256,7 @@ export async function restoreVersion(deps: DocDeps, input: { path: string; versi
   return await withPathLock(rel, async () => {
     // the target is looked up on the COMMITTED versions first: a restore that answers 404 changes nothing (unsaved
     // text becomes a version only once the target is known); settling only appends, so the target stays valid
-    let versions = await versionsOf(rel);
+    let versions = await versionsOf(rel, { db: deps.db, who });
     let target: Version | undefined;
     if (snapId) {
       const row = (await snapshotQuery<SnapshotRow>(
@@ -245,7 +271,7 @@ export async function restoreVersion(deps: DocDeps, input: { path: string; versi
       target = versions.find((v) => v.version === wantV);
       if (!target) throw noVersion();
     }
-    versions = await settle(rel, versions, who);
+    versions = await settle(deps, rel, versions, who);
     const current = versions[versions.length - 1];
     if (target.blob === current.blob) {
       return { restored: false, unchanged: true, from_version: target.version, version: current.version, snapshot: null };
@@ -263,7 +289,7 @@ export async function restoreVersion(deps: DocDeps, input: { path: string; versi
       await vaultWrite(rel, prior).catch(() => {}); // the file is what it was; the marker on the current version stays (it is true)
       throw e;
     }
-    const after = await versionsOf(rel);
+    const after = await versionsOf(rel, { db: deps.db, who });
     return {
       restored: true, unchanged: false, from_version: target.version, version: after[after.length - 1].version,
       snapshot: snapshotOut(before, current.version), hash: await sha256(text), listing,
@@ -277,7 +303,7 @@ export async function compareVersions(deps: DocDeps, path: string, from: unknown
   const rel = await loadDocument(deps, path, who);
   const a = versionNumber(from, "from");
   const b = versionNumber(to, "to");
-  const versions = await versionsOf(rel);
+  const versions = await versionsOf(rel, { db: deps.db, who });
   const va = versions.find((v) => v.version === a);
   const vb = versions.find((v) => v.version === b);
   if (!va || !vb) throw noVersion();

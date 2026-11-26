@@ -26,6 +26,10 @@ const B = { sub: "user-b", actor: "user-b", name: "Bob", key: "user-b" };
 // the snapshots table, in memory; every statement the module sends is logged
 interface Snap { id: string; owner_sub: string; actor_sub: string; commit_hash: string; blob_hash: string; name: string; kind: string; created_at: string }
 const snaps: Snap[] = [];
+// the listing / trail rows a test plants: path -> owner_sub; `lookupFails` makes both lookups throw
+const listingRows = new Map<string, string>();
+const trailRows = new Map<string, string>();
+let lookupFails = false;
 const log: string[] = [];
 let n = 0;
 // deno-lint-ignore no-explicit-any
@@ -47,6 +51,11 @@ const db: any = {
     if (/FROM public\.document_snapshots WHERE id = \$1::uuid/.test(sql)) {
       // the owner condition is applied only if the statement carries it (a mutation that drops it must be seen)
       return Promise.resolve(snaps.filter((s) => s.id === a[0] && (!/owner_sub = \$2/.test(sql) || s.owner_sub === a[1])));
+    }
+    if (/FROM public\.user_document_(listings|trail) WHERE path = \$1/.test(sql)) {
+      if (lookupFails) return Promise.reject(new Error("lookup failed"));
+      const m = /user_document_listings/.test(sql) ? listingRows : trailRows;
+      return Promise.resolve(m.has(a[0] as string) ? [{ owner_sub: m.get(a[0] as string) }] : []);
     }
     return Promise.resolve([]); // no listing rows: an unlisted file is the caller's when it sits in their directory
   },
@@ -404,6 +413,122 @@ Deno.test("legacy and cross-owner scopes: an exact rename between two different 
   assertEquals([ownerScope(`documents/u1/a.md`), ownerScope(`documents/u1/.trash/a.md`), ownerScope(`documents/.trash/a.md`), ownerScope(`documents/a.md`)], ["u1", "u1", "", ""]);
 });
 
+// legacy scope: documents/<file>.md, documents/.trash|.archive/<file>.md, notes/ and content/ have no owner key, so ownerScope
+// puts them all in scope ''. Two different listing owners' legacy files, or a note and a legacy document, must never be
+// paired by a sweep commit (a whole-tree `git add -A` holding one's removal and the other's new file).
+const ctxA = { db, who: A }, ctxB = { db, who: B };
+const legacyBody = (tag: string) => Array.from({ length: 12 }, (_, i) => `legacy line ${i} of a document long enough for git to pair it ${i % 3}`).join("\n") + `\n${tag}\n`;
+async function legacySweep(src: string, dst: string, mode: "near" | "exact") {
+  const id = ++doc;
+  for (let i = 1; i <= 3; i++) await put(src, legacyBody(i < 3 ? `OLDER-LEGACY-${i}-${id}` : `CURRENT-LEGACY-${id}`), "edit");
+  const cur = await vlt.vaultRead(src);
+  await git("rm", "-q", "--", src);
+  await vlt.vaultWrite(dst, mode === "exact" ? cur : cur.replace("CURRENT-LEGACY", "CURRENT-LEGACZ"));
+  await git("add", "-A");
+  await git("-c", "user.name=wiki-compile", "-c", "user.email=w@x", "commit", "-q", "-m", `sweep ${id}`);
+  const vs = await v.versionsOf(dst, ctxB);
+  return { n: vs.length, followed: vs.some((x) => x.path === src) };
+}
+
+Deno.test("T3-U12: a sweep commit that removes one legacy file and adds another is not a move, whatever the scope '' paths are (A legacy -> B legacy, note -> legacy, wiki -> legacy, legacy .trash -> legacy), near or exact", async () => {
+  for (const [what, s, d] of [
+    ["legacy a -> legacy b", "documents/legacy-owner-a-%.md", "documents/legacy-owner-b-%.md"],
+    ["note -> legacy", "notes/someone/private-%.md", "documents/legacy-from-note-%.md"],
+    ["wiki -> legacy", "content/source/page-%.md", "documents/legacy-from-wiki-%.md"],
+    ["legacy .trash (A) -> legacy root (B)", "documents/.trash/lt-a-%.md", "documents/lt-b-%.md"],
+    ["legacy -> keyed", "documents/legacy-to-keyed-%.md", `documents/${B.key}/from-legacy-%.md`],
+    ["legacy -> legacy .archive", "documents/legacy-arch-a-%.md", "documents/.archive/legacy-arch-b-%.md"],
+  ] as const) {
+    for (const mode of ["near", "exact"] as const) {
+      const r = await legacySweep(s.replace("%", String(doc + 1)), d.replace("%", String(doc + 1)), mode);
+      assertEquals([what, mode, r.n, r.followed], [what, mode, 1, false], "the target starts at its own v1");
+    }
+  }
+});
+
+Deno.test("legacy scope: the app's own legacy trash, restore and archive of ONE file keep its history (same live path)", async () => {
+  const id = ++doc;
+  const live = `documents/legacy-own-${id}.md`, trash = `documents/.trash/legacy-own-${id}.md`, arch = `documents/.archive/legacy-own-${id}.md`;
+  await put(live, legacyBody("v1"), "edit");
+  await put(live, legacyBody("v2"), "edit");
+  await vlt.gitMv(live, trash, `documents: trash ${live}`, A.name);
+  assertEquals((await v.versionsOf(trash, ctxA)).length, 2);
+  await vlt.gitMv(trash, live, `documents: restore ${trash}`, A.name);
+  assertEquals((await v.versionsOf(live, ctxA)).length, 2);
+  await vlt.gitMv(live, arch, `documents: archive ${live}`, A.name);
+  assertEquals((await v.versionsOf(arch, ctxA)).length, 2);
+  await vlt.gitMv(arch, live, `documents: unarchive ${arch}`, A.name);
+  await put(live, legacyBody("v3"), "edit");
+  assertEquals((await v.versionsOf(live, ctxA)).length, 3);
+});
+
+// the residual shape (same file name, two owners): A's legacy document is trashed by the app and then removed for good; B's
+// NEW document at the same live name lands in the same whole-tree commit. git pairs A's removed .trash file with B's new file
+// (same liveRel), near or byte-identical. B must not get A's history, with or without a trail line for A's removal.
+Deno.test("residual: A's hard-deleted legacy .trash file and B's new legacy file of the SAME name in one sweep commit: B starts at v1 (R100 and near, with and without a trail row)", async () => {
+  for (const mode of ["exact", "near"] as const) {
+    for (const trail of [false, true]) {
+      const id = ++doc;
+      const live = `documents/same-name-${id}.md`, trash = `documents/.trash/same-name-${id}.md`;
+      await put(live, legacyBody(`OLDER-SAME-1-${id}`), "documents: edit");
+      await put(live, legacyBody(`OLDER-SAME-2-${id}`), "documents: edit");
+      await put(live, legacyBody(`CURRENT-LEGACY-${id}`), "documents: edit");
+      await vlt.gitMv(live, trash, `documents: trash ${live}`, A.name);
+      const cur = await vlt.vaultRead(trash);
+      if (trail) trailRows.set(trash, A.sub);
+      await git("rm", "-q", "--", trash); // A's delete-forever, staged
+      await vlt.vaultWrite(live, mode === "exact" ? cur : cur.replace("CURRENT-LEGACY", "CURRENT-LEGACZ")); // B's new file
+      await git("add", "-A");
+      await git("-c", "user.name=wiki-compile", "-c", "user.email=w@x", "commit", "-q", "-m", "wiki compile");
+      const vs = await v.versionsOf(live, ctxB);
+      assertEquals([mode, trail, vs.length, vs.some((x) => x.path === trash)], [mode, trail, 1, false]);
+      assert(!JSON.stringify(vs).includes("OLDER-SAME"), "none of A's history");
+      trailRows.delete(trash);
+    }
+  }
+});
+
+Deno.test("legacy owner proof: the app's own move is followed only when no other owner is on record for `from`; a failed lookup is not followed", async () => {
+  const id = ++doc;
+  const live = `documents/proof-${id}.md`, trash = `documents/.trash/proof-${id}.md`;
+  await put(live, legacyBody("p1"), "documents: edit");
+  await put(live, legacyBody("p2"), "documents: edit");
+  await vlt.gitMv(live, trash, `documents: trash ${live}`, A.name);
+  assertEquals((await v.versionsOf(trash, ctxA)).length, 2, "nothing on record: the app's own move is followed");
+  listingRows.set(live, A.sub);
+  assertEquals((await v.versionsOf(trash, ctxA)).length, 2, "the caller is the owner on record");
+  assertEquals((await v.versionsOf(trash, ctxB)).length, 1, "another owner on record for `from`: not followed");
+  listingRows.delete(live);
+  trailRows.set(live, B.sub);
+  assertEquals((await v.versionsOf(trash, ctxA)).length, 1, "the removal trail names another owner: not followed");
+  trailRows.delete(live);
+  lookupFails = true;
+  assertEquals((await v.versionsOf(trash, ctxA)).length, 1, "a failed lookup: not established, not followed");
+  lookupFails = false;
+  assertEquals((await v.versionsOf(trash)).length, 1, "no owner check given: a legacy pairing is not followed");
+  // a commit that is not the app's move of `from` (the subject names another path) is not followed either
+  const id2 = ++doc;
+  const l2 = `documents/proof-b-${id2}.md`, t2 = `documents/.trash/proof-b-${id2}.md`;
+  await put(l2, legacyBody("q1"), "documents: edit");
+  await put(l2, legacyBody("q2"), "documents: edit");
+  await vlt.gitMv(l2, t2, `documents: trash documents/other.md`, A.name);
+  assertEquals((await v.versionsOf(t2, ctxA)).length, 1);
+});
+
+Deno.test("sameOwnerMove: the rule table (documents/ only; the same key; legacy only for one file's own move)", async () => {
+  const { sameOwnerMove } = await import("../util/vault_versions.ts");
+  const rows: [string, string, boolean][] = [
+    ["documents/u1/a.md", "documents/u1/.trash/a.md", true], ["documents/u1/a.md", "documents/u1/b/c.md", true],
+    ["documents/u1/a.md", "documents/u2/a.md", false],
+    ["documents/a.md", "documents/.trash/a.md", true], ["documents/.trash/a.md", "documents/a.md", true], ["documents/.archive/a.md", "documents/a.md", true],
+    ["documents/a.md", "documents/b.md", false], ["documents/.trash/a.md", "documents/b.md", false],
+    ["documents/a.md", "documents/u1/a.md", false], ["documents/u1/a.md", "documents/a.md", false],
+    ["notes/x/a.md", "documents/a.md", false], ["documents/a.md", "notes/x/a.md", false], ["content/a.md", "documents/a.md", false],
+    ["notes/a.md", "notes/b.md", false], ["notes/a.md", "notes/a.md", false],
+  ];
+  assertEquals(rows.filter(([f, t, w]) => sameOwnerMove(f, t) !== w).map(([f, t]) => `${f} -> ${t}`), []);
+});
+
 Deno.test("restore: a request that answers 404 does not commit the caller's unsaved text", async () => {
   const p = newPath();
   await put(p, body(1), "edit");
@@ -529,8 +654,10 @@ Deno.test("every vault commit the documents API makes goes through the vault git
     for await (const e of Deno.readDir(d)) {
       if (!e.name.endsWith(".ts") || e.name.endsWith("_test.ts") || (d.pathname.endsWith("/routes/") && !e.name.startsWith("documents"))) continue;
       const text = await Deno.readTextFile(new URL(e.name, d));
-      text.split("\n").forEach((line, i) => {
-        if (/^\s*\/\//.test(line) || /^import\b|^\s+gitMv, gitRm|^export function commitLocked/.test(line)) return;
+      text.split("\n").forEach((raw, i) => {
+        // comments are not code: a trailing `// ...` (not a URL's) is cut before matching, so a word in a comment cannot excuse a bare call
+        const line = raw.replace(/(^|[^:"'`\\])\/\/.*$/, "$1");
+        if (/^\s*\/\//.test(raw) || /^import\b|^\s+gitMv, gitRm|^export function commitLocked/.test(line)) return;
         if (/\b(vaultCommitPath|gitRm|gitMv|gitRmRecursive)\(/.test(line) && !/withPathLock\(VAULT_GIT|commitLocked/.test(line)) bare.push(`${e.name}:${i + 1}: ${line.trim().slice(0, 90)}`);
       });
     }

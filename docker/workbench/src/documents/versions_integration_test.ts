@@ -520,15 +520,96 @@ t("V13: delete-folder racing creates by A and B: all succeed, no commit carries 
   assertEquals([top.author, top.message], [null, ""]);
 });
 
-t("V11b: A's staged removal and B's create of BYTE-IDENTICAL text land in one commit: B has one version (the exact-bytes cross-owner pairing is never followed)", async () => {
+t("V11b: A (4 versions) has a staged removal and B's create of BYTE-IDENTICAL text to A's current text land in one commit: B has one version, none of A's older text (the exact-bytes cross-owner pairing is never followed)", async () => {
   const title = `v11b-same-${run}`;
+  const mark = `V11B-OLDER-${run}`;
   const aPath = await newDoc(A, title, "identical body");
+  const v1 = await textOf(aPath);
+  await edit(aPath, `---\ntitle: a\n---\n\n${mark} 2\n`);
+  await edit(aPath, `---\ntitle: a\n---\n\n${mark} 3\n`);
+  await edit(aPath, v1); // A's current text is v1's bytes again: B's create below is byte-identical to it
+  assertEquals((await versions(aPath)).total, 4);
   const tp = (await call("POST", `${D}/trash`, { path: aPath })).json.trashed as string;
   const aText = await textOf(tp);
   await git("rm", "--quiet", "--", tp); // staged: the whole-index commit of B's create carries it
   const bPath = await newDoc(B, title, "identical body");
   assertEquals(await textOf(bPath), aText, "byte-identical text");
-  assertEquals((await versions(bPath, B)).total, 1);
-  const r = await call("POST", `${D}/restore-version`, { path: bPath, version: 1 }, B);
-  assertEquals([r.status, r.json.unchanged], [200, true]);
+  await bSeesOnlyOwn(bPath, aText, mark, "byte-identical text, A with 4 versions");
+});
+
+// V14 (fix round 3): LEGACY files have no owner key, so every legacy document, legacy .trash/.archive file, note and wiki file
+// shares one scope. A whole-tree commit holding A's removed legacy file (or a note) and B's restored legacy document, near-identical
+// or byte-identical text, must not hand B A's versions or A's text through restore-version.
+t("V14: a sweep commit holds A's removed legacy document (or a note) and B's restored legacy document: B's versions stay B's, a restore never writes A's text", async () => {
+  const bSub = B[SUB_HEADER];
+  const SHARED = Array.from({ length: 10 }, (_, k) => `shared paragraph ${k} of a plan two people wrote word for word`).join("\n") + "\n";
+  const fm = (title: string, b: string) => `---\ntitle: ${JSON.stringify(title)}\n---\n\n${b}`;
+  const commit = async (file: string, text: string, who: string) => {
+    await Deno.mkdir(`${VAULT}/${file.slice(0, file.lastIndexOf("/"))}`, { recursive: true });
+    await Deno.writeTextFile(`${VAULT}/${file}`, text);
+    await git("add", "--", file);
+    await git("-c", `user.name=${who}`, "-c", "user.email=x@l", "commit", "-q", "-m", `documents: edit ${file}`);
+  };
+  let n = 0;
+  for (const src of [(id: string) => `documents/v14a-${run}-${id}.md`, (id: string) => `notes/v14-${run}/${id}.md`]) {
+    for (const kind of ["near", "exact"] as const) {
+      const id = `${++n}${kind}`;
+      const older = `V14-OLDER-A-${run}-${id}`;
+      const la = src(id);
+      for (const [k, txt] of [[1, `${older} 1\n` + SHARED], [2, `${older} 2\n` + SHARED], [3, SHARED + `${older}-FINAL\n`]] as const) await commit(la, fm("L", txt), `a-${k}`);
+      const lbT = `documents/.trash/v14b-${run}-${id}.md`, lb = `documents/v14b-${run}-${id}.md`;
+      for (const k of [1, 2]) await commit(lbT, fm("B", `B-OWN-${k}\n`), bSub);
+      await sql(`INSERT INTO public.user_document_listings (path, title, owner_sub, actor_sub) VALUES ($1, 'B', $2, $2)`, [lb, bSub]);
+      await git("mv", lbT, lb); // B's restore, staged
+      await Deno.writeTextFile(`${VAULT}/${lb}`, fm("L", SHARED + (kind === "exact" ? `${older}-FINAL\n` : `${older}-FINAL-B\n`)));
+      await git("rm", "-q", "--", la); // A's removal, staged
+      await git("add", "-A");
+      await git("-c", "user.name=wiki-compile", "-c", "user.email=w@l", "commit", "-q", "-m", "wiki compile (timer)");
+      const l = await call("GET", `${D}/versions?path=${q(lb)}`, undefined, B);
+      assertEquals(l.status, 200, l.text);
+      assert(!l.text.includes(older) && !l.text.includes(la), `${id}: nothing of the other file in B's list`);
+      for (const vv of l.json.versions as { version: number }[]) {
+        const rr = await call("POST", `${D}/restore-version`, { path: lb, version: vv.version }, B);
+        assertEquals(rr.status, 200, rr.text);
+        const now = await textOf(lb);
+        assert(!now.includes(`${older} 1`) && !now.includes(`${older} 2`), `${id}: v${vv.version} restore wrote the other file's older text`);
+      }
+    }
+  }
+});
+
+// V14b (fix round 3, the residual): the SAME file name for two owners. A's legacy document is trashed by the app (a `documents: trash`
+// move) and removed for good; B's NEW legacy document at the same live name lands in the same whole-tree commit. git pairs A's removed
+// .trash file with B's new file (R100 for identical text, a similarity rename for near-identical): B must start at its own v1.
+t("V14b: A's hard-deleted legacy .trash file and B's new legacy file of the SAME name in one sweep: B has one version, a restore never writes A's text", async () => {
+  const bSub = B[SUB_HEADER];
+  const SHARED = Array.from({ length: 10 }, (_, k) => `shared paragraph ${k} of a plan two people wrote word for word`).join("\n") + "\n";
+  const fm = (title: string, b: string) => `---\ntitle: ${JSON.stringify(title)}\n---\n\n${b}`;
+  const commit = async (file: string, text: string, msg: string) => {
+    await Deno.mkdir(`${VAULT}/${file.slice(0, file.lastIndexOf("/"))}`, { recursive: true });
+    await Deno.writeTextFile(`${VAULT}/${file}`, text);
+    await git("add", "--", file);
+    await git("-c", "user.name=a-user", "-c", "user.email=a@l", "commit", "-q", "-m", msg);
+  };
+  for (const kind of ["exact", "near"] as const) {
+    const older = `V14B-OLDER-A-${run}-${kind}`;
+    const live = `documents/v14s-${run}-${kind}.md`, trash = `documents/.trash/v14s-${run}-${kind}.md`;
+    for (const k of [1, 2]) await commit(live, fm("S", `${older} ${k}\n` + SHARED), `documents: edit ${live}`);
+    await commit(live, fm("S", SHARED + `${older}-FINAL\n`), `documents: edit ${live}`);
+    await Deno.mkdir(`${VAULT}/documents/.trash`, { recursive: true });
+    await git("mv", live, trash);
+    await git("-c", "user.name=a-user", "-c", "user.email=a@l", "commit", "-q", "-m", `documents: trash ${live}`);
+    await git("rm", "-q", "--", trash); // A's delete forever, staged
+    await Deno.writeTextFile(`${VAULT}/${live}`, fm("S", SHARED + (kind === "exact" ? `${older}-FINAL\n` : `${older}-FINAL-B\n`))); // B's new file
+    await sql(`INSERT INTO public.user_document_listings (path, title, owner_sub, actor_sub) VALUES ($1, 'S', $2, $2)`, [live, bSub]);
+    await git("add", "-A");
+    await git("-c", "user.name=wiki-compile", "-c", "user.email=w@l", "commit", "-q", "-m", "wiki compile (timer)");
+    const l = await call("GET", `${D}/versions?path=${q(live)}`, undefined, B);
+    assertEquals(l.status, 200, l.text);
+    assertEquals([kind, l.json.total], [kind, 1], "B starts at its own v1");
+    assert(!l.text.includes(older), "nothing of A's text in B's list");
+    const rr = await call("POST", `${D}/restore-version`, { path: live, version: 1 }, B);
+    assertEquals(rr.status, 200, rr.text);
+    assert(!(await textOf(live)).includes(`${older} 1`), "a restore never writes A's older text");
+  }
 });
