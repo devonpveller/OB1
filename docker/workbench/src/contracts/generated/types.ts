@@ -642,6 +642,54 @@ export type Flow = {
   }>;
 };
 
+export type Gap = {
+  id: string;
+  path: string;
+  text: string;
+  origin: string; /** registry: gap_origins */
+  state: string; /** registry: gap_states */
+  job_id: string | null;
+  covered_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type GapCreate = {
+  path: string;
+  text: string;
+  origin?: string; /** registry: gap_origins */
+};
+
+export type GapDeleted = {
+  id: string;
+  deleted: boolean;
+};
+
+export type GapResearch = {
+  ids: Array<string>;
+};
+
+export type GapResearchStarted = {
+  job_id: string;
+  gaps: Array<Gap>;
+};
+
+export type GapUpdate = {
+  text?: string;
+  state?: string; /** registry: gap_states */
+};
+
+export type Gaps = {
+  gaps: Array<Gap>;
+  total: number;
+  counts: {
+    open: number;
+    researching: number;
+    covered: number;
+    dismissed: number;
+  };
+};
+
 export type GraphLink = {
   source: string;
   target: string;

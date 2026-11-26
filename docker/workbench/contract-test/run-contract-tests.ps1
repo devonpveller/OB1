@@ -424,7 +424,7 @@ try {
     $_.Name -match '/cleanup/(sources/\{id\}/(sever|erase)|process-all|tombstones/\{id\}/lift|actions/\{id\})$' -or
     $_.Name -match '/private/(claims|jobs)/\{id\}$' -or
     $_.Name -match '/documents/pending-refs/\{id\}(/place)?$' -or  # rwr-doc-toplace-api: DELETE and POST .../place by id (PENDING_BY_ID in dredd-hooks.js): two operations
-    $_.Name -match '^/workbench/research(/preview)?$' }).Count + 2  # rw-owner-private-view: the owner-only by-id reads (PRIVATE_BY_ID); rwr-flags-api: +2 = GET and PATCH /flags/{id} (FLAG_BY_ID; one path, two operations)
+    $_.Name -match '^/workbench/research(/preview)?$' }).Count + 2 + 5  # rw-owner-private-view: the owner-only by-id reads (PRIVATE_BY_ID); rwr-flags-api: +2 = GET and PATCH /flags/{id} (FLAG_BY_ID; one path, two operations); rwr-doc-gaps-api: +5 = POST /gaps, POST /gaps/research and GET, PATCH, DELETE /gaps/{id} (isGapSkipped in dredd-hooks.js; only the list GET is run)
   Check ($dm.Success -and $dm.Groups[2].Value -eq '0' -and $dm.Groups[3].Value -eq '0' -and [int]$dm.Groups[1].Value -eq ($ops - $hookSkipped)) "Dredd: $($dm.Value) (operations in the document: $ops; skipped by the hooks: $hookSkipped)"
 
   # ---------------------------------------------------------------- 6. eleven-router smoke

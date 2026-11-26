@@ -43,6 +43,15 @@ const RESEARCH_START_URI = /^\/workbench\/research(\/preview)?(\?|$)/;
 const isResearchStart = (t) => !!(t && t.request && String(t.request.method || '').toUpperCase() === 'POST' &&
   RESEARCH_START_URI.test(String(t.request.uri || '')));
 
+// 9. rwr-doc-gaps-api (slot 650): a gap is a per-user row on the caller's own document, and 'research these' acts through the
+//    research service (the Dredd lab runs none and the fixtures own no document of the Dredd identity). Only the list GET is
+//    checked here; create, by-id GET/PATCH/DELETE and research are exercised by src/contracts/gaps_integration_test.ts
+//    (run-gaps-tests.ps1). run-contract-tests.ps1 counts the same five skipped operations.
+const GAPS_URI = /\/workbench\/contract\/gaps(\/|\?|$)/;
+const GAPS_LIST = /\/workbench\/contract\/gaps(\?[^/]*)?$/;
+const isGapSkipped = (t) => !!(t && t.request && GAPS_URI.test(String(t.request.uri || '')) &&
+  !(String(t.request.method || '').toUpperCase() === 'GET' && GAPS_LIST.test(String(t.request.uri || ''))));
+
 const PODCAST_MODEL = /\/(podcasts|presenters|teams)(\/|$| )/;
 
 // 8. rwr-cast-edit-api (slot 560): the cast routes' fixtures (schemas/cast.ts CX) belong to their own lab subject,
@@ -73,7 +82,7 @@ hooks.beforeEach((transaction, done) => {
     transaction.request.headers['X-Test-Sub'] = 'lab-caster-0001';
   }
   const code = String(transaction.expected && transaction.expected.statusCode);
-  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || FLAG_BY_ID.test(String(transaction.name || '')) || PENDING_BY_ID.test(String(transaction.name || '')) || PRIVATE_BY_ID.test(String(transaction.name || '')) || isResearchStart(transaction);
+  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || FLAG_BY_ID.test(String(transaction.name || '')) || PENDING_BY_ID.test(String(transaction.name || '')) || PRIVATE_BY_ID.test(String(transaction.name || '')) || isResearchStart(transaction) || isGapSkipped(transaction);
   done();
 });
 
