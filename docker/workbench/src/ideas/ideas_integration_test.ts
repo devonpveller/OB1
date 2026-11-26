@@ -1127,6 +1127,7 @@ t("AR2: a document-tethered idea archives by id the same way the document route 
 
 // -- rw-idea-reopen-trail: a reopen leaves ONE owner-scoped trail line (kind 'reopened', subject = the idea id, no text) ------
 const trailRows = (owner: string) => sql<Record<string, any>>(`SELECT * FROM public.user_document_trail WHERE owner_sub = $1 ORDER BY id`, [owner]);
+const rowJson = (r: unknown) => JSON.stringify(r, (_k, v) => (typeof v === "bigint" ? v.toString() : v)); // the id is a BIGINT
 const reopenedFor = async (owner: string, id: string) => (await trailRows(owner)).filter((r) => r.kind === "reopened" && r.idea_id === id);
 
 t("RT1: POST /ideas/{id}/reopen writes one line for the caller (actor = the caller, no idea text); a refused reopen writes none", async () => {
@@ -1150,7 +1151,7 @@ t("RT1: POST /ideas/{id}/reopen writes one line for the caller (actor = the call
   assertEquals(lines.length, 1);
   assertEquals([lines[0].owner_sub, lines[0].actor_sub, lines[0].path, lines[0].document_id, lines[0].trashed_at], [sub(A), sub(A), null, null, null]);
   assertEquals((await reopenedFor(sub(B), id)).length, 0);
-  assert(!JSON.stringify(lines[0]).includes(MARK) && !ok.text.includes(MARK), "the planted marker is in neither the trail row nor the response");
+  assert(!rowJson(lines[0]).includes(MARK) && !ok.text.includes(MARK), "the planted marker is in neither the trail row nor the response");
   assertEquals((await call("POST", `/workbench/ideas/${id}/reopen`, {})).status, 409, "a second reopen is refused");
   assertEquals((await reopenedFor(sub(A), id)).length, 1, "and writes no second line");
   // the read: A sees the line (no marker), B's trail never shows A's lines
@@ -1176,7 +1177,7 @@ t("RT2: the refinery open writes one line when it reopens an archived refinery, 
   const lines = await reopenedFor(sub(A), id);
   assertEquals(lines.length, 1);
   assertEquals([lines[0].actor_sub, lines[0].path], [sub(A), null]);
-  assert(!JSON.stringify(lines[0]).includes(MARK) && !o.text.includes(MARK), "no idea text in the row or the response");
+  assert(!rowJson(lines[0]).includes(MARK) && !o.text.includes(MARK), "no idea text in the row or the response");
   assertEquals((await call("POST", "/workbench/documents/refinery/open", { path })).json.reopened, false);
   assertEquals((await reopenedFor(sub(A), id)).length, 1, "a second open writes no second line");
 });
