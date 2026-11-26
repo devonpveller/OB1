@@ -1,5 +1,5 @@
 // Cleanup "Not again for this" (research-workbench redesign, rwr-cleanup): the reads and writes over
-// public.cleanup_dismissals (init-cleanup-dismissals.sql, slot 700).
+// public.cleanup_dismissals (init-cleanup-dismissals.sql, slot 710).
 //
 // Per user (07-MULTI-USER): owner_sub is the identity seam's subject_sub; EVERY statement here filters or writes by
 // it, so no other person's dismissal is ever selected, counted or deleted. The ref is not checked against any shared

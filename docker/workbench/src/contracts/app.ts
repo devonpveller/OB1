@@ -38,7 +38,7 @@ export function createContractApp(deps: ContractDeps) {
   registerCleanup(app, deps); // P8a (rw-p8a2-cleanup): the cleanup view
   registerLibrary(app, deps); // rwr-home round 4: the shared-library reads behind the Home library cards
   registerFlags(app, deps); // rwr-flags-api: flag for cleanup (per user)
-  registerDismissals(app, deps); // rwr-cleanup (slot 700): "not again for this" on Cleanup (per user)
+  registerDismissals(app, deps); // rwr-cleanup (slot 710): "not again for this" on Cleanup (per user)
   registerInlets(app, deps); // rwr-imports-server-api (slot 600): the caller's own inlet connections
   registerPrivate(app, deps); // rw-owner-private-view (slot 480): the owner's private views (no MCP tool)
   registerResearchStart(app, deps); // rwr-research-start-api: POST /workbench/research and /research/preview

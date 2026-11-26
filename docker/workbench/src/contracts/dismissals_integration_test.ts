@@ -1,6 +1,6 @@
 // deno test src/contracts/dismissals_integration_test.ts - Cleanup "Not again for this" (rwr-cleanup) over a REAL workbench and
 // database, as TWO users. SKIPPED unless DISMISS_TEST_BASE and CONTRACT_TEST_DB_HOST are set;
-// contract-test/run-dismissals-tests.ps1 runs it in its disposable lab (the real initdb chain incl. 700-init-cleanup-dismissals.sql,
+// contract-test/run-dismissals-tests.ps1 runs it in its disposable lab (the real initdb chain incl. 710-init-cleanup-dismissals.sql,
 // fixtures.sql, the :wt workbench with WORKSPACE_IDENTITY_HEADER=X-Test-Sub). Never point it at a live stack.
 // STATUS: written with the unit tests; NOT RUN yet (the lab needs a plane lease).
 // Environment: DISMISS_TEST_BASE, DISMISS_TEST_KEY, DISMISS_TEST_SUB_HEADER (default X-Test-Sub),

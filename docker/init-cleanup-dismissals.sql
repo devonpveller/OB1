@@ -11,7 +11,7 @@
 -- The ref is NOT checked against any shared table (no existence oracle: a dismissal is the person's own note).
 -- Nothing here reads or writes sources / tombstones / claims, and no shared view, function or trail carries it.
 --
--- Idempotent (IF NOT EXISTS / ON CONFLICT DO NOTHING). Fresh-volume slot 700 (the latest earlier mount is 690);
+-- Idempotent (IF NOT EXISTS / ON CONFLICT DO NOTHING). Fresh-volume slot 710 (assigned by the coordinator);
 -- the live DB gets it by hand (psql -f, BEFORE the new workbench image, a fresh backup first). Revert:
 -- revert-cleanup-dismissals.sql.
 -- ============================================================

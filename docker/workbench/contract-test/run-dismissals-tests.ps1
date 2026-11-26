@@ -169,7 +169,7 @@ try {
   New-Item -ItemType Directory -Force $stage | Out-Null
   $chain = @($rx.Matches($compose) | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
   foreach ($m in $chain) { Copy-Item (Join-Path $dockerDir $m[0]) (Join-Path $stage $m[1]) }
-  Check (@($chain | Where-Object { $_[1] -eq '700-init-cleanup-dismissals.sql' }).Count -eq 1) "the chain mounts 700-init-cleanup-dismissals.sql ($($chain.Count) migrations)"
+  Check (@($chain | Where-Object { $_[1] -eq '710-init-cleanup-dismissals.sql' }).Count -eq 1) "the chain mounts 710-init-cleanup-dismissals.sql ($($chain.Count) migrations)"
 
   Write-Host '[2] the internal network'
   $null = Dk network create --driver bridge --internal --subnet $subnets.run --label $label $net

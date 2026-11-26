@@ -1,4 +1,4 @@
--- Revert init-cleanup-dismissals.sql (research-workbench redesign, rwr-cleanup; slot 700).
+-- Revert init-cleanup-dismissals.sql (research-workbench redesign, rwr-cleanup; slot 710).
 --
 --   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -f revert-cleanup-dismissals.sql
 --

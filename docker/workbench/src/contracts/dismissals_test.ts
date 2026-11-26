@@ -115,8 +115,8 @@ Deno.test("D8: migration files: the slot is mounted once, the revert undoes what
   } catch {
     return; // inside the image the migrations are not in the build context
   }
-  assert(compose.includes("./init-cleanup-dismissals.sql:/docker-entrypoint-initdb.d/700-init-cleanup-dismissals.sql:ro"));
-  assertEquals((compose.match(/\/docker-entrypoint-initdb\.d\/700-/g) ?? []).length, 1);
+  assert(compose.includes("./init-cleanup-dismissals.sql:/docker-entrypoint-initdb.d/710-init-cleanup-dismissals.sql:ro"));
+  assertEquals((compose.match(/\/docker-entrypoint-initdb\.d\/710-/g) ?? []).length, 1);
   assert(/revert: .*revert-cleanup-dismissals\.sql/.test(compose) && /fresh-volume/.test(compose) && /live: psql -f/.test(compose));
   assert(/CREATE TABLE IF NOT EXISTS public\.cleanup_dismissals/.test(fwd) && /DROP TABLE IF EXISTS public\.cleanup_dismissals/.test(rev));
   assert(/UNIQUE \(owner_sub, kind, ref\)/.test(fwd), "one dismissal per person per thing");
