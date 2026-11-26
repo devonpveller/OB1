@@ -167,7 +167,7 @@ function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
   return (($out.Result + $err.Result) -replace "`r", '').TrimEnd()
 }
 function Dk { Lab-Docker 300 ([string[]]$args) }
-function DkLong { Lab-Docker 2400 ([string[]]$args) }
+function DkLong { Lab-Docker (Get-LabBuildTimeoutSec) ([string[]]$args) }
 
 # the shim's own RED: each refused shape is refused before docker runs
 $shimCases = @(
@@ -202,7 +202,7 @@ function Build-At([string]$sha, [string]$tag, [string]$target, [string]$what) {
     $script:made.dirs += $tree
     $tar = Join-Path $env:TEMP "$P-$sha.tar"
     & git -C $ob1 archive --format=tar -o $tar $sha
-    & tar -xf $tar -C $tree
+    & (Get-LabTar) -xf $tar -C $tree
     Remove-Item -Force $tar
     if ($WalkOff) {
       # the base predates the switch: one line after the route runs, so the walk can be turned off

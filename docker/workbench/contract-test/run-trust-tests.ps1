@@ -194,7 +194,7 @@ function Build-At([string]$sha, [string]$tag, [string]$target, [string]$what) {
     $script:made.dirs += $tree
     $tar = Join-Path $env:TEMP "$P-$sha.tar"
     & git -C $ob1 archive --format=tar -o $tar $sha
-    & tar -xf $tar -C $tree
+    & (Get-LabTar) -xf $tar -C $tree
     Remove-Item -Force $tar
   }
   $ctx = if ($what -eq 'workbench') { Join-Path $tree 'docker/workbench' } else { Join-Path $tree 'docker/wiki-viewer' }

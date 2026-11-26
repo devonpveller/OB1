@@ -231,7 +231,7 @@ function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
   return (($out.Result + $err.Result) -replace "`r", '').TrimEnd()
 }
 function Dk { Lab-Docker 300 ([string[]]$args) }
-function DkLong { Lab-Docker 2400 ([string[]]$args) }
+function DkLong { Lab-Docker (Get-LabBuildTimeoutSec) ([string[]]$args) }
 
 # the shim's own RED: each refused shape is refused before docker runs
 $shimCases = @(

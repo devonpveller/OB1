@@ -141,6 +141,20 @@ function Convert-LabDockerfileSkipGate([string]$Dockerfile, [string]$Ob1) {
   return ''
 }
 
+# The bound on one image build. 2400 s (the runners' old DkLong) is not enough on a loaded host: measured 2026-11-26, a
+# cold workbench build at 100% host CPU was killed at 2409 s before its gate finished. OB1_LAB_BUILD_TIMEOUT_SEC overrides.
+function Get-LabBuildTimeoutSec {
+  $n = 0
+  if ($env:OB1_LAB_BUILD_TIMEOUT_SEC -and [int]::TryParse($env:OB1_LAB_BUILD_TIMEOUT_SEC, [ref]$n) -and $n -gt 0) { return $n }
+  return 5400
+}
+# Windows' own tar (bsdtar). Under Git Bash the first 'tar' on PATH is MSYS tar, which reads 'C:\...' as a remote host.
+function Get-LabTar {
+  $w = Join-Path $env:SystemRoot 'System32\tar.exe'
+  if (Test-Path -LiteralPath $w) { return $w }
+  return 'tar'
+}
+
 # ---- part 2: the reuse key ------------------------------------------------------------------------------------------------
 # @{ tree; args; tag; dirty; why } for a build of $Context at OB1 revision $Rev ('HEAD' = the working tree).
 function Get-LabBuildKey {
@@ -226,7 +240,7 @@ function Invoke-LabImage {
   if ($Target) { $a += @('--target', $Target) }
   $a += $Extra
   $a += @('-t', $tag, $Context)
-  $o = Invoke-LabBuildLease $Owner $Ob1 { Lab-Docker 2400 $a }
+  $o = Invoke-LabBuildLease $Owner $Ob1 { Lab-Docker (Get-LabBuildTimeoutSec) $a }
   $brc = $script:rc
   if ($brc -eq 0 -and $GateImage) {
     $l = Get-LabImageLabels $tag
@@ -354,7 +368,7 @@ function Invoke-LabWorkbenchImages {
     $script:made.dirs += $tree
     $tar = Join-Path $env:TEMP "$P-$BaseSha.tar"
     & git -C $Ob1 archive --format=tar -o $tar $BaseSha
-    & tar -xf $tar -C $tree
+    & (Get-LabTar) -xf $tar -C $tree
     Remove-Item -Force $tar -ErrorAction SilentlyContinue
     if ($SkipGate) {
       $w = Convert-LabDockerfileSkipGate (Join-Path $tree 'docker\workbench\Dockerfile') $Ob1
@@ -363,7 +377,7 @@ function Invoke-LabWorkbenchImages {
     $r = Invoke-LabImage -Repo 'openbrain-workbench' -Context (Join-Path $tree 'docker\workbench') -Ob1 $Ob1 -Rev $BaseSha -BuildArgs @{ OB1_SHA = $BaseSha } `
       -KeyParts @("ctx=$wbRel") -OwnerTag "openbrain-workbench:wt-$Short-base" -Owner $Owner -GateImage -SkipGate:$SkipGate -NoReuse:$NoReuse
     if (-not $r.reused) { Save 'build-workbench-base.log' (($r.log -split "`n") | Select-Object -Last 40 | Out-String) }
-    $how = if ($r.reused) { 'reused' } else { 'built' }
+    $how = if ($r.rc -ne 0) { "FAILED to build (rc $($r.rc)$(if ($r.rc -eq 124) { ': TIMEOUT at the build bound' }))" } elseif ($r.reused) { 'reused' } else { 'built' }
     Check ($r.rc -eq 0) "RED: $($r.tag) $how from OB1 $BaseSha$(if ($SkipGate) { ' (its unit gate SKIPPED: a red-base image)' })"
     if ($r.rc -ne 0) { return $res }
     $res.wb = $r.tag; if (-not $r.reused) { $res.built += 'workbench' }
@@ -381,7 +395,7 @@ function Invoke-LabWorkbenchImages {
       $clean = ($r.log -replace '\x1b\[[0-9;]*m', '')
       if (-not $r.reused) { Save 'build-workbench.log' ((($clean -split "`n") | Where-Object { $_ -match 'ok \||FAILED|passed|error|SKIPPED' } | Select-Object -Last 120) -join "`n") }
     }
-    $how = if ($r.reused) { 'reused (labels checked: the same tree, the same args)' } elseif ($skipOk) { 'built (its unit gate SKIPPED: a mutant image)' } else { "built (its build test gate passed$GateNote)" }
+    $how = if ($r.rc -ne 0) { "FAILED to build (rc $($r.rc)$(if ($r.rc -eq 124) { ': TIMEOUT at the build bound' }))" } elseif ($r.reused) { 'reused (labels checked: the same tree, the same args)' } elseif ($skipOk) { 'built (its unit gate SKIPPED: a mutant image)' } else { "built (its build test gate passed$GateNote)" }
     Check ($r.rc -eq 0) "$($r.tag) at OB1 $($Sha.Substring(0, 7)): $how"
     if ($r.rc -ne 0) { return $res }
     if (-not $r.reused -and -not $skipOk) {

@@ -156,7 +156,7 @@ function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
   return (($out.Result + $err.Result) -replace "`r", '').TrimEnd()
 }
 function Dk { Lab-Docker 300 ([string[]]$args) }
-function DkLong { Lab-Docker 2400 ([string[]]$args) }
+function DkLong { Lab-Docker (Get-LabBuildTimeoutSec) ([string[]]$args) }
 
 $shimCases = @(
   @('run', '-p', '8080:8080', 'x'), @('run', '--network', 'ai-stack_llm-net', 'x'), @('network', 'create', '--driver', 'macvlan', 'n'),
