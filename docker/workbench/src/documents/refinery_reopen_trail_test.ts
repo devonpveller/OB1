@@ -13,7 +13,7 @@ const IDEA = "a1000000-0000-4000-8000-0000000000a1";
 const who = { sub: "operator", actor: "operator", name: "Op", key: "operator" } as Identity;
 const PATH = "documents/operator/ideas/x.md";
 
-function fake(archivedAt: string | null, owner = "operator") {
+function fake(archivedAt: string | null, owner = "operator", stamp = "dirty") {
   const seen: { sql: string; args: unknown[] }[] = [];
   const db: Db = {
     query: (sql: string, args: unknown[] = []) => {
@@ -22,10 +22,13 @@ function fake(archivedAt: string | null, owner = "operator") {
         return Promise.resolve([{ id: "d1", path: PATH, title: "T", updated_at: new Date(), refinery_id: IDEA, owner_sub: owner }] as never);
       }
       if (/FROM public\.ideas i LEFT JOIN public\.refinery_state/.test(sql)) {
-        return Promise.resolve([{ id: IDEA, status: archivedAt ? "archived" : "engaged", archived_at: archivedAt, archived_from: archivedAt ? "dirty" : null }] as never);
+        return Promise.resolve([{ id: IDEA, status: archivedAt ? "archived" : "engaged", archived_at: archivedAt, archived_from: archivedAt ? stamp : null }] as never);
       }
+      if (/SELECT archived_from FROM public\.refinery_state/.test(sql)) return Promise.resolve([{ archived_from: archivedAt ? stamp : null }] as never);
       if (/UPDATE public\.refinery_state SET archived_at = NULL.*archived_at IS NOT NULL.*RETURNING/s.test(sql)) {
-        return Promise.resolve((archivedAt ? [{ archived_from: "dirty" }] : []) as never);
+        // RETURNING gives the row AFTER the update: archived_from is already NULL there (PostgreSQL semantics)
+        const col = /RETURNING (\w+)/.exec(sql)![1];
+        return Promise.resolve((archivedAt ? [{ [col]: col === "archived_from" ? null : IDEA }] : []) as never);
       }
       return Promise.resolve([] as never);
     },
@@ -74,7 +77,7 @@ function stateful() {
   };
   const unlock = (me: object) => { if (holder === me) { holder = null; waiters.splice(0).forEach((w) => w()); } };
   const mk = (me: object | null): Db => ({
-    query: async (sql: string) => {
+    query: async (sql: string, args: unknown[] = []) => {
       await tick();
       if (/FROM public\.user_document_listings WHERE path/.test(sql)) {
         return [{ id: "d1", path: PATH, title: "T", updated_at: new Date(), refinery_id: IDEA, owner_sub: "operator" }] as never;
@@ -92,9 +95,10 @@ function stateful() {
         const from = st.archived_from;
         if (/archived_at IS NOT NULL/.test(sql) && !was) return [] as never;
         st.archived_at = null; st.archived_from = null;
-        return (/RETURNING/.test(sql) ? [{ archived_from: from }] : []) as never;
+        void from; // RETURNING is the row AFTER the update: archived_from is NULL there
+        return (/RETURNING archived_from/.test(sql) ? [{ archived_from: null }] : /RETURNING/.test(sql) ? [{ refinery_id: IDEA }] : []) as never;
       }
-      if (/UPDATE public\.ideas SET status/.test(sql)) { st.status = "restored"; return [] as never; }
+      if (/UPDATE public\.ideas SET status/.test(sql)) { st.status = String(args[1]); return [] as never; }
       if (/INSERT INTO public\.user_document_trail/.test(sql)) { st.lines++; return [] as never; }
       return [] as never;
     },
@@ -112,6 +116,7 @@ Deno.test("rw-idea-reopen-trail: two concurrent refinery opens of an archived re
     const rs = await Promise.all([reopenRefinery(deps(db), PATH, who), reopenRefinery(deps(db), PATH, who)]);
     assertEquals(st.lines, 1, `round ${i}`);
     assertEquals(rs.map((r) => r.reopened).sort(), [false, true], `round ${i}`);
+    assertEquals(st.status, "dirty", `round ${i}: the state it was archived from comes back`);
   }
 });
 
@@ -128,4 +133,16 @@ Deno.test("rw-idea-reopen-trail: a refinery open racing POST /ideas/{id}/reopen 
     const openWon = open.status === "fulfilled" && open.value.reopened === true;
     assert(byIdWon !== openWon, `round ${i}: byIdWon=${byIdWon} openWon=${openWon}`);
   }
+});
+
+Deno.test("rw-idea-reopen-trail (fix round 2): reopening a PROMOTED, archived refinery restores 'promoted', not 'engaged'", async () => {
+  const { db, seen } = fake("2026-11-01T00:00:00Z", "operator", "promoted");
+  const out = await reopenRefinery(deps(db), PATH, who);
+  assertEquals(out.reopened, true);
+  const set = seen.find((s) => /UPDATE public\.ideas SET status/.test(s.sql))!;
+  assertEquals(set.args[1], "promoted");
+  // an archive that left no stamp still comes back engaged
+  const none = fake("2026-11-01T00:00:00Z", "operator", null as never);
+  await reopenRefinery(deps(none.db), PATH, who);
+  assertEquals(none.seen.find((s) => /UPDATE public\.ideas SET status/.test(s.sql))!.args[1], "engaged");
 });

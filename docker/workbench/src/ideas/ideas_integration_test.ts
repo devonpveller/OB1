@@ -376,6 +376,52 @@ t("I9b: archiving a PROMOTED refinery and reopening it restores the promotion (t
   assertEquals((await ideaRow(id)).status, "promoted");
 });
 
+t("I9c (fix round 2): a PROMOTED refinery comes back 'promoted' through every route that reopens it - refinery open, start-refinery, the unarchive door - with one line each", async () => {
+  for (const route of ["open", "start", "unarchive"]) {
+    const id = await captured(sub(A), `promoted-${route} ${rnd()}`);
+    const s = await call("POST", "/workbench/documents/seed", { idea_id: id });
+    assertEquals(s.status, 201, s.text);
+    let path = s.json.path as string;
+    if (route === "unarchive") {
+      const ar = await call("POST", "/workbench/documents/archive", { path });
+      assertEquals(ar.status, 200, ar.text);
+      path = ar.json.archived as string;
+    } else {
+      assertEquals((await call("POST", "/workbench/documents/refinery/archive", { path })).status, 200);
+    }
+    assertEquals((await ideaRow(id)).status, "archived", route);
+    const o = await call("POST", route === "unarchive" ? "/workbench/documents/unarchive" : `/workbench/documents/refinery/${route}`, { path });
+    assertEquals(o.status, 200, `${route}: ${o.text}`);
+    assertEquals((await ideaRow(id)).status, "promoted", `${route}: the state it was archived from`);
+    assertEquals((await reopenedFor(sub(A), id)).length, 1, `${route}: one line`);
+  }
+});
+
+const sleepMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+t("TX10 (race, from the attempt-2 tester): start-refinery racing an archived refinery - start||start, start||open, start||by-id, staggered - writes one line and says reopened once", async () => {
+  const bad: string[] = [];
+  const offs = [0, 0, 2, 5, 10, 20, 0, 3];
+  for (const kind of ["start-start", "start-open", "start-byid"]) {
+    for (let i = 0; i < 8; i++) {
+      const { path, id } = await docRefinery(A, `tx10 ${kind} ${rnd()}`);
+      assertEquals((await call("POST", "/workbench/documents/refinery/archive", { path })).json.archived, true);
+      const startC = () => call("POST", "/workbench/documents/refinery/start", { path });
+      const other = kind === "start-start" ? startC : kind === "start-open"
+        ? () => call("POST", "/workbench/documents/refinery/open", { path }) : () => call("POST", `/workbench/ideas/${id}/reopen`, {});
+      const rs = await Promise.all([startC(), sleepMs(offs[i]).then(other)]);
+      const n = (await reopenedFor(sub(A), id)).length;
+      const trues = rs.filter((r) => r.status === 200 && r.json.reopened === true).length;
+      const byIdWon = kind === "start-byid" && rs[1].status === 200;
+      const okTrue = kind === "start-byid" ? trues + (byIdWon ? 1 : 0) === 1 : trues === 1;
+      if (n !== 1 || !okTrue || rs[0].status !== 200 || (kind !== "start-byid" && rs[1].status !== 200)) {
+        bad.push(`${kind} r${i}: ${n} lines ${rs.map((r) => `${r.status}/${r.json.reopened}`).join(" ")}`);
+      }
+      assertEquals((await ideaRow(id)).status !== "archived", true, "idea is open afterwards");
+    }
+  }
+  assertEquals(bad, []);
+});
+
 // ── acceptance 4: the user source list ───────────────────────────────────────────────────────────────────
 t("I10: every user-added source is listed with its fold status, scoped corroboration and found_via trail; a held one goes with no tombstone", async () => {
   const { path, id } = await docRefinery(A, `sources ${rnd()}`);
