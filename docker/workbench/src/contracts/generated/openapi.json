@@ -6614,6 +6614,188 @@
         },
         "additionalProperties": false
       },
+      "PendingRefs": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "example": "documents/fixture-refinery.md"
+          },
+          "pending_refs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PendingRef"
+            }
+          },
+          "total": {
+            "type": "integer",
+            "description": "the caller's own queue for this document, not only this page"
+          }
+        },
+        "required": [
+          "path",
+          "pending_refs",
+          "total"
+        ]
+      },
+      "PendingRef": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "9e1d0000-0000-4000-8000-000000000001",
+            "description": "pending reference id"
+          },
+          "path": {
+            "type": "string",
+            "example": "documents/fixture-refinery.md",
+            "description": "the document's vault path (the caller's own)"
+          },
+          "source_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "11111111-1111-4111-8111-111111111111",
+            "description": "the cited source, or null when a claim is cited"
+          },
+          "claim_id": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+            "description": "the cited claim, or null when a source is cited"
+          },
+          "section": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "an optional section label ('' when none)"
+          },
+          "quote": {
+            "type": "string",
+            "maxLength": 4000,
+            "description": "an optional quote the reference will pin ('' when none)"
+          },
+          "added_from": {
+            "type": "string",
+            "example": "source",
+            "description": "where the cite was gathered: a short label"
+          },
+          "created_at": {
+            "type": "string",
+            "example": "2026-10-17T12:00:00.000Z",
+            "description": "ISO-8601 timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "source_id",
+          "claim_id",
+          "section",
+          "quote",
+          "added_from",
+          "created_at"
+        ]
+      },
+      "PendingRefCreate": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "example": "documents/fixture-refinery.md",
+            "description": "the document's vault path (full, or relative to the caller's own directory)"
+          },
+          "source_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "11111111-1111-4111-8111-111111111111",
+            "description": "the cited source"
+          },
+          "claim_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+            "description": "the cited claim"
+          },
+          "section": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "quote": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "added_from": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9_.:-]{0,63}$",
+            "example": "source",
+            "description": "where the cite was gathered: a short lower-case label such as source, search, chat"
+          }
+        },
+        "required": [
+          "path",
+          "added_from"
+        ],
+        "additionalProperties": false
+      },
+      "PendingRefRemoved": {
+        "type": "object",
+        "properties": {
+          "removed": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "9e1d0000-0000-4000-8000-000000000001",
+            "description": "the queue row that was removed"
+          }
+        },
+        "required": [
+          "removed"
+        ]
+      },
+      "PendingRefPlaced": {
+        "type": "object",
+        "properties": {
+          "pending_ref_id": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+            "example": "9e1d0000-0000-4000-8000-000000000001",
+            "description": "the queue row that was placed and removed"
+          },
+          "form": {
+            "type": "string",
+            "example": "chip"
+          },
+          "record": {
+            "$ref": "#/components/schemas/ReferenceRecord"
+          },
+          "insert": {
+            "type": "string",
+            "description": "the text to put at the cursor"
+          }
+        },
+        "required": [
+          "pending_ref_id",
+          "form",
+          "record",
+          "insert"
+        ]
+      },
+      "PendingRefPlace": {
+        "type": "object",
+        "properties": {
+          "form": {
+            "type": "string",
+            "example": "chip",
+            "description": "chip (default: a citation at the cursor) or transclusion (protected quoted text; needs a quote)"
+          }
+        },
+        "additionalProperties": false
+      },
       "InletConnections": {
         "type": "object",
         "properties": {
@@ -16436,6 +16618,429 @@
                 },
                 "schema": {
                   "$ref": "#/components/schemas/Flag"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/documents/pending-refs": {
+      "get": {
+        "operationId": "pendingRefList",
+        "tags": [
+          "documents (to place)"
+        ],
+        "summary": "the caller's own 'to place' queue for one of their documents, oldest first",
+        "description": "path is required: the document's vault path. A document that is another user's, not listed or missing is 404 no such document.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "the document's vault path"
+            },
+            "required": false,
+            "description": "the document's vault path",
+            "name": "path",
+            "in": "query",
+            "example": "documents/fixture-refinery.md"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9]{1,4}$",
+              "description": "1-200, default 100"
+            },
+            "required": false,
+            "description": "1-200, default 100",
+            "name": "limit",
+            "in": "query",
+            "example": "100"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the document's queue",
+            "content": {
+              "application/json": {
+                "example": {
+                  "path": "documents/fixture-refinery.md",
+                  "pending_refs": [
+                    {
+                      "id": "9e1d0000-0000-4000-8000-000000000001",
+                      "path": "documents/fixture-refinery.md",
+                      "source_id": "11111111-1111-4111-8111-111111111111",
+                      "claim_id": null,
+                      "section": "Opening",
+                      "quote": "",
+                      "added_from": "source",
+                      "created_at": "2026-10-17T12:00:00.000Z"
+                    }
+                  ],
+                  "total": 1
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/PendingRefs"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "pendingRefAdd",
+        "tags": [
+          "documents (to place)"
+        ],
+        "summary": "add a cite (a source or a claim) to a document's 'to place' queue, from any screen",
+        "description": "Exactly one of source_id and claim_id. The same cite and quote added twice to one document is 409 (the body names the row already waiting).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "path": "documents/fixture-refinery.md",
+                "source_id": "11111111-1111-4111-8111-111111111111",
+                "section": "Opening",
+                "added_from": "source"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/PendingRefCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "the queue row, recorded as the caller's",
+            "content": {
+              "application/json": {
+                "example": {
+                  "id": "9e1d0000-0000-4000-8000-000000000001",
+                  "path": "documents/fixture-refinery.md",
+                  "source_id": "11111111-1111-4111-8111-111111111111",
+                  "claim_id": null,
+                  "section": "Opening",
+                  "quote": "",
+                  "added_from": "source",
+                  "created_at": "2026-10-17T12:00:00.000Z"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/PendingRef"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/documents/pending-refs/{id}": {
+      "delete": {
+        "operationId": "pendingRefRemove",
+        "tags": [
+          "documents (to place)"
+        ],
+        "summary": "take one of the caller's own cites out of the queue; another user's is not found, as a missing one is",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "pending reference id"
+            },
+            "required": true,
+            "description": "pending reference id",
+            "name": "id",
+            "in": "path",
+            "example": "9e1d0000-0000-4000-8000-000000000001"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "the row that was removed",
+            "content": {
+              "application/json": {
+                "example": {
+                  "removed": "9e1d0000-0000-4000-8000-000000000001"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/PendingRefRemoved"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workbench/contract/documents/pending-refs/{id}/place": {
+      "post": {
+        "operationId": "pendingRefPlace",
+        "tags": [
+          "documents (to place)"
+        ],
+        "summary": "place one of the caller's queued cites at the cursor: a pinned reference record is created and the row leaves the queue",
+        "description": "Calls the existing place-reference path (the document holds the new record as cited). A refusal (the quote is not in the source, the document already cites that source) leaves the row in the queue. form is chip (default) or transclusion (needs a quote).",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "pending reference id"
+            },
+            "required": true,
+            "description": "pending reference id",
+            "name": "id",
+            "in": "path",
+            "example": "9e1d0000-0000-4000-8000-000000000001"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "example": {
+                "form": "chip"
+              },
+              "schema": {
+                "$ref": "#/components/schemas/PendingRefPlace"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "the pinned reference and the text to put at the cursor",
+            "content": {
+              "application/json": {
+                "example": {
+                  "pending_ref_id": "9e1d0000-0000-4000-8000-000000000001",
+                  "form": "chip",
+                  "record": {
+                    "id": "f2000000-0000-4000-8000-0000000000c1",
+                    "source_id": "f1000000-0000-4000-8000-000000000001",
+                    "scope": "span",
+                    "provenance": "user",
+                    "pinned_revision": 2,
+                    "chunk_idx": 0,
+                    "state": "pinned",
+                    "selectors": {
+                      "quote": {
+                        "exact": "Opening line of the reference fixture.",
+                        "prefix": "",
+                        "suffix": " The quoted span about pinned an"
+                      },
+                      "position": {
+                        "start": 0,
+                        "end": 38
+                      }
+                    },
+                    "created_by": "dredd",
+                    "created_at": "2026-10-17T12:00:00.000Z"
+                  },
+                  "insert": "[@ref:f2000000-0000-4000-8000-0000000000c1]"
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/PendingRefPlaced"
                 }
               }
             }

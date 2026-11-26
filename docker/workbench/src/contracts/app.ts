@@ -12,6 +12,7 @@ import { registerTrust } from "./routes/trust.ts";
 import { registerCleanup } from "./routes/cleanup.ts";
 import { registerLibrary } from "./routes/library.ts";
 import { registerFlags } from "./routes/flags.ts";
+import { registerPendingRefs } from "./routes/pending_refs.ts";
 import { registerInlets } from "./routes/inlets.ts";
 import { registerResearchStart } from "./routes/research_start.ts";
 import { registerIdeaCapture } from "./routes/idea_capture.ts";
@@ -37,6 +38,7 @@ export function createContractApp(deps: ContractDeps) {
   registerCleanup(app, deps); // P8a (rw-p8a2-cleanup): the cleanup view
   registerLibrary(app, deps); // rwr-home round 4: the shared-library reads behind the Home library cards
   registerFlags(app, deps); // rwr-flags-api: flag for cleanup (per user)
+  registerPendingRefs(app, deps); // rwr-doc-toplace-api (slot 630): a document's "to place" queue (per user; no MCP tool)
   registerInlets(app, deps); // rwr-imports-server-api (slot 600): the caller's own inlet connections
   registerPrivate(app, deps); // rw-owner-private-view (slot 480): the owner's private views (no MCP tool)
   registerResearchStart(app, deps); // rwr-research-start-api: POST /workbench/research and /research/preview

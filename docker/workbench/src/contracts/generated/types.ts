@@ -904,6 +904,47 @@ export type Notifications = {
   notifications: Array<Notification>;
 };
 
+export type PendingRef = {
+  id: string;
+  path: string;
+  source_id: string | null;
+  claim_id: string | null;
+  section: string;
+  quote: string;
+  added_from: string;
+  created_at: string;
+};
+
+export type PendingRefCreate = {
+  path: string;
+  source_id?: string;
+  claim_id?: string;
+  section?: string;
+  quote?: string;
+  added_from: string;
+};
+
+export type PendingRefPlace = {
+  form?: string;
+};
+
+export type PendingRefPlaced = {
+  pending_ref_id: string;
+  form: string;
+  record: ReferenceRecord;
+  insert: string;
+};
+
+export type PendingRefRemoved = {
+  removed: string;
+};
+
+export type PendingRefs = {
+  path: string;
+  pending_refs: Array<PendingRef>;
+  total: number;
+};
+
 export type PodcastEpisode = {
   id: string;
   title: string;
