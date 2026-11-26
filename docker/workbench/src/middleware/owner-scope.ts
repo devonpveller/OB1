@@ -27,21 +27,25 @@ import { documentPathsIn, ownsDocumentPaths } from "../documents/ownership.ts";
 
 const OTHER = "(another user's document)";
 // a body field holding a document's TEXT, not a path: never searched (a document may quote a path)
-// ("quote": the to-place queue's quote, text copied from a source, as "exact" is)
-const TEXT_FIELDS = new Set(["content", "body", "text", "markdown", "exact", "quote", "note", "summary"]);
+const TEXT_FIELDS = new Set(["content", "body", "text", "markdown", "exact", "note", "summary"]);
+// rwr-doc-toplace-api: on the to-place routes ONLY, "quote" is text copied from a source (as "exact" is) and is never searched
+// for paths, request or response. Everywhere else a quote field is still searched and walked (attempt 1 note).
+const PENDING_REFS = /^\/workbench\/contract\/documents\/pending-refs(\/|$)/;
+const TEXT_FIELDS_PENDING = new Set([...TEXT_FIELDS, "quote"]);
+const textFieldsFor = (route: string) => PENDING_REFS.test(route) ? TEXT_FIELDS_PENDING : TEXT_FIELDS;
 const UUID_IN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 // the documents API's own URL prefixes are routes, not vault paths
 const ROUTE_PREFIX = /^\/workbench\/(?:documents|contract\/documents)(?=\/|$)/;
 
 export { documentPathsIn };
 
-function stringsOf(v: unknown, out: string[], key = ""): void {
+function stringsOf(v: unknown, out: string[], key = "", fields: Set<string> = TEXT_FIELDS): void {
   if (typeof v === "string") {
-    if (!TEXT_FIELDS.has(key)) out.push(v);
+    if (!fields.has(key)) out.push(v);
   } else if (Array.isArray(v)) {
-    for (const x of v) stringsOf(x, out, key);
+    for (const x of v) stringsOf(x, out, key, fields);
   } else if (v && typeof v === "object") {
-    for (const [k, x] of Object.entries(v)) stringsOf(x, out, k);
+    for (const [k, x] of Object.entries(v)) stringsOf(x, out, k, fields);
   }
 }
 
@@ -73,10 +77,10 @@ async function requestStrings(c: Context): Promise<string[]> {
   if (isJson) {
     let parsed: unknown;
     try { parsed = JSON.parse(raw); } catch { throw new BodyRefused(400, "the body is not valid JSON"); }
-    stringsOf(parsed, out);
+    stringsOf(parsed, out, "", textFieldsFor(route));
   } else if (media === "multipart/form-data" || media === "application/x-www-form-urlencoded") {
     try {
-      for (const [k, v] of (await c.req.raw.clone().formData()).entries()) if (typeof v === "string" && !TEXT_FIELDS.has(k)) out.push(v);
+      for (const [k, v] of (await c.req.raw.clone().formData()).entries()) if (typeof v === "string" && !textFieldsFor(route).has(k)) out.push(v);
     } catch { throw new BodyRefused(400, "the form body cannot be read"); }
   }
   // any other type outside the contract API is a document's or note's text (a note save): not a path
@@ -84,9 +88,9 @@ async function requestStrings(c: Context): Promise<string[]> {
 }
 
 // ── 2. the response walk ───────────────────────────────────────────────────────────────────────
-async function scrub(db: Db, body: unknown, who: Identity): Promise<unknown> {
+async function scrub(db: Db, body: unknown, who: Identity, fields: Set<string> = TEXT_FIELDS): Promise<unknown> {
   const strings: string[] = [];
-  stringsOf(body, strings);
+  stringsOf(body, strings, "", fields);
   const docPaths = new Set<string>();
   const uuids = new Set<string>();
   for (const s of strings) {
@@ -206,7 +210,7 @@ export function ownerScope(db: Db) {
     if (!type.includes("json")) return;
     let body: unknown;
     try { body = await c.res.clone().json(); } catch { return; }
-    const scrubbed = await scrub(db, body, who);
+    const scrubbed = await scrub(db, body, who, textFieldsFor(route));
     if (scrubbed === body) return;
     const headers = new Headers(c.res.headers);
     headers.delete("content-length");

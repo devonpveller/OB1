@@ -60,9 +60,10 @@ CREATE TABLE IF NOT EXISTS public.document_pending_refs (
     CONSTRAINT document_pending_refs_one_target CHECK ((source_id IS NOT NULL) <> (claim_id IS NOT NULL)),
     CONSTRAINT document_pending_refs_added_from CHECK (added_from ~ '^[a-z][a-z0-9_.:-]{0,63}$')
 );
--- a cite waits once per document: the same source (or claim) and quote added again is the same row
+-- a cite waits once per document: the same source (or claim) and quote added again is the same row. The key holds md5(quote),
+-- never the quote itself: a btree row tops out at about 2700 bytes and a quote may be 4000 characters (attempt 1, D1).
 CREATE UNIQUE INDEX IF NOT EXISTS uq_document_pending_refs_cite
-    ON public.document_pending_refs (owner_sub, path, (COALESCE(source_id::text, 'claim:' || claim_id::text)), quote);
+    ON public.document_pending_refs (owner_sub, path, (COALESCE(source_id::text, 'claim:' || claim_id::text)), md5(quote));
 CREATE INDEX IF NOT EXISTS idx_document_pending_refs_doc ON public.document_pending_refs (owner_sub, path, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_document_pending_refs_path ON public.document_pending_refs (path);
 

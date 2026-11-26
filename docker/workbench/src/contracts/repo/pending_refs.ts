@@ -81,18 +81,23 @@ export async function addPendingRef(db: Db, who: Identity, b: AddInput): Promise
     const c = await db.query<{ ok: boolean }>(`SELECT EXISTS (SELECT 1 FROM public.claims WHERE id = $1) AS ok`, [b.claim_id]);
     if (!c[0]?.ok) throw new NotFound("no such claim");
   }
-  const n = (await db.query<{ n: number }>(
-    `SELECT count(*)::int AS n FROM public.document_pending_refs WHERE owner_sub = $1 AND path = $2`, [who.sub, rel],
-  ))[0].n;
-  if (n >= MAX_PER_DOCUMENT) throw new Conflict(`this document's to-place queue is full (${MAX_PER_DOCUMENT} cites): place or remove some first`);
   try {
-    const r = await db.query<PendingRefRow>(
-      `INSERT INTO public.document_pending_refs (owner_sub, actor_sub, path, source_id, claim_id, section, quote, added_from)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (owner_sub, path, (COALESCE(source_id::text, 'claim:' || claim_id::text)), quote) DO NOTHING
-       RETURNING ${COLS}`,
-      [who.sub, who.actor, rel, b.source_id ?? null, b.claim_id ?? null, b.section ?? "", b.quote ?? "", b.added_from],
-    );
+    // The bound and the insert are ONE step (attempt 1, D2): an advisory lock on (owner, document) serialises the adds of one
+    // queue for the length of the transaction, so the count a caller reads is still true when its row goes in.
+    const r = await db.tx(async (t) => {
+      await t.query(`SELECT pg_advisory_xact_lock(hashtextextended($1 || '|' || $2, 630))`, [who.sub, rel]);
+      const n = (await t.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM public.document_pending_refs WHERE owner_sub = $1 AND path = $2`, [who.sub, rel],
+      ))[0].n;
+      if (n >= MAX_PER_DOCUMENT) throw new Conflict(`this document's to-place queue is full (${MAX_PER_DOCUMENT} cites): place or remove some first`);
+      return await t.query<PendingRefRow>(
+        `INSERT INTO public.document_pending_refs (owner_sub, actor_sub, path, source_id, claim_id, section, quote, added_from)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (owner_sub, path, (COALESCE(source_id::text, 'claim:' || claim_id::text)), md5(quote)) DO NOTHING
+         RETURNING ${COLS}`,
+        [who.sub, who.actor, rel, b.source_id ?? null, b.claim_id ?? null, b.section ?? "", b.quote ?? "", b.added_from],
+      );
+    });
     if (r[0]) return r[0];
   } catch (e) {
     // the document's listing went away between the check and the insert (a delete forever): it is a missing document
@@ -101,7 +106,8 @@ export async function addPendingRef(db: Db, who: Identity, b: AddInput): Promise
   }
   const dup = await db.query<{ id: string }>(
     `SELECT id::text AS id FROM public.document_pending_refs
-      WHERE owner_sub = $1 AND path = $2 AND COALESCE(source_id::text, 'claim:' || claim_id::text) = $3 AND quote = $4`,
+      WHERE owner_sub = $1 AND path = $2 AND COALESCE(source_id::text, 'claim:' || claim_id::text) = $3
+        AND md5(quote) = md5($4::text) AND quote = $4::text`,
     [who.sub, rel, b.source_id ?? `claim:${b.claim_id}`, b.quote ?? ""],
   );
   throw new Conflict("this cite is already waiting in this document", { pending_ref_id: dup[0]?.id ?? null });

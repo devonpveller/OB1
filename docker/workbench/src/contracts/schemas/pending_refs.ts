@@ -13,8 +13,10 @@ const PENDING = "9e1d0000-0000-4000-8000-000000000001";
 const CLEAN = (s: string) => !/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(s);
 const CLEAN_MSG = { message: "must not contain control characters" };
 const PATH = z.string().min(1).max(1024).refine(CLEAN, CLEAN_MSG);
-const SECTION = z.string().max(200).refine(CLEAN, CLEAN_MSG);
-const QUOTE = z.string().max(4000).refine(CLEAN, CLEAN_MSG);
+// the limits count code points, not UTF-16 units (an emoji is one character), so the stored text and the limit agree
+const CODEPOINTS = (n: number) => (s: string) => Array.from(s).length <= n;
+const SECTION = z.string().refine(CODEPOINTS(200), { message: "at most 200 characters" }).refine(CLEAN, CLEAN_MSG).openapi({ maxLength: 200 });
+const QUOTE = z.string().refine(CODEPOINTS(4000), { message: "at most 4000 characters" }).refine(CLEAN, CLEAN_MSG).openapi({ maxLength: 4000 });
 
 export const PendingRef = z.object({
   id: uuid(PENDING, "pending reference id"),
