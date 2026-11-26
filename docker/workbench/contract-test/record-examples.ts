@@ -97,6 +97,18 @@ for (const [k, f] of [["timeline", "events"], ["trail", "entries"], ["jobs", "jo
   ex[k][f] = ex[k][f].slice(0, 3);
 }
 delete ex.steer;
+// rw-settings-registry-tier: the published examples never name an admin-tier key (the registry route hides those from a person who is
+// not an admin, and openapi.json is public). The lab records the real fixture key (the only entry the settings registry holds);
+// the document shows a user-tier key instead, and dredd-hooks.js points those two operations back at the fixture key.
+const SHOWN_KEY = "refinery.dormancy_days";
+// the same SHAPE the fixture key answers ({mount} on a read, {path} after a write; resolved path / reachable / via), with a mount name that
+// is not the admin key's default, so dredd-hooks.js's repoint to the fixture key validates body and schema against the example unchanged
+const SHOWN_READ = { value: { mount: "media" }, resolved: { path: "/mounts/media", reachable: false, via: "mount:media" } };
+const SHOWN_WROTE = { value: { path: "/mounts/media/alt" }, resolved: { path: "/mounts/media/alt", reachable: false, via: "path" } };
+ex.settings.settings = ex.settings.settings.map((x: any) => ({ ...x, key: SHOWN_KEY, ...SHOWN_READ }));
+ex.setting = { ...ex.setting, key: SHOWN_KEY, ...SHOWN_READ };
+ex.settingWritten = { ...ex.settingWritten, key: SHOWN_KEY, ...SHOWN_WROTE };
+reqs.settingWritten = { value: { path: "/mounts/media/alt" }, by: "dredd" };
 const lines = [
   "// Response and request examples for the OpenAPI document. RECORDED from the contract",
   "// served over contract-test/fixtures.sql by contract-test/record-examples.ts (timestamps",

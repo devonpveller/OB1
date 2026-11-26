@@ -18,6 +18,7 @@ import { parseLimit } from "../logic/scope.ts";
 import { ErrorBody, limit, pathParam, queryParam } from "../schemas/common.ts";
 import { Notifications, Registries, RegistryDetail, Setting, Settings, SettingWrite } from "../schemas/system.ts";
 import { EX } from "../schemas/examples.ts";
+import { REGISTRY } from "../registry.ts";
 import { authorOf, body, type ContractApp, type ContractDeps, errors, op, fail, json, PREFIX, send } from "./http.ts";
 
 // rwr-settings-shell (tester attempt 1, case 1): the contract's settings reads hold the shared (admin-tier) keys. A PERSON who is
@@ -28,6 +29,30 @@ import { authorOf, body, type ContractApp, type ContractDeps, errors, op, fail, 
 export function seesAdminTier(who: Identity, cfg = identityConfig()): boolean {
   return who.kind === "service" || settingsAdmin(who, cfg);
 }
+// rw-settings-registry-tier (attempt 1): a visible entry may itself NAME a key the person cannot see (superseded_by, or a key typed
+// into its label or definition). For a person, a reference to a key outside their tier is blanked: superseded_by becomes null, a string
+// field that holds such a key's name becomes null (recursively through the definition). A key they may see is left as it is.
+export function scrubEntries<E extends { key: string; superseded_by?: string | null; label?: string; definition?: Record<string, unknown> }>(
+  all: E[], mine: Set<string>,
+): E[] {
+  const hidden = new Set<string>(all.filter((e) => !mine.has(e.key)).map((e) => e.key));
+  for (const e of all) if (e.superseded_by && !mine.has(e.superseded_by)) hidden.add(e.superseded_by);
+  const names = [...hidden];
+  const scrub = (v: unknown): unknown => {
+    if (typeof v === "string") return names.some((n) => v.includes(n)) ? null : v;
+    if (Array.isArray(v)) return v.map(scrub);
+    if (v && typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [names.some((n) => k.includes(n)) ? "redacted" : k, scrub(x)]));
+    return v;
+  };
+  return all.filter((e) => mine.has(e.key)).map((e) => ({
+    ...e,
+    superseded_by: e.superseded_by && mine.has(e.superseded_by) ? e.superseded_by : null,
+    label: (names.some((n) => (e.label ?? "").includes(n)) ? "" : e.label) as string,
+    definition: scrub(e.definition ?? {}) as Record<string, unknown>,
+  }));
+}
+// The registry answers differ by who asks: no shared cache may hold one person's view for another.
+const PER_IDENTITY = { "cache-control": "private", vary: "X-Brain-Key, Cookie, Authorization, x-authentik-jwt, x-ob-user-token, X-Test-Sub" };
 async function userTierKeys(db: Db): Promise<Set<string>> {
   try {
     return new Set((await db.query<{ key: string }>(`SELECT key FROM public.settings_keys WHERE tier = 'user'`)).map((r) => r.key));
@@ -77,7 +102,7 @@ export function registerSystem(app: ContractApp, deps: ContractDeps) {
     }
   });
 
-  const keyParam = z.object({ key: pathParam("key", "podcast.archive_destination", "a settings registry key") });
+  const keyParam = z.object({ key: pathParam("key", "refinery.dormancy_days", "a settings registry key") });
   op(app, createRoute({
     method: "get", path: `${PREFIX}/settings/{key}`, operationId: "setting", tags: ST, summary: "one setting",
     request: { params: keyParam },
@@ -120,7 +145,14 @@ export function registerSystem(app: ContractApp, deps: ContractDeps) {
     responses: { 200: json(Registries, EX.registries, "registries"), ...errors },
   }), async (c) => {
     try {
-      return send(c, Registries, await sys.registries(deps.db));
+      const out = await sys.registries(deps.db);
+      // rw-settings-registry-tier: the settings registry's entry count is what this person may see, as in the registry itself
+      if (!seesAdminTier(await identityOf(c))) {
+        const mine = await userTierKeys(deps.db);
+        for (const r of out.registries) if (r.name === REGISTRY.settings) r.entries = (await deps.registry.entries(r.name)).filter((e) => mine.has(e.key)).length;
+      }
+      for (const [k, v] of Object.entries(PER_IDENTITY)) c.header(k, v);
+      return send(c, Registries, out);
     } catch (e) {
       return fail(c, e);
     }
@@ -135,6 +167,14 @@ export function registerSystem(app: ContractApp, deps: ContractDeps) {
     try {
       const r = await sys.registry(deps.db, deps.registry, c.req.valid("param").name);
       if (!r) return c.json({ error: "no such registry" }, 404);
+      // rw-settings-registry-tier (settings-shell review N1): the settings registry holds the admin-tier keys (their names, labels,
+      // default mounts); a person who is not an admin sees only the entries public.settings_keys says are user tier (the same rule
+      // as the settings reads above; an entry the table does not know is hidden). The contract_registry MCP tool calls this route.
+      if (r.name === REGISTRY.settings && !seesAdminTier(await identityOf(c))) {
+        const mine = await userTierKeys(deps.db);
+        r.entries = scrubEntries(r.entries, mine);
+      }
+      for (const [k, v] of Object.entries(PER_IDENTITY)) c.header(k, v);
       return send(c, RegistryDetail, r);
     } catch (e) {
       return fail(c, e);

@@ -36,7 +36,7 @@ const person = (sub: string, groups: string[]) => token({
 });
 
 // The settings registry holds the admin key (podcast.archive_destination) and, to prove the filter is by tier, one user-tier key.
-const ENTRIES = [
+const ENTRIES: Record<string, unknown>[] = [
   { registry: "settings", key: "podcast.archive_destination", version: 1, label: "x", definition: { type: "destination", default: { mount: "podcast-archive" } }, retired_at: null, superseded_by: null },
   { registry: "settings", key: "ui.sample", version: 1, label: "x", definition: { type: "json", default: { v: 1 } }, retired_at: null, superseded_by: null },
 ];
@@ -50,6 +50,10 @@ function fakeDb(tiers: Record<string, string> | "missing"): Db {
       if (/FROM public\.settings_keys WHERE tier = 'user'/.test(sql)) {
         if (tiers === "missing") return Promise.reject(new Error('relation "public.settings_keys" does not exist'));
         return Promise.resolve(Object.entries(tiers).filter(([, t]) => t === "user").map(([key]) => ({ key })));
+      }
+      if (/FROM public\.contract_registries WHERE name/.test(sql)) return Promise.resolve([{ name: "settings", version: 1, owner: "P0", description: "the configuration store keys" }]);
+      if (/FROM public\.contract_registries r/.test(sql)) {
+        return Promise.resolve([{ name: "settings", version: 1, owner: "P0", description: "the configuration store keys", entries: ENTRIES.length }]);
       }
       return Promise.resolve([]); // contract_settings: nothing stored, every key reads its default
     },
@@ -131,4 +135,90 @@ Deno.test("fail closed: a registry key settings_keys does not know, or no settin
   assertEquals(await keysOf(await noTable(LIST, h)), []);
   assertEquals((await noTable(ONE("ui.sample"), h)).status, 404);
   assertEquals((await keysOf(await noTable(LIST, { "x-brain-key": FA.WORKBENCH_KEY }))).sort(), [ADMIN_KEY, "ui.sample"]);
+});
+
+// rw-settings-registry-tier: the registry route (and the contract_registry MCP tool, which calls exactly this route) is the
+// same door. A person who is not an admin gets no admin-tier entry: not its key, its label, its default mount, anywhere in the body.
+const REG = "/workbench/contract/registries/settings";
+const regKeys = async (r: Response) => { const j = await r.json(); if (!j.entries) throw new Error("status " + r.status + " " + JSON.stringify(j)); return (j.entries as { key: string }[]).map((e) => e.key); };
+const ADMIN_LABEL = ENTRIES[0].label + "";
+
+Deno.test("registry/settings: a non-admin person sees only the user-tier entries; no admin key, default mount or definition anywhere in the body", async () => {
+  const call = door(FA);
+  const h = { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-alice", ["users"]) };
+  const r = await call(REG, h);
+  assertEquals(r.status, 200);
+  const body = await r.text();
+  assertEquals(JSON.parse(body).entries.map((e: { key: string }) => e.key), ["ui.sample"]);
+  for (const leak of [ADMIN_KEY, "podcast-archive", "destination", "archive"]) assert(!body.includes(leak), `'${leak}' leaked: ${body}`);
+  assert(ADMIN_LABEL.length > 0);
+  // the summary list counts only what this person may see
+  const sum = await (await call("/workbench/contract/registries", h)).json();
+  assertEquals(sum.registries.find((x: { name: string }) => x.name === "settings").entries, 1);
+});
+
+Deno.test("registry/settings: an admin person and every service caller still see every entry", async () => {
+  const call = door(FA);
+  const admin = { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-root", ["users", "research-admins"]) };
+  assertEquals((await regKeys(await call(REG, admin))).sort(), [ADMIN_KEY, "ui.sample"]);
+  for (const key of [FA.WORKBENCH_KEY, "podcast-key-0123456789", "mcp-key-012345678901"]) {
+    assertEquals((await regKeys(await call(REG, { "x-brain-key": key }))).sort(), [ADMIN_KEY, "ui.sample"], key);
+  }
+  const sum = await (await call("/workbench/contract/registries", { "x-brain-key": FA.WORKBENCH_KEY })).json();
+  assertEquals(sum.registries.find((x: { name: string }) => x.name === "settings").entries, 2);
+});
+
+Deno.test("registry/settings: header mode person sees no admin entry, the default subject sees all; fail closed with no settings_keys table", async () => {
+  const E = { WORKBENCH_KEY: "internal-key-0123456789", WORKSPACE_IDENTITY_HEADER: "X-Test-Sub" };
+  const call = door(E);
+  const k = { "x-brain-key": E.WORKBENCH_KEY };
+  assertEquals(await regKeys(await call(REG, { ...k, "x-test-sub": "bob" })), ["ui.sample"]);
+  assertEquals((await regKeys(await call(REG, k))).sort(), [ADMIN_KEY, "ui.sample"]);
+  const h = { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-alice", ["users"]) };
+  assertEquals(await regKeys(await door(FA, "missing")(REG, h)), []);
+});
+
+// rw-settings-registry-tier attempt 1: a user-tier entry that NAMES an admin key (superseded_by, label, definition) must not carry the
+// name to a person; the per-identity answers say so to caches; an entry settings_keys does not know is hidden (the M2 case).
+Deno.test("registry/settings: a visible entry's reference to an admin key is blanked for a person (superseded_by, label, nested definition), kept for an admin and a service", async () => {
+  const planted = { registry: "settings", key: "ui.planted", version: 2, label: `replaces ${ADMIN_KEY}`,
+    definition: { type: "json", note: { deep: [`see ${ADMIN_KEY}`, "fine"] }, [ADMIN_KEY]: 1 }, retired_at: null, superseded_by: ADMIN_KEY };
+  ENTRIES.push(planted);
+  try {
+    const call = door(FA, { ...TIERS, "ui.planted": "user" });
+    const p = { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-alice", ["users"]) };
+    const r = await call(REG, p);
+    const body = await r.text();
+    assert(!body.includes(ADMIN_KEY) && !body.includes("podcast"), `an admin key name reached a person: ${body}`);
+    const mine = JSON.parse(body).entries.find((e: { key: string }) => e.key === "ui.planted");
+    assertEquals([mine.superseded_by, mine.label], [null, ""]);
+    assert(mine.definition.note.deep[1] === "fine", "unrelated fields stay");
+    for (const h of [{ "x-brain-key": FA.WORKBENCH_KEY }, { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-root", ["research-admins"]) }]) {
+      const full = await (await call(REG, h as Record<string, string>)).text();
+      assert(full.includes(ADMIN_KEY), "admin and service see the reference");
+    }
+  } finally {
+    ENTRIES.pop();
+  }
+});
+
+Deno.test("registry answers carry Cache-Control: private and a Vary on the identity headers", async () => {
+  const call = door(FA);
+  const h = { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-alice", ["users"]) };
+  for (const path of [REG, "/workbench/contract/registries"]) {
+    const r = await call(path, h);
+    await r.text();
+    assertEquals(r.headers.get("cache-control"), "private", path);
+    const vary = (r.headers.get("vary") ?? "").toLowerCase();
+    for (const n of ["x-brain-key", "cookie", "authorization", "x-authentik-jwt"]) assert(vary.includes(n), `${path}: Vary lacks ${n}: ${vary}`);
+  }
+});
+
+Deno.test("registry/settings: an entry settings_keys does not know is hidden from a person (fail closed), shown to a service", async () => {
+  const h = { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-alice", ["users"]) };
+  const call = door(FA, { "ui.sample": "user" }); // the admin key is missing from the table
+  assertEquals(await regKeys(await call(REG, h)), ["ui.sample"]);
+  assertEquals((await regKeys(await call(REG, { "x-brain-key": FA.WORKBENCH_KEY }))).sort(), [ADMIN_KEY, "ui.sample"]);
+  const orphan = door(FA, {}); // no key known at all
+  assertEquals(await regKeys(await orphan(REG, h)), []);
 });

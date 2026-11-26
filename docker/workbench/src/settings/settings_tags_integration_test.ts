@@ -59,7 +59,7 @@ async function call(method: string, path: string, body?: unknown, who: Record<st
   const text = await r.text();
   let json: any = {};
   try { json = JSON.parse(text); } catch { /* not json */ }
-  return { status: r.status, json, text };
+  return { status: r.status, json, text, headers: r.headers };
 }
 const put = (who: Record<string, string>, key: string, value: unknown, version?: number) =>
   call("PUT", `${S}/${key}`, version === undefined ? { value } : { value, version }, who);
@@ -186,4 +186,59 @@ t("T6: two identities - B never sees A's per-user data from this item: values, v
   const a2 = await call("GET", S, undefined, A);
   assertEquals(find(a2.json.settings, "refinery.dormancy_days").value, 105);
   assertEquals(find(a2.json.settings, "ui.start_screen").value, "ideas");
+});
+
+// rw-settings-registry-tier (settings-shell review N1): the settings registry route, and so the contract_registry MCP tool that
+// calls it, is filtered by tier for a person who is not an admin. A marker is PLANTED in every field of an admin-tier registry
+// entry (key, label, nested definition fields) and a user-tier entry is planted beside it; every string and every object key in
+// what a person receives is walked for the marker. The admin and a service (the workbench key with no identity header, the
+// podcast writer's kind of caller) still see both. The registry reader caches 30 s, so the admin view is polled until it shows
+// the plant.
+const walk = (v: unknown, out: string[] = []): string[] => {
+  if (typeof v === "string") out.push(v);
+  else if (Array.isArray(v)) v.forEach((x) => walk(x, out));
+  else if (v && typeof v === "object") for (const [k, x] of Object.entries(v)) { out.push(k); walk(x, out); }
+  return out;
+};
+t("T7: two identities - the settings registry a person reads holds no admin-tier key, label, default mount or nested field; an admin and a service see all", async () => {
+  const mark = `plantedadmin${rnd()}`;
+  const akey = `zz.${mark}`;
+  const ukey = `zz.planteduser${rnd()}`;
+  const def = (m: string) => JSON.stringify({ type: "string", default: { mount: m }, nested: { a: [{ b: `${m}-deep` }] }, read_by: `${m} reader` });
+  try {
+    await sql(`INSERT INTO public.settings_keys (key, tier, type, section, label, read_by, store) VALUES ($1,'admin','string','research',$2,'x','contract'), ($3,'user','string','refinery','a user label','x','settings')`, [akey, `${mark} label`, ukey]);
+    await sql(`INSERT INTO public.contract_registry_entries (registry, key, label, definition, superseded_by) VALUES ('settings',$1,$2,$3::jsonb,NULL), ('settings',$4,$6,$5::jsonb,$1)`, [akey, `${mark} label`, def(mark), ukey, def("usermount"), `replaces ${akey}`]);
+    let admin = await call("GET", "/workbench/contract/registries/settings", undefined, ADMIN);
+    for (let i = 0; i < 45 && !admin.text.includes(mark); i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      admin = await call("GET", "/workbench/contract/registries/settings", undefined, ADMIN);
+    }
+    assertEquals(admin.status, 200, admin.text);
+    assert(admin.text.includes(mark) && admin.text.includes(ukey), "the admin sees both planted entries (the plant is live)");
+    assertEquals(admin.json.entries.find((e: { key: string }) => e.key === ukey).superseded_by, akey, "the admin still sees the reference");
+    assert(admin.json.entries.some((e: { key: string }) => e.key === "podcast.archive_destination"), "and the real admin key");
+    // a service: the workbench key with no identity header and ... the lab's default-subject is the admin; a service is the same key
+    // through a header-less door, so what the lab can show for a service is the admin's view (the unit door test covers the service keys)
+    for (const who of [A, B]) {
+      const r = await call("GET", "/workbench/contract/registries/settings", undefined, who);
+      assertEquals(r.status, 200, r.text);
+      const strings = walk(r.json);
+      assert(!r.text.includes(mark), `the marker reaches a person: ${r.text}`);
+      assert(strings.every((s) => !s.includes(mark) && !s.includes("podcast.archive_destination") && !s.includes("podcast-archive")), "no admin string in any field");
+      assertEquals(r.json.entries.map((e: { key: string }) => e.key), [ukey], "exactly the user-tier entry");
+      assert(r.text.includes("usermount-deep"), "the user-tier entry arrives whole, nested fields included");
+      // attempt 1: the user-tier entry itself NAMES the admin key (superseded_by and its label): neither reaches a person
+      assertEquals(r.json.entries[0].superseded_by, null, "superseded_by to an admin key is blanked");
+      assert(!r.text.includes(akey), "the admin key's name is in no field, not even as a reference");
+      assertEquals(r.headers.get("cache-control"), "private");
+      assert((r.headers.get("vary") ?? "").toLowerCase().includes("x-brain-key"));
+      const sum = (await call("GET", "/workbench/contract/registries", undefined, who)).json.registries.find((x: { name: string }) => x.name === "settings");
+      assertEquals(sum.entries, 1, "the registry summary counts only what this person may see");
+    }
+    const sumAdmin = (await call("GET", "/workbench/contract/registries", undefined, ADMIN)).json.registries.find((x: { name: string }) => x.name === "settings");
+    assertEquals(sumAdmin.entries, admin.json.entries.length);
+  } finally {
+    await sql(`DELETE FROM public.contract_registry_entries WHERE registry = 'settings' AND key IN ($1,$2)`, [akey, ukey]);
+    await sql(`DELETE FROM public.settings_keys WHERE key IN ($1,$2)`, [akey, ukey]);
+  }
 });

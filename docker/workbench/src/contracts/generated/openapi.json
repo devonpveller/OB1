@@ -4222,7 +4222,7 @@
             "type": "string",
             "minLength": 1,
             "x-registry": "settings",
-            "example": "podcast.archive_destination",
+            "example": "refinery.dormancy_days",
             "description": "A key of the `settings` registry (GET /workbench/contract/registries/settings)."
           },
           "value": {
@@ -13324,18 +13324,18 @@
                 "example": {
                   "settings": [
                     {
-                      "key": "podcast.archive_destination",
+                      "key": "refinery.dormancy_days",
                       "value": {
-                        "mount": "podcast-archive"
+                        "mount": "media"
                       },
                       "is_default": true,
                       "version": 0,
                       "updated_at": null,
                       "updated_by": null,
                       "resolved": {
-                        "path": "/mounts/podcast-archive",
+                        "path": "/mounts/media",
                         "reachable": false,
-                        "via": "mount:podcast-archive"
+                        "via": "mount:media"
                       }
                     }
                   ]
@@ -13417,7 +13417,7 @@
             "description": "a settings registry key",
             "name": "key",
             "in": "path",
-            "example": "podcast.archive_destination"
+            "example": "refinery.dormancy_days"
           }
         ],
         "responses": {
@@ -13426,18 +13426,18 @@
             "content": {
               "application/json": {
                 "example": {
-                  "key": "podcast.archive_destination",
+                  "key": "refinery.dormancy_days",
                   "value": {
-                    "mount": "podcast-archive"
+                    "mount": "media"
                   },
                   "is_default": true,
                   "version": 0,
                   "updated_at": null,
                   "updated_by": null,
                   "resolved": {
-                    "path": "/mounts/podcast-archive",
+                    "path": "/mounts/media",
                     "reachable": false,
-                    "via": "mount:podcast-archive"
+                    "via": "mount:media"
                   }
                 },
                 "schema": {
@@ -13515,7 +13515,7 @@
             "description": "a settings registry key",
             "name": "key",
             "in": "path",
-            "example": "podcast.archive_destination"
+            "example": "refinery.dormancy_days"
           }
         ],
         "requestBody": {
@@ -13524,7 +13524,7 @@
             "application/json": {
               "example": {
                 "value": {
-                  "path": "/mounts/podcast-archive/alt"
+                  "path": "/mounts/media/alt"
                 },
                 "by": "dredd"
               },
@@ -13540,16 +13540,16 @@
             "content": {
               "application/json": {
                 "example": {
-                  "key": "podcast.archive_destination",
+                  "key": "refinery.dormancy_days",
                   "value": {
-                    "path": "/mounts/podcast-archive/alt"
+                    "path": "/mounts/media/alt"
                   },
                   "is_default": false,
                   "version": 1,
                   "updated_at": "2026-10-17T12:00:00.000Z",
                   "updated_by": "dredd",
                   "resolved": {
-                    "path": "/mounts/podcast-archive/alt",
+                    "path": "/mounts/media/alt",
                     "reachable": false,
                     "via": "path"
                   }
