@@ -21,3 +21,4 @@ export function createFlagsFake(opts?: {
   itemsSnapshot(): string;
 };
 export function documentPathsIn(s: string): string[];
+export function singleDocumentPath(ref: string): string | null;

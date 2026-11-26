@@ -261,4 +261,139 @@ t("R2: a NUL in a note is 400; an admin keeps from.ref of another user's documen
   assertEquals(gone.status, 404, gone.text);
 });
 
+// ── rw-doc-path-spaces ─────────────────────────────────────────────────────────────────────────────────────
+const ODD_FOLDERS = ["Old notes", "a&b", "a,b", "it's", "a(b)", "a#b", "a?b", 'say "hi"', "a b&c, (d) 'e' #f"];
+
+t("S1: a document in a folder whose name has a space or punctuation can be flagged; the flag reads back byte-equal", async () => {
+  for (const folder of ODD_FOLDERS) {
+    const ref = `documents/${A}/${folder}/cpu.md`;
+    const made = await mk(A, { from: { kind: "document", ref } });
+    assertEquals(made.status, 201, `${folder}: ${made.text}`);
+    assertEquals(made.json.from, { kind: "document", ref });
+    const row = (await sql(`SELECT from_ref FROM public.user_flags WHERE id = $1`, [made.json.id]))[0];
+    assertEquals(row.from_ref, ref, "stored byte-equal");
+    const listed = (await call(A, "GET", `${FL}?limit=500`)).json.flags as any[];
+    assertEquals(listed.find((f) => f.id === made.json.id).from.ref, ref, "listed byte-equal");
+  }
+});
+
+t("S2: B naming A's document in such a folder gets the answer for a missing document; B never learns the folder exists", async () => {
+  const before = (await sql(`SELECT count(*)::int AS n FROM public.user_flags WHERE owner_sub = $1`, [B]))[0].n; // earlier cases may have made B flags
+  for (const folder of ODD_FOLDERS) {
+    const foreign = await mk(B, { from: { kind: "document", ref: `documents/${A}/${folder}/cpu.md` } });
+    const missing = await mk(B, { from: { kind: "document", ref: `documents/${A}-nobody/${folder}/cpu.md` } });
+    assertEquals(foreign.status, 404, `${folder}: ${foreign.text}`);
+    assertEquals([foreign.status, foreign.text], [missing.status, missing.text], folder);
+  }
+  assertEquals((await sql(`SELECT count(*)::int AS n FROM public.user_flags WHERE owner_sub = $1`, [B]))[0].n, before, "B made no flag");
+});
+
+t("S3: traversal, a control character and a path outside documents/ are still refused", async () => {
+  for (const ref of [`documents/../notes/x.md`, `documents/${A}/../${B}/x.md`, `documents/${A}/x\u0001.md`, `notes/x.md`, `documents/`]) {
+    const r = await mk(A, { from: { kind: "document", ref } });
+    assert(r.status === 400 || r.status === 404, `${JSON.stringify(ref)} -> ${r.status} ${r.text}`);
+    assertEquals(r.json.id, undefined, ref);
+  }
+});
+
+// A's legacy file (documents/<file>.md, owned by its listing row) whose name has a space after a prefix that is B's own
+// legacy file: the scanner cuts A's path at the space and used to judge the prefix - B's. B naming A's file is refused
+// exactly as for a missing document, at the request gate and in each route that checks again.
+t("S4: legacy files - a path cut at a space is never judged as the shorter path another user owns", async () => {
+  const tag = rnd();
+  const mine = `documents/${tag}-team.md`;
+  const theirs = `documents/${tag}-team.md copy.md`;
+  const gone = `documents/${tag}-none.md`;
+  await sql(`INSERT INTO public.user_document_listings (path, title, owner_sub) VALUES ($1, 'b', $3), ($2, 'a', $4)`, [mine, theirs, B, A]);
+  try {
+    const nope = async (label: string, call_: (p: string) => Promise<{ status: number; text: string }>) => {
+      const foreign = await call_(theirs);
+      const missing = await call_(gone);
+      assertEquals(foreign.status, 404, `${label}: ${foreign.text}`);
+      assertEquals([foreign.status, foreign.text], [missing.status, missing.text], label);
+    };
+    await nope("flag from", (p) => mk(B, { from: { kind: "document", ref: p } }));
+    await nope("holder references", (p) => call(B, "GET", `/workbench/contract/holders/user_document/references?ref=${encodeURIComponent(p)}`));
+  } finally {
+    await sql(`DELETE FROM public.user_document_listings WHERE path = ANY($1)`, [[mine, theirs]]);
+  }
+});
+
+// S5 (attempt 1, Case 7): the scanner cuts at JavaScript's \s; the legacy-prefix check once asked Postgres's \s, which under
+// en_US.utf8 does not know U+00A0, U+FEFF, U+202F, U+2007 (and more). One ISOLATED pair per JS-only space, so no other
+// neighbour can mask the check: B owns documents/<tag>-team.md, A owns documents/<tag>-team.md<SP>copy.md. B naming A's file
+// is the answer for a missing document, byte for byte, on every route that reads a path - and A's text never appears.
+const JS_ONLY_SPACES: [string, string][] = [
+  ["U+00A0", " "], ["U+FEFF", "﻿"], ["U+202F", " "], ["U+2007", " "], ["U+2000", " "], ["U+2001", " "],
+  ["U+2002", " "], ["U+2003", " "], ["U+2004", " "], ["U+2005", " "], ["U+2006", " "], ["U+2008", " "],
+  ["U+2009", " "], ["U+200A", " "], ["U+3000", "　"], ["U+2028", " "], ["U+2029", " "], ["U+1680", " "],
+  ["U+0085", ""], ["NBSP+NBSP", "  "],
+];
+t("S5: legacy files - a path cut at a JavaScript-only space is never judged as the shorter path another user owns (every route)", async () => {
+  const q = encodeURIComponent;
+  const routes: [string, (p: string) => Promise<{ status: number; text: string }>][] = [
+    ["flag from", (p) => mk(B, { from: { kind: "document", ref: p } })],
+    ["holder references", (p) => call(B, "GET", `/workbench/contract/holders/user_document/references?ref=${q(p)}`)],
+    ["reference create", (p) => call(B, "POST", "/workbench/contract/references", { source_id: SRC, quote: "x", holder: { kind: "user_document", ref: p } })],
+    ["diff-check", (p) => call(B, "POST", "/workbench/contract/diff-check", { holder: { kind: "user_document", ref: p } })],
+    ["note-history", (p) => call(B, "GET", `/workbench/note-history?path=${q(p)}`)],
+    ["export", (p) => call(B, "GET", `/workbench/export?path=${q(p)}&format=md`)],
+  ];
+  const bad: string[] = [];
+  for (const [name, sp] of JS_ONLY_SPACES) {
+    const tag = rnd();
+    const mine = `documents/${tag}-team.md`;
+    const theirs = `documents/${tag}-team.md${sp}copy.md`;
+    const gone = `documents/${tag}-none.md`;
+    await sql(`INSERT INTO public.user_document_listings (path, title, owner_sub) VALUES ($1, 'b', $3), ($2, 'a', $4)`, [mine, theirs, B, A]);
+    try {
+      for (const [label, fn] of routes) {
+        const f = await fn(theirs);
+        const m = await fn(gone);
+        if (f.status !== m.status || f.text !== m.text.replaceAll(gone, theirs).replaceAll(q(gone), q(theirs))) bad.push(`${name} ${label}: foreign ${f.status} ${f.text.slice(0, 120)} | missing ${m.status} ${m.text.slice(0, 120)}`);
+      }
+    } finally {
+      await sql(`DELETE FROM public.user_document_listings WHERE path = ANY($1)`, [[mine, theirs]]);
+    }
+  }
+  assertEquals(bad, []);
+});
+
+// S6 (review 1, B1): the own-key skip. B's LEGACY root file `documents/<A's key><stop>...` is cut by the scanner to exactly
+// `documents/<A's key>`, A's own directory. A naming B's file is the answer for a missing document on every route, never B's file.
+const AFTER_KEY = [" notes.md", ",old.md", "#1.md", " (copy).md", ")x.md", "'s.md", "&x.md", "\u00a0notes.md"];
+// the caller is a FIXED identity: the lab script plants B's legacy vault files `documents/s6akey<stop>...` (marker S6-B-SECRET-<n>) under its key
+const A6 = "s6akey";
+const S6_MARK = "S6-B-SECRET";
+t("S6: legacy file `<own key><stop character>...` of another user - the caller gets the missing-document answer on every route", async () => {
+  const q = encodeURIComponent;
+  const routes: [string, (p: string) => Promise<{ status: number; text: string }>][] = [
+    ["flag from", (p) => mk(A6, { from: { kind: "document", ref: p } })],
+    ["holder references", (p) => call(A6, "GET", `/workbench/contract/holders/user_document/references?ref=${q(p)}`)],
+    ["reference create", (p) => call(A6, "POST", "/workbench/contract/references", { source_id: SRC, quote: "x", holder: { kind: "user_document", ref: p } })],
+    ["diff-check", (p) => call(A6, "POST", "/workbench/contract/diff-check", { holder: { kind: "user_document", ref: p } })],
+    ["note-history", (p) => call(A6, "GET", `/workbench/note-history?path=${q(p)}`)],
+    ["export", (p) => call(A6, "GET", `/workbench/export?path=${q(p)}&format=md`)],
+  ];
+  const bad: string[] = [];
+  // review 2 / B2: the same file named through a capitalised root (a case-insensitive vault mount); the listing row is lower-case
+  for (const [root, tail] of ["documents", "Documents", "DOCUMENTS"].flatMap((r) => AFTER_KEY.map((t) => [r, t] as const))) {
+    const row = `documents/${A6}${tail}`;
+    const theirs = `${root}/${A6}${tail}`;
+    const gone = `${root}/${A6}-nobody${tail}`;
+    await sql(`INSERT INTO public.user_document_listings (path, title, owner_sub) VALUES ($1, 'b', $2) ON CONFLICT (path) DO UPDATE SET owner_sub = EXCLUDED.owner_sub`, [row, B]);
+    try {
+      for (const [label, fn] of routes) {
+        const f = await fn(theirs);
+        const m = await fn(gone);
+        if (f.text.includes(S6_MARK)) bad.push(`${JSON.stringify(root + tail)} ${label}: B's CONTENT reached A: ${f.status} ${f.text.slice(0, 120)}`);
+        if (f.status !== m.status || f.text !== m.text.replaceAll(gone, theirs).replaceAll(q(gone), q(theirs))) bad.push(`${JSON.stringify(root + tail)} ${label}: foreign ${f.status} ${f.text.slice(0, 120)} | missing ${m.status} ${m.text.slice(0, 120)}`);
+      }
+    } finally {
+      await sql(`DELETE FROM public.user_document_listings WHERE path = $1`, [row]);
+    }
+  }
+  assertEquals(bad, []);
+});
+
 Deno.test({ name: "close the pool", ignore, sanitizeOps: false, sanitizeResources: false, fn: async () => { await pool?.end(); } });
