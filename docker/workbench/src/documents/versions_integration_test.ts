@@ -163,7 +163,7 @@ t("V3: compare of two versions returns exactly the git diff on the vault file", 
   const vs2 = (await versions(moved)).versions;
   const x = await call("GET", `${D}/compare?path=${q(moved)}&from=1&to=7`);
   assertEquals(x.status, 200, x.text);
-  assertEquals(x.json.diff, await git("diff", vs2.find((v) => v.version === 1)!.commit, vs2.find((v) => v.version === 7)!.commit, "--", p, moved));
+  assertEquals(x.json.diff, await git("diff", `${vs2.find((v) => v.version === 1)!.commit}:${p}`, `${vs2.find((v) => v.version === 7)!.commit}:${moved}`)); // blob to blob: the path then on each side
   // read-only: nothing changed, no version added
   assertEquals((await versions(moved)).total, 7);
   for (const bad of ["from=x&to=1", "from=1", "from=0&to=1", "from=1&to=1.5", "from=-1&to=2"]) {
