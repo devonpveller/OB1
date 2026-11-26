@@ -217,6 +217,11 @@ try {
   Ok ($baseText.Length -gt 1000 -and -not $w) 'the base Dockerfile (57cc0eef) is rewritten'
   Ok ($testStage -notmatch 'deno test' -and $testStage -match 'ai-stack\.lab\.gate="skipped"' -and $testStage -match '\.test-gate-skipped') 'its test stage runs no deno test, is labelled skipped and writes the skipped marker'
   Ok ($t -match 'COPY --from=test /app/\.test-gate-\* /app/' -and $t -notmatch 'COPY --from=test /app/\.test-gate-passed') 'its runtime copies whichever marker exists'
+  $crlfDf = Join-Path $root 'base-Dockerfile-crlf'
+  [System.IO.File]::WriteAllText($crlfDf, (($baseText -replace "`r", '') -replace "`n", "`r`n") + "`r`n")
+  $w = Convert-LabDockerfileSkipGate $crlfDf $ob1Real
+  $tc = [System.IO.File]::ReadAllText($crlfDf)
+  Ok (-not $w -and $tc -match '\.test-gate-skipped' -and $tc -notmatch 'touch /app/\.test-gate-passed') "a CRLF copy (git archive under core.autocrlf) is rewritten too ($w)"
   $w = Convert-LabDockerfileSkipGate (Join-Path $wbDir 'Dockerfile') $ob1Real
   Ok ($w -match 'inside the OB1 working tree') 'the working tree''s own Dockerfile is never rewritten'
   $cur = Join-Path $root 'cur-Dockerfile'; Copy-Item (Join-Path $wbDir 'Dockerfile') $cur

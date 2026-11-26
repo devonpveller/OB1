@@ -132,8 +132,9 @@ function Convert-LabDockerfileSkipGate([string]$Dockerfile, [string]$Ob1) {
   if ($full.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) { return "refusing to rewrite $full - it is inside the OB1 working tree (only a scratch copy is rewritten)" }
   $t = [System.IO.File]::ReadAllText($full)
   if ($t -match 'ARG WORKBENCH_TEST_GATE') { return '' }   # knows the arg already: the build arg does it
-  $rxRun = [regex]'(?m)^RUN deno test [^\r\n]*(\\\r?\n[^\r\n]*)*?&& touch /app/\.test-gate-passed[^\r\n]*$'
-  $rxCopy = [regex]'(?m)^COPY --from=test /app/\.test-gate-passed /app/\.test-gate-passed[^\r\n]*$'
+  # (?=\r?$): a git archive copy has CRLF under core.autocrlf, and .NET's multiline $ matches only before \n
+  $rxRun = [regex]'(?m)^RUN deno test [^\r\n]*(\\\r?\n[^\r\n]*)*?&& touch /app/\.test-gate-passed[^\r\n]*?(?=\r?$)'
+  $rxCopy = [regex]'(?m)^COPY --from=test /app/\.test-gate-passed /app/\.test-gate-passed[^\r\n]*?(?=\r?$)'
   if ($rxRun.Matches($t).Count -ne 1 -or $rxCopy.Matches($t).Count -ne 1) { return "the Dockerfile at $full has no single gate RUN / marker COPY to rewrite" }
   $t = $rxRun.Replace($t, "LABEL $($script:LabGateLabel)=`"skipped`"`nRUN echo 'TEST GATE SKIPPED (lab red-base / mutant copy)' && echo skipped > /app/.test-gate-skipped")
   $t = $rxCopy.Replace($t, "LABEL $($script:LabGateLabel)=`"skipped`"`nCOPY --from=test /app/.test-gate-* /app/")
