@@ -397,7 +397,7 @@ try {
   # password (out of band on live)
   $wbRole = 'ob_app_memory'; $wbRolePw = $appPw
   if ($has480) {
-    $initLog = Dk logs $db
+    $initLog = $logs + "`n" + (Dk logs $db | Out-String)  # rw-lab-throughput: a cloned DB's initdb ran in the template; $logs carries that log
     Check ($initLog -match 'ob_app_memory does not exist \(yet\)') '[480] on the fresh volume (initdb) 480 ran before ob_app_memory existed and said so'
     $null = Dk cp (Join-Path $dockerDir 'init-owner-private-view.sql') "${db}:/tmp/i480.sql"
     $o480 = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/i480.sql
