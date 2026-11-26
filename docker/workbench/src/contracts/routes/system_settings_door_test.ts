@@ -36,7 +36,7 @@ const person = (sub: string, groups: string[]) => token({
 });
 
 // The settings registry holds the admin key (podcast.archive_destination) and, to prove the filter is by tier, one user-tier key.
-const ENTRIES = [
+const ENTRIES: Record<string, unknown>[] = [
   { registry: "settings", key: "podcast.archive_destination", version: 1, label: "x", definition: { type: "destination", default: { mount: "podcast-archive" } }, retired_at: null, superseded_by: null },
   { registry: "settings", key: "ui.sample", version: 1, label: "x", definition: { type: "json", default: { v: 1 } }, retired_at: null, superseded_by: null },
 ];
@@ -176,4 +176,49 @@ Deno.test("registry/settings: header mode person sees no admin entry, the defaul
   assertEquals((await regKeys(await call(REG, k))).sort(), [ADMIN_KEY, "ui.sample"]);
   const h = { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-alice", ["users"]) };
   assertEquals(await regKeys(await door(FA, "missing")(REG, h)), []);
+});
+
+// rw-settings-registry-tier attempt 1: a user-tier entry that NAMES an admin key (superseded_by, label, definition) must not carry the
+// name to a person; the per-identity answers say so to caches; an entry settings_keys does not know is hidden (the M2 case).
+Deno.test("registry/settings: a visible entry's reference to an admin key is blanked for a person (superseded_by, label, nested definition), kept for an admin and a service", async () => {
+  const planted = { registry: "settings", key: "ui.planted", version: 2, label: `replaces ${ADMIN_KEY}`,
+    definition: { type: "json", note: { deep: [`see ${ADMIN_KEY}`, "fine"] }, [ADMIN_KEY]: 1 }, retired_at: null, superseded_by: ADMIN_KEY };
+  ENTRIES.push(planted);
+  try {
+    const call = door(FA, { ...TIERS, "ui.planted": "user" });
+    const p = { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-alice", ["users"]) };
+    const r = await call(REG, p);
+    const body = await r.text();
+    assert(!body.includes(ADMIN_KEY) && !body.includes("podcast"), `an admin key name reached a person: ${body}`);
+    const mine = JSON.parse(body).entries.find((e: { key: string }) => e.key === "ui.planted");
+    assertEquals([mine.superseded_by, mine.label], [null, ""]);
+    assert(mine.definition.note.deep[1] === "fine", "unrelated fields stay");
+    for (const h of [{ "x-brain-key": FA.WORKBENCH_KEY }, { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-root", ["research-admins"]) }]) {
+      const full = await (await call(REG, h as Record<string, string>)).text();
+      assert(full.includes(ADMIN_KEY), "admin and service see the reference");
+    }
+  } finally {
+    ENTRIES.pop();
+  }
+});
+
+Deno.test("registry answers carry Cache-Control: private and a Vary on the identity headers", async () => {
+  const call = door(FA);
+  const h = { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-alice", ["users"]) };
+  for (const path of [REG, "/workbench/contract/registries"]) {
+    const r = await call(path, h);
+    await r.text();
+    assertEquals(r.headers.get("cache-control"), "private", path);
+    const vary = (r.headers.get("vary") ?? "").toLowerCase();
+    for (const n of ["x-brain-key", "cookie", "authorization", "x-authentik-jwt"]) assert(vary.includes(n), `${path}: Vary lacks ${n}: ${vary}`);
+  }
+});
+
+Deno.test("registry/settings: an entry settings_keys does not know is hidden from a person (fail closed), shown to a service", async () => {
+  const h = { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-alice", ["users"]) };
+  const call = door(FA, { "ui.sample": "user" }); // the admin key is missing from the table
+  assertEquals(await regKeys(await call(REG, h)), ["ui.sample"]);
+  assertEquals((await regKeys(await call(REG, { "x-brain-key": FA.WORKBENCH_KEY }))).sort(), [ADMIN_KEY, "ui.sample"]);
+  const orphan = door(FA, {}); // no key known at all
+  assertEquals(await regKeys(await orphan(REG, h)), []);
 });

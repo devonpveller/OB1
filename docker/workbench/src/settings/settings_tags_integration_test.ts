@@ -59,7 +59,7 @@ async function call(method: string, path: string, body?: unknown, who: Record<st
   const text = await r.text();
   let json: any = {};
   try { json = JSON.parse(text); } catch { /* not json */ }
-  return { status: r.status, json, text };
+  return { status: r.status, json, text, headers: r.headers };
 }
 const put = (who: Record<string, string>, key: string, value: unknown, version?: number) =>
   call("PUT", `${S}/${key}`, version === undefined ? { value } : { value, version }, who);
@@ -207,7 +207,7 @@ t("T7: two identities - the settings registry a person reads holds no admin-tier
   const def = (m: string) => JSON.stringify({ type: "string", default: { mount: m }, nested: { a: [{ b: `${m}-deep` }] }, read_by: `${m} reader` });
   try {
     await sql(`INSERT INTO public.settings_keys (key, tier, type, section, label, read_by, store) VALUES ($1,'admin','string','research',$2,'x','contract'), ($3,'user','string','refinery','a user label','x','settings')`, [akey, `${mark} label`, ukey]);
-    await sql(`INSERT INTO public.contract_registry_entries (registry, key, label, definition) VALUES ('settings',$1,$2,$3::jsonb), ('settings',$4,'a user label',$5::jsonb)`, [akey, `${mark} label`, def(mark), ukey, def("usermount")]);
+    await sql(`INSERT INTO public.contract_registry_entries (registry, key, label, definition, superseded_by) VALUES ('settings',$1,$2,$3::jsonb,NULL), ('settings',$4,$6,$5::jsonb,$1)`, [akey, `${mark} label`, def(mark), ukey, def("usermount"), `replaces ${akey}`]);
     let admin = await call("GET", "/workbench/contract/registries/settings", undefined, ADMIN);
     for (let i = 0; i < 45 && !admin.text.includes(mark); i++) {
       await new Promise((r) => setTimeout(r, 1000));
@@ -215,6 +215,7 @@ t("T7: two identities - the settings registry a person reads holds no admin-tier
     }
     assertEquals(admin.status, 200, admin.text);
     assert(admin.text.includes(mark) && admin.text.includes(ukey), "the admin sees both planted entries (the plant is live)");
+    assertEquals(admin.json.entries.find((e: { key: string }) => e.key === ukey).superseded_by, akey, "the admin still sees the reference");
     assert(admin.json.entries.some((e: { key: string }) => e.key === "podcast.archive_destination"), "and the real admin key");
     // a service: the workbench key with no identity header and ... the lab's default-subject is the admin; a service is the same key
     // through a header-less door, so what the lab can show for a service is the admin's view (the unit door test covers the service keys)
@@ -226,6 +227,11 @@ t("T7: two identities - the settings registry a person reads holds no admin-tier
       assert(strings.every((s) => !s.includes(mark) && !s.includes("podcast.archive_destination") && !s.includes("podcast-archive")), "no admin string in any field");
       assertEquals(r.json.entries.map((e: { key: string }) => e.key), [ukey], "exactly the user-tier entry");
       assert(r.text.includes("usermount-deep"), "the user-tier entry arrives whole, nested fields included");
+      // attempt 1: the user-tier entry itself NAMES the admin key (superseded_by and its label): neither reaches a person
+      assertEquals(r.json.entries[0].superseded_by, null, "superseded_by to an admin key is blanked");
+      assert(!r.text.includes(akey), "the admin key's name is in no field, not even as a reference");
+      assertEquals(r.headers.get("cache-control"), "private");
+      assert((r.headers.get("vary") ?? "").toLowerCase().includes("x-brain-key"));
       const sum = (await call("GET", "/workbench/contract/registries", undefined, who)).json.registries.find((x: { name: string }) => x.name === "settings");
       assertEquals(sum.entries, 1, "the registry summary counts only what this person may see");
     }
