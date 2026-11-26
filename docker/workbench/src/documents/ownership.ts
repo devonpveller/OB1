@@ -19,6 +19,7 @@
 import type { Context, Next } from "hono";
 import type { Db } from "../contracts/db.ts";
 import { DOCUMENTS_ROOT } from "./paths.ts";
+import { ENCODED_DOTS } from "../util/paths.ts";
 import { identityConfig } from "../middleware/identity.ts";
 
 // rw-identity round 3 (operator 2026-10-28: all existing private content is the one operator's): who
@@ -98,6 +99,9 @@ export const FOREIGN_JOB = (j: string, sub: string, key: string, adminSees = fal
 // rw-identity-harden round 2 (tester F-T1): `documents/` in ANY letter case - on a case-insensitive
 // vault mount (a Windows or macOS bind) `Documents/<other>/x.md` opens the same file, so it is judged as
 // a documents path; another user's key in any case is not the caller's own (only the exact key is).
+// The characters documentPathsIn stops a path at (its `[^\s"'?&#,)]` class), one place for the legacy-prefix check: a character
+// either cuts a scanned path or it does not, in the scanner and in that check alike (tested over every code point).
+export const CUT_AFTER = /^[\s"'?&#,)]/;
 const isDocumentsPath = (p: string) => p.slice(0, DOCUMENTS_ROOT.length + 1).toLowerCase() === `${DOCUMENTS_ROOT}/`;
 
 export async function ownsDocumentPaths(db: Db, paths: string[], who: Viewer): Promise<boolean> {
@@ -120,12 +124,16 @@ export async function ownsDocumentPaths(db: Db, paths: string[], who: Viewer): P
   // rw-doc-path-spaces: a path the scanner cut short (a space or " ' ? & # , ) in a file name) reaches here as its own
   // prefix. If that prefix is the caller's file but it is also the start, at one of those characters, of ANOTHER
   // user's path, the full path the route will read may be theirs: refuse, exactly as for a missing document.
-  const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const cut = [...legacy, ...live].map((x) => `^${esc(x)}[\\s"'?&#,)]`);
-  const other = await db.query<{ path: string }>(
-    `SELECT path FROM public.user_document_listings WHERE owner_sub <> $2 AND path ~ ANY($1) LIMIT 1`, [cut, who.sub],
+  // The database only finds the other owners' paths that START with the prefix (starts_with is exact bytes); WHETHER the next
+  // character is one the scanner stops at is decided HERE, by the scanner's own class (CUT_AFTER), because Postgres's \s
+  // and JavaScript's \s are different sets (U+00A0, U+FEFF, U+202F, U+2007 ... are whitespace only to JavaScript).
+  const prefixes = [...new Set([...legacy, ...live])];
+  const others = await db.query<{ path: string }>(
+    `SELECT path FROM public.user_document_listings WHERE owner_sub <> $2
+       AND EXISTS (SELECT 1 FROM unnest($1::text[]) AS pre WHERE starts_with(path, pre) AND length(path) > length(pre))`,
+    [prefixes, who.sub],
   );
-  return other.length === 0;
+  return !others.some((o) => prefixes.some((pre) => o.path.startsWith(pre) && CUT_AFTER.test(o.path.slice(pre.length))));
 }
 
 function normalize(p: string): string {
@@ -147,8 +155,9 @@ export function singleDocumentPath(ref: string): string | null {
   // deno-lint-ignore no-control-regex
   if (typeof ref !== "string" || /[\x00-\x1f\x7f]/.test(ref)) return null;
   const p = ref.replace(/\\/g, "/");
-  if (!isDocumentsPath(p) || p.length <= DOCUMENTS_ROOT.length + 1) return null;
-  if (p.split("/").some((seg) => seg === "" || seg === "." || seg === "..")) return null;
+  if (!p.startsWith(`${DOCUMENTS_ROOT}/`) || p.length <= DOCUMENTS_ROOT.length + 1) return null;
+  // no `.`, `..` or empty segment, nor one that decodes to dots (%2e, %252e ...): the same refusal as safeRelPath
+  if (p.split("/").some((seg) => seg === "" || seg === "." || seg === ".." || ENCODED_DOTS.test(seg))) return null;
   return p;
 }
 

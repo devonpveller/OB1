@@ -58,10 +58,11 @@ const isDocumentsPath = (p) => p.slice(0, "documents".length + 1).toLowerCase() 
 export function singleDocumentPath(ref) {
   if (typeof ref !== "string" || CTRL_ANY.test(ref)) return null;
   const p = ref.replace(/\\/g, "/");
-  if (!isDocumentsPath(p) || p.length <= "documents/".length) return null;
-  if (p.split("/").some((seg) => seg === "" || seg === "." || seg === "..")) return null;
+  if (!p.startsWith("documents/") || p.length <= "documents/".length) return null; // exactly lower case
+  if (p.split("/").some((seg) => seg === "" || seg === "." || seg === ".." || ENCODED_DOTS.test(seg))) return null;
   return p;
 }
+const ENCODED_DOTS = /^(?:\.|%(?:25)*2e){1,2}$/i; // util/paths.ts
 const CTRL_ANY = /[\x00-\x1f\x7f]/;
 export function documentPathsIn(s) {
   const found = [];
@@ -119,7 +120,7 @@ export function createFlagsFake({ ownsDocument, admins = [], now = () => Date.no
       if (f.kind === "document") {
         // repo/flags.ts checkFrom, as the server has it: the whole ref is one documents/ path (backslashes read as slashes)
         const one = singleDocumentPath(f.ref);
-        if (one === null) return bad("from.ref must be a document path (documents/...)");
+        if (one === null) return bad("from.ref must be a path inside your own documents");
         const paths = [one];
         // ownsDocumentPaths: the caller's own key directory is theirs (existence is NOT checked); a legacy documents/<file>.md
         // or documents/.x is theirs only if its listing row is (the callback); any other key is not

@@ -216,9 +216,17 @@ Deno.test("rw-doc-path-spaces: another user's document in a spaced folder is 'no
 Deno.test("rw-doc-path-spaces: traversal, control characters and a path outside documents/ are still refused", async () => {
   const { db, log } = recorder();
   for (const ref of ["documents/../notes/x.md", "documents/user-a/../user-b/x.md", "documents/user-a/x\u0000.md", "documents/user-a/x\n.md",
-      "notes/x.md", "documents/", "documents", `documents/${WHO.key}//x.md`, `documents/${WHO.key}/./x.md`, `documents/${WHO.key}/x.md/`]) {
+      "notes/x.md", "documents/", "documents", "Documents/user-a/x.md", "DOCUMENTS/user-a/x.md",
+      "documents/user-a/%2e%2e/user-b/x.md", "documents/user-a/%2E%2E/x.md", "documents/user-a/%252e%252e/x.md", "documents/user-a/%2e/x.md",
+      `documents/${WHO.key}//x.md`, `documents/${WHO.key}/./x.md`, `documents/${WHO.key}/x.md/`]) {
     const e = await assertRejects(() => createFlag(db, reader(db), WHO, { item_kind: "source", item_id: SRC, reason: "low_quality", from: { kind: "document", ref } }), Error, "", ref);
     assertEquals(e.constructor.name, "BadRequest", ref);
   }
   assertEquals(log.filter((l) => /^INSERT/.test(l)).length, 0);
+});
+
+Deno.test("rw-doc-path-spaces: the 400 for a bad from.ref does not carry a documents/ path (the response walk would mask it)", async () => {
+  const { db } = recorder();
+  const e = await assertRejects(() => createFlag(db, reader(db), WHO, { item_kind: "source", item_id: SRC, reason: "low_quality", from: { kind: "document", ref: "notes/x.md" } }));
+  assert(!/documents\//i.test((e as Error).message), (e as Error).message);
 });

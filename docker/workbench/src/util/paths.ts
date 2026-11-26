@@ -6,7 +6,7 @@
 // Control chars (NUL .. US, 0x00-0x1f) are disallowed in any path segment.
 const CONTROL_CHARS = /[\x00-\x1f]/;
 // a segment of only dots and percent-encoded dots (%2e, %252e, %25252e, ... any case)
-const ENCODED_DOTS = /^(?:\.|%(?:25)*2e){1,2}$/i;
+export const ENCODED_DOTS = /^(?:\.|%(?:25)*2e){1,2}$/i;
 
 export function safeRelPath(rel: string): string {
   const parts = String(rel)

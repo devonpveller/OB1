@@ -319,4 +319,44 @@ t("S4: legacy files - a path cut at a space is never judged as the shorter path 
   }
 });
 
+// S5 (attempt 1, Case 7): the scanner cuts at JavaScript's \s; the legacy-prefix check once asked Postgres's \s, which under
+// en_US.utf8 does not know U+00A0, U+FEFF, U+202F, U+2007 (and more). One ISOLATED pair per JS-only space, so no other
+// neighbour can mask the check: B owns documents/<tag>-team.md, A owns documents/<tag>-team.md<SP>copy.md. B naming A's file
+// is the answer for a missing document, byte for byte, on every route that reads a path - and A's text never appears.
+const JS_ONLY_SPACES: [string, string][] = [
+  ["U+00A0", " "], ["U+FEFF", "﻿"], ["U+202F", " "], ["U+2007", " "], ["U+2000", " "], ["U+2001", " "],
+  ["U+2002", " "], ["U+2003", " "], ["U+2004", " "], ["U+2005", " "], ["U+2006", " "], ["U+2008", " "],
+  ["U+2009", " "], ["U+200A", " "], ["U+3000", "　"], ["U+2028", " "], ["U+2029", " "], ["U+1680", " "],
+  ["U+0085", ""], ["NBSP+NBSP", "  "],
+];
+t("S5: legacy files - a path cut at a JavaScript-only space is never judged as the shorter path another user owns (every route)", async () => {
+  const q = encodeURIComponent;
+  const routes: [string, (p: string) => Promise<{ status: number; text: string }>][] = [
+    ["flag from", (p) => mk(B, { from: { kind: "document", ref: p } })],
+    ["holder references", (p) => call(B, "GET", `/workbench/contract/holders/user_document/references?ref=${q(p)}`)],
+    ["reference create", (p) => call(B, "POST", "/workbench/contract/references", { source_id: SRC, quote: "x", holder: { kind: "user_document", ref: p } })],
+    ["diff-check", (p) => call(B, "POST", "/workbench/contract/diff-check", { holder: { kind: "user_document", ref: p } })],
+    ["note-history", (p) => call(B, "GET", `/workbench/note-history?path=${q(p)}`)],
+    ["export", (p) => call(B, "GET", `/workbench/export?path=${q(p)}&format=md`)],
+  ];
+  const bad: string[] = [];
+  for (const [name, sp] of JS_ONLY_SPACES) {
+    const tag = rnd();
+    const mine = `documents/${tag}-team.md`;
+    const theirs = `documents/${tag}-team.md${sp}copy.md`;
+    const gone = `documents/${tag}-none.md`;
+    await sql(`INSERT INTO public.user_document_listings (path, title, owner_sub) VALUES ($1, 'b', $3), ($2, 'a', $4)`, [mine, theirs, B, A]);
+    try {
+      for (const [label, fn] of routes) {
+        const f = await fn(theirs);
+        const m = await fn(gone);
+        if (f.status !== m.status || f.text !== m.text.replaceAll(gone, theirs).replaceAll(q(gone), q(theirs))) bad.push(`${name} ${label}: foreign ${f.status} ${f.text.slice(0, 120)} | missing ${m.status} ${m.text.slice(0, 120)}`);
+      }
+    } finally {
+      await sql(`DELETE FROM public.user_document_listings WHERE path = ANY($1)`, [[mine, theirs]]);
+    }
+  }
+  assertEquals(bad, []);
+});
+
 Deno.test({ name: "close the pool", ignore, sanitizeOps: false, sanitizeResources: false, fn: async () => { await pool?.end(); } });

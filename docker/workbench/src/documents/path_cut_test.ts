@@ -5,18 +5,21 @@
 // the flags lab (src/contracts/flags_integration_test.ts).
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import type { Db } from "../contracts/db.ts";
-import { documentPathsIn, ownsDocumentPaths } from "./ownership.ts";
+import { CUT_AFTER, documentPathsIn, ownsDocumentPaths, singleDocumentPath } from "./ownership.ts";
 
 type Row = { path: string; owner_sub: string };
-// A stub of public.user_document_listings that answers the two statements ownsDocumentPaths may send, by their shape:
-// an equality match on the caller's own rows, and (if sent) a prefix-at-a-terminator match on anyone else's.
+// A stub of public.user_document_listings that answers the two statements ownsDocumentPaths may send, by their shape: an
+// equality match on the caller's own rows, and (if sent) the PREFIX match (starts_with) on anyone else's. The stub CANNOT
+// stand in for Postgres's regex classes - which is why the next-character decision is made in JS, not in SQL (see the
+// code-point test below, and the lab cases that run on a real pg16: every JS-only space, in flags_integration_test.ts).
 function listings(rows: Row[]): Db {
   const db: Db = {
     query: <T>(sql: string, p: unknown[] = []) => {
       const s = sql.replace(/\s+/g, " ");
       if (/owner_sub <> \$2/.test(s)) {
-        const res = (p[0] as string[]).map((r) => new RegExp(r));
-        return Promise.resolve(rows.filter((r) => r.owner_sub !== p[1] && res.some((re) => re.test(r.path))).map((r) => ({ path: r.path })) as T[]);
+        assert(/starts_with\(/.test(s) && !/ ~ /.test(s), "the other owners' rows are found by prefix, not by a database regex class");
+        const pre = p[0] as string[];
+        return Promise.resolve(rows.filter((r) => r.owner_sub !== p[1] && pre.some((x) => r.path.startsWith(x) && r.path.length > x.length)).map((r) => ({ path: r.path })) as T[]);
       }
       const mine = new Set([...(p[0] as string[]), ...(p[2] as string[])]);
       return Promise.resolve(rows.filter((r) => r.owner_sub === p[1] && mine.has(r.path)).map((r) => ({ path: r.path })) as T[]);
@@ -61,4 +64,38 @@ Deno.test("legacy paths (documents/<file>.md, owner = the listing row): a cut pa
   assertEquals(await owns(quiet, B, "documents/solo.md"), true);
   assertEquals(await owns(db, B, "documents/team.md"), false);
   assert(true);
+});
+
+// The class the legacy-prefix check uses must be the scanner's own, character for character. Over every BMP code point:
+// the scanner cuts `documents/x<c>y.md` at <c> exactly when CUT_AFTER matches <c>.
+Deno.test("CUT_AFTER is exactly the scanner's stop class (every code point)", () => {
+  const bad: string[] = [];
+  for (let cp = 1; cp <= 0xffff; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    const c = String.fromCharCode(cp);
+    if (cp < 0x20 || cp === 0x7f || c === "/" || c === "\\") continue; // control characters are refused earlier; / and \ are separators
+    const scanned = documentPathsIn(`documents/x${c}y.md`);
+    const cutsHere = scanned.length === 1 && scanned[0] === "documents/x";
+    if (cutsHere !== CUT_AFTER.test(c)) bad.push(`U+${cp.toString(16).padStart(4, "0")} scanner-cuts=${cutsHere} CUT_AFTER=${CUT_AFTER.test(c)}`);
+  }
+  assertEquals(bad, []);
+});
+
+// every space JavaScript's \s knows that Postgres's \s (en_US.utf8) does not: the tester's case 7
+const JS_ONLY_SPACES = [" ", "﻿", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", " ", "　", " ", " ", " ", "", "  "];
+Deno.test("legacy paths: a cut at a JavaScript-only space is refused like any other cut", async () => {
+  for (const sp of JS_ONLY_SPACES) {
+    const db = listings([{ path: "documents/team.md", owner_sub: "ak-b" }, { path: `documents/team.md${sp}copy.md`, owner_sub: "ak-a" }]);
+    assertEquals(await owns(db, B, `documents/team.md${sp}copy.md`), false, `U+${[...sp].map((c) => c.charCodeAt(0).toString(16)).join("+")}`);
+  }
+});
+
+Deno.test("singleDocumentPath: exact lower-case documents/, no encoded dots, no control characters", () => {
+  assertEquals(singleDocumentPath("documents/ak-a/Old notes/x.md"), "documents/ak-a/Old notes/x.md");
+  for (const bad of ["Documents/ak-a/x.md", "DOCUMENTS/ak-a/x.md", "documents/ak-a/%2e%2e/x.md", "documents/ak-a/%2E%2E/x.md", "documents/ak-a/%252e%252e/x.md", "documents/ak-a/%2e/x.md",
+      "documents/ak-a/../x.md", "documents/ak-a//x.md", "documents/", "documents", "notes/x.md", "documents/ak-a/x.md"]) {
+    assertEquals(singleDocumentPath(bad), null, bad);
+  }
+  assertEquals(singleDocumentPath("documents/ak-a/..a/x.md"), "documents/ak-a/..a/x.md"); // dots inside a name are a name
+  assertEquals(singleDocumentPath("documents/ak-a/100%2e5/x.md"), "documents/ak-a/100%2e5/x.md");
 });

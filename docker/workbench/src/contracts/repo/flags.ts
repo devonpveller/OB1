@@ -97,7 +97,7 @@ async function checkFrom(db: Db, who: Identity, from: { kind: string; ref: strin
   if (from.kind === "document") {
     // one field, one path: read whole (a folder name may hold a space or & , ' ( ) # ?), never scanned
     const path = singleDocumentPath(from.ref);
-    if (path === null) throw new BadRequest("from.ref must be a document path (documents/...)");
+    if (path === null) throw new BadRequest("from.ref must be a path inside your own documents");
     if (!(await ownsDocumentPaths(db, [path], who))) throw new NotFound("no such document");
   } else {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(from.ref)) throw new BadRequest("from.ref must be a source id");
