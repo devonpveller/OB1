@@ -207,7 +207,7 @@ Deno.test("write-guard: a refusal at the row write puts back what the path held;
 // (skel) is a letters-only skeleton like the database's normaliser, so a tab is a separator there
 const OWN = "The prcbx alpha result reproduced in twelve trials across two labs.";
 const rowOf = (title: string, body: string) => ({ slug: "content/notebooks/nb/r", title, body: body + "\n" });
-const refused = async (fields: Record<string, string>, own = [OWN]) => {
+const refused = async (fields: Record<string, string | undefined>, own = [OWN]) => {
   const title = fields.title ?? "r";
   const content = fields.content ?? "clean";
   const file = [`title: ${JSON.stringify(title)}`, ...(fields.agent ? [`agent: ${JSON.stringify(fields.agent)}`] : []),
