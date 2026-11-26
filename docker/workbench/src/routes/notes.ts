@@ -6,6 +6,7 @@ import type { Context } from "hono";
 import * as repo from "../repositories/notes.ts";
 import { publicError } from "../util/public-error.ts";
 import { changeAuthor } from "../identity/author.ts";
+import { isNoteSource } from "../util/structured-note-check.ts";
 import { identityOf } from "../middleware/identity.ts";
 
 export const notes = new Hono();
@@ -28,6 +29,17 @@ notes.post("/", async (c) => {
   if (!body?.notebook || !body?.title || body?.content == null) {
     return c.json({ error: "notebook, title, content are required" }, 400);
   }
+  // attempt 1 (tester): every field the shared vault file carries is a STRING; an array, number or object used to reach
+  // the check and answer 500 (or be written as text). Optional fields may be absent or null.
+  for (const k of ["notebook", "title", "content"] as const) {
+    if (typeof body[k] !== "string") return c.json({ error: `${k} must be a string` }, 400);
+  }
+  for (const k of ["agent", "chat"] as const) {
+    if (body[k] != null && typeof body[k] !== "string") return c.json({ error: `${k} must be a string` }, 400);
+  }
+  // `source` is written into the shared file's frontmatter: only the two fixed values, never free text (a newline in it
+  // would add lines or end the frontmatter). Absent or null = the default.
+  if (body.source != null && !isNoteSource(body.source)) return c.json({ error: "source must be user_note or ai_note" }, 400);
   try {
     // round 2: the writer is the request's verified identity (never a body field) - the row's author
     const res = await repo.writeStructuredNote({ ...body, authorSub: (await identityOf(c)).sub });
