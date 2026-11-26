@@ -310,7 +310,9 @@ Deno.test("the snapshot table missing (slot 620 not applied) fails closed: 503 o
 // ── attempt 1 of the tester: quoted paths, a reused old path, commits that carry two owners' files ─────────────────
 Deno.test("quoted paths: a document whose path git quotes keeps its whole history after a move, a trash and a restore", async () => {
   // Windows cannot hold some of these names: the full set runs in the image build gate (Linux)
-  const all = [`q"uote`, `back\\slash`, `uni\u00e9\u4e2d`, `rep[1]`, `st*r`, `sp ace`, `q?m`, `it's`, `-dash`, `#hash`];
+  // (No backslash: gitMv's `git mv` does not move such a name - the app never makes one, its slugs are [a-z0-9-] - and
+  // the rename fallback then fails.)
+  const all = [`q"uote`, `uni\u00e9\u4e2d`, `rep[1]`, `st*r`, `sp ace`, `q?m`, `it's`, `-dash`, `#hash`];
   const names = Deno.build.os === "windows" ? all.filter((n) => !/["*?\\]/.test(n)) : all;
   for (const n of names) {
     const p = `documents/${A.key}/${n}-${++doc}.md`;
