@@ -24,6 +24,9 @@ function fake(archivedAt: string | null, owner = "operator") {
       if (/FROM public\.ideas i LEFT JOIN public\.refinery_state/.test(sql)) {
         return Promise.resolve([{ id: IDEA, status: archivedAt ? "archived" : "engaged", archived_at: archivedAt, archived_from: archivedAt ? "dirty" : null }] as never);
       }
+      if (/UPDATE public\.refinery_state SET archived_at = NULL.*archived_at IS NOT NULL.*RETURNING/s.test(sql)) {
+        return Promise.resolve((archivedAt ? [{ archived_from: "dirty" }] : []) as never);
+      }
       return Promise.resolve([] as never);
     },
     tx: (fn: (d: Db) => Promise<unknown>) => fn(db),
@@ -56,4 +59,73 @@ Deno.test("rw-idea-reopen-trail: another user's document is refused (404) and wr
   try { await reopenRefinery(deps(db), PATH, who); } catch (e) { status = (e as { status?: number }).status ?? -1; }
   assertEquals(status, 404);
   assertEquals(trail(seen).length, 0);
+});
+
+// ── the race (fix round 1): a stateful fake with a row lock on the idea, so two callers really interleave ──────────────
+const { reopenIdea } = await import("../ideas/repo.ts");
+const tick = () => new Promise((r) => setTimeout(r, 0));
+function stateful() {
+  const st = { archived_at: "2026-11-01T00:00:00Z" as string | null, archived_from: "dirty" as string | null, status: "archived", lines: 0 };
+  let holder: object | null = null;
+  const waiters: (() => void)[] = [];
+  const lock = async (me: object) => {
+    while (holder && holder !== me) await new Promise<void>((r) => waiters.push(r));
+    holder = me;
+  };
+  const unlock = (me: object) => { if (holder === me) { holder = null; waiters.splice(0).forEach((w) => w()); } };
+  const mk = (me: object | null): Db => ({
+    query: async (sql: string) => {
+      await tick();
+      if (/FROM public\.user_document_listings WHERE path/.test(sql)) {
+        return [{ id: "d1", path: PATH, title: "T", updated_at: new Date(), refinery_id: IDEA, owner_sub: "operator" }] as never;
+      }
+      if (/FROM public\.ideas i LEFT JOIN public\.refinery_state/.test(sql)) {
+        return [{ id: IDEA, status: st.status, archived_at: st.archived_at, archived_from: st.archived_from }] as never;
+      }
+      if (/FROM public\.ideas WHERE id = .*FOR UPDATE/.test(sql)) {
+        if (me) await lock(me);
+        return [{ status: st.status }] as never;
+      }
+      if (/SELECT archived_from FROM public\.refinery_state/.test(sql)) return [{ archived_from: st.archived_from }] as never;
+      if (/UPDATE public\.refinery_state SET archived_at = NULL/.test(sql)) {
+        const was = st.archived_at;
+        const from = st.archived_from;
+        if (/archived_at IS NOT NULL/.test(sql) && !was) return [] as never;
+        st.archived_at = null; st.archived_from = null;
+        return (/RETURNING/.test(sql) ? [{ archived_from: from }] : []) as never;
+      }
+      if (/UPDATE public\.ideas SET status/.test(sql)) { st.status = "restored"; return [] as never; }
+      if (/INSERT INTO public\.user_document_trail/.test(sql)) { st.lines++; return [] as never; }
+      return [] as never;
+    },
+    tx: async (fn: (d: Db) => Promise<unknown>) => {
+      const me = {};
+      try { return await fn(mk(me)); } finally { unlock(me); }
+    },
+  }) as never;
+  return { st, db: mk(null) };
+}
+
+Deno.test("rw-idea-reopen-trail: two concurrent refinery opens of an archived refinery write ONE line; one answers reopened:true", async () => {
+  for (let i = 0; i < 5; i++) {
+    const { st, db } = stateful();
+    const rs = await Promise.all([reopenRefinery(deps(db), PATH, who), reopenRefinery(deps(db), PATH, who)]);
+    assertEquals(st.lines, 1, `round ${i}`);
+    assertEquals(rs.map((r) => r.reopened).sort(), [false, true], `round ${i}`);
+  }
+});
+
+Deno.test("rw-idea-reopen-trail: a refinery open racing POST /ideas/{id}/reopen writes ONE line", async () => {
+  for (let i = 0; i < 8; i++) { // i = how many ticks the by-id route starts after the refinery open
+    const { st, db } = stateful();
+    const delayed = async () => { for (let k = 0; k < i; k++) await tick(); return await reopenIdea(db, IDEA, who); };
+    const rs = await Promise.allSettled([delayed(), reopenRefinery(deps(db), PATH, who)]);
+    assertEquals(st.lines, 1, `round ${i}`);
+    const open = rs[1];
+    const byId = rs[0];
+    // exactly one of the two reopened: the by-id route 409s when it lost, the refinery open answers reopened:false
+    const byIdWon = byId.status === "fulfilled";
+    const openWon = open.status === "fulfilled" && open.value.reopened === true;
+    assert(byIdWon !== openWon, `round ${i}: byIdWon=${byIdWon} openWon=${openWon}`);
+  }
 });

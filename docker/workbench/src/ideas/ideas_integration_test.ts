@@ -1182,6 +1182,34 @@ t("RT2: the refinery open writes one line when it reopens an archived refinery, 
   assertEquals((await reopenedFor(sub(A), id)).length, 1, "a second open writes no second line");
 });
 
+t("RT4 (race, fix round 1): two concurrent refinery opens of an archived refinery write exactly one line; one answers reopened:true", async () => {
+  const bad: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    const { path, id } = await docRefinery(A, `rt4 ${rnd()}`);
+    assertEquals((await call("POST", "/workbench/documents/refinery/archive", { path })).json.archived, true);
+    const rs = await Promise.all([call("POST", "/workbench/documents/refinery/open", { path }), call("POST", "/workbench/documents/refinery/open", { path })]);
+    const n = (await reopenedFor(sub(A), id)).length;
+    const won = rs.filter((r) => r.status === 200 && r.json.reopened === true).length;
+    if (n !== 1 || won !== 1 || rs.some((r) => r.status !== 200)) bad.push(`round ${i}: ${n} lines, ${rs.map((r) => `${r.status}/${r.json.reopened}`).join(" ")}`);
+  }
+  assertEquals(bad, []);
+});
+
+t("RT5 (race, fix round 1): POST /ideas/{id}/reopen racing a refinery open writes exactly one line, and the loser says so", async () => {
+  const bad: string[] = [];
+  for (let i = 0; i < 5; i++) {
+    const { path, id } = await docRefinery(A, `rt5 ${rnd()}`);
+    assertEquals((await call("POST", "/workbench/documents/refinery/archive", { path })).json.archived, true);
+    const [byId, open] = await Promise.all([call("POST", `/workbench/ideas/${id}/reopen`, {}), call("POST", "/workbench/documents/refinery/open", { path })]);
+    const n = (await reopenedFor(sub(A), id)).length;
+    const byIdWon = byId.status === 200, openWon = open.status === 200 && open.json.reopened === true;
+    if (n !== 1 || byIdWon === openWon || (!byIdWon && byId.status !== 409) || open.status !== 200) {
+      bad.push(`round ${i}: ${n} lines, idea ${byId.status}, open ${open.status}/${open.json.reopened}`);
+    }
+  }
+  assertEquals(bad, []);
+});
+
 t("RT3: the table refuses a malformed reopened line (a path, a document id, no idea id) and a removal line with an idea id", async () => {
   const bad = async (text: string, args: unknown[]) => {
     try { await sql(text, args); return ""; } catch (e) { return String((e as { fields?: { code?: string } }).fields?.code ?? e); }

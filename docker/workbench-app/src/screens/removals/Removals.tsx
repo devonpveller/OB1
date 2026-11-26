@@ -389,7 +389,7 @@ function TrailTab({ tick, subject }: { tick: number; subject: string | null }) {
         <p className="meta">Nothing on this screen can change or delete a line. A Hidden line is read from the source's state now, so it goes when the source is shown again; the Shown again line stays. Your own documents appear here only to you.</p>
         <div className="rm-filters" role="group" aria-label="Filter the trail">
           <Choice legend="Show" name="f-show" value={show} onChange={setShow} testid="f-show"
-            options={[["all", "Sources and documents"], ["Sources", "Sources"], ["Documents", "Documents"], ["Ideas", "Ideas"]]} />
+            options={[["all", "All"], ["Sources", "Sources"], ["Documents", "Documents"], ["Ideas", "Ideas"]]} />
           <Choice legend="What" name="f-what" value={what} onChange={setWhat} testid="f-what"
             options={[["all", "Everything"], ...kinds.map((k): [string, string] => [k, labelOf(k)])]} />
           <Choice legend="Who" name="f-who" value={who} onChange={setWho} testid="f-who" options={[["all", "Everyone"], ["me", "Only me"]]} />

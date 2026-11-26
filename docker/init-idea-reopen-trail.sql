@@ -13,6 +13,8 @@
 --
 -- Idempotent. Applied to a live DB by hand (psql -f, BEFORE the new workbench image; a fresh backup first), then
 -- check-idea-reopen-trail.sql. ORDER: do not re-run slot 510 after 'reopened' rows exist (its kind CHECK is the narrow one).
+-- RE-APPLY 690 AFTER ANY RE-RUN OF SLOT 510: with no 'reopened' rows 510 exits 0 and silently narrows the kind CHECK (every app
+-- reopen insert then fails 23514 and check-idea-reopen-trail.sql says FAIL); with rows it refuses and changes nothing. 690 repairs both.
 -- Revert: revert-idea-reopen-trail.sql (THIS DISCARDS the 'reopened' lines).
 --   psql -v ON_ERROR_STOP=1 -U postgres -d openbrain -f init-idea-reopen-trail.sql
 -- ============================================================
