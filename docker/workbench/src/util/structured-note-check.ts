@@ -36,6 +36,12 @@ export type AskNoteRefused = (slug: string, title: string, body: string) => Prom
 // and the content is contiguous there) - AND the whole-FILE view (attempt 2, F1: the frontmatter's agent / chat /
 // notebook lines land in the shared vault file too). Refused when EITHER carries the writer's own sentence, so no row
 // the guard would refuse passes the check and the vault file is never written for one.
+// attempt 2 (tester, by reading): `source` is a sixth writer-supplied field that landed in the shared file RAW (no JSON
+// encoding), so a newline in it could add frontmatter lines or end the frontmatter, and it was in no view. Every caller
+// sends one of these two fixed values (the typed signature of writeStructuredNote); anything else is a 400.
+export const NOTE_SOURCES = ["user_note", "ai_note"] as const;
+export const isNoteSource = (v: unknown): v is (typeof NOTE_SOURCES)[number] => typeof v === "string" && (NOTE_SOURCES as readonly string[]).includes(v);
+
 export type NoteFields = { title?: unknown; agent?: unknown; chat?: unknown; notebook?: unknown; content?: unknown };
 export function structuredNoteViews(row: NoteRow, file: string, fields?: string | NoteFields): NoteRow[] {
   const views = [row, { slug: row.slug, title: row.title, body: file }];

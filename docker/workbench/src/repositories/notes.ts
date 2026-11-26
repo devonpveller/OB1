@@ -7,7 +7,7 @@ import { safeFolderRel, safeJoin, safeRelPath } from "../util/paths.ts";
 // @ts-ignore — plain .mjs from the /recipes bind-mount.
 import { slugifyNotebook } from "@shared/slug";
 import { parseNoteRow } from "../util/notes-parse.ts";
-import { assertNoteNamesFit, assertRawNoteNamesFit, structuredNoteFileSlug, structuredNoteViews, withPathLock, writeGuardedStructuredNote } from "../util/structured-note-check.ts";
+import { assertNoteNamesFit, isNoteSource, assertRawNoteNamesFit, structuredNoteFileSlug, structuredNoteViews, withPathLock, writeGuardedStructuredNote } from "../util/structured-note-check.ts";
 export { parseNoteRow };
 import { pool } from "../db/pool.ts";
 import { poolDb } from "../contracts/db.ts";
@@ -200,7 +200,7 @@ export async function writeStructuredNote(input: {
   const fm = [
     "---",
     `title: ${JSON.stringify(input.title)}`,
-    `source: ${input.source ?? "ai_note"}`,
+    `source: ${isNoteSource(input.source) ? input.source : "ai_note"}`,
     ...(input.agent ? [`agent: ${JSON.stringify(input.agent)}`] : []),
     ...(input.chat ? [`chat: ${JSON.stringify(input.chat)}`] : []),
     `notebook: ${JSON.stringify(input.notebook)}`,

@@ -466,7 +466,12 @@ try {
         @('a_ns_nb_arr', $subA, 'A clean note.', '', '', '', '', '{"notebook":["x"]}'),
         @('a_ns_title_obj', $subA, 'A clean note.', '', '', '', '', '{"title":{"a":1}}'),
         @('a_ns_content_num', $subA, 'A clean note.', '', '', '', '', '{"content":5}'),
-        @('a_ns_agent_null_ok', $subA, 'A clean note.', '', '', '', '', '{"agent":null}'))
+        @('a_ns_agent_null_ok', $subA, 'A clean note.', '', '', '', '', '{"agent":null}'),
+        # attempt 2 (tester, by reading): `source` reached the shared file RAW and was in no view; now only user_note / ai_note
+        @('b_split_source_content_own', $subB, $splitRest, '', '', '', '', ('{"source":"The ' + $wB + ' alpha result"}')),
+        @('a_split_source_content_b', $subA, $splitRest, '', '', '', '', ('{"source":"The ' + $wB + ' alpha result"}')),
+        @('b_source_break', $subB, 'A clean note.', '', '', '', '', ('{"source":"ai_note' + [char]92 + 'n---' + [char]92 + 'n# injected"}')),
+        @('a_source_ai_note_ok', $subA, 'A clean note.', '', '', '', '', '{"source":"ai_note"}'))
       # the race run asks only the two that matter: the writer's own sentence (B) and another user's (A)
       if ($ph -eq 'race') { $cases = @($cases | Where-Object { $_[0] -in @('b_quotes_own', 'a_quotes_b') }) }
       foreach ($case in $cases) {
@@ -564,6 +569,13 @@ try {
     Check ($r5['green_a_ns_agent_arr'] -eq $r5['green_b_ns_agent_arr'] -and $r5['green_a_ns_agent_arr_body'] -eq $r5['green_b_ns_agent_arr_body']) 'R5 GREEN: the 400 is identical for A and B'
     Check ($r5['green_a_ns_agent_null_ok'] -eq 'status=201 file=1 row=1') "R5 GREEN: a null agent is the same as none: $($r5['green_a_ns_agent_null_ok'])"
     if ($PrevWorkbenchTag) { foreach ($k in @('a_ns_agent_arr', 'a_ns_agent_num', 'a_ns_agent_obj')) { Check ($r5["prev_$k"] -match 'status=5') "R5 RED (the attempt-1 tip, $k): a non-string agent is a 500: $($r5["prev_$k"])" } }
+    # attempt 2 (source): free text in `source` is a 400, the same for A and B (no oracle), nothing written; a fixed value saves
+    foreach ($k in @('b_split_source_content_own', 'a_split_source_content_b', 'b_source_break')) {
+      Check ($r5["green_$k"] -eq 'status=400 file=0 row=0') "R5 GREEN ($k): a source outside user_note / ai_note is a 400, nothing written: $($r5["green_$k"])"
+    }
+    Check ($r5['green_b_split_source_content_own'] -eq $r5['green_a_split_source_content_b'] -and $r5['green_b_split_source_content_own_body'] -eq $r5['green_a_split_source_content_b_body']) 'R5 GREEN: the source 400 is identical for A and B (no existence signal)'
+    Check ($r5['green_a_source_ai_note_ok'] -eq 'status=201 file=1 row=1') "R5 GREEN: source ai_note saves: $($r5['green_a_source_ai_note_ok'])"
+    if ($PrevWorkbenchTag) { foreach ($k in @('b_split_source_content_own', 'b_source_break')) { Check ($r5["prev_$k"] -eq 'status=201 file=1 row=1') "R5 RED (the attempt-1 tip, $k): B's note with a free-text source is SAVED into the shared file: $($r5["prev_$k"])" } }
     # attempt 2 defect 2: B's own-sentence note and B's clean note at the same path at once (pre-check forced false): the clean file survives
     $bad = @(1..4 | Where-Object { $r5["race_r2_$_"] -notmatch '^own:(422|503) clean:201 file=1 row=1$' })
     Check ($bad.Count -eq 0) "R5 RACE R2 (the fix): in all 4 rounds the own note is refused and the clean note's file AND row survive: $((1..4 | ForEach-Object { $r5["race_r2_$_"] }) -join ' | ')"

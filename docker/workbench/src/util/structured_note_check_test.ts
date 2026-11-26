@@ -4,6 +4,8 @@
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert@1";
 import {
   assertNoteNamesFit,
+  isNoteSource,
+  NOTE_SOURCES,
   assertRawNoteNamesFit,
   MAX_RAW_NAME_LEN,
   withPathLock,
@@ -273,4 +275,24 @@ Deno.test("attempt 1: the raw name cap refuses an absurd name at once, the same 
   assert(e instanceof StructuredNoteRefused && e.status === 422 && e.message === NOTE_NAME_TOO_LONG);
   assert(throwsSync(() => assertRawNoteNamesFit("n", "t".repeat(MAX_RAW_NAME_LEN + 1))) instanceof StructuredNoteRefused);
   assertEquals(throwsSync(() => assertRawNoteNamesFit("x".repeat(300), "t")), undefined);
+});
+
+// ── rw-note-write-guard attempt 2: `source` is a sixth field that reaches the shared file raw ──
+Deno.test("attempt 2: source is only user_note or ai_note; free text (a split sentence, a frontmatter break) is refused before anything is written", async () => {
+  assertEquals([...NOTE_SOURCES], ["user_note", "ai_note"]);
+  assert(isNoteSource("user_note") && isNoteSource("ai_note"));
+  for (const bad of ["The prcbx alpha result", "ai_note\n---\n# injected", "ai_note\t", "", "AI_NOTE", 5, ["ai_note"], { a: 1 }, true]) {
+    assert(!isNoteSource(bad), `refused: ${JSON.stringify(bad)}`);
+  }
+  let repo: string, route: string;
+  try {
+    repo = (await Deno.readTextFile(new URL("../repositories/notes.ts", import.meta.url))).replace(/\r\n/g, "\n");
+    route = (await Deno.readTextFile(new URL("../routes/notes.ts", import.meta.url))).replace(/\r\n/g, "\n");
+  } catch {
+    return;
+  }
+  assert(route.includes('if (body.source != null && !isNoteSource(body.source)) return c.json({ error: "source must be user_note or ai_note" }, 400);'), "the route refuses a source outside the enum");
+  assert(route.indexOf("!isNoteSource(body.source)") < route.indexOf("repo.writeStructuredNote("), "before anything runs");
+  assert(repo.includes('`source: ${isNoteSource(input.source) ? input.source : "ai_note"}`,'), "the file never gets a raw source");
+  assert(!repo.includes("`source: ${input.source"), "no raw interpolation of source");
 });
