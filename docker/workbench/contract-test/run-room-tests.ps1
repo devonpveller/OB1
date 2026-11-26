@@ -235,6 +235,11 @@ try {
       $wbTag = Resolve-LabImageId $wbTag; $wbTestTag = Resolve-LabImageId $wbTestTag
       if (-not $wbTag -or -not $wbTestTag) { throw 'could not resolve the prebuilt images to image IDs' }
     }
+    # attempt 4 (test attempt 3, X3): the prebuilt viewer is tree-bound and ID-pinned like the workbench
+    if (-not $Red) {
+        if ($run.mode -eq 'green' -or $run.mode -eq 'landing') { $viewerTag = Assert-LabViewerImage $viewerTag $run.mode $ob1 }
+        else { $viewerTag = Resolve-LabImageId $viewerTag; if (-not $viewerTag) { throw 'could not resolve the prebuilt viewer to an image ID' } }
+    }
   }
 
   Write-Host '[4] the lab'

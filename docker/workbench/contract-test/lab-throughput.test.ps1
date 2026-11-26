@@ -28,7 +28,7 @@ $label = 'ai-stack.harness.owner=wt-unit'
 $script:images = @{}       # tag -> image record @{ id; labels; markers; src } (two tags may share one record)
 $script:builds = @()       # every build's arg list
 $script:gateAware = $true  # a Dockerfile that knows WORKBENCH_TEST_GATE (false = an older tree)
-$script:fakeOb1 = ''       # the repo a fake build copies /app/src from (Get-LabSrcExpected)
+$script:fakeOb1 = ''       # the repo a fake build copies /app from (Get-LabAppExpected)
 $script:rc = 0
 $script:lastTimeout = 0
 $script:idN = 0
@@ -66,9 +66,14 @@ function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
     $r = Find-FakeImage $a[[array]::IndexOf($a, 'sh') + 1]
     if (-not $r) { $script:rc = 125; return 'Unable to find image' }
     $cmd = $a[-1]
+    if ($cmd -match 'od -An') {
+      # the attempt-4 /app probe: every file, its path hex-encoded, then END
+      $out = @(); foreach ($k in ($r.app.Keys | Sort-Object -CaseSensitive)) { $out += "F $($r.app[$k]) $(-join ([System.Text.Encoding]::UTF8.GetBytes($k) | ForEach-Object { $_.ToString('x2') }))" }
+      return (($out + 'END') -join "`n")
+    }
     if ($cmd -match 'src-file') {
-      # the /app/src probe: one line per file, then the end marker
-      $out = @(); foreach ($k in ($r.src.Keys | Sort-Object)) { $out += "src-file $($r.src[$k]) $k" }
+      # an older helper's /app/src probe (attempt 3): src files only, the path printed as text
+      $out = @(); foreach ($k in ($r.app.Keys | Sort-Object)) { if ($k.StartsWith('./src/')) { $out += "src-file $($r.app[$k]) ./$($k.Substring(6))" } }
       return (($out + 'src-end') -join "`n")
     }
     $mk = [string]$r.markers
@@ -85,9 +90,9 @@ function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
       if ($a[$i] -eq '-t') { $tag = $a[$i + 1] }
     }
     if ($script:gateAware) { $labels['ai-stack.lab.gate'] = $(if ($gate) { $gate } else { 'full' }) }
-    $src = @{}; if ($script:fakeOb1) { $src = Get-LabSrcExpected $script:fakeOb1 $(if ($target -eq 'test') { 'test' } else { 'runtime' }) }
+    $app = @{}; if ($script:fakeOb1) { $app = Get-LabAppExpected $script:fakeOb1 $(if ($target -eq 'test') { 'test' } else { 'runtime' }) }
     # the markers a real build leaves: the skipped marker only when the Dockerfile knew the arg and was told to skip
-    $script:images[$tag] = @{ id = (New-FakeId); labels = $labels; markers = $(if ($script:gateAware -and $gate -eq 'skipped') { 's' } else { 'p' }); src = $src }
+    $script:images[$tag] = @{ id = (New-FakeId); labels = $labels; markers = $(if ($script:gateAware -and $gate -eq 'skipped') { 's' } else { 'p' }); app = $app }
     return 'built'
   }
   return ''
@@ -163,16 +168,17 @@ try {
   Write-Host '[T3] Assert-LabGreenImage'
   # run against an OLDER helper (-Helper <copy>) the attack cases must FAIL one by one, not crash: give the test what it
   # needs to set the cases up (the expected /app/src, an ID resolver) when the helper lacks them
-  if (-not (Get-Command Get-LabSrcExpected -ErrorAction SilentlyContinue)) {
-    function Get-LabSrcExpected([string]$Ob1, [string]$Kind) {
-      $h = @{}; $sha = [System.Security.Cryptography.SHA256]::Create(); $l1 = [System.Text.Encoding]::GetEncoding(28591)
-      foreach ($r in @(& git -C $Ob1 ls-files -- 'docker/workbench/src')) {
-        $in = "$r".Substring('docker/workbench/src/'.Length)
-        if ($Kind -eq 'runtime' -and ($in -match '_test\.ts$' -or $in -eq 'export/credentials_oracle.ts')) { continue }
+  if (-not (Get-Command Get-LabAppExpected -ErrorAction SilentlyContinue)) {
+    function Get-LabAppExpected([string]$Ob1, [string]$Kind) {
+      $h = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+      $sha = [System.Security.Cryptography.SHA256]::Create(); $l1 = [System.Text.Encoding]::GetEncoding(28591)
+      foreach ($r in @(& git -C $Ob1 ls-files -- 'docker/workbench/deno.json' 'docker/workbench/deno.lock' 'docker/workbench/THIRD-PARTY-NOTICES.md' 'docker/workbench/gate' 'docker/workbench/csl' 'docker/workbench/src')) {
+        $rel = "$r".Substring('docker/workbench/'.Length)
+        if ($Kind -eq 'runtime' -and ($rel -match '^src/.*_test\.ts$' -or $rel -eq 'src/export/credentials_oracle.ts')) { continue }
         $raw = $l1.GetString([System.IO.File]::ReadAllBytes((Join-Path $Ob1 $r)))
-        $h["./$in"] = [System.BitConverter]::ToString($sha.ComputeHash($l1.GetBytes($raw.Replace("`r", '')))).Replace('-', '').ToLower()
+        $h["./$rel"] = [System.BitConverter]::ToString($sha.ComputeHash($l1.GetBytes($raw.Replace("`r", '')))).Replace('-', '').ToLower()
       }
-      return $h
+      return ,$h
     }
   }
   if (-not (Get-Command Resolve-LabImageId -ErrorAction SilentlyContinue)) {
@@ -180,26 +186,36 @@ try {
   }
   $guardTakesTree = (Get-Command Assert-LabGreenImage).Parameters.ContainsKey('Ob1')
   if (-not $guardTakesTree) { Write-Host '  NOTE  this helper''s guard takes no OB1 tree (an older helper): the cases below show what it lets through' }
+  $hasViewerGuard = [bool](Get-Command Assert-LabViewerImage -ErrorAction SilentlyContinue)
   $r3 = Join-Path $root 'ob1-t3'; New-Item -ItemType Directory -Force (Join-Path $r3 'docker\workbench\src\export') | Out-Null
   $g3 = { param([string[]]$x) $p = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; try { & git -C $r3 @x 2>&1 | Out-Null } finally { $ErrorActionPreference = $p } }
   & $g3 @('init', '-q'); & $g3 @('config', 'user.email', 't@example.invalid'); & $g3 @('config', 'user.name', 't'); & $g3 @('config', 'commit.gpgsign', 'false')
   [System.IO.File]::WriteAllText((Join-Path $r3 'docker\workbench\Dockerfile'), "FROM x`n")
+  [System.IO.File]::WriteAllText((Join-Path $r3 'docker\workbench\deno.json'), "{ `"imports`": {} }`n")
+  New-Item -ItemType Directory -Force (Join-Path $r3 'docker\wiki-viewer') | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $r3 'docker\wiki-viewer\Dockerfile'), "FROM y`n")
   [System.IO.File]::WriteAllText((Join-Path $r3 'docker\workbench\src\a.ts'), "export const a = 1;`r`n")
   [System.IO.File]::WriteAllText((Join-Path $r3 'docker\workbench\src\a_test.ts'), "test`n")
   [System.IO.File]::WriteAllText((Join-Path $r3 'docker\workbench\src\export\credentials_oracle.ts'), "oracle`n")
   & $g3 @('add', '-A'); & $g3 @('commit', '-q', '-m', 'one')
   $tree3 = "$(& git -C $r3 rev-parse 'HEAD^{tree}')".Trim()
-  $wantRt = Get-LabSrcExpected $r3 'runtime'; $wantTs = Get-LabSrcExpected $r3 'test'
-  Ok ($wantRt.Count -eq 1 -and $wantRt.ContainsKey('./a.ts') -and $wantTs.Count -eq 3) "the expected /app/src: runtime drops *_test.ts and the oracle ($($wantRt.Count) / $($wantTs.Count) files)"
+  $wantRt = Get-LabAppExpected $r3 'runtime'; $wantTs = Get-LabAppExpected $r3 'test'
+  Ok ($wantRt.Count -eq 2 -and $wantRt.ContainsKey('./src/a.ts') -and $wantRt.ContainsKey('./deno.json') -and $wantTs.Count -eq 4) "the expected /app: every copied input (deno.json and src here); runtime drops *_test.ts and the oracle ($($wantRt.Count) / $($wantTs.Count) files)"
   $crlfFree = [System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::ASCII.GetBytes("export const a = 1;`n"))).Replace('-', '').ToLower()
-  Ok ($wantRt['./a.ts'] -eq $crlfFree) 'a file is hashed with its CR bytes removed (a CRLF checkout equals the LF image copy)'
+  Ok ($wantRt['./src/a.ts'] -eq $crlfFree) 'a file is hashed with its CR bytes removed (a CRLF checkout equals the LF image copy)'
   function New-Img([string]$tag, [hashtable]$o) {
     $lb = @{ 'ai-stack.lab.gate' = 'full'; 'ai-stack.lab.tree' = $tree3 }
     if ($o.ContainsKey('labels')) { $lb = $o.labels }
-    $src = @{}; foreach ($k in $(if ($o.kind -eq 'test') { $wantTs.Keys } else { $wantRt.Keys })) { $src[$k] = $(if ($o.kind -eq 'test') { $wantTs[$k] } else { $wantRt[$k] }) }
-    if ($o.mutate) { $src['./a.ts'] = ('0' * 64) }
-    if ($o.extra) { $src['./evil.ts'] = ('1' * 64) }
-    $script:images[$tag] = @{ id = (New-FakeId); labels = $lb; markers = $(if ($o.ContainsKey('markers')) { $o.markers } else { 'p' }); src = $src }
+    $src = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)
+    foreach ($k in $(if ($o.kind -eq 'test') { $wantTs.Keys } else { $wantRt.Keys })) { $src[$k] = $(if ($o.kind -eq 'test') { $wantTs[$k] } else { $wantRt[$k] }) }
+    if ($o.mutate) { $src['./src/a.ts'] = ('0' * 64) }
+    if ($o.extra) { $src['./src/evil.ts'] = ('1' * 64) }
+    # X1: the mutant under the real name, the original under a near-twin name (a trailing space / another letter case)
+    if ($o.twin) { $orig = $src['./src/a.ts']; $src['./src/a.ts'] = ('0' * 64); $src[$o.twin] = $orig }
+    # X2: a copied input other than src replaced (an import map), and a module outside src
+    if ($o.denojson) { $src['./deno.json'] = ('2' * 64) }
+    if ($o.outside) { $src['./mut/lifecycle.ts'] = ('3' * 64) }
+    $script:images[$tag] = @{ id = (New-FakeId); labels = $lb; markers = $(if ($o.ContainsKey('markers')) { $o.markers } else { 'p' }); app = $src }
   }
   function Try-Guard([string]$tag, [string]$mode = 'green', [string]$kind = 'runtime') {
     $f0 = $script:fail; $id = ''; $threw = $false
@@ -212,7 +228,7 @@ try {
   $x = Try-Guard 'wb:good-test' 'landing' 'test'
   Ok (-not $x.threw -and $x.id -eq $script:images['wb:good-test'].id) 'and the test stage (its *_test.ts and the oracle included), for a landing'
   $x = Try-Guard 'wb:good' 'green' 'test'
-  Ok ($x.threw -and $x.line -match 'missing \./a_test\.ts') 'a runtime image offered as the test stage is refused (its tests are missing)'
+  Ok ($x.threw -and $x.line -match 'missing \./(src/)?a_test\.ts') 'a runtime image offered as the test stage is refused (its tests are missing)'
   foreach ($c in @(
       @('skip', @{ labels = @{ 'ai-stack.lab.gate' = 'skipped'; 'ai-stack.lab.tree' = $tree3 }; markers = 's' }, 'gate markers', 'a skip-gate image'),
       @('forged', @{ markers = 's' }, 'gate markers', 'D1: a forged label (gate=full) over the skipped marker'),
@@ -220,8 +236,12 @@ try {
       @('nomarker', @{ markers = '' }, 'gate markers', 'no passed marker'),
       @('both', @{ markers = 'ps' }, 'gate markers', 'both markers'),
       @('a4', @{ labels = @{ 'ai-stack.lab.gate' = 'full'; 'ai-stack.lab.tree' = ('e' * 40) }; markers = 'p'; mutate = $true }, 'built from tree', 'A4: forged markers on another tree''s skip image'),
-      @('a5', @{ mutate = $true }, 'differs \./a\.ts', 'A5: a full-gate image of this tree with mutant code copied on top'),
-      @('a5x', @{ extra = $true }, 'extra \./evil\.ts', 'A5: a full-gate image with an extra module added'),
+      @('a5', @{ mutate = $true }, 'differs \./(src/)?a\.ts', 'A5: a full-gate image of this tree with mutant code copied on top'),
+      @('a5x', @{ extra = $true }, "extra '?\./(src/)?evil\.ts", 'A5: a full-gate image with an extra module added'),
+      @('x1', @{ twin = './src/a.ts ' }, "differs \./src/a\.ts|extra '\./src/a\.ts '", 'X1: the original under a trailing-space twin name, the mutant under the real name'),
+      @('x1c', @{ twin = './src/A.ts' }, "differs \./src/a\.ts|extra '\./src/A\.ts'", 'X1: the original under another letter case, the mutant under the real name (case-sensitive)'),
+      @('x2', @{ denojson = $true; outside = $true }, 'differs \./deno\.json|extra ''\./mut/lifecycle\.ts''', 'X2: deno.json (the import map) replaced and a module outside src added'),
+      @('x2o', @{ outside = $true }, "extra '\./mut/lifecycle\.ts'", 'X2: a module outside /app/src only'),
       @('a6', @{ labels = @{ 'ai-stack.lab.gate' = 'full'; 'ai-stack.lab.tree' = ('2' * 40) } }, 'built from tree', 'A6: a full-gate image of an older tree of this branch'),
       @('a6b', @{ labels = @{ 'org.opencontainers.image.revision' = 'a155c44b' } }, 'no ai-stack.lab.tree label', 'A6b: another tester''s image with no tree label (built before rw-lab-throughput)'),
       @('dirty', @{ labels = @{ 'ai-stack.lab.gate' = 'full'; 'ai-stack.lab.tree' = $tree3; 'ai-stack.lab.dirty' = '1' } }, 'dirty working tree', 'an image built from a dirty working tree'))) {
@@ -258,6 +278,30 @@ try {
   $allRunners = @(Get-ChildItem $here -Filter 'run-*.ps1' | Where-Object { [System.IO.File]::ReadAllText($_.FullName) -match 'Assert-LabGreenImage' })
   $bare = @($allRunners | Where-Object { [System.IO.File]::ReadAllText($_.FullName) -match '(?m)^\s*(if \(.*\) \{ )?Assert-LabGreenImage ' })
   Ok ($bare.Count -eq 0) "no runner calls the guard without running the ID it returns ($(($bare | ForEach-Object { $_.Name }) -join ', '))"
+  # X3: the viewer, a companion image, is tree-bound and ID-pinned on -Prebuilt too
+  $script:images['vw:good'] = @{ id = (New-FakeId); labels = @{ 'ai-stack.lab.tree' = $tree3 }; markers = ''; app = @{} }
+  $script:images['vw:other'] = @{ id = (New-FakeId); labels = @{ 'ai-stack.lab.tree' = ('9' * 40) }; markers = ''; app = @{} }
+  $script:images['vw:old'] = @{ id = (New-FakeId); labels = @{ 'x' = 'y' }; markers = ''; app = @{} }
+  $vg = { param($t) $f0 = $script:fail; $id = ''; $th = $false; try { if ($hasViewerGuard) { $id = [string](Assert-LabViewerImage $t 'green' $r3) } else { $th = $false; $id = 'no-guard' } } catch { $th = $true }; @{ threw = $th; id = $id; fails = $script:fail - $f0; line = $script:lines[-1] } }
+  $x = & $vg 'vw:good'
+  Ok ($hasViewerGuard -and -not $x.threw -and $x.id -eq $script:images['vw:good'].id) 'X3: this tree''s viewer passes the viewer guard and the guard returns its ID'
+  $x = & $vg 'vw:other'
+  Ok ($hasViewerGuard -and $x.threw -and $x.line -match 'built from tree') 'X3: another tree''s viewer is REFUSED'
+  $x = & $vg 'vw:old'
+  Ok ($hasViewerGuard -and $x.threw -and $x.line -match 'no ai-stack.lab.tree label') 'X3: an unlabelled viewer is REFUSED'
+  [System.IO.File]::WriteAllText((Join-Path $r3 'docker\wiki-viewer\x.js'), "drift`n")
+  $x = & $vg 'vw:good'
+  Ok ($hasViewerGuard -and $x.threw -and $x.line -match 'uncommitted changes') 'X3: uncommitted changes under docker/wiki-viewer refuse a green run''s viewer'
+  Remove-Item -Force (Join-Path $r3 'docker\wiki-viewer\x.js')
+  foreach ($rn in @('run-docs-lifecycle-tests.ps1', 'run-panels-tests.ps1', 'run-room-tests.ps1')) {
+    $rt = [System.IO.File]::ReadAllText((Join-Path $here $rn))
+    Ok ($rt -match [regex]::Escape("`$viewerTag = Assert-LabViewerImage `$viewerTag `$run.mode `$ob1") -and $rt -match [regex]::Escape("`$viewerTag = Resolve-LabImageId `$viewerTag")) "X3: $rn guards and ID-pins its -Prebuilt viewer"
+  }
+  Ok ($helperT -match [regex]::Escape("`$res.viewer = Assert-LabViewerImage `$res.viewer `$Run.mode `$Ob1")) 'X3: Invoke-LabWorkbenchImages guards the viewer of a green or landing run'
+  foreach ($rn in @('run-identity-tests.ps1', 'run-sessions-tests.ps1', 'run-trust-tests.ps1', 'run-workspace-tests.ps1')) {
+    $rt = [System.IO.File]::ReadAllText((Join-Path $here $rn))
+    Ok ($rt -match '\[switch\]\$Prebuilt' -and $rt -match 'this runner has no -Prebuilt mode' -and $rt -match '-Prebuilt \$Prebuilt') "$rn declares -Prebuilt only to refuse it (and -Landing -Prebuilt)"
+  }
   # A8: a landing never takes prebuilt images
   $r = $null; try { $r = Resolve-LabRun -Landing $true -Prebuilt $true } catch { }
   Ok ($r -and $r.refused -match '-Prebuilt is refused') "A8: -Landing -Prebuilt is refused ($(if ($r) { $r.refused } else { 'Resolve-LabRun takes no -Prebuilt' }))"

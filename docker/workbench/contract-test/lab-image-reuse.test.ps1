@@ -118,6 +118,19 @@ try {
   $a5 = 'lab-reuse-probe:wt-a5'; $null = Dk build --label $label -t $a5 $a5Dir; $tags += $a5
   Check ((Get-LabGateMarkers $a5) -eq 'full' -and (Get-LabImageLabels $a5)['ai-stack.lab.tree'] -eq $r3.key.tree) 'A5 planted: every label and marker of this tree''s full image, with mutant code copied on top'
   try { $null = Assert-LabGreenImage $a5 'green' $repo 'runtime'; Fail 'the green guard ACCEPTED code copied onto a full image (A5)' } catch { Pass 'A5: refused by /app/src (the FAIL line above is the guard speaking)'; $script:fail--; $script:n-- }
+  Write-Host '[R7] attempt 3 D1-ter on a real daemon: a trailing-space twin name (X1), a file outside /app/src (X2)'
+  $x1Dir = Join-Path $root 'x1'; New-Item -ItemType Directory -Force $x1Dir | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $x1Dir 'a.ts'), "export const v = 'MUTANT';`n")
+  [System.IO.File]::WriteAllText((Join-Path $x1Dir 'Dockerfile'), "FROM $($r3.tag)`nRUN cp /app/src/a.ts '/app/src/a.ts '`nCOPY a.ts /app/src/a.ts`n")
+  $x1 = 'lab-reuse-probe:wt-x1'; $null = Dk build --label $label -t $x1 $x1Dir; $tags += $x1
+  $x1app = Get-LabImageApp (Resolve-LabImageId $x1)
+  Check ($null -ne $x1app -and $x1app.ContainsKey('./src/a.ts ') -and $x1app.ContainsKey('./src/a.ts') -and $x1app['./src/a.ts '] -cne $x1app['./src/a.ts']) 'X1 planted: the probe reads ./src/a.ts and ./src/a.ts<space> as two files (exact paths)'
+  try { $null = Assert-LabGreenImage $x1 'green' $repo 'runtime'; Fail 'the green guard ACCEPTED a trailing-space twin (X1)' } catch { Pass 'X1: refused (the FAIL line above is the guard speaking)'; $script:fail--; $script:n-- }
+  $x2Dir = Join-Path $root 'x2'; New-Item -ItemType Directory -Force $x2Dir | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $x2Dir 'm.ts'), "export const m = 1;`n")
+  [System.IO.File]::WriteAllText((Join-Path $x2Dir 'Dockerfile'), "FROM $($r3.tag)`nCOPY m.ts /app/mut/m.ts`n")
+  $x2 = 'lab-reuse-probe:wt-x2'; $null = Dk build --label $label -t $x2 $x2Dir; $tags += $x2
+  try { $null = Assert-LabGreenImage $x2 'green' $repo 'runtime'; Fail 'the green guard ACCEPTED a module outside /app/src (X2)' } catch { Pass 'X2: a file outside /app/src is refused (the FAIL line above is the guard speaking)'; $script:fail--; $script:n-- }
   try { $null = Assert-LabGreenImage $r1.tag 'green' $repo 'runtime'; Fail 'the green guard ACCEPTED the first tree''s image for the second tree (A6)' } catch { Pass 'A6: the first tree''s full-gate image is refused for the second tree (the FAIL line above is the guard speaking)'; $script:fail--; $script:n-- }
   $null = Dk tag $r5.tag $r3.tag
   $now = Resolve-LabImageId $r3.tag

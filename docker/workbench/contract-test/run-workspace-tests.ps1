@@ -89,6 +89,7 @@ param(
   [switch]$SkipGate,
   [switch]$NoReuse,
   [switch]$NoDbTemplate,
+  [switch]$Prebuilt,   # attempt 4: declared so it is refused cleanly (unbound, it was taken as a positional value)
   [switch]$WalkOff,
   [switch]$KeepImages,
   [switch]$IntakeOnly,
@@ -130,7 +131,8 @@ if ($w) { Write-Host "REFUSED: $w"; exit 2 }
 $subnets = Split-HarnessSubnet $Subnet
 if ($Evidence -and (Test-Path $Evidence) -and @(Get-ChildItem -Force $Evidence).Count) { Write-Host "REFUSED: -Evidence $Evidence is not empty"; exit 2 }
 . (Join-Path $PSScriptRoot 'lab-throughput.ps1')
-$run = Resolve-LabRun -Red $Red -Landing $Landing -NoSweep $NoSweep -Sweep $Sweep -Mutant $Mutant -WbMount $WbMount -SkipGate $SkipGate
+$run = Resolve-LabRun -Red $Red -Landing $Landing -NoSweep $NoSweep -Sweep $Sweep -Mutant $Mutant -WbMount $WbMount -SkipGate $SkipGate -Prebuilt $Prebuilt
+if (-not $run.refused -and $Prebuilt) { $run.refused = 'this runner has no -Prebuilt mode: it builds, or reuses with the labels and /app checked, its own images' }
 if ($run.refused) { Write-Host "REFUSED: $($run.refused)"; exit 2 }
 $NoSweep = -not $run.sweep
 

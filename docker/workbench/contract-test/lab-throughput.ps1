@@ -116,21 +116,31 @@ function Get-LabImageLabels([string]$Tag) {
   if ($j) { foreach ($p in $j.PSObject.Properties) { $h[$p.Name] = [string]$p.Value } }
   return $h
 }
-# THREAT MODEL of the green guard (rw-lab-throughput attempt 3, after test attempt 2's D1-bis). The rule it holds: a lab
-# never reports green on code that did not pass the full unit gate, or on a tree other than the one under test.
-#   It DEFENDS against the ordinary failures: a stale or foreign image under the run's tag (an earlier tip's :wt-<id>,
-#   another tester's images, an older tree's reuse tag), a tag re-pointed between the check and the run (the check
-#   resolves the tag to an image ID ONCE and the runner runs that ID, never the tag again), a skip-gate image, and an
-#   image whose source was changed after its gate ran (FROM <full image> + COPY <mutant> - its /app/src no longer equals
-#   the tree's).
-#   It does NOT defend against a deliberate forger who can build images on this daemon: labels and the gate markers are
-#   written by the build, so a FROM <skip image of THIS tree> + RUN touch /app/.test-gate-passed passes - the code is the
-#   tree's own, only the claim that its unit gate ran is false. Whoever can run `docker build` here can also run anything
-#   else on this host; the guard keeps honest runs honest, it is not a sandbox.
+# THREAT MODEL of the green guard - FROZEN by the coordinator after test attempt 3 (rw-lab-throughput attempt 4).
+# The rule it holds: a lab never reports green on code that did not pass the full unit gate, or on a tree other than the
+# one under test. Its job is to stop ACCIDENTAL wrong-code green:
+#   IN SCOPE (refused): a stale, foreign or other-tree image under the run's tag (an earlier tip's :wt-<id>, another
+#   tester's images, an older tree's reuse tag, an unlabelled image from before rw-lab-throughput); a tag re-pointed
+#   between the check and the run (the tag is resolved to an image ID ONCE and the run uses that ID); a skip-gate image;
+#   an unguarded companion image (the viewer on -Prebuilt: tree-bound and ID-pinned too); and drift in ANY file the
+#   Dockerfile copies into /app (deno.json, deno.lock, THIRD-PARTY-NOTICES.md, gate/, csl/, src/ - compared file by file
+#   against the tree's tracked files, paths exact and case-sensitive, no extra file in the runtime image).
+#   OUT OF SCOPE (documented residuals): deliberate crafting by someone who can build images on this daemon - a forged
+#   passed marker on this tree's own skip image, or a hand-made FROM layer designed to fool the checker (for example code
+#   placed outside /app, in the dependency cache or the system image). Labels and in-image checks cannot stop whoever
+#   controls the build; whoever can run `docker build` here can run anything on this host. The guard keeps honest runs
+#   honest; it is not a sandbox.
+#   NOT WIRED: run-cast-tests.ps1, run-flags-tests.ps1, run-inlets-tests.ps1 and run-private-report-claims-lab.ps1 still
+#   build and run their own images without this guard (their -Prebuilt takes the tag as it is). They are out of scope
+#   of this item until they adopt lab-throughput.ps1.
 $script:LabDirtyLabel = 'ai-stack.lab.dirty'
 # The inputs of the workbench image (the Dockerfile's COPY sources): a change anywhere else in OB1 never makes it dirty.
 $script:LabWbInputs = @('docker/workbench/Dockerfile', 'docker/workbench/deno.json', 'docker/workbench/deno.lock', 'docker/workbench/THIRD-PARTY-NOTICES.md',
   'docker/workbench/gate', 'docker/workbench/csl', 'docker/workbench/src')
+# What the Dockerfile copies into /app (relative to docker/workbench): the files the image must hold exactly.
+$script:LabAppInputs = @('deno.json', 'deno.lock', 'THIRD-PARTY-NOTICES.md', 'gate', 'csl', 'src')
+# The viewer image's inputs (docker/wiki-viewer and its recipes build context).
+$script:LabViewerInputs = @('docker/wiki-viewer', 'recipes')
 
 # The image ID ('sha256:<64 hex>') a tag or ID resolves to now, or ''.
 function Resolve-LabImageId([string]$Ref) {
@@ -138,53 +148,79 @@ function Resolve-LabImageId([string]$Ref) {
   if ($script:rc -ne 0 -or $o -notmatch '^sha256:[0-9a-f]{64}$') { return '' }
   return $o
 }
-# The tree under test: OB1 HEAD's tree, and whether the workbench inputs differ from it (tracked or untracked).
-function Get-LabTreeUnderTest([string]$Ob1) {
+# git's raw stdout as UTF-8 (paths exactly as git has them: no console code page, no line splitting).
+function Invoke-LabGitRaw([string]$Ob1, [string[]]$GitArgs) {
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = 'git'
+  $psi.Arguments = (@('-C', $Ob1, '-c', 'core.quotepath=off') + $GitArgs | ForEach-Object { if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ } }) -join ' '
+  $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false
+  $psi.StandardOutputEncoding = New-Object System.Text.UTF8Encoding $false
+  $p = [System.Diagnostics.Process]::Start($psi)
+  $o = $p.StandardOutput.ReadToEnd(); $null = $p.StandardError.ReadToEnd(); $p.WaitForExit()
+  return $o
+}
+# The tree under test: OB1 HEAD's tree, and whether $Inputs differ from it (tracked or untracked).
+function Get-LabTreeUnderTest([string]$Ob1, [string[]]$Inputs = @()) {
+  if (-not $Inputs.Count) { $Inputs = @($script:LabWbInputs) }
   $tree = "$(& git -C $Ob1 rev-parse 'HEAD^{tree}' 2>$null)".Trim()
-  $inputs = @($script:LabWbInputs)
-  $st = (@(& git -C $Ob1 status --porcelain --untracked-files=all -- @inputs 2>$null) -join "`n").Trim()
+  $st = (@(& git -C $Ob1 status --porcelain --untracked-files=all -- @Inputs 2>$null) -join "`n").Trim()
   return @{ tree = $tree; dirty = [bool]$st; status = $st }
 }
-# What the tree says /app/src must hold: './<path>' -> sha256 of the file with CR removed (the working tree, which is the
-# committed tree when Get-LabTreeUnderTest says clean). Kind 'runtime' drops what the Dockerfile's app-src stage deletes
-# (every *_test.ts and src/export/credentials_oracle.ts); 'test' is the whole of src.
-function Get-LabSrcExpected([string]$Ob1, [string]$Kind) {
-  $h = @{}
+function New-LabOrdinalMap { return (New-Object 'System.Collections.Generic.Dictionary[string,string]' ([System.StringComparer]::Ordinal)) }
+# What the tree says /app must hold: './<path under docker/workbench>' -> sha256 of the file with CR removed, from the
+# tracked files of $script:LabAppInputs (git ls-files -z: exact paths). Kind 'runtime' drops what the app-src stage
+# deletes (every src/**/*_test.ts and src/export/credentials_oracle.ts); 'test' is all of it.
+function Get-LabAppExpected([string]$Ob1, [string]$Kind) {
+  $h = New-LabOrdinalMap
   $latin1 = [System.Text.Encoding]::GetEncoding(28591)
   $sha = [System.Security.Cryptography.SHA256]::Create()
+  $paths = @($script:LabAppInputs | ForEach-Object { "docker/workbench/$_" })
   try {
-    foreach ($rel in @(& git -C $Ob1 ls-files -- 'docker/workbench/src' 2>$null)) {
-      $r = "$rel".Trim(); if (-not $r) { continue }
-      $inSrc = $r.Substring('docker/workbench/src/'.Length)
-      if ($Kind -eq 'runtime' -and ($inSrc -match '_test\.ts$' -or $inSrc -eq 'export/credentials_oracle.ts')) { continue }
-      # Latin-1 maps every byte to one char and back, so this drops exactly the CR bytes, fast
+    foreach ($r in ((Invoke-LabGitRaw $Ob1 (@('ls-files', '-z', '--') + $paths)) -split [char]0)) {
+      if (-not $r) { continue }
+      $rel = $r.Substring('docker/workbench/'.Length)
+      if ($Kind -eq 'runtime' -and ($rel -cmatch '^src/.*_test\.ts$' -or $rel -ceq 'src/export/credentials_oracle.ts')) { continue }
+      # Latin-1 maps every byte to one char and back, so this drops exactly the CR bytes
       $raw = $latin1.GetString([System.IO.File]::ReadAllBytes((Join-Path $Ob1 ($r -replace '/', '\'))))
-      $h["./$inSrc"] = [System.BitConverter]::ToString($sha.ComputeHash($latin1.GetBytes($raw.Replace("`r", '')))).Replace('-', '').ToLower()
+      $h["./$rel"] = [System.BitConverter]::ToString($sha.ComputeHash($latin1.GetBytes($raw.Replace("`r", '')))).Replace('-', '').ToLower()
     }
   } finally { $sha.Dispose() }
   return $h
 }
-# What the image holds in /app/src: './<path>' -> sha256 with CR removed, from one `docker run --rm --network none`.
-function Get-LabImageSrc([string]$Id) {
-  $o = Dk run --rm --network none --entrypoint sh $Id -c 'cd /app/src && find . -type f | LC_ALL=C sort | while IFS= read -r f; do printf "src-file %s %s\n" "$(tr -d "\r" < "$f" | sha256sum | cut -d" " -f1)" "$f"; done; echo src-end'
-  if ($script:rc -ne 0 -or ($o | Out-String) -notmatch 'src-end') { return $null }
-  $h = @{}
-  foreach ($l in (($o | Out-String) -split "`n")) { if ($l -match '^src-file ([0-9a-f]{64}) (\./.+?)\s*$') { $h[$Matches[2]] = $Matches[1] } }
-  return $h
-}
-# '' when the image's /app/src is the tree's (every expected file present with the same content; for the runtime image no
-# extra file either), else the first differences.
-function Test-LabImageSrc([string]$Id, [string]$Ob1, [string]$Kind) {
-  $want = Get-LabSrcExpected $Ob1 $Kind
-  if (-not $want.Count) { return "no tracked source under docker/workbench/src in $Ob1" }
-  $have = Get-LabImageSrc $Id
-  if ($null -eq $have) { return 'its /app/src could not be read' }
-  $bad = @()
-  foreach ($k in ($want.Keys | Sort-Object)) {
-    if (-not $have.ContainsKey($k)) { $bad += "missing $k" } elseif ($have[$k] -ne $want[$k]) { $bad += "differs $k" }
+# What the image holds in /app: './<path>' -> sha256 with CR removed, from one `docker run --rm --network none`. Each path
+# is printed hex-encoded (od), so a space, a newline or any byte in a name survives exactly (test attempt 3, X1); the
+# gate markers are left out (Get-LabGateMarkers reads them).
+function Get-LabImageApp([string]$Id) {
+  $probe = 'cd /app && find . -type f -exec sh -c ''for f do printf "F %s %s\n" "$(tr -d "\r" < "$f" | sha256sum | cut -d" " -f1)" "$(printf "%s" "$f" | od -An -tx1 | tr -d " \n")"; done'' sh {} + ; echo END'
+  $o = (Dk run --rm --network none --entrypoint sh $Id -c $probe | Out-String)
+  if ($script:rc -ne 0 -or $o -notmatch '(?m)^END\s*$') { return $null }
+  $h = New-LabOrdinalMap
+  $utf8 = New-Object System.Text.UTF8Encoding $false
+  foreach ($l in ($o -split "`n")) {
+    if ($l -cnotmatch '^F ([0-9a-f]{64}) ([0-9a-f]+)\s*$') { continue }
+    $hash = $Matches[1]; $hex = $Matches[2]
+    if ($hex.Length % 2) { continue }
+    $bytes = New-Object byte[] ($hex.Length / 2)
+    for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = [Convert]::ToByte($hex.Substring(2 * $i, 2), 16) }
+    $path = $utf8.GetString($bytes)
+    if ($path -ceq './.test-gate-passed' -or $path -ceq './.test-gate-skipped') { continue }
+    $h[$path] = $hash
   }
-  if ($Kind -eq 'runtime') { foreach ($k in ($have.Keys | Sort-Object)) { if (-not $want.ContainsKey($k)) { $bad += "extra $k" } } }
-  if ($bad.Count) { return "its /app/src is not the tree's ($($bad.Count) difference(s): $(($bad | Select-Object -First 4) -join ', '))" }
+  return ,$h
+}
+# '' when the image's /app holds exactly the tree's copied files (every expected file present with the same content, and
+# no other file), else the first differences. Ordinal (case-sensitive) on both sides.
+function Test-LabImageApp([string]$Id, [string]$Ob1, [string]$Kind) {
+  $want = Get-LabAppExpected $Ob1 $Kind
+  if (-not $want.Count) { return "no tracked file of $($script:LabAppInputs -join ', ') under docker/workbench in $Ob1" }
+  $have = Get-LabImageApp $Id
+  if ($null -eq $have) { return 'its /app could not be read' }
+  $bad = @()
+  foreach ($k in ($want.Keys | Sort-Object -CaseSensitive)) {
+    if (-not $have.ContainsKey($k)) { $bad += "missing $k" } elseif ($have[$k] -cne $want[$k]) { $bad += "differs $k" }
+  }
+  foreach ($k in ($have.Keys | Sort-Object -CaseSensitive)) { if (-not $want.ContainsKey($k)) { $bad += "extra '$k'" } }
+  if ($bad.Count) { return "its /app is not the tree's ($($bad.Count) difference(s): $(($bad | Select-Object -First 4) -join ', '))" }
   return ''
 }
 # What the image itself says about its unit gate: 'full' (/app/.test-gate-passed and no .test-gate-skipped), 'skipped',
@@ -200,32 +236,44 @@ function Get-LabGateMarkers([string]$Ref) {
   if ($pm -and $sm) { return 'both' }
   return 'none'
 }
-# The green / landing guard. Resolves $Tag to an image ID ONCE, checks THAT image and returns its ID - the caller runs the
-# ID, never the tag again (test attempt 2, A7). Refuses (FAIL, then throw) unless:
-#   the tree under test is clean in the workbench inputs (a green run tests a committed tree);
-#   the image's ai-stack.lab.tree is that tree and it is not labelled dirty (A6, A6b, A8: stale and foreign images);
-#   its gate markers say full and its label does not say skipped (D1);
-#   its /app/src equals the tree's, file by file (A5: code put on a full image after its gate ran). $Kind: runtime | test.
-function Assert-LabGreenImage([string]$Tag, [string]$Mode, [string]$Ob1, [string]$Kind = 'runtime') {
-  $refuse = { param($why) Fail "REFUSED: $Tag is not this tree's full-gate image ($why) and this is a $Mode run - a green or landing run only ever runs an image of the tree under test whose unit gate ran"; throw "guard: $Tag refused in a $Mode run: $why" }
+# The tree binding every guarded image shares: resolves $Tag to an image ID ONCE and returns it; refuses (FAIL, throw)
+# unless $Inputs are clean in the tree under test, the image's ai-stack.lab.tree is that tree, and it is not labelled
+# dirty. $What names the image in the messages.
+function Assert-LabTreeImage([string]$Tag, [string]$Mode, [string]$Ob1, [string[]]$Inputs, [string]$What) {
+  $refuse = { param($why) Fail "REFUSED: $Tag is not this tree's $What ($why) and this is a $Mode run - a green or landing run only ever runs images of the tree under test"; throw "guard: $Tag refused in a $Mode run: $why" }
   if (-not $Ob1) { & $refuse 'the guard was given no OB1 tree to bind the image to' }
   $id = Resolve-LabImageId $Tag
-  if (-not $id) { Fail "the green-image guard could not inspect $Tag"; throw "guard: $Tag not inspectable" }
-  $tut = Get-LabTreeUnderTest $Ob1
+  if (-not $id) { Fail "the image guard could not inspect $Tag"; throw "guard: $Tag not inspectable" }
+  $tut = Get-LabTreeUnderTest $Ob1 $Inputs
   if (-not $tut.tree) { & $refuse "the tree under test in $Ob1 cannot be read" }
-  if ($tut.dirty) { & $refuse "the tree under test has uncommitted changes in the workbench inputs ($(($tut.status -split "`n" | Select-Object -First 3) -join '; ')): a green or landing run tests a committed tree" }
+  if ($tut.dirty) { & $refuse "the tree under test has uncommitted changes in its inputs ($(($tut.status -split "`n" | Select-Object -First 3) -join '; ')): a green or landing run tests a committed tree" }
   $l = Get-LabImageLabels $id
   if ($null -eq $l) { & $refuse "image $id cannot be inspected" }
   $t = $l[$script:LabTreeLabel]
-  if ($t -ne $tut.tree) { & $refuse "it was built from tree '$(if ($t) { $t } else { '<no ai-stack.lab.tree label>' })', the tree under test is $($tut.tree)" }
+  if ($t -cne $tut.tree) { & $refuse "it was built from tree '$(if ($t) { $t } else { '<no ai-stack.lab.tree label>' })', the tree under test is $($tut.tree)" }
   if ($l[$script:LabDirtyLabel] -eq '1') { & $refuse 'it was built from a dirty working tree (ai-stack.lab.dirty=1)' }
-  $g = $l[$script:LabGateLabel]
-  $mk = Get-LabGateMarkers $id
+  return @{ id = $id; tree = $tut.tree; labels = $l; refuse = $refuse }
+}
+# The green / landing guard of a WORKBENCH image (runtime or test stage). Returns the checked image ID; the caller runs
+# that ID, never the tag again (test attempt 2, A7). Refuses unless the tree binding holds (above), its gate markers say
+# full and its label does not say skipped (D1), and its /app holds exactly the tree's copied files (A5, X1, X2).
+function Assert-LabGreenImage([string]$Tag, [string]$Mode, [string]$Ob1, [string]$Kind = 'runtime') {
+  $b = Assert-LabTreeImage $Tag $Mode $Ob1 $script:LabWbInputs "full-gate $Kind image"
+  $refuse = { param($why) Fail "REFUSED: $Tag is not this tree's full-gate $Kind image ($why) and this is a $Mode run - a green or landing run only ever runs an image of the tree under test whose unit gate ran"; throw "guard: $Tag refused in a $Mode run: $why" }
+  $g = $b.labels[$script:LabGateLabel]
+  $mk = Get-LabGateMarkers $b.id
   if ($g -eq 'skipped' -or $mk -ne 'full') { & $refuse "its gate markers say '$mk' (want /app/.test-gate-passed and no /app/.test-gate-skipped); label $($script:LabGateLabel)='$g'" }
-  $src = Test-LabImageSrc $id $Ob1 $Kind
-  if ($src) { & $refuse $src }
-  Pass "the green-image guard: $Tag = $id (tree $($tut.tree.Substring(0, 12)), gate markers full, /app/src = the tree's, $Kind) - the run uses this ID"
-  return $id
+  $app = Test-LabImageApp $b.id $Ob1 $Kind
+  if ($app) { & $refuse $app }
+  Pass "the green-image guard: $Tag = $($b.id) (tree $($b.tree.Substring(0, 12)), gate markers full, /app = the tree's deno.json, deno.lock, notices, gate, csl and src, $Kind) - the run uses this ID"
+  return $b.id
+}
+# The green / landing guard of the VIEWER (a companion image, test attempt 3 X3): bound to the tree of its own inputs
+# (docker/wiki-viewer, recipes) and ID-pinned. Returns the checked ID.
+function Assert-LabViewerImage([string]$Tag, [string]$Mode, [string]$Ob1) {
+  $b = Assert-LabTreeImage $Tag $Mode $Ob1 $script:LabViewerInputs 'viewer image'
+  Pass "the viewer guard: $Tag = $($b.id) (tree $($b.tree.Substring(0, 12)), docker/wiki-viewer and recipes clean) - the run uses this ID"
+  return $b.id
 }
 
 # ---- part 1: a skip-gate Dockerfile for a tree that predates WORKBENCH_TEST_GATE (a red base) ---------------------------
@@ -564,7 +612,10 @@ function Invoke-LabWorkbenchImages {
     $res.viewer = $vid
   }
   if ($Run.mode -eq 'green' -or $Run.mode -eq 'landing') {
-    try { $res.wb = Assert-LabGreenImage $res.wb $Run.mode $Ob1 'runtime'; $res.test = Assert-LabGreenImage $res.test $Run.mode $Ob1 'test' } catch { return $res }
+    try {
+      $res.wb = Assert-LabGreenImage $res.wb $Run.mode $Ob1 'runtime'; $res.test = Assert-LabGreenImage $res.test $Run.mode $Ob1 'test'
+      if ($res.viewer) { $res.viewer = Assert-LabViewerImage $res.viewer $Run.mode $Ob1 }
+    } catch { return $res }
   } else {
     # red / mutant: no gate guard, but the run still uses the image IDs resolved here, never a tag that can move
     foreach ($k in @('wb', 'test')) {
