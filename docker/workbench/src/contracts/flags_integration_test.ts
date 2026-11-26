@@ -361,26 +361,30 @@ t("S5: legacy files - a path cut at a JavaScript-only space is never judged as t
 
 // S6 (review 1, B1): the own-key skip. B's LEGACY root file `documents/<A's key><stop>...` is cut by the scanner to exactly
 // `documents/<A's key>`, A's own directory. A naming B's file is the answer for a missing document on every route, never B's file.
-const AFTER_KEY = [" notes.md", ",old.md", "#1.md", " (copy).md", ")x.md", "'s.md", "&x.md", " notes.md"];
+const AFTER_KEY = [" notes.md", ",old.md", "#1.md", " (copy).md", ")x.md", "'s.md", "&x.md", "\u00a0notes.md"];
+// the caller is a FIXED identity: the lab script plants B's legacy vault files `documents/s6akey<stop>...` (marker S6-B-SECRET-<n>) under its key
+const A6 = "s6akey";
+const S6_MARK = "S6-B-SECRET";
 t("S6: legacy file `<own key><stop character>...` of another user - the caller gets the missing-document answer on every route", async () => {
   const q = encodeURIComponent;
   const routes: [string, (p: string) => Promise<{ status: number; text: string }>][] = [
-    ["flag from", (p) => mk(A, { from: { kind: "document", ref: p } })],
-    ["holder references", (p) => call(A, "GET", `/workbench/contract/holders/user_document/references?ref=${q(p)}`)],
-    ["reference create", (p) => call(A, "POST", "/workbench/contract/references", { source_id: SRC, quote: "x", holder: { kind: "user_document", ref: p } })],
-    ["diff-check", (p) => call(A, "POST", "/workbench/contract/diff-check", { holder: { kind: "user_document", ref: p } })],
-    ["note-history", (p) => call(A, "GET", `/workbench/note-history?path=${q(p)}`)],
-    ["export", (p) => call(A, "GET", `/workbench/export?path=${q(p)}&format=md`)],
+    ["flag from", (p) => mk(A6, { from: { kind: "document", ref: p } })],
+    ["holder references", (p) => call(A6, "GET", `/workbench/contract/holders/user_document/references?ref=${q(p)}`)],
+    ["reference create", (p) => call(A6, "POST", "/workbench/contract/references", { source_id: SRC, quote: "x", holder: { kind: "user_document", ref: p } })],
+    ["diff-check", (p) => call(A6, "POST", "/workbench/contract/diff-check", { holder: { kind: "user_document", ref: p } })],
+    ["note-history", (p) => call(A6, "GET", `/workbench/note-history?path=${q(p)}`)],
+    ["export", (p) => call(A6, "GET", `/workbench/export?path=${q(p)}&format=md`)],
   ];
   const bad: string[] = [];
   for (const tail of AFTER_KEY) {
-    const theirs = `documents/${A}${tail}`;
-    const gone = `documents/${A}-nobody${tail}`;
-    await sql(`INSERT INTO public.user_document_listings (path, title, owner_sub) VALUES ($1, 'b', $2)`, [theirs, B]);
+    const theirs = `documents/${A6}${tail}`;
+    const gone = `documents/${A6}-nobody${tail}`;
+    await sql(`INSERT INTO public.user_document_listings (path, title, owner_sub) VALUES ($1, 'b', $2) ON CONFLICT (path) DO UPDATE SET owner_sub = EXCLUDED.owner_sub`, [theirs, B]);
     try {
       for (const [label, fn] of routes) {
         const f = await fn(theirs);
         const m = await fn(gone);
+        if (f.text.includes(S6_MARK)) bad.push(`${JSON.stringify(tail)} ${label}: B's CONTENT reached A: ${f.status} ${f.text.slice(0, 120)}`);
         if (f.status !== m.status || f.text !== m.text.replaceAll(gone, theirs).replaceAll(q(gone), q(theirs))) bad.push(`${JSON.stringify(tail)} ${label}: foreign ${f.status} ${f.text.slice(0, 120)} | missing ${m.status} ${m.text.slice(0, 120)}`);
       }
     } finally {

@@ -76,6 +76,12 @@ foreach ($fx in @(@('content/tool/tool-fixture', 'Tool Fixture', 'An entity page
 }
 . (Join-Path $PSScriptRoot 'evidence-gate.ps1')
 
+# S6 (review 1, B1): B's LEGACY vault files named after the caller's key plus a stop character (the flags integration test's
+# fixed caller s6akey), each with a marker, so the test can prove B's content is never served, not only that the answer matches.
+$s6docs = Join-Path $vault 'documents'; New-Item -ItemType Directory -Force $s6docs | Out-Null
+$s6tails = @(' notes.md', ',old.md', '#1.md', ' (copy).md', ')x.md', "'s.md", '&x.md', ([string][char]0xA0) + 'notes.md')
+$s6n = 0
+foreach ($tl in $s6tails) { $s6n++; [System.IO.File]::WriteAllText((Join-Path $s6docs ('s6akey' + $tl)), "---`ntitle: b`n---`nS6-B-SECRET-$s6n`n", (New-Object System.Text.UTF8Encoding $false)) }
 $script:fail = 0
 $script:made = @{ net = $false; containers = @(); images = @(); dirs = @($evStage, $stage, $vault) }
 function Pass([string]$m) { Write-Host "  PASS  $m" }
