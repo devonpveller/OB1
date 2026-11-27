@@ -1,0 +1,22 @@
+/* The Coverage tab (rwr-doc-coverage). Every rule applies only inside .cov; colours come from the shared tokens (light and dark).
+   Nothing is wider than the side panel: text wraps anywhere, rows wrap, the box is as wide as its card. */
+.cov { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.cov * { min-width: 0; }
+.cov-sec { display: flex; flex-direction: column; gap: 8px; }
+.cov .cov-h { margin: 0; font-size: 13px; font-weight: 600; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.cov .cov-add { display: flex; flex-direction: column; gap: 6px; }
+.cov textarea { width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel-2); color: var(--fg); font: inherit; resize: vertical; }
+.cov .cov-over { color: var(--danger); }
+.cov .cov-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.cov .cov-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.cov .cov-row { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); }
+.cov .cov-line { display: flex; align-items: flex-start; gap: 8px; }
+.cov .cov-line input[type="checkbox"] { flex: none; width: 24px; height: 24px; margin: 0; }
+.cov .cov-text { overflow-wrap: anywhere; word-break: break-word; }
+.cov .cov-sub { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.cov .cov-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 8px; border-radius: 6px; background: var(--amber-soft); border: 1px solid var(--amber-line); color: var(--amber-text); }
+.cov .cov-confirm .btn { background: var(--panel); color: var(--fg); }
+.cov .btn.sm { height: 28px; padding: 0 10px; white-space: normal; }
+.cov .danger-line { border-color: var(--danger); color: var(--danger); }
+.cov .docs-err { color: var(--danger); margin: 0; overflow-wrap: anywhere; }
+.cov .meta { overflow-wrap: anywhere; }

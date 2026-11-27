@@ -4,9 +4,10 @@
 // that it is not built yet - never an error, never a blank. A later item replaces its tab's `panel` and nothing else.
 // The strip is the WAI-ARIA tabs pattern: one tab stop, Left / Right / Home / End move between tabs.
 import { useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { CoverageTab, useCoverage, type CoverageCtx } from "./CoverageTab";
 
 export type TabId = "references" | "coverage" | "topics" | "refine" | "history" | "details" | "export";
-export type TabDef = { id: TabId; label: string; will: string; panel?: ReactNode };
+export type TabDef = { id: TabId; label: string; will: string; panel?: ReactNode; badge?: number | null };
 
 export const DOC_TABS: TabDef[] = [
   { id: "references", label: "References", will: "The sources waiting to be placed, the ones cited in the text, and a way to find more." },
@@ -18,7 +19,10 @@ export const DOC_TABS: TabDef[] = [
   { id: "export", label: "Export", will: "Download the document as PDF, Word or Markdown, with the citation check." },
 ];
 
-export function InThisDoc({ tabs = DOC_TABS }: { tabs?: TabDef[] }) {
+export function InThisDoc({ tabs: given = DOC_TABS, ctx }: { tabs?: TabDef[]; ctx?: CoverageCtx }) {
+  // rwr-doc-coverage: the Coverage tab (and its number, the count of open gaps) once the screen hands over what it needs
+  const cov = useCoverage(ctx ?? null);
+  const tabs = ctx ? given.map((t) => (t.id === "coverage" ? { ...t, badge: cov.open, panel: <CoverageTab cov={cov} ctx={ctx} /> } : t)) : given;
   const [on, setOn] = useState<TabId>(tabs[0].id);
   const refs = useRef<Record<string, HTMLButtonElement | null>>({});
   const move = (e: KeyboardEvent, i: number) => {
@@ -37,7 +41,7 @@ export function InThisDoc({ tabs = DOC_TABS }: { tabs?: TabDef[] }) {
         {tabs.map((t, i) => (
           <button key={t.id} type="button" role="tab" id={`dt-${t.id}`} aria-selected={t.id === cur.id} aria-controls={`dp-${t.id}`}
             tabIndex={t.id === cur.id ? 0 : -1} className={"tab" + (t.id === cur.id ? " tabon" : "")} data-testid={`dtab-${t.id}`}
-            ref={(el) => { refs.current[t.id] = el; }} onClick={() => setOn(t.id)} onKeyDown={(e) => move(e, i)}>{t.label}</button>
+            ref={(el) => { refs.current[t.id] = el; }} onClick={() => setOn(t.id)} onKeyDown={(e) => move(e, i)}>{t.label}{t.badge ? <>{" "}<span className="count" data-testid="cov-count">{t.badge}</span></> : null}</button>
         ))}
       </div>
       <div role="tabpanel" id={`dp-${cur.id}`} aria-labelledby={`dt-${cur.id}`} tabIndex={0} className="doc-panel" data-testid={`dpanel-${cur.id}`}>
