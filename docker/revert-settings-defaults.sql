@@ -57,5 +57,10 @@ UPDATE public.settings_keys SET validation = '{}'::jsonb
     'research.search_k', 'research.confidence_floor', 'research.reuse_max_distance', 'research.kb_sources_k',
     'curator.shortlist_k', 'curator.new_thread_min_confidence', 'curator.merge_floor_distance', 'curator.conflict_distance');
 
+-- slot 400's code defaults come back for the three keys slot 730 set to the deployed values
+UPDATE public.settings_keys k SET default_value = d.v::jsonb
+  FROM (VALUES ('research.max_fetch', '24'), ('research.max_fetch_timeouts', '20'), ('research.max_wall_ms', '180000')) AS d (key, v)
+ WHERE k.key = d.key AND k.tier = 'admin' AND k.default_value IS DISTINCT FROM d.v::jsonb;
+
 COMMIT;
 NOTIFY pgrst, 'reload schema';

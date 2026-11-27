@@ -28,12 +28,12 @@ export interface RunLimits {
 }
 
 /** limit -> its settings key, its fixed range and whether it is a whole number */
-const SPEC = {
+export const SPEC = {
   SEARCH_K: { key: "research.search_k", min: 3, max: 16, int: true },
   CONFIDENCE_FLOOR: { key: "research.confidence_floor", min: 0.3, max: 0.8, int: false },
-  MAX_FETCH: { key: "research.max_fetch", min: 6, max: 60, int: true },
-  MAX_FETCH_TIMEOUTS: { key: "research.max_fetch_timeouts", min: 0, max: 40, int: true },
-  MAX_WALL_MS: { key: "research.max_wall_ms", min: 60000, max: 600000, int: true },
+  MAX_FETCH: { key: "research.max_fetch", min: 6, max: 160, int: true },
+  MAX_FETCH_TIMEOUTS: { key: "research.max_fetch_timeouts", min: 0, max: 80, int: true },
+  MAX_WALL_MS: { key: "research.max_wall_ms", min: 60000, max: 1800000, int: true },
   KB_SOURCES_K: { key: "research.kb_sources_k", min: 0, max: 12, int: true },
   REUSE_MAX_DISTANCE: { key: "research.reuse_max_distance", min: 0.3, max: 0.7, int: false },
   MAX_ROUNDS: { key: "research.max_rounds", min: 1, max: 5, int: true },

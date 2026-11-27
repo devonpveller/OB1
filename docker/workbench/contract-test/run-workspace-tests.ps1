@@ -553,6 +553,14 @@ try {
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
   if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the settings defaults integration test fails on the base ($($sum.Value))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -eq 12) "the settings defaults integration test, all 12 cases ($($sum.Value))" }
+  if (-not $Red) {
+    # rwr-settings-defaults [5j4b]: the limits are written in four places (compose, slot 400 + 730 defaults, slot 730 ranges and presets, both
+    # limits.ts); this host-side test fails when any two drift. It reads files only (no docker, no network).
+    Write-Host '[5j4b] limits-agreement.test.ts: compose defaults = registry defaults = Standard preset; SQL ranges = both limits.ts SPEC'
+    $agree = ((& deno test --allow-read (Join-Path $dockerDir 'limits-agreement.test.ts') 2>&1 | Out-String) -replace '\x1b\[[0-9;]*m', '')
+    Save 'limits-agreement.log' $agree
+    Check ($agree -match 'ok \| 5 passed \| 0 failed') '[5j4b] the limits agree across the compose file, slot 730 and both limits.ts (5 / 5)'
+  }
 
   if (-not $Red) {
     # rw-settings-store [5k]: "a stored refinery value is what the service reads on its next run" - the REAL refinery

@@ -22,7 +22,8 @@
 --     logged - and the app role can read it and cannot edit, delete or truncate it. A non-admin has no route to it.
 --   * the services read an admin limit through the one function, public.setting_get(NULL, key) (slot 400): NULL = the env value.
 -- Slot 400's setting_problem() and slot 490's user_setting_set() are NOT replaced (the new rules are triggers).
--- Additive and idempotent: a re-run restores exactly what is written here. Fresh volume: runs after 400, 480, 490, 550. Live:
+-- Additive and idempotent: a re-run restores exactly what is written here. RE-RUN IT AFTER ANY RE-RUN OF SLOT 400 (400's upsert puts its
+-- code defaults back on the three keys this file sets to the deployed values). Fresh volume: runs after 400, 480, 490, 550. Live:
 -- a fresh DB backup, psql -f BEFORE the new workbench image. Revert: revert-settings-defaults.sql (discards the eight keys'
 -- stored values, the stored admin limits and the audit log; the limits are then the services' env values again).
 -- ============================================================
@@ -52,24 +53,24 @@ INSERT INTO public.settings_keys (key, tier, type, section, position, label, hel
         'The Start research dialog asks you to confirm when the chosen depth may read more pages than this. It cannot be higher than the most pages a run may read at all (set by an admin).',
         NULL, NULL, 'openbrain-workbench-app, when the Start research dialog shows what a run would do', '{"min":1,"max":200}', true, 'settings', 'only_you'),
     ('library.how_far_out', 'user', 'integer', 'ui', 110, 'How far out the Library looks from what you open',
-        'Steps from an item to the related items the Library shows: 1 = direct relations only, 3 = three steps out.',
-        '2', NULL, 'openbrain-workbench-app Library (kept now, applied when that screen opens)', '{"min":1,"max":3}', true, 'settings', 'only_you'),
+        'Kept now; applied when the Library opens. Steps from an item to the related items the Library shows: 1 = direct relations only, 3 = three steps out.',
+        '2', NULL, 'openbrain-workbench-app Library (kept now, applied when the Library opens)', '{"min":1,"max":3}', true, 'settings', 'only_you'),
     ('library.recent_size', 'user', 'integer', 'ui', 120, 'Recently viewed: how many items to keep',
-        'How many opened items the Recently viewed list keeps (newest first).',
-        '24', NULL, 'openbrain-workbench-app Library, whenever an item is added to Recently viewed (kept now, applied when that screen opens)', '{"min":1,"max":24}', true, 'settings', 'only_you'),
+        'Kept now; applied when the Library opens. How many opened items the Recently viewed list keeps (newest first).',
+        '24', NULL, 'openbrain-workbench-app Library, whenever an item is added to Recently viewed (kept now, applied when the Library opens)', '{"min":1,"max":24}', true, 'settings', 'only_you'),
     ('library.clear_on_signout', 'user', 'boolean', 'ui', 130, 'Clear Recently viewed when I sign out',
-        'Off: the list stays with your account. On: it is emptied when you sign out.',
-        'false', NULL, 'openbrain-workbench-app Library, at sign out (kept now, applied when that screen opens)', '{}', true, 'settings', 'only_you'),
+        'Kept now; applied when the Library opens. Off: the list stays with your account. On: it is emptied when you sign out.',
+        'false', NULL, 'openbrain-workbench-app Library, at sign out (kept now, applied when the Library opens)', '{}', true, 'settings', 'only_you'),
     ('library.hidden_suggestions', 'user', 'ref_list', 'ui', 140, 'Hidden suggestions',
-        'The suggestions you hid, each {kind, id} - identifiers only. At most 100.',
-        NULL, NULL, 'openbrain-workbench-app Library, whenever a suggestion is hidden or shown again (kept now, applied when that screen opens)',
+        'Kept now; applied when the Library opens. The suggestions you hid, each {kind, id} - identifiers only. At most 100.',
+        NULL, NULL, 'openbrain-workbench-app Library, whenever a suggestion is hidden or shown again (kept now, applied when the Library opens)',
         '{"max_items":100,"max_len":120,"kinds":["source","claim","topic","gap"]}', true, 'settings', 'only_you'),
     ('podcast.default_format', 'user', 'string', 'digest', 110, 'Default podcast format',
-        'A format of yours (by id or name) that a new episode starts from.',
-        NULL, NULL, 'openbrain-workbench-app, when a new episode is made (kept now, applied when that form opens)', '{"max_len":120,"ref":"podcast_format"}', true, 'settings', 'on_server'),
+        'Kept now; applied when the new-episode form opens. A format of yours (by id or name) that a new episode starts from.',
+        NULL, NULL, 'openbrain-workbench-app, when a new episode is made (kept now, applied when the new-episode form opens)', '{"max_len":120,"ref":"podcast_format"}', true, 'settings', 'on_server'),
     ('podcast.episode_minutes', 'user', 'integer', 'digest', 120, 'Episode length (minutes)',
-        'How long a new episode should run, about.',
-        '10', NULL, 'openbrain-workbench-app, when a new episode is made (kept now, applied when that form opens)', '{"min":3,"max":30}', true, 'settings', 'on_server')
+        'Kept now; applied when the new-episode form opens. How long a new episode should run, about.',
+        '10', NULL, 'openbrain-workbench-app, when a new episode is made (kept now, applied when the new-episode form opens)', '{"min":3,"max":30}', true, 'settings', 'on_server')
 ON CONFLICT (key) DO UPDATE SET
     tier = EXCLUDED.tier, type = EXCLUDED.type, section = EXCLUDED.section, position = EXCLUDED.position,
     label = EXCLUDED.label, help = EXCLUDED.help, default_value = EXCLUDED.default_value, env_name = EXCLUDED.env_name,
@@ -78,11 +79,11 @@ ON CONFLICT (key) DO UPDATE SET
 -- the fixed ranges of the thirteen admin limits (a re-run puts them back exactly)
 UPDATE public.settings_keys k SET validation = r.v::jsonb
   FROM (VALUES
-    ('research.max_fetch',                  '{"min":6,"max":60}'),
-    ('research.max_fetch_timeouts',         '{"min":0,"max":40}'),
+    ('research.max_fetch',                  '{"min":6,"max":160}'),
+    ('research.max_fetch_timeouts',         '{"min":0,"max":80}'),
     ('research.max_rounds',                 '{"min":1,"max":5}'),
     ('research.relevant_target',            '{"min":3,"max":16}'),
-    ('research.max_wall_ms',                '{"min":60000,"max":600000}'),
+    ('research.max_wall_ms',                '{"min":60000,"max":1800000}'),
     ('research.search_k',                   '{"min":3,"max":16}'),
     ('research.confidence_floor',           '{"min":0.30,"max":0.80}'),
     ('research.reuse_max_distance',         '{"min":0.30,"max":0.70}'),
@@ -93,6 +94,15 @@ UPDATE public.settings_keys k SET validation = r.v::jsonb
     ('curator.conflict_distance',           '{"min":0.10,"max":0.40}')
   ) AS r (key, v)
  WHERE k.key = r.key AND k.tier = 'admin' AND k.validation IS DISTINCT FROM r.v::jsonb;
+
+-- The DEPLOYED defaults. Slot 400 registered harness.ts's code defaults (24 pages, 20 timeouts, 180 000 ms) but openbrain-research runs on the
+-- compose defaults (docker-compose.yml: RESEARCH_MAX_FETCH 80, RESEARCH_MAX_FETCH_TIMEOUTS 40, RESEARCH_MAX_WALL_MS 900000). "In force" with nothing
+-- stored, the user ceiling and the preset called Standard must say what runs, so these three default_values are set to the compose values
+-- (revert-settings-defaults.sql puts slot 400's back). The other ten keys' slot-400 defaults already equal the compose defaults.
+-- limits-agreement.test.ts (beside the compose file) fails if this table, the compose file or either limits.ts drifts.
+UPDATE public.settings_keys k SET default_value = d.v::jsonb
+  FROM (VALUES ('research.max_fetch', '80'), ('research.max_fetch_timeouts', '40'), ('research.max_wall_ms', '900000')) AS d (key, v)
+ WHERE k.key = d.key AND k.tier = 'admin' AND k.default_value IS DISTINCT FROM d.v::jsonb;
 
 -- ── 2. the user ceiling ─────────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS public.settings_user_ceilings (
@@ -325,30 +335,30 @@ ON CONFLICT (grp) DO UPDATE SET position = EXCLUDED.position, label = EXCLUDED.l
 
 INSERT INTO public.settings_limit_presets (grp, preset, position, label, help) VALUES
     ('run_size', 'small',    10, 'Small',    'Quicker, lighter runs.'),
-    ('run_size', 'standard', 20, 'Standard', 'The shipped values.'),
+    ('run_size', 'standard', 20, 'Standard', 'The deployed defaults: what runs when nothing is chosen.'),
     ('run_size', 'large',    30, 'Large',    'Longer runs that read more.'),
     ('judgement', 'strict',   10, 'Strict',   'A higher bar for a source or a stored claim.'),
-    ('judgement', 'standard', 20, 'Standard', 'The shipped values.'),
+    ('judgement', 'standard', 20, 'Standard', 'The deployed defaults: what runs when nothing is chosen.'),
     ('judgement', 'open',     30, 'Open',     'A lower bar: weaker evidence gets through as a lead.'),
     ('curator', 'careful',  10, 'Careful',  'Fewer, tighter threads.'),
-    ('curator', 'standard', 20, 'Standard', 'The shipped values.'),
+    ('curator', 'standard', 20, 'Standard', 'The deployed defaults: what runs when nothing is chosen.'),
     ('curator', 'broad',    30, 'Broad',    'More candidates, looser grouping.')
 ON CONFLICT (grp, preset) DO UPDATE SET position = EXCLUDED.position, label = EXCLUDED.label, help = EXCLUDED.help;
 
 -- the documented values (the table the test compares with); a re-run puts them back
 DELETE FROM public.settings_limit_preset_values;
 INSERT INTO public.settings_limit_preset_values (grp, preset, key, value) VALUES
-    ('run_size', 'small',    'research.max_fetch', '12'),        ('run_size', 'small',    'research.max_fetch_timeouts', '10'),
+    ('run_size', 'small',    'research.max_fetch', '24'),        ('run_size', 'small',    'research.max_fetch_timeouts', '20'),
     ('run_size', 'small',    'research.max_rounds', '2'),        ('run_size', 'small',    'research.relevant_target', '5'),
-    ('run_size', 'small',    'research.max_wall_ms', '120000'),  ('run_size', 'small',    'research.search_k', '6'),
+    ('run_size', 'small',    'research.max_wall_ms', '300000'),  ('run_size', 'small',    'research.search_k', '6'),
     ('run_size', 'small',    'research.kb_sources_k', '4'),
-    ('run_size', 'standard', 'research.max_fetch', '24'),        ('run_size', 'standard', 'research.max_fetch_timeouts', '20'),
+    ('run_size', 'standard', 'research.max_fetch', '80'),        ('run_size', 'standard', 'research.max_fetch_timeouts', '40'),
     ('run_size', 'standard', 'research.max_rounds', '3'),        ('run_size', 'standard', 'research.relevant_target', '8'),
-    ('run_size', 'standard', 'research.max_wall_ms', '180000'),  ('run_size', 'standard', 'research.search_k', '8'),
+    ('run_size', 'standard', 'research.max_wall_ms', '900000'),  ('run_size', 'standard', 'research.search_k', '8'),
     ('run_size', 'standard', 'research.kb_sources_k', '6'),
-    ('run_size', 'large',    'research.max_fetch', '40'),        ('run_size', 'large',    'research.max_fetch_timeouts', '30'),
+    ('run_size', 'large',    'research.max_fetch', '120'),       ('run_size', 'large',    'research.max_fetch_timeouts', '60'),
     ('run_size', 'large',    'research.max_rounds', '4'),        ('run_size', 'large',    'research.relevant_target', '12'),
-    ('run_size', 'large',    'research.max_wall_ms', '300000'),  ('run_size', 'large',    'research.search_k', '12'),
+    ('run_size', 'large',    'research.max_wall_ms', '1500000'),  ('run_size', 'large',    'research.search_k', '12'),
     ('run_size', 'large',    'research.kb_sources_k', '10'),
     ('judgement', 'strict',   'research.confidence_floor', '0.65'), ('judgement', 'strict',   'research.reuse_max_distance', '0.45'),
     ('judgement', 'standard', 'research.confidence_floor', '0.50'), ('judgement', 'standard', 'research.reuse_max_distance', '0.55'),

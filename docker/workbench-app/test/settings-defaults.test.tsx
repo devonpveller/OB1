@@ -20,11 +20,11 @@ const USER_KEYS = (): Setting[] => [
   row({ key: "refinery.brainstorm", type: "boolean", section: "refinery", label: "Brainstorm on my ideas", default: true, tag: "on_server" }),
   row({ key: "research.default_depth", type: "enum", section: "research", label: "Default research depth", default: "standard", validation: { enum: ["quick", "standard", "deep"] } }),
   row({ key: "research.ask_over_fetch", type: "integer", section: "research", position: 20, label: "Ask me before a run reads more than this many pages", validation: { min: 1, max: 200 } }),
-  row({ key: "library.how_far_out", type: "integer", section: "ui", position: 110, label: "How far out the Library looks", default: 2, validation: { min: 1, max: 3 } }),
-  row({ key: "library.recent_size", type: "integer", section: "ui", position: 120, label: "Recently viewed: how many items to keep", default: 24, validation: { min: 1, max: 24 } }),
-  row({ key: "library.clear_on_signout", type: "boolean", section: "ui", position: 130, label: "Clear Recently viewed when I sign out", default: false }),
-  row({ key: "library.hidden_suggestions", type: "ref_list", section: "ui", position: 140, label: "Hidden suggestions", validation: { max_items: 100 } }),
-  row({ key: "podcast.episode_minutes", type: "integer", section: "digest", position: 120, label: "Episode length (minutes)", default: 10, validation: { min: 3, max: 30 }, tag: "on_server" }),
+  row({ key: "library.how_far_out", read_by: "openbrain-workbench-app Library (kept now, applied when the Library opens)", type: "integer", section: "ui", position: 110, label: "How far out the Library looks", default: 2, validation: { min: 1, max: 3 } }),
+  row({ key: "library.recent_size", read_by: "openbrain-workbench-app Library (kept now, applied when the Library opens)", type: "integer", section: "ui", position: 120, label: "Recently viewed: how many items to keep", default: 24, validation: { min: 1, max: 24 } }),
+  row({ key: "library.clear_on_signout", read_by: "openbrain-workbench-app Library (kept now, applied when the Library opens)", type: "boolean", section: "ui", position: 130, label: "Clear Recently viewed when I sign out", default: false }),
+  row({ key: "library.hidden_suggestions", read_by: "openbrain-workbench-app Library (kept now, applied when the Library opens)", type: "ref_list", section: "ui", position: 140, label: "Hidden suggestions", validation: { max_items: 100 } }),
+  row({ key: "podcast.episode_minutes", read_by: "openbrain-workbench-app (kept now, applied when the new-episode form opens)", type: "integer", section: "digest", position: 120, label: "Episode length (minutes)", default: 10, validation: { min: 3, max: 30 }, tag: "on_server" }),
 ];
 
 type Group = { group: string; label: string; help: string; current: string; presets: { preset: string; label: string; help: string; values: { key: string; label: string; value: unknown }[] }[]; values: any[] };
@@ -179,7 +179,7 @@ describe("a default may not pass the admin's ceiling", () => {
     await pick("Research defaults");
     const f = within(screen.getByTestId("setting-research.ask_over_fetch")).getByTestId("control") as HTMLInputElement;
     expect(f.value).toBe("24");
-    expect(screen.getByTestId("ceiling-research.ask_over_fetch").textContent).toMatch(/Highest allowed: 12.*Your saved value is above it, so runs use 12/);
+    expect(screen.getByTestId("ceiling-research.ask_over_fetch").textContent).toMatch(/Highest allowed: 12.*Your saved value is above it, so you are asked above 12/);
     expect(srv.puts).toEqual([]);
   });
 });
@@ -199,7 +199,7 @@ describe("the admin research limits are presets, never numbers", () => {
     expect(panel.querySelectorAll("input[type=number], input[type=text], input:not([type])").length).toBe(0);
     expect(panel.querySelectorAll("select, datalist").length).toBe(0);
     expect(within(panel).getAllByRole("radiogroup").length).toBe(2);
-    expect(screen.getByTestId("limits-now-run_size").textContent).toMatch(/In force: Standard\..*Pages retrieved per run: 24 \(the server's own\)/);
+    expect(screen.getByTestId("limits-now-run_size").textContent).toMatch(/In force: Standard\..*Pages retrieved per run: 24 \(deployed default\)/);
     fireEvent.click(screen.getByTestId("preset-run_size-small"));
     await waitFor(() => expect(screen.getByTestId("limits-saved-run_size").textContent).toBe("Saved"));
     expect(srv.puts.find((p) => p.path === "PUT /workbench/settings/admin/limits/run_size")!.body).toEqual({ preset: "small" });
@@ -207,7 +207,7 @@ describe("the admin research limits are presets, never numbers", () => {
     expect((screen.getByTestId("preset-run_size-small") as HTMLInputElement).checked).toBe(true);
   });
 
-  it("a refusal is shown in the server's words and nothing changes; 'the server's own values' resets", async () => {
+  it("a refusal is shown in the server's words and nothing changes; 'Back to the deployed defaults' asks first, then resets", async () => {
     await openSettings(true);
     await pick("Research and curator limits");
     await screen.findByTestId("limits");
@@ -218,8 +218,16 @@ describe("the admin research limits are presets, never numbers", () => {
     expect(screen.getByTestId("limits-now-run_size").textContent).toMatch(/In force: Standard/);
     fireEvent.click(screen.getByTestId("preset-run_size-small"));
     await waitFor(() => expect(screen.getByTestId("limits-now-run_size").textContent).toMatch(/In force: Small/));
+    const putsBefore = srv.puts.length;
     fireEvent.click(screen.getByTestId("limits-reset-run_size"));
-    await waitFor(() => expect(screen.getByTestId("limits-now-run_size").textContent).toMatch(/In force: Standard\..*\(the server's own\)/));
+    expect(screen.getByTestId("limits-confirm-run_size").textContent).toMatch(/How big a research run is.*back to the deployed defaults for everyone/);
+    expect(srv.puts.length).toBe(putsBefore); // nothing is sent until the yes
+    fireEvent.click(screen.getByTestId("limits-confirm-no-run_size"));
+    expect(screen.queryByTestId("limits-confirm-run_size")).toBeNull();
+    fireEvent.click(screen.getByTestId("limits-reset-run_size"));
+    fireEvent.click(screen.getByTestId("limits-confirm-yes-run_size"));
+    await waitFor(() => expect(screen.getByTestId("limits-now-run_size").textContent).toMatch(/In force: Standard\..*\(deployed default\)/));
+    expect(srv.puts.at(-1)!.path).toBe("DELETE /workbench/settings/admin/limits/run_size");
   });
 
   it("the log shows who changed what, old and new, with the preset", async () => {
@@ -254,6 +262,21 @@ describe("the admin research limits are presets, never numbers", () => {
     expect(screen.queryByText(/Large/)).toBeNull();
     expect(screen.queryByTestId("limits-saved-run_size")).toBeNull();
     expect(screen.queryByTestId("admin-heading")).toBeNull();
+  });
+});
+
+describe("a key nothing reads yet says so", () => {
+  const NOT_APPLIED = ["library.how_far_out", "library.recent_size", "library.clear_on_signout", "library.hidden_suggestions", "podcast.episode_minutes"];
+  it("every key whose registry row says 'kept now' renders the note, and a key that is applied renders none", async () => {
+    await openSettings(false);
+    for (const [sec, want] of [["user-library", ["library.how_far_out", "library.recent_size", "library.clear_on_signout", "library.hidden_suggestions"]], ["user-digest", ["podcast.episode_minutes"]]] as const) {
+      await pick(sec === "user-library" ? "Library" : /Daily digest/);
+      for (const k of want) expect(screen.getByTestId("notapplied-" + k).textContent).toMatch(/^Kept now; applied when (the Library|the new-episode form) opens\.$/);
+    }
+    await pick("Research defaults");
+    for (const k of ["research.default_depth", "research.ask_over_fetch"]) expect(screen.queryByTestId("notapplied-" + k)).toBeNull();
+    // the registry fixture marks exactly these keys; none can be drawn without the note
+    expect(USER_KEYS().filter((k) => /kept now/i.test(k.read_by ?? "")).map((k) => k.key).sort()).toEqual([...NOT_APPLIED].sort());
   });
 });
 

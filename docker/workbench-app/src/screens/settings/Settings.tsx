@@ -7,7 +7,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import "./settings.css";
 import { Link } from "../../shell/Link";
 import {
-  HIDDEN_SUGGESTIONS, LEGEND, TAG_LABEL, applyPreset, loadLimits, loadLog, loadSettings, numberProblem, resetGroup, resetSetting, saveSetting, sectionsOf, show,
+  HIDDEN_SUGGESTIONS, LEGEND, notAppliedNote, TAG_LABEL, applyPreset, loadLimits, loadLog, loadSettings, numberProblem, resetGroup, resetSetting, saveSetting, sectionsOf, show,
   type Loaded, type LimitGroup, type LogLine, type Section, type Setting,
 } from "./settings-data";
 
@@ -125,11 +125,12 @@ function Field({ row, onRow, onStale, epoch }: { row: Setting; onRow: (r: Settin
       <div className="s-main">
         <label className="s-label" id={id + "-l"} htmlFor={editable && row.type !== "enum" ? id : undefined}>{row.label}</label>
         {row.help && <p className="meta">{row.help}</p>}
+        {notAppliedNote(row) && <p className="meta not-applied" data-testid={"notapplied-" + row.key}>{notAppliedNote(row)}</p>}
         <p className="meta">{row.is_default ? `Using the default: ${show(row.default)}` : (row.tier === "admin" ? "Set by an admin" : "Set by you")}</p>
         {typeof row.ceiling === "number" && (
           <p className="meta" data-testid={"ceiling-" + row.key}>
             Highest allowed: {row.ceiling}{row.ceiling_phrase ? ` (${row.ceiling_phrase})` : ""}.
-            {!row.is_default && typeof row.value === "number" && row.value > row.ceiling ? ` Your saved value is above it, so runs use ${row.ceiling}.` : ""}
+            {!row.is_default && typeof row.value === "number" && row.value > row.ceiling ? ` Your saved value is above it, so you are asked above ${row.ceiling}.` : ""}
           </p>
         )}
       </div>
@@ -166,6 +167,7 @@ function HiddenSuggestions({ row, onRow, onStale, epoch }: { row: Setting; onRow
     <div className="srow" data-testid={"setting-" + row.key} data-key={row.key}>
       <div className="s-main">
         <span className="s-label">{row.label}</span>
+        {notAppliedNote(row) && <p className="meta not-applied" data-testid={"notapplied-" + row.key}>{notAppliedNote(row)}</p>}
         <p className="meta" data-testid="hidden-count">{n === 0 ? "None hidden." : `${n} hidden.`}</p>
       </div>
       <div className="s-side">
@@ -193,6 +195,7 @@ function LimitsPanel({ epoch }: { epoch: () => number }) {
   const [failed, setFailed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<Record<string, string>>({});
+  const [confirming, setConfirming] = useState<string | null>(null); // the group whose "back to the deployed defaults" awaits a yes (one at a time, keyed by group)
   const [log, setLog] = useState<LogLine[] | null>(null);
   const [logFailed, setLogFailed] = useState(false);
 
@@ -236,7 +239,7 @@ function LimitsPanel({ epoch }: { epoch: () => number }) {
             <p className="meta">{g.help}</p>
             <p className="meta" data-testid={"limits-now-" + g.group}>
               {g.current === "custom" ? "In force: values no preset names (a custom setting)." : `In force: ${g.presets.find((p) => p.preset === g.current)?.label ?? g.current}.`}
-              {" "}{g.values.map((v) => `${v.label}: ${show(v.value)}${v.is_default ? " (the server's own)" : ""}`).join("; ")}
+              {" "}{g.values.map((v) => `${v.label}: ${show(v.value)}${v.is_default ? " (deployed default)" : ""}`).join("; ")}
             </p>
           </div>
           <div className="s-side">
@@ -255,7 +258,14 @@ function LimitsPanel({ epoch }: { epoch: () => number }) {
             <div className="s-state">
               <span role="status" aria-live="polite" className="saved" data-testid={"limits-saved-" + g.group}>{msg[g.group] === "Saved" ? "Saved" : ""}</span>
               {msg[g.group] && msg[g.group] !== "Saved" && <span role="alert" className="err" data-testid={"limits-error-" + g.group}>{msg[g.group]}</span>}
-              <button type="button" className="link" disabled={busy !== null} onClick={() => void run(g, null)} data-testid={"limits-reset-" + g.group}>Use the server's own values</button>
+              <button type="button" className="link" disabled={busy !== null} onClick={() => setConfirming(g.group)} data-testid={"limits-reset-" + g.group}>Back to the deployed defaults</button>
+              {confirming === g.group && (
+                <span role="alertdialog" aria-label={"Put " + g.label + " back"} data-testid={"limits-confirm-" + g.group}>
+                  <span className="meta">Put &ldquo;{g.label}&rdquo; back to the deployed defaults for everyone?</span>{" "}
+                  <button type="button" disabled={busy !== null} onClick={() => { setConfirming(null); void run(g, null); }} data-testid={"limits-confirm-yes-" + g.group}>Yes, put back</button>{" "}
+                  <button type="button" onClick={() => setConfirming(null)} data-testid={"limits-confirm-no-" + g.group}>Cancel</button>
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -270,7 +280,7 @@ function LimitsPanel({ epoch }: { epoch: () => number }) {
             <ul className="log" data-testid="log-list">
               {log.map((l) => (
                 <li key={l.id} data-testid="log-line">
-                  {when(l.at)}: {l.actor} {l.action === "clear" ? "went back to the server's own value for" : "set"} {label(l.key)}
+                  {when(l.at)}: {l.actor} {l.action === "clear" ? "went back to the deployed default for" : "set"} {label(l.key)}
                   {l.action === "clear" ? ` (was ${showValue(l.old_value)})` : `: ${showValue(l.old_value)} to ${showValue(l.new_value)}`}
                   {l.preset && l.group ? ` (preset ${l.preset})` : ""}
                 </li>

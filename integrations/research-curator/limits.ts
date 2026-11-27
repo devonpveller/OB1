@@ -17,7 +17,7 @@ export interface CuratorLimits {
   conflictDistance: number;
 }
 
-const SPEC = {
+export const SPEC = {
   shortlistK: { key: "curator.shortlist_k", min: 2, max: 10, int: true },
   newThreadMinConfidence: { key: "curator.new_thread_min_confidence", min: 0.4, max: 0.8, int: false },
   mergeFloorDistance: { key: "curator.merge_floor_distance", min: 0.25, max: 0.6, int: false },

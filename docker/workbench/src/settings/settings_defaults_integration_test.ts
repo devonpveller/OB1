@@ -73,9 +73,9 @@ const find = (list: { key: string }[], key: string) => list.find((s) => s.key ==
 // settings_limit_preset_values must equal it, and applying a preset must store exactly these values and no other key.
 const PRESETS: Record<string, Record<string, Record<string, number>>> = {
   run_size: {
-    small: { "research.max_fetch": 12, "research.max_fetch_timeouts": 10, "research.max_rounds": 2, "research.relevant_target": 5, "research.max_wall_ms": 120000, "research.search_k": 6, "research.kb_sources_k": 4 },
-    standard: { "research.max_fetch": 24, "research.max_fetch_timeouts": 20, "research.max_rounds": 3, "research.relevant_target": 8, "research.max_wall_ms": 180000, "research.search_k": 8, "research.kb_sources_k": 6 },
-    large: { "research.max_fetch": 40, "research.max_fetch_timeouts": 30, "research.max_rounds": 4, "research.relevant_target": 12, "research.max_wall_ms": 300000, "research.search_k": 12, "research.kb_sources_k": 10 },
+    small: { "research.max_fetch": 24, "research.max_fetch_timeouts": 20, "research.max_rounds": 2, "research.relevant_target": 5, "research.max_wall_ms": 300000, "research.search_k": 6, "research.kb_sources_k": 4 },
+    standard: { "research.max_fetch": 80, "research.max_fetch_timeouts": 40, "research.max_rounds": 3, "research.relevant_target": 8, "research.max_wall_ms": 900000, "research.search_k": 8, "research.kb_sources_k": 6 },
+    large: { "research.max_fetch": 120, "research.max_fetch_timeouts": 60, "research.max_rounds": 4, "research.relevant_target": 12, "research.max_wall_ms": 1500000, "research.search_k": 12, "research.kb_sources_k": 10 },
   },
   judgement: {
     strict: { "research.confidence_floor": 0.65, "research.reuse_max_distance": 0.45 },
@@ -89,8 +89,8 @@ const PRESETS: Record<string, Record<string, Record<string, number>>> = {
   },
 };
 const RANGES: Record<string, [number, number]> = {
-  "research.max_fetch": [6, 60], "research.max_fetch_timeouts": [0, 40], "research.max_rounds": [1, 5], "research.relevant_target": [3, 16],
-  "research.max_wall_ms": [60000, 600000], "research.search_k": [3, 16], "research.confidence_floor": [0.3, 0.8], "research.reuse_max_distance": [0.3, 0.7],
+  "research.max_fetch": [6, 160], "research.max_fetch_timeouts": [0, 80], "research.max_rounds": [1, 5], "research.relevant_target": [3, 16],
+  "research.max_wall_ms": [60000, 1800000], "research.search_k": [3, 16], "research.confidence_floor": [0.3, 0.8], "research.reuse_max_distance": [0.3, 0.7],
   "research.kb_sources_k": [0, 12], "curator.shortlist_k": [2, 10], "curator.new_thread_min_confidence": [0.4, 0.8],
   "curator.merge_floor_distance": [0.25, 0.6], "curator.conflict_distance": [0.1, 0.4],
 };
@@ -146,7 +146,7 @@ t("D2: the ranges are the database's, whoever writes - a direct write outside a 
   assertEquals(await code(`INSERT INTO public.contract_settings (key, value, updated_by) VALUES ('research.max_fetch', '24.5'::jsonb, 'x')`), "22023", "a whole-number limit refuses a fraction");
   // an UPDATE of a stored limit is judged too
   await sql(`INSERT INTO public.contract_settings (key, value, updated_by) VALUES ('research.max_fetch', '24', 'x')`);
-  assertEquals(await code(`UPDATE public.contract_settings SET value = '61' WHERE key = 'research.max_fetch'`), "22023");
+  assertEquals(await code(`UPDATE public.contract_settings SET value = '161' WHERE key = 'research.max_fetch'`), "22023");
   assertEquals((await stored())["research.max_fetch"], 24);
 });
 
@@ -174,12 +174,12 @@ t("D4: every admin change is a log line - who, what, old value, new value; a dir
   assertEquals((await call("PUT", `${S}/admin/limits/run_size`, { preset: "small" }, ADMIN)).status, 200);
   assertEquals((await call("PUT", `${S}/admin/limits/run_size`, { preset: "large" }, ADMIN)).status, 200);
   const l = await sql<any>(`SELECT * FROM public.settings_admin_audit WHERE id > $1 AND key = 'research.max_fetch' ORDER BY id`, [before]);
-  assertEquals(l.map((x: any) => [x.action, x.old_value === null ? null : Number(x.old_value), Number(x.new_value), x.preset]), [["set", null, 12, "small"], ["set", 12, 40, "large"]]);
+  assertEquals(l.map((x: any) => [x.action, x.old_value === null ? null : Number(x.old_value), Number(x.new_value), x.preset]), [["set", null, 24, "small"], ["set", 24, 120, "large"]]);
   // reset: the stored values go, one 'clear' line per key, the old value kept
   assertEquals((await call("DELETE", `${S}/admin/limits/run_size`, undefined, ADMIN)).status, 200);
   const c = await sql<any>(`SELECT * FROM public.settings_admin_audit WHERE id > $1 AND action = 'clear' AND key = 'research.max_fetch'`, [before]);
   assertEquals(c.length, 1);
-  assertEquals([Number(c[0].old_value), c[0].new_value, c[0].preset], [40, null, "env"]);
+  assertEquals([Number(c[0].old_value), c[0].new_value, c[0].preset], [120, null, "env"]);
   assertEquals(await stored(), {});
   // a write that names nobody still leaves a line that says so
   const b2 = await lastId();
@@ -221,7 +221,10 @@ t("D5: the admin reads the log over HTTP; a non-admin cannot read or write the l
   const groups = await call("GET", `${S}/admin/limits`, undefined, ADMIN);
   assertEquals(groups.json.groups.map((g: any) => g.group), ["run_size", "judgement", "curator"]);
   assertEquals(groups.json.groups.find((g: any) => g.group === "judgement").current, "strict");
-  assertEquals(groups.json.groups.find((g: any) => g.group === "run_size").current, "standard", "no stored value = the shipped values = standard");
+  assertEquals(groups.json.groups.find((g: any) => g.group === "run_size").current, "standard", "no stored value = the deployed defaults = standard");
+  // nothing stored for run size: the values shown are the deployed (compose) defaults, flagged as defaults
+  const rv = Object.fromEntries(groups.json.groups.find((g: any) => g.group === "run_size").values.map((v: any) => [v.key, [v.value, v.is_default]]));
+  assertEquals([rv["research.max_fetch"], rv["research.max_fetch_timeouts"], rv["research.max_wall_ms"]], [[80, true], [40, true], [900000, true]]);
   // a non-admin, every route and spelling: the same refusal as any admin door, nothing read, nothing written
   const refusal = (await call("DELETE", `${S}/admin/whatever.x`, undefined, A)).text;
   const before = await lastId();
@@ -269,31 +272,33 @@ t("D6: an admin limit is invisible to a non-admin on the user door in every spel
 
 t("D7: a default above the ceiling is refused with the ceiling named; a default at it is saved; the ceiling follows the admin's limit", async () => {
   const ASK = "research.ask_over_fetch";
-  const over = await putUser(A, ASK, 25);
+  // nothing stored: the ceiling is what the service really runs on (the compose default, 80 pages)
+  assertEquals(find((await call("GET", S, undefined, A)).json.settings, ASK).ceiling, 80);
+  const over = await putUser(A, ASK, 81);
   assertEquals(over.status, 400, over.text);
-  assert(over.json.error.includes("at most 24"), over.json.error);
+  assert(over.json.error.includes("at most 80"), over.json.error);
   assert(!over.json.error.includes("max_fetch"), "the refusal does not name the admin key");
-  assertEquals((await putUser(A, ASK, 24)).status, 200);
-  assertEquals(find((await call("GET", S, undefined, A)).json.settings, ASK).ceiling, 24);
-  // the admin picks Small (12 pages): the ceiling is 12; a stored 24 is NOT altered on read, but a new value above 12 is refused
+  assertEquals((await putUser(A, ASK, 80)).status, 200);
+  assertEquals((await putUser(A, ASK, 40, 1)).status, 200, "40 is allowed: runs read up to 80");
+  // the admin picks Small (24 pages): the ceiling is 24; a stored 40 is NOT altered on read, but a new value above 24 is refused
   assertEquals((await call("PUT", `${S}/admin/limits/run_size`, { preset: "small" }, ADMIN)).status, 200);
   const row = find((await call("GET", S, undefined, A)).json.settings, ASK);
-  assertEquals([row.value, row.ceiling], [24, 12], "a stored value is returned as stored, with the ceiling beside it");
-  const o2 = await putUser(A, ASK, 13, row.version);
+  assertEquals([row.value, row.ceiling], [40, 24], "a stored value is returned as stored, with the ceiling beside it");
+  const o2 = await putUser(A, ASK, 25, row.version);
   assertEquals(o2.status, 400);
-  assert(o2.json.error.includes("at most 12"), o2.json.error);
-  assertEquals((await putUser(A, ASK, 12, row.version)).status, 200);
-  // large: ceiling 40
+  assert(o2.json.error.includes("at most 24"), o2.json.error);
+  assertEquals((await putUser(A, ASK, 24, row.version)).status, 200);
+  // large: ceiling 120
   await call("PUT", `${S}/admin/limits/run_size`, { preset: "large" }, ADMIN);
-  assertEquals(find((await call("GET", S, undefined, A)).json.settings, ASK).ceiling, 40);
-  assertEquals((await putUser(B, ASK, 40)).status, 200);
-  assertEquals((await putUser(B, ASK, 41, 1)).status, 400);
+  assertEquals(find((await call("GET", S, undefined, A)).json.settings, ASK).ceiling, 120);
+  assertEquals((await putUser(B, ASK, 120)).status, 200);
+  assertEquals((await putUser(B, ASK, 121, 1)).status, 400);
   // the database refuses it whoever writes (the trigger), here as the superuser
-  assertEquals(await code(`INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('def-direct', $1, '41')`, [ASK]), "22023");
-  assertEquals(await code(`INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('def-direct', $1, '40')`, [ASK]), "");
-  // the shipped state again (no stored limit): the code default 24
+  assertEquals(await code(`INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('def-direct', $1, '121')`, [ASK]), "22023");
+  assertEquals(await code(`INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('def-direct', $1, '120')`, [ASK]), "");
+  // nothing stored again: the deployed default
   await call("DELETE", `${S}/admin/limits/run_size`, undefined, ADMIN);
-  assertEquals(find((await call("GET", S, undefined, A)).json.settings, ASK).ceiling, 24);
+  assertEquals(find((await call("GET", S, undefined, A)).json.settings, ASK).ceiling, 80);
   await sql(`DELETE FROM public.user_settings WHERE owner_sub = ANY($1)`, [[A["X-Test-Sub"], B["X-Test-Sub"]]]);
 });
 
@@ -357,8 +362,8 @@ t("D9: two identities - B never sees A's defaults: not the values, the versions,
 t("D10: the services read an admin limit through the one function: NULL until an admin picks a preset (env stays the fallback), then the preset's value", async () => {
   assertEquals((await sql<{ v: unknown }>(`SELECT public.setting_get(NULL, 'research.max_fetch') AS v`))[0].v, null);
   await call("PUT", `${S}/admin/limits/run_size`, { preset: "small" }, ADMIN);
-  assertEquals((await sql<{ v: unknown }>(`SELECT public.setting_get(NULL, 'research.max_fetch') AS v`))[0].v, 12);
-  assertEquals((await sql<{ v: unknown }>(`SELECT public.setting_get(NULL, 'research.max_wall_ms') AS v`))[0].v, 120000);
+  assertEquals((await sql<{ v: unknown }>(`SELECT public.setting_get(NULL, 'research.max_fetch') AS v`))[0].v, 24);
+  assertEquals((await sql<{ v: unknown }>(`SELECT public.setting_get(NULL, 'research.max_wall_ms') AS v`))[0].v, 300000);
   assertEquals((await sql<{ v: unknown }>(`SELECT public.setting_get(NULL, 'curator.shortlist_k') AS v`))[0].v, null, "another group is untouched");
   await call("DELETE", `${S}/admin/limits/run_size`, undefined, ADMIN);
   assertEquals((await sql<{ v: unknown }>(`SELECT public.setting_get(NULL, 'research.max_fetch') AS v`))[0].v, null);
@@ -406,7 +411,7 @@ t("D12: no change of the admin tier is unlogged or forged - TRUNCATE is refused 
     assertEquals(r.code, "42501", `TRUNCATE as ${role ?? "the superuser"} must be refused`);
     assertEquals(await inTx([...set, [`TRUNCATE public.contract_settings CASCADE`]]).then((x) => x.code), "42501", `TRUNCATE CASCADE as ${role ?? "the superuser"}`);
   }
-  assertEquals((await stored())["research.max_fetch"], 12, "the stored limits are still there");
+  assertEquals((await stored())["research.max_fetch"], 24, "the stored limits are still there");
   assertEquals(await lastId(), before);
   // forgery: an app role sets every value the old trigger trusted, then writes a limit
   for (const role of ["ob_app_memory", "ob_workbench"]) {

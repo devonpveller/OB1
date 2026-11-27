@@ -26,11 +26,11 @@ Deno.test("a stored value replaces the env value, key by key; the others keep th
 });
 
 Deno.test("a stored value outside its range, not whole, or not a number is ignored: a bad row can never raise a ceiling", () => {
-  for (const [k, bad] of [["MAX_FETCH", 61], ["MAX_FETCH", 5], ["MAX_FETCH", 24.5], ["MAX_FETCH", "30"], ["MAX_FETCH", null], ["MAX_FETCH", NaN],
+  for (const [k, bad] of [["MAX_FETCH", 161], ["MAX_FETCH", 5], ["MAX_FETCH", 24.5], ["MAX_FETCH", "30"], ["MAX_FETCH", null], ["MAX_FETCH", NaN],
     ["CONFIDENCE_FLOOR", 0.29], ["CONFIDENCE_FLOOR", 0.81], ["MAX_ROUNDS", 6], ["MAX_ROUNDS", 0], ["MAX_WALL_MS", 599999.5], ["KB_SOURCES_K", -1]] as const) {
     assertEquals(limitValue(k, bad), null, `${k}=${bad}`);
   }
-  assertEquals(limitValue("MAX_FETCH", 60), 60);
+  assertEquals(limitValue("MAX_FETCH", 160), 160);
   assertEquals(limitValue("MAX_FETCH", 6), 6);
   assertEquals(limitValue("KB_SOURCES_K", 0), 0);
   assertEquals(limitValue("MAX_FETCH_TIMEOUTS", 0), 0);
@@ -56,7 +56,7 @@ Deno.test("the start door's ceilings take the stored pages, rounds and wall time
   const env = { rounds: 3, max_fetch: 24, wall_ms: 180000 };
   assertEquals(await storedCeilings(fake({ "research.max_fetch": 12, "research.max_rounds": 2, "research.max_wall_ms": 120000 }), env), { rounds: 2, max_fetch: 12, wall_ms: 120000 });
   assertEquals(await storedCeilings(fake({}), env), env);
-  assertEquals(await storedCeilings(fake({ "research.max_fetch": 99 }), env), env);
+  assertEquals(await storedCeilings(fake({ "research.max_fetch": 999 }), env), env);
 });
 
 Deno.test("the keys read are the nine research keys the admin presets write (and no curator key)", () => {

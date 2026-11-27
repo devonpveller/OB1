@@ -27,6 +27,7 @@ export type Setting = {
   help: string;
   default: unknown;
   env: string | null;
+  read_by?: string; // which service or screen reads it, and when (the registry's words)
   validation: Record<string, unknown>;
   editable: boolean;
   tag: string | null;
@@ -73,6 +74,13 @@ export function sectionsOf(tier: "user" | "admin", list: Setting[]): Section[] {
     id: `${tier}-${section}`, tier, section, title: sectionTitle(tier, section),
     keys: keys.sort((a, b) => a.position - b.position || a.key.localeCompare(b.key)),
   }));
+}
+
+// A key no screen or service reads yet says so, in the registry's own words ("... (kept now, applied when the Library opens)"): the
+// row shows "Kept now; applied when the Library opens." so a stored value never looks like it does something. null = it is applied.
+export function notAppliedNote(s: Pick<Setting, "read_by">): string | null {
+  const m = /kept now, applied when ([^)]+?) opens\)/i.exec(s.read_by ?? "");
+  return m ? `Kept now; applied when ${m[1]} opens.` : null;
 }
 
 const URL = "/workbench/settings";
