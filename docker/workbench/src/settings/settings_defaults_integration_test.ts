@@ -412,7 +412,7 @@ t("D12: no change of the admin tier is unlogged or forged - TRUNCATE is refused 
   for (const role of ["ob_app_memory", "ob_workbench"]) {
     const r = await inTx([
       [`SET LOCAL ROLE ${role}`],
-      [`SELECT set_config('workbench.settings_actor', 'u-admin', true), set_config('workbench.settings_group', 'run_size', true), set_config('workbench.settings_preset', 'large', true)`],
+      [`SELECT set_config('workbench.settings_actor', 'u-admin', true) AS a, set_config('workbench.settings_group', 'run_size', true) AS g, set_config('workbench.settings_preset', 'large', true) AS p`],
       [`INSERT INTO public.contract_settings (key, value, updated_by) VALUES ('research.max_fetch', '60', 'u-admin') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = 'u-admin'`],
       [`RESET ROLE`],
       LAST_LINE,
