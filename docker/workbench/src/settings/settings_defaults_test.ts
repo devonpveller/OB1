@@ -95,13 +95,16 @@ Deno.test("L2: the admin reads the groups; presets carry their values; the prese
 Deno.test("L3: a preset is the only way in - the body is {preset} and nothing else; raw numbers are refused", async () => {
   const { db, seen } = fakeDb();
   const a = app(db);
-  for (const body of [{ preset: "small", values: { "research.max_fetch": 999 } }, { "research.max_fetch": 999 }, { preset: 5 }, { preset: "Small!" }, [], "small", null, {}]) {
+  // the shapes a regression would accept: a key and a value (alone, or beside a valid preset), and any extra field
+  const RAW = [{ key: "research.max_fetch", value: 30 }, { preset: "small", key: "research.max_fetch", value: 30 }, { preset: "small", value: 30 }, { preset: "small", key: "research.max_fetch" },
+    { preset: "small", extra: 1 }, { preset: "small", values: [] }, { preset: "small", __proto__: { x: 1 }, owner: "x" }];
+  for (const body of [{ preset: "small", values: { "research.max_fetch": 999 } }, { "research.max_fetch": 999 }, ...RAW, { preset: 5 }, { preset: "Small!" }, [], "small", null, {}]) {
     const r = await send(a, "PUT", "/s/admin/limits/run_size", body, ADMIN);
     assertEquals(r.status, 400, JSON.stringify(body));
   }
   // the per-key admin door stays closed to a limit
   assertEquals((await send(a, "PUT", "/s/admin/research.max_fetch", { value: 30 }, ADMIN)).status, 409);
-  assertEquals(seen.some((x) => /settings_limits_apply|INSERT INTO public\.contract_settings/.test(x.sql)), false);
+  assertEquals(seen.some((x) => /settings_limits_apply|admin_setting_write|INSERT INTO public\.contract_settings/.test(x.sql)), false, "nothing was written for any of them");
 });
 
 Deno.test("L4: applying a preset passes the seam's actor, the group and the preset - never a number; the answer is the group", async () => {

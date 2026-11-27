@@ -13,6 +13,7 @@ SET LOCAL lock_timeout = '10s';
 DROP TRIGGER IF EXISTS trg_user_settings_rules ON public.user_settings;
 DROP TRIGGER IF EXISTS trg_contract_settings_bounds ON public.contract_settings;
 DROP TRIGGER IF EXISTS trg_contract_settings_audit ON public.contract_settings;
+DROP TRIGGER IF EXISTS trg_contract_settings_no_truncate ON public.contract_settings;
 
 -- the stored admin limits go (the triggers are gone, so the removal writes no log line into a table about to be dropped)
 DELETE FROM public.contract_settings WHERE key IN (
@@ -24,12 +25,15 @@ DROP FUNCTION IF EXISTS public.settings_limits_apply(TEXT, TEXT, TEXT);
 DROP FUNCTION IF EXISTS public.settings_limits_reset(TEXT, TEXT);
 DROP FUNCTION IF EXISTS public.settings_limits_current(TEXT);
 DROP FUNCTION IF EXISTS public.admin_setting_clear(TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.admin_setting_write(TEXT, TEXT, JSONB);
+DROP FUNCTION IF EXISTS public.trg_contract_settings_no_truncate();
 DROP FUNCTION IF EXISTS public.trg_contract_settings_bounds();
 DROP FUNCTION IF EXISTS public.trg_contract_settings_audit();
 DROP FUNCTION IF EXISTS public.trg_user_settings_rules();
 DROP FUNCTION IF EXISTS public.settings_user_ceiling(TEXT);
 
 -- the tables first (their triggers depend on settings_admin_audit_no_edit), then that function
+DROP TABLE IF EXISTS public.settings_audit_context;
 DROP TABLE IF EXISTS public.settings_admin_audit;
 DROP TABLE IF EXISTS public.settings_limit_preset_values;
 DROP TABLE IF EXISTS public.settings_limit_presets;

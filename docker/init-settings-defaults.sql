@@ -202,9 +202,43 @@ CREATE TRIGGER trg_settings_admin_audit_no_truncate BEFORE TRUNCATE ON public.se
     FOR EACH STATEMENT EXECUTE FUNCTION public.settings_admin_audit_no_edit();
 
 -- ── 4. the admin tier: bounds and the log, at the table ─────────────────────────────────────────
--- BEFORE: a limit outside its fixed range is refused (22023) whoever writes it. AFTER: every change is a log line. The
--- actor is the one the caller named (workbench.settings_actor, set inside this file's functions), else the row's updated_by,
--- else a marker that says nobody named themselves.
+-- BEFORE: a limit outside its fixed range is refused (22023) whoever writes it. AFTER: every change is a log line. Who and which
+-- preset are NOT taken from anything a caller can set (no GUC, no updated_by): this file's SECURITY DEFINER writers record
+-- the actor they were given in settings_audit_context (no right for any app role) for their own transaction, and the trigger
+-- reads it there. A write that does not come through them is logged as "db role <session_user> (a direct write)" with no preset.
+-- TRUNCATE of the table is refused (a statement trigger), so the stored limits cannot vanish without a line.
+CREATE TABLE IF NOT EXISTS public.settings_audit_context (
+    txid   BIGINT PRIMARY KEY,
+    actor  TEXT NOT NULL CHECK (btrim(actor) <> ''),
+    grp    TEXT,
+    preset TEXT
+);
+REVOKE ALL ON public.settings_audit_context FROM PUBLIC;
+DO $$
+DECLARE r RECORD;
+BEGIN
+    FOR r IN SELECT DISTINCT ro.rolname AS grantee
+               FROM pg_class cl, aclexplode(cl.relacl) a JOIN pg_roles ro ON ro.oid = a.grantee
+              WHERE cl.oid = 'public.settings_audit_context'::regclass AND NOT ro.rolsuper AND ro.oid <> cl.relowner
+    LOOP
+        EXECUTE format('REVOKE ALL ON public.settings_audit_context FROM %I', r.grantee);
+    END LOOP;
+END $$;
+REVOKE ALL ON public.settings_audit_context FROM service_role;
+REVOKE ALL ON public.settings_audit_context FROM ob_workbench;
+ALTER TABLE public.settings_audit_context ENABLE ROW LEVEL SECURITY;
+
+CREATE OR REPLACE FUNCTION public.trg_contract_settings_no_truncate() RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION 'contract_settings cannot be truncated: its limits are changed one key at a time and every change is logged' USING ERRCODE = 'insufficient_privilege';
+END $$;
+REVOKE ALL ON FUNCTION public.trg_contract_settings_no_truncate() FROM PUBLIC;
+DROP TRIGGER IF EXISTS trg_contract_settings_no_truncate ON public.contract_settings;
+CREATE TRIGGER trg_contract_settings_no_truncate BEFORE TRUNCATE ON public.contract_settings
+    FOR EACH STATEMENT EXECUTE FUNCTION public.trg_contract_settings_no_truncate();
+
 CREATE OR REPLACE FUNCTION public.trg_contract_settings_bounds() RETURNS TRIGGER
 LANGUAGE plpgsql
 SET search_path = public, pg_temp
@@ -228,12 +262,15 @@ SECURITY DEFINER
 SET search_path = public, pg_temp
 AS $$
 DECLARE
-    who TEXT := COALESCE(NULLIF(btrim(current_setting('workbench.settings_actor', true)), ''),
-                         CASE WHEN TG_OP = 'DELETE' THEN NULL ELSE NULLIF(btrim(NEW.updated_by), '') END,
-                         'unknown (a direct database write)');
-    g   TEXT := NULLIF(current_setting('workbench.settings_group', true), '');
-    p   TEXT := NULLIF(current_setting('workbench.settings_preset', true), '');
+    who TEXT;
+    g   TEXT;
+    p   TEXT;
 BEGIN
+    SELECT c.actor, c.grp, c.preset INTO who, g, p FROM public.settings_audit_context c WHERE c.txid = txid_current();
+    IF who IS NULL THEN
+        who := 'db role ' || session_user || ' (a direct write)';
+        g := NULL; p := NULL;
+    END IF;
     IF TG_OP = 'DELETE' THEN
         INSERT INTO public.settings_admin_audit (actor, action, key, old_value, new_value, grp, preset)
         VALUES (who, 'clear', OLD.key, OLD.value, NULL, g, p);
@@ -390,9 +427,8 @@ BEGIN
         RAISE EXCEPTION 'there is no preset % in %', p_preset, p_grp USING ERRCODE = 'P0002';
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended('settings_limits' || chr(31) || p_grp, 0));
-    PERFORM set_config('workbench.settings_actor', p_actor, true);
-    PERFORM set_config('workbench.settings_group', p_grp, true);
-    PERFORM set_config('workbench.settings_preset', p_preset, true);
+    INSERT INTO public.settings_audit_context (txid, actor, grp, preset) VALUES (txid_current(), p_actor, p_grp, p_preset)
+    ON CONFLICT (txid) DO UPDATE SET actor = EXCLUDED.actor, grp = EXCLUDED.grp, preset = EXCLUDED.preset;
     FOR v IN SELECT key, value FROM public.settings_limit_preset_values WHERE grp = p_grp AND preset = p_preset ORDER BY key LOOP
         why := public.setting_problem(NULL, v.key, v.value);
         IF why IS NOT NULL THEN RAISE EXCEPTION '%: %', v.key, why USING ERRCODE = '22023'; END IF;
@@ -403,6 +439,7 @@ BEGIN
         GET DIAGNOSTICS c = ROW_COUNT;
         n := n + c;
     END LOOP;
+    DELETE FROM public.settings_audit_context WHERE txid = txid_current();
     RETURN n;
 END;
 $$;
@@ -420,11 +457,11 @@ BEGIN
         RAISE EXCEPTION 'there is no group %', p_grp USING ERRCODE = 'P0002';
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended('settings_limits' || chr(31) || p_grp, 0));
-    PERFORM set_config('workbench.settings_actor', p_actor, true);
-    PERFORM set_config('workbench.settings_group', p_grp, true);
-    PERFORM set_config('workbench.settings_preset', 'env', true);
+    INSERT INTO public.settings_audit_context (txid, actor, grp, preset) VALUES (txid_current(), p_actor, p_grp, 'env')
+    ON CONFLICT (txid) DO UPDATE SET actor = EXCLUDED.actor, grp = EXCLUDED.grp, preset = EXCLUDED.preset;
     DELETE FROM public.contract_settings WHERE key IN (SELECT DISTINCT key FROM public.settings_limit_preset_values WHERE grp = p_grp);
     GET DIAGNOSTICS n = ROW_COUNT;
+    DELETE FROM public.settings_audit_context WHERE txid = txid_current();
     RETURN n;
 END;
 $$;
@@ -438,10 +475,29 @@ AS $$
 DECLARE n INT;
 BEGIN
     IF p_actor IS NULL OR btrim(p_actor) = '' THEN RAISE EXCEPTION 'an actor is required' USING ERRCODE = '22023'; END IF;
-    PERFORM set_config('workbench.settings_actor', p_actor, true);
+    INSERT INTO public.settings_audit_context (txid, actor) VALUES (txid_current(), p_actor)
+    ON CONFLICT (txid) DO UPDATE SET actor = EXCLUDED.actor, grp = NULL, preset = NULL;
     DELETE FROM public.contract_settings WHERE key = p_key;
     GET DIAGNOSTICS n = ROW_COUNT;
+    DELETE FROM public.settings_audit_context WHERE txid = txid_current();
     RETURN n;
+END;
+$$;
+
+-- set one shared setting (the contract door's and the admin PUT's write), so the change is logged with the admin who made it
+CREATE OR REPLACE FUNCTION public.admin_setting_write(p_actor TEXT, p_key TEXT, p_value JSONB) RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF p_actor IS NULL OR btrim(p_actor) = '' THEN RAISE EXCEPTION 'an actor is required' USING ERRCODE = '22023'; END IF;
+    INSERT INTO public.settings_audit_context (txid, actor) VALUES (txid_current(), p_actor)
+    ON CONFLICT (txid) DO UPDATE SET actor = EXCLUDED.actor, grp = NULL, preset = NULL;
+    INSERT INTO public.contract_settings (key, value, updated_by) VALUES (p_key, p_value, p_actor)
+    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, version = public.contract_settings.version + 1,
+           updated_at = now(), updated_by = EXCLUDED.updated_by;
+    DELETE FROM public.settings_audit_context WHERE txid = txid_current();
 END;
 $$;
 
@@ -449,7 +505,7 @@ DO $$
 DECLARE f TEXT; r RECORD;
 BEGIN
     FOREACH f IN ARRAY ARRAY['public.settings_limits_current(text)', 'public.settings_limits_apply(text,text,text)',
-                             'public.settings_limits_reset(text,text)', 'public.admin_setting_clear(text,text)'] LOOP
+                             'public.settings_limits_reset(text,text)', 'public.admin_setting_clear(text,text)', 'public.admin_setting_write(text,text,jsonb)'] LOOP
         EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', f);
         FOR r IN SELECT DISTINCT ro.rolname AS grantee
                    FROM pg_proc pr, aclexplode(pr.proacl) a JOIN pg_roles ro ON ro.oid = a.grantee

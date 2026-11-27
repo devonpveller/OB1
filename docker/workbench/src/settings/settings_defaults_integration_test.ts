@@ -119,7 +119,7 @@ t("D1: each preset writes exactly the documented key values - table-driven, over
         assertEquals(l.old_value, null);
         assertEquals(Number(l.new_value), want[l.key]);
         assertEquals([l.grp, l.preset], [grp, preset]);
-        assert(l.actor && l.actor !== "unknown (a direct database write)", `actor ${l.actor}`);
+        assert(l.actor && !/^db role /.test(l.actor), `actor ${l.actor}`);
       }
       // the same preset again: nothing changes, so nothing is logged
       const again = await lastId();
@@ -154,9 +154,11 @@ t("D3: no raw number reaches a limit over HTTP - the per-key admin door is close
   const before = await lastId();
   assertEquals((await call("PUT", `${S}/admin/research.max_fetch`, { value: 30 }, ADMIN)).status, 409);
   assertEquals((await call("DELETE", `${S}/admin/research.max_fetch`, undefined, ADMIN)).status, 409);
-  for (const body of [{ values: { "research.max_fetch": 999 } }, { preset: "small", values: { "research.max_fetch": 999 } }, { "research.max_fetch": 30 }, { preset: 30 }, { preset: "nope" }, {}]) {
+  for (const body of [{ values: { "research.max_fetch": 999 } }, { preset: "small", values: { "research.max_fetch": 999 } }, { "research.max_fetch": 30 }, { preset: 30 }, { preset: "nope" }, {},
+    { key: "research.max_fetch", value: 30 }, { preset: "small", key: "research.max_fetch", value: 30 }, { preset: "small", value: 30 }, { preset: "small", extra: 1 }]) {
     const r = await call("PUT", `${S}/admin/limits/run_size`, body, ADMIN);
     assert(r.status === 400 || r.status === 404, `${JSON.stringify(body)} -> ${r.status}`);
+    assertEquals(await stored(), {}, `${JSON.stringify(body)} stored something`);
   }
   assertEquals((await call("PUT", `${S}/admin/limits/no_such_group`, { preset: "small" }, ADMIN)).status, 404);
   assertEquals((await call("PUT", `${S}/admin/limits/run_size`, { preset: "strict" }, ADMIN)).status, 404, "another group's preset is not this group's");
@@ -185,7 +187,9 @@ t("D4: every admin change is a log line - who, what, old value, new value; a dir
   await sql(`UPDATE public.contract_settings SET value = '10' WHERE key = 'research.search_k'`);
   await sql(`DELETE FROM public.contract_settings WHERE key = 'research.search_k'`);
   const d = await sql<any>(`SELECT * FROM public.settings_admin_audit WHERE id > $1 ORDER BY id`, [b2]);
-  assertEquals(d.map((x: any) => [x.action, x.actor]), [["set", "unknown (a direct database write)"], ["set", "unknown (a direct database write)"], ["clear", "unknown (a direct database write)"]]);
+  // a write that does not come through the logging writers is logged as the database role that made it, never as a name it supplies
+  assert(d.length === 3 && d.every((x: any) => /^db role \S+ \(a direct write\)$/.test(x.actor) && x.preset === null && x.grp === null), JSON.stringify(d.map((x: any) => x.actor)));
+  assertEquals(d.map((x: any) => x.action), ["set", "set", "clear"]);
   // a no-op UPDATE writes nothing
   await sql(`INSERT INTO public.contract_settings (key, value, updated_by) VALUES ('research.search_k', '9', 'x')`);
   const b3 = await lastId();
@@ -372,4 +376,64 @@ t("D11: a value no preset names reads as 'custom' and is never rewritten; two ad
   const cur = (await call("GET", `${S}/admin/limits`, undefined, ADMIN)).json.groups.find((x: any) => x.group === "run_size").current;
   assertNotEquals(cur, "custom", "the values are one preset's, never a mix");
   assertEquals(Object.fromEntries(Object.entries(await stored()).map(([k, v]) => [k, Number(v)])), PRESETS.run_size[cur]);
+});
+
+// run statements in ONE transaction that is always rolled back (so nothing, not even a log line, is left behind); returns the first
+// refusal's SQLSTATE ("" when none) and the rows of the last statement
+async function inTx(stmts: [string, unknown[]?][]): Promise<{ code: string; rows: any[] }> {
+  const c = await pool!.connect();
+  let rows: any[] = [];
+  try {
+    await c.queryObject("BEGIN");
+    for (const [q, a] of stmts) rows = (await c.queryObject(q, a ?? [])).rows;
+    return { code: "", rows };
+  } catch (e) {
+    return { code: String((e as { fields?: { code?: string } }).fields?.code ?? (e as Error).message), rows: [] };
+  } finally {
+    try { await c.queryObject("ROLLBACK"); } catch { /* broken */ }
+    c.release();
+  }
+}
+const LAST_LINE: [string] = [`SELECT actor, grp, preset, action, new_value FROM public.settings_admin_audit ORDER BY id DESC LIMIT 1`];
+
+t("D12: no change of the admin tier is unlogged or forged - TRUNCATE is refused for every role; a write that names itself as an admin is logged as the database role", async () => {
+  // TRUNCATE (statement privilege the app roles hold through service_role): refused, the stored limits stay
+  await call("PUT", `${S}/admin/limits/run_size`, { preset: "small" }, ADMIN);
+  const before = await lastId();
+  for (const role of ["ob_workbench", "ob_app_memory", "service_role", null]) {
+    const set: [string, unknown[]?][] = role ? [[`SET LOCAL ROLE ${role}`]] : [];
+    const r = await inTx([...set, [`TRUNCATE public.contract_settings`]]);
+    assertEquals(r.code, "42501", `TRUNCATE as ${role ?? "the superuser"} must be refused`);
+    assertEquals(await inTx([...set, [`TRUNCATE public.contract_settings CASCADE`]]).then((x) => x.code), "42501", `TRUNCATE CASCADE as ${role ?? "the superuser"}`);
+  }
+  assertEquals((await stored())["research.max_fetch"], 12, "the stored limits are still there");
+  assertEquals(await lastId(), before);
+  // forgery: an app role sets every value the old trigger trusted, then writes a limit
+  for (const role of ["ob_app_memory", "ob_workbench"]) {
+    const r = await inTx([
+      [`SET LOCAL ROLE ${role}`],
+      [`SELECT set_config('workbench.settings_actor', 'u-admin', true), set_config('workbench.settings_group', 'run_size', true), set_config('workbench.settings_preset', 'large', true)`],
+      [`INSERT INTO public.contract_settings (key, value, updated_by) VALUES ('research.max_fetch', '60', 'u-admin') ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = 'u-admin'`],
+      [`RESET ROLE`],
+      LAST_LINE,
+    ]);
+    assertEquals(r.code, "", role);
+    const l = r.rows[0];
+    assert(/^db role \S+ \(a direct write\)$/.test(l.actor), `${role}: the log says ${l.actor}`);
+    assertEquals([l.grp, l.preset, l.action, Number(l.new_value)], [null, null, "set", 60], role);
+    // and a delete naming an admin
+    const d = await inTx([[`SET LOCAL ROLE ${role}`], [`SELECT set_config('workbench.settings_actor', 'u-admin', true)`], [`DELETE FROM public.contract_settings WHERE key = 'research.max_fetch'`], [`RESET ROLE`], LAST_LINE]);
+    assert(/^db role /.test(d.rows[0].actor) && d.rows[0].action === "clear" && d.rows[0].preset === null, `${role} delete: ${d.rows[0]?.actor}`);
+  }
+  // the context the real writers use cannot be read or written by an app role
+  for (const role of ["ob_app_memory", "ob_workbench", "service_role"]) {
+    assertEquals((await inTx([[`SET LOCAL ROLE ${role}`], [`INSERT INTO public.settings_audit_context (txid, actor) VALUES (txid_current(), 'u-admin')`]])).code, "42501", `${role} insert`);
+    assertEquals((await inTx([[`SET LOCAL ROLE ${role}`], [`SELECT * FROM public.settings_audit_context`]])).code, "42501", `${role} select`);
+  }
+  // the real writer still names the admin and the preset (through the route), and leaves no context row behind
+  await call("PUT", `${S}/admin/limits/run_size`, { preset: "large" }, ADMIN);
+  const last = (await sql<any>(`SELECT actor, preset FROM public.settings_admin_audit WHERE key = 'research.max_fetch' ORDER BY id DESC LIMIT 1`))[0];
+  assertEquals(last.preset, "large");
+  assert(!/^db role /.test(last.actor), last.actor);
+  assertEquals((await sql<any>(`SELECT count(*)::int AS n FROM public.settings_audit_context`))[0].n, 0);
 });

@@ -71,7 +71,7 @@ ok(!(await A.ev(`!!document.querySelector('[data-testid=coming]')`)), "no 'comin
 ok(JSON.stringify(await texts(A, "[data-testid=legend] .tag")) === JSON.stringify(["Only you", "Stays on this server", "Sent to a cloud provider", "Admin changes it for everyone"]), "the legend names the four tags");
 ok(/No setting carries this tag yet/.test((await text(A, "[data-testid=legend-cloud]")) || ""), "and says no setting carries the cloud tag yet");
 ok(!/cloud/i.test(await A.ev(`(()=>{const s=document.querySelector('[data-testid=stance]').cloneNode(true);s.querySelector('[data-testid=legend]').remove();return s.textContent})()`)), "the privacy stance prose says nothing about cloud");
-ok(JSON.stringify(await texts(A, "[data-testid=snav] button")) === JSON.stringify(["Start screen", "My ideas", "Research defaults", "Library", "Daily digest and podcast"]), "Yours sections: Start screen, My ideas, Research defaults, Library, Daily digest and podcast");
+ok(JSON.stringify(await texts(A, "[data-testid=snav] button")) === JSON.stringify(["Start screen", "My ideas", "Daily digest and podcast", "Research defaults", "Library"]), "Yours sections: Start screen, My ideas, Daily digest and podcast, Research defaults, Library");
 ok((await text(A, "[data-testid=admin-heading]")) === null && !/Admin only/.test(await A.ev(`document.body.innerText`)), "no 'Admin only' section for alice");
 await section(A, "user-refinery");
 ok(JSON.stringify(await texts(A, "[data-testid^=setting-] [data-testid=tag]")) === JSON.stringify(["Stays on this server", "Stays on this server"]), "every row of My ideas carries its tag");
@@ -135,7 +135,7 @@ await setMode("admin");
 const D = await client();
 await D.go("/settings");
 ok((await text(D, "[data-testid=admin-heading]")) === "Admin only", "the admin has an 'Admin only' heading");
-ok(JSON.stringify(await texts(D, "[data-testid=snav] button")) === JSON.stringify(["Start screen", "My ideas", "Research defaults", "Library", "Daily digest and podcast", "Podcast archive", "Research and curator limits"]), "and the shared sections");
+ok(JSON.stringify(await texts(D, "[data-testid=snav] button")) === JSON.stringify(["Start screen", "My ideas", "Daily digest and podcast", "Research defaults", "Library", "Podcast archive", "Research and curator limits"]), "and the shared sections");
 await section(D, "admin-research");
 ok(JSON.stringify(await texts(D, "[data-testid^=limits-] [data-testid=tag]")) === JSON.stringify(["Admin changes it for everyone", "Admin changes it for everyone"]), "each shared limit group is tagged 'Admin changes it for everyone'");
 const lgD = await stub("/__log");
@@ -165,7 +165,7 @@ await D.ev(`document.querySelector('[data-testid="preset-run_size-small"]').clic
 ok(await D.waitFor(`document.querySelector('[data-testid="limits-saved-run_size"]')?.textContent==='Saved'`), "choosing a preset saves it ('Saved')");
 ok(/In force: Small\./.test((await text(D, "[data-testid=limits-now-run_size]")) || ""), "and the page says which preset is in force");
 await D.ev(`document.querySelector('[data-testid=log-show]').click()`);
-ok(await D.waitFor(`/u-admin set .*: 24 to 12 \(preset small\)/.test(document.querySelector('[data-testid=log-line]')?.textContent||'')`), "the log shows who changed what, from what to what");
+ok(await D.waitFor(`/u-admin set .*: 24 to 12 \\(preset small\\)/.test(document.querySelector('[data-testid=log-line]')?.textContent||'')`), "the log shows who changed what, from what to what");
 await setMode("alice");
 await A.go("/settings");
 await section(A, "user-research");

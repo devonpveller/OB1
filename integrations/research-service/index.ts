@@ -1449,8 +1449,9 @@ Deno.serve({ port: PORT }, async (req) => {
     if (!verdict.ok && verdict.refusal === "no_owner") return Response.json({ refused: "no_owner", handback_id: null }, { status: 200 });
     const c = await pool.connect();
     try {
-      await c.queryObject("BEGIN");
+      // read outside the transaction: a failed read (setting_get missing) must fall back to env, never abort the job's insert
       const ceilings = await storedCeilings(c, runCeilings());
+      await c.queryObject("BEGIN");
       const jobId = verdict.ok ? await insertDerivedJob(c, verdict.request, run, ceilings) : null;
       // rw-boundary-ideas: an idea never comes through this door (refused above), so a refusal here is final
       const state = verdict.ok ? "queued" as const : "refused" as const;

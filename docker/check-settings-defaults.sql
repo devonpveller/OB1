@@ -23,8 +23,11 @@ WITH r AS (
       WHERE has_table_privilege('service_role', 'public.settings_admin_audit', p) OR has_table_privilege('ob_workbench', 'public.settings_admin_audit', p))
   UNION ALL SELECT 'audit_triggers_missing', 3 - (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.settings_admin_audit'::regclass AND NOT tgisinternal AND tgenabled = 'O')
   UNION ALL SELECT 'limit_writers_not_workbench_only', (SELECT count(*) FROM unnest(ARRAY['public.settings_limits_apply(text,text,text)',
-      'public.settings_limits_reset(text,text)', 'public.admin_setting_clear(text,text)']) f
+      'public.settings_limits_reset(text,text)', 'public.admin_setting_clear(text,text)', 'public.admin_setting_write(text,text,jsonb)']) f
       WHERE has_function_privilege('service_role', f, 'EXECUTE') OR NOT has_function_privilege('ob_workbench', f, 'EXECUTE'))
+  UNION ALL SELECT 'audit_context_privileges', (SELECT count(*) FROM unnest(ARRAY['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE']) p
+      WHERE has_table_privilege('service_role', 'public.settings_audit_context', p) OR has_table_privilege('ob_workbench', 'public.settings_audit_context', p))
+  UNION ALL SELECT 'contract_settings_truncate_not_refused', 1 - (SELECT count(*) FROM pg_trigger WHERE tgrelid = 'public.contract_settings'::regclass AND tgname = 'trg_contract_settings_no_truncate' AND NOT tgisinternal AND tgenabled = 'O' AND (tgtype & 32) = 32 AND (tgtype & 1) = 0)
   UNION ALL SELECT 'limit_triggers_missing', 3 - (SELECT count(*) FROM pg_trigger WHERE NOT tgisinternal AND tgenabled = 'O'
       AND ((tgrelid = 'public.contract_settings'::regclass AND tgname IN ('trg_contract_settings_bounds', 'trg_contract_settings_audit'))
         OR (tgrelid = 'public.user_settings'::regclass AND tgname = 'trg_user_settings_rules')))

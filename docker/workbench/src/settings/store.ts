@@ -152,12 +152,7 @@ export async function setAdminSetting(db: Db, reg: RegistryReader, mountsRoot: s
   }
   const why = (await db.query<{ p: string | null }>(`SELECT public.setting_problem(NULL, $1, $2::jsonb) AS p`, [k.key, JSON.stringify(value)]))[0].p;
   if (why) throw new SettingRefused(400, `${k.key}: ${why}`);
-  await db.query(
-    `INSERT INTO public.contract_settings (key, value, updated_by) VALUES ($1, $2::jsonb, $3)
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, version = public.contract_settings.version + 1,
-       updated_at = now(), updated_by = EXCLUDED.updated_by`,
-    [k.key, JSON.stringify(value), actor],
-  );
+  await db.query(`SELECT public.admin_setting_write($1, $2, $3::jsonb)`, [actor, k.key, JSON.stringify(value)]);
   return await adminSetting(db, reg, mountsRoot, k);
 }
 
