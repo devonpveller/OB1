@@ -84,7 +84,8 @@ export function createCleanupFake({ now = () => Date.now(), flagReasons = FLAG_R
       if (typeof body.reason_type !== "string" || !Array.isArray(body.source_ids)) return invalid("reason_type and source_ids are required");
       if (body.source_ids.length < 1 || body.source_ids.length > 500 || body.source_ids.some((x) => typeof x !== "string" || !UUIDISH.test(x))) return invalid("source_ids: 1 to 500 ids");
       if (!ERASURE_REASONS.includes(body.reason_type)) return unreg("erasure_reasons", body.reason_type);
-      const items = body.source_ids.map((sid) => {
+      // the real repo (repo/cleanup.ts) lower-cases and de-duplicates the ids before it works through them
+      const items = [...new Set(body.source_ids.map((x) => x.toLowerCase()))].map((sid) => {
         const s = sources.find((x) => x.id === sid);
         if (!s) return { source_id: sid, outcome: "skipped", severed: 0, blocking: 0, tombstone_id: null, detail: "the source is active, not suppressed or unlinked" };
         if (!s.erase_allowed) return { source_id: sid, outcome: "blocked", severed: 0, blocking: s.blocking, tombstone_id: null, detail: "a connection the sever tool cannot remove" };
@@ -132,7 +133,7 @@ export function createCleanupFake({ now = () => Date.now(), flagReasons = FLAG_R
     m = /^\/workbench\/contract\/cleanup\/dismissals\/([^/]+)$/.exec(p);
     if (m && method === "DELETE") {
       const id = decodeURIComponent(m[1]);
-      const d = UUIDISH.test(id) ? dismissals.find((x) => x.id === id && x.owner_sub === who.sub) : null;
+      const d = UUIDISH.test(id) ? dismissals.find((x) => x.id === id.toLowerCase() && x.owner_sub === who.sub) : null; // uuid compares case-free, as Postgres and the route's /i pattern do
       if (!d) return { status: 404, body: { error: "no such dismissal" } };
       dismissals = dismissals.filter((x) => x !== d);
       return { status: 200, body: { id } };

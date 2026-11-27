@@ -3,7 +3,7 @@
 //   worth reopening  GET  contract/cleanup/reopen-candidates  erased sources whose address came back with evidence
 //   flagged by you   GET  contract/flags?state=open           the caller's OWN flags (never scope=all)
 //   reasons          GET  contract/registries/flag_reasons    the words for a flag's reason: the server's registry, no list here
-//   dismissals       GET/POST/DELETE contract/cleanup/dismissals   the caller's own "not again for this" (rwr-cleanup, slot 700)
+//   dismissals       GET/POST/DELETE contract/cleanup/dismissals   the caller's own "not again for this" (rwr-cleanup, slot 710)
 //   Erase for good   POST contract/cleanup/sources/:id/erase
 //   Apply to all     POST contract/cleanup/process-all          ONE reason for the whole batch
 //   Reopen           POST contract/cleanup/tombstones/:id/lift

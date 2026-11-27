@@ -235,8 +235,9 @@ function Section({ read, count, page, children, extra }: { read: Read<unknown> &
 type Decision = { text: string; ok: boolean };
 
 // One item at a time. The queue is fixed when the review starts; each step records what was decided, and the end is a summary.
-function Review<T>({ items, idOf, render, onClose, refresh }: {
+function Review<T>({ items, idOf, render, onClose, refresh, onStep }: {
   items: T[]; idOf: (x: T) => string; render: (x: T, onDone: (d: Done) => void) => ReactNode; onClose: () => void; refresh: () => void;
+  onStep: () => void; // every step (decided, left for now, stopped) closes any open confirmation: the card that held it is gone
 }) {
   const [queue] = useState(items);
   const [i, setI] = useState(0);
@@ -244,6 +245,7 @@ function Review<T>({ items, idOf, render, onClose, refresh }: {
   const [finished, setFinished] = useState(false);
   const total = queue.length;
   const step = (text: string, ok: boolean) => {
+    onStep();
     setLog((l) => [...l, { text, ok }]);
     if (i + 1 >= total) { setFinished(true); refresh(); } else setI(i + 1);
   };
@@ -265,7 +267,7 @@ function Review<T>({ items, idOf, render, onClose, refresh }: {
       <div key={idOf(cur)}>{render(cur, (d) => step(d.text, true))}</div>
       <div className="rm-actions">
         <button type="button" data-testid="review-skip" onClick={() => step("Left it as it was", false)}>Leave it for now</button>
-        <button type="button" data-testid="review-stop" onClick={() => setFinished(true)}>Stop and see the summary</button>
+        <button type="button" data-testid="review-stop" onClick={() => { onStep(); setFinished(true); }}>Stop and see the summary</button>
       </div>
     </div>
   );
@@ -297,7 +299,7 @@ function ReadyTab({ env, tick, refresh }: { env: Env; tick: number; refresh: () 
     note: "Sources that were taken out and that nothing depends on any more. Erasing keeps a marker; it cannot be undone.",
   };
   if (mode === "review") {
-    return <Review items={items} idOf={(s) => s.id} refresh={refresh} onClose={() => { env.ask.set(null); setMode("list"); }}
+    return <Review items={items} idOf={(s) => s.id} refresh={refresh} onStep={() => env.ask.set(null)} onClose={() => { env.ask.set(null); setMode("list"); }}
       render={(s, d) => <ReadyCard s={s} env={env} onDone={(x) => { refresh(); d(x); }} />} />;
   }
   const n = items.length;
@@ -345,7 +347,7 @@ function ReopenTab({ env, tick, refresh }: { env: Env; tick: number; refresh: ()
   const items = cands.state === "ok" && gone.state === "ok" ? cands.data.filter((c) => !gone.data.has(c.tombstoneId)) : [];
   const page: Page = { title: "Worth reopening", empty: "Nothing is worth reopening right now.", note: "Erased sources whose address came back with new evidence." };
   if (mode === "review") {
-    return <Review items={items} idOf={(c) => c.tombstoneId} refresh={refresh} onClose={() => { env.ask.set(null); setMode("list"); }}
+    return <Review items={items} idOf={(c) => c.tombstoneId} refresh={refresh} onStep={() => env.ask.set(null)} onClose={() => { env.ask.set(null); setMode("list"); }}
       render={(c, d) => <CandidateCard c={c} env={env} onDone={(x) => { refresh(); d(x); }} />} />;
   }
   return (
@@ -362,7 +364,7 @@ function FlaggedTab({ env, tick, refresh }: { env: Env; tick: number; refresh: (
   const items = read.state === "ok" ? read.data : [];
   const page: Page = { title: "Flagged by you", empty: "You have not flagged anything.", note: "Only you and admins can see your flags. A flag changes nothing about what you flagged." };
   if (mode === "review") {
-    return <Review items={items} idOf={(f) => f.id} refresh={refresh} onClose={() => setMode("list")}
+    return <Review items={items} idOf={(f) => f.id} refresh={refresh} onStep={() => env.ask.set(null)} onClose={() => setMode("list")}
       render={(f, d) => <FlagCard f={f} env={env} onDone={(x) => { refresh(); d(x); }} />} />;
   }
   return (

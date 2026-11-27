@@ -770,3 +770,77 @@ describe("rwr-cleanup fix round 1: one guard per screen, and a refusal says so",
     expect(screen.queryByTestId("apply-panel")).toBeNull();
   });
 });
+
+describe("rwr-cleanup requeue 1: every review step closes the open confirmation (reviewer D1)", () => {
+  it("R1 Ready: Erase on item 1, then Leave it for now: item 2's Erase is usable and no panel is left", async () => {
+    await open("alice", "ready");
+    fireEvent.click(screen.getByTestId("review-start")); await waitFor(() => expect(screen.getByTestId("review")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("erase")); expect(screen.getByTestId("erase-panel")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("review-skip")); await settle();
+    expect(screen.getByTestId("review-progress").textContent).toMatch(/^2 of/);
+    expect(screen.queryByTestId("erase-panel")).toBeNull();
+    expect((screen.getByTestId("erase") as HTMLButtonElement).disabled).toBe(false);
+  });
+  it("R2 Reopen: both markers are alice's; Reopen on item 1, then Leave it for now: item 2's Reopen is usable and no panel is left", async () => {
+    cl.tombs()[TOMB.bob].erased_by = PEOPLE.alice.sub;
+    await open("alice", "reopen");
+    fireEvent.click(screen.getByTestId("review-start")); await waitFor(() => expect(screen.getByTestId("review")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("reopen")); expect(screen.getByTestId("reopen-panel")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("review-skip")); await settle();
+    expect(screen.getByTestId("review-progress").textContent).toMatch(/^2 of/);
+    expect(screen.queryByTestId("reopen-panel")).toBeNull();
+    expect((screen.getByTestId("reopen") as HTMLButtonElement).disabled).toBe(false);
+  });
+  it("R3 Ready: a confirmed erase that fails leaves the panel open; Leave it for now still frees the next item", async () => {
+    await open("alice", "ready");
+    fireEvent.click(screen.getByTestId("review-start")); await waitFor(() => expect(screen.getByTestId("review")).toBeTruthy());
+    failNext["POST /workbench/contract/cleanup/sources/" + SRC.ready1 + "/erase"] = 500;
+    fireEvent.click(screen.getByTestId("erase")); typeWord("ERASE"); fireEvent.click(screen.getByTestId("typed-ok")); await settle(); await settle();
+    fireEvent.click(screen.getByTestId("review-skip")); await settle();
+    expect((screen.getByTestId("erase") as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe("rwr-cleanup requeue 1: per-target guard (reviewer D2) and the fake matches the real code (D3)", () => {
+  it("T2X5 per-target: a held dismissal of candidate 0 does not stop dismissal of candidate 1 by the same person", async () => {
+    await open("alice", "reopen");
+    let release = () => {};
+    slow["POST /workbench/contract/cleanup/dismissals"] = new Promise<void>((res) => { release = res; });
+    fireEvent.click(within(cards()[0]).getByTestId("dismiss")); await settle();
+    fireEvent.click(within(cards()[1]).getByTestId("dismiss")); await settle(); await settle();
+    const n = sent.filter((s) => s.method === "POST" && /dismissals$/.test(s.url)).length;
+    release(); await settle();
+    expect(n).toBe(2);
+  });
+  it("T2X6 a failed request frees its target: the retry sends again", async () => {
+    await open("alice", "reopen");
+    failNext["POST /workbench/contract/cleanup/dismissals"] = 500;
+    fireEvent.click(within(cards()[0]).getByTestId("dismiss")); await settle(); await settle();
+    fireEvent.click(within(cards()[0]).getByTestId("dismiss")); await settle(); await settle();
+    expect(sent.filter((s) => s.method === "POST" && /dismissals$/.test(s.url)).length).toBe(2);
+  });
+  it("T2X7 an unmount while held frees the guard", async () => {
+    who = "alice";
+    const r = render(<ToastProvider><Cleanup subject="u-alice" ready /></ToastProvider>);
+    fireEvent.click(screen.getByTestId("tab-reopen")); await waitFor(() => expect(cards().length).toBe(2));
+    let release = () => {};
+    slow["POST /workbench/contract/cleanup/dismissals"] = new Promise<void>((res) => { release = res; });
+    fireEvent.click(within(cards()[0]).getByTestId("dismiss")); await settle();
+    r.unmount();
+    release(); await settle(); await settle();
+    render(<ToastProvider><Cleanup subject="u-alice" ready /></ToastProvider>);
+    fireEvent.click(screen.getByTestId("tab-reopen")); await waitFor(() => expect(cards().length).toBeGreaterThan(0));
+    fireEvent.click(within(cards()[0]).getByTestId("dismiss")); await settle(); await settle();
+    expect(sent.filter((s) => s.method === "POST" && /dismissals$/.test(s.url)).length).toBe(2);
+  });
+  it("TC1 the fake answers an own dismissal deleted by its id in upper case with 200, as the real route does (UUIDISH /i, uuid compares case-free)", () => {
+    const me = PEOPLE.alice;
+    const d = cl.handle(me, "POST", "/workbench/contract/cleanup/dismissals", { kind: "suggestion", ref: "k" })!.body;
+    const r = cl.handle(me, "DELETE", `/workbench/contract/cleanup/dismissals/${d.id.toUpperCase()}`)!;
+    expect(r.status).toBe(200);
+  });
+  it("TC2 process-all with the same id twice (and in two cases): one item, as repo/cleanup.ts does", () => {
+    const r = cl.handle(PEOPLE.alice, "POST", "/workbench/contract/cleanup/process-all", { reason_type: "deliberate", source_ids: [SRC.ready1, SRC.ready1, SRC.ready1.toUpperCase()] })!;
+    expect(r.body.items.length).toBe(1);
+  });
+});
