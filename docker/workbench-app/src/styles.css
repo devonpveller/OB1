@@ -277,6 +277,22 @@ a.row:hover { background: var(--bg); }
 .doc-tabs { display: flex; flex-wrap: wrap; gap: 2px 4px; border-bottom: 1px solid var(--line); }
 .doc-tabs .tab { height: 32px; padding: 0 10px; font-size: 13px; }
 .doc-panel { padding: 8px 4px; display: flex; flex-direction: column; gap: 6px; }
+/* the References tab (rwr-doc-refs): every rule that holds text lets it wrap, so nothing overflows the panel at 400 px */
+.refs { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.refs section { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.refs .sec, .refs h4.sec { padding: 4px 0 2px; margin: 0; }
+.refs-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.refs-row { min-width: 0; display: flex; flex-direction: column; gap: 4px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); overflow-wrap: anywhere; }
+.refs-inner { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.refs-title { min-width: 0; font-weight: 600; text-align: left; overflow-wrap: anywhere; white-space: normal; }
+.refs-title.linkish { background: none; border: 0; padding: 0; color: var(--accent-strong); text-decoration: underline; cursor: pointer; }
+.refs-note, .refs-newer, .refs-msg { min-width: 0; overflow-wrap: anywhere; }
+.refs-newer { color: var(--amber-text); }
+.refs-acts { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.refs-confirm, .refs-diff { min-width: 0; display: flex; flex-direction: column; gap: 6px; padding: 8px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel); overflow-wrap: anywhere; }
+.refs-diff blockquote { max-height: 160px; overflow-y: auto; }
+.refs-find { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.refs-q { flex: 1 1 140px; min-width: 0; height: 30px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 6px; background: var(--panel); color: var(--fg); font: inherit; }
 .drawer { position: fixed; top: 0; right: 0; bottom: 0; z-index: 35; width: min(420px, 100vw); background: var(--panel); border-left: 1px solid var(--line-strong); box-shadow: -6px 0 20px rgba(0, 0, 0, 0.18); padding: 16px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
 .drawer-head { display: flex; align-items: flex-start; gap: 10px; }
 .drawer-head h2 { margin: 0; font-size: 16px; font-weight: 600; flex: 1; min-width: 0; overflow-wrap: anywhere; }

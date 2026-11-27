@@ -51,6 +51,9 @@ function stub() {
       settings.set(k, { value: body.value, version: n });
       return j({ key: k, value: body.value, version: n });
     }
+    // the References tab's reads (rwr-doc-refs; its own suite drives them against e2e/refs-fake.mjs): nothing waiting, nothing held
+    if (path === "/workbench/contract/documents/pending-refs") return j({ path: "", pending_refs: [], total: 0 });
+    if (path === "/workbench/documents/references") return j({ path: "", style: "ieee", references: [], listed: [] });
     if (flipAfterFile && method === "GET" && path === "/workbench/documents/file") {
       const r = fake.handle(who, method, u, body ?? {})!;
       flipAfterFile = false; who = "bob";
@@ -342,7 +345,7 @@ describe("the In this doc tab strip", () => {
     const strip = screen.getByTestId("in-this-doc");
     expect(within(strip).getAllByRole("tab").map((t) => t.textContent)).toEqual(["References", "Coverage", "Topics", "Refine", "History", "Details", "Export"]);
     expect(DOC_TABS.length).toBe(7);
-    for (const t of DOC_TABS) {
+    for (const t of DOC_TABS.filter((x) => x.id !== "references")) { // References is built (rwr-doc-refs, test/doc-refs.test.tsx)
       fireEvent.click(within(strip).getByRole("tab", { name: t.label }));
       const panel = within(strip).getByRole("tabpanel");
       expect(panel.textContent).toMatch(new RegExp(`${t.label} is not built yet`));

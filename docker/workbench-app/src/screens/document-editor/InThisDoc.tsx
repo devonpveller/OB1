@@ -18,7 +18,7 @@ export const DOC_TABS: TabDef[] = [
   { id: "export", label: "Export", will: "Download the document as PDF, Word or Markdown, with the citation check." },
 ];
 
-export function InThisDoc({ tabs = DOC_TABS }: { tabs?: TabDef[] }) {
+export function InThisDoc({ tabs = DOC_TABS, panels }: { tabs?: TabDef[]; panels?: Partial<Record<TabId, ReactNode>> }) {
   const [on, setOn] = useState<TabId>(tabs[0].id);
   const refs = useRef<Record<string, HTMLButtonElement | null>>({});
   const move = (e: KeyboardEvent, i: number) => {
@@ -41,7 +41,7 @@ export function InThisDoc({ tabs = DOC_TABS }: { tabs?: TabDef[] }) {
         ))}
       </div>
       <div role="tabpanel" id={`dp-${cur.id}`} aria-labelledby={`dt-${cur.id}`} tabIndex={0} className="doc-panel" data-testid={`dpanel-${cur.id}`}>
-        {cur.panel ?? (
+        {panels?.[cur.id] ?? cur.panel ?? (
           <>
             <p className="soon-line">{cur.label} is not built yet.</p>
             <p className="meta">{cur.will} It arrives in a later step; nothing here needs your attention now.</p>
