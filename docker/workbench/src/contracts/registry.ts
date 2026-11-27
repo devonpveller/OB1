@@ -56,6 +56,8 @@ export const REGISTRY = {
   // rwr-doc-gaps-api (init-document-gaps.sql, slot 650): document gaps
   gapOrigins: "gap_origins",
   gapStates: "gap_states",
+  // rwr-cleanup (init-cleanup-dismissals.sql, slot 710): what a person can tell Cleanup not to show again
+  dismissalKinds: "dismissal_kinds",
   // rwr-cast-edit-api (init-cast.sql, slot 560): the cast model's new fields
   podcastFormatKinds: "podcast_format_kinds",
   podcastFormatUses: "podcast_format_uses",

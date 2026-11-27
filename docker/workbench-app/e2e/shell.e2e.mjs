@@ -12,7 +12,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const MENU = [
   ["/", "Home", 0], ["/research", "Research", 3], ["/chat", "Chat", 4], ["/documents", "Documents", null], ["/ideas", "Ideas", null],
   ["/podcasts", "Podcasts", 3], ["/library", "Library", 2], ["/imports", "Imports", null], ["/removals", "Removals and trail", null],
-  ["/cleanup", "Cleanup", 5], ["/settings", "Settings", null],
+  ["/cleanup", "Cleanup", null], ["/settings", "Settings", null],
 ];
 const ALL = [...MENU, ["/what-moved-where", "What moved where", null]];
 
@@ -93,7 +93,7 @@ ok(["/workbench/settings", "/workbench/documents/file", "/workbench/documents/st
 // six and the account's three (settings, the locked document's file and state)
 const HOME_READS = ["/workbench/contract/documents", "/workbench/documents/folders", "/workbench/contract/ideas", "/workbench/contract/library/recent", "/workbench/contract/library/waiting-claims", "/workbench/contract/podcasts", "/workbench/contract/podcasts/requests", "/workbench/contract/search"];
 // ...and the Removals screen's own reads (the run opens it by its menu entry; they are checked in removals.e2e.mjs)
-const REMOVALS_READS = ["/workbench/contract/trail", "/workbench/contract/cleanup/actions", "/workbench/documents/trail"];
+const REMOVALS_READS = ["/workbench/contract/trail", "/workbench/contract/cleanup/actions", "/workbench/documents/trail", "/workbench/contract/cleanup/dismissals", "/workbench/contract/registries/flag_reasons"]; // ...and Cleanup (rwr-cleanup): its first tab and the reasons' words (cleanup.e2e.mjs)
 const shellReads = seenPaths.filter((p) => !HOME_READS.includes(p) && !REMOVALS_READS.includes(p));
 ok(shellReads.join() === [...SIX, "/workbench/documents/file", "/workbench/documents/resolve", "/workbench/documents/state", "/workbench/settings"].sort().join(), `exactly those: the shell and the account read only the six and the four (the opaque id's resolve read is the deep link's): ${shellReads.join(", ")}`);
 

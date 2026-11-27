@@ -252,7 +252,7 @@ const OPEN = /^\/workbench\/(health|auth\/me)$/;
 // rwr-doc-toplace-api: and the document to-place queue (contract/documents/pending-refs: a person's own cites; a service has none)
 // rwr-cast-edit-api: and the cast (contract/cast/*: a person's presenters, teams, formats and voices; openbrain-podcast
 // reads the model through its own REST door, never here)
-export const USER_ONLY = /^\/workbench\/(documents|workspace|ideas|settings|contract\/(flags|private|inlets|cast|documents\/pending-refs)|auth\/(impersonate|users|audit))(\/|$)/;
+export const USER_ONLY = /^\/workbench\/(documents|workspace|ideas|settings|contract\/(flags|private|inlets|cast|documents\/pending-refs|cleanup\/dismissals)|auth\/(impersonate|users|audit))(\/|$)/;
 // the reads that can carry a research job's original prompt (round 4, F4)
 // rw-p8a1-core round 3 (reviewer RF1): the trail's leads too - an admin may read an ownerless tree's
 // rw-p5a-intake: and the intake panel's reads (and the old /workbench/jobs), whose ownerless jobs an admin who is

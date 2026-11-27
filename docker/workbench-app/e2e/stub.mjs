@@ -102,5 +102,8 @@ private body` }) : json({ error: "no such document" }, 404);
   if (p === "/workbench/contract/documents") return json({ documents: [] });
   if (p === "/workbench/contract/ideas") return json({ ideas: [] });
   if (p === "/workbench/documents/trail") return json({ lines: [], total: 0 });
+  // the Cleanup screen (rwr-cleanup) is a real screen: empty answers so the shell run can open it (its own e2e is cleanup.e2e.mjs)
+  if (p === "/workbench/contract/cleanup/dismissals") return json({ dismissals: [], total: 0 });
+  if (p === "/workbench/contract/registries/flag_reasons") return json({ name: "flag_reasons", version: 1, owner: "lab", description: "", entries: [] });
   json({ error: "not found" }, 404);
 }).listen(9000, () => console.log("stub up"));

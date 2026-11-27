@@ -97,7 +97,7 @@ Deno.test("07-MULTI-USER: no cleanup body takes a user - the actor is the identi
   // the document says the same: no cleanup request body has a user-shaped property
   const doc = buildDocument() as { paths: Record<string, Record<string, Record<string, any>>>; components: { schemas: Record<string, any> } };
   const cleanupOps = Object.entries(doc.paths).filter(([p]) => p.includes("/cleanup/")).flatMap(([, item]) => Object.values(item));
-  assertEquals(cleanupOps.length, 8, "the cleanup routes are in the OpenAPI document");
+  assertEquals(cleanupOps.length, 11, "the cleanup routes are in the OpenAPI document (8 + the three dismissal operations, rwr-cleanup)");
   for (const o of cleanupOps) {
     const ref = o.requestBody?.content?.["application/json"]?.schema?.$ref as string | undefined;
     if (!ref) continue;

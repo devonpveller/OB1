@@ -422,6 +422,7 @@ try {
   # isResearchStart skips exactly these two - they act through the research service, which this lab does not run)
   $hookSkipped = @($docJson.paths.PSObject.Properties | Where-Object { $_.Name -match '/sessions/\{id\}/(steer|cancel)$' -or
     $_.Name -match '/cleanup/(sources/\{id\}/(sever|erase)|process-all|tombstones/\{id\}/lift|actions/\{id\})$' -or
+    $_.Name -match '/cleanup/dismissals/\{id\}$' -or  # rwr-cleanup: DELETE /cleanup/dismissals/{id} (DISMISSAL_BY_ID in dredd-hooks.js)
     $_.Name -match '/private/(claims|jobs)/\{id\}$' -or
     $_.Name -match '/documents/pending-refs/\{id\}(/place)?$' -or  # rwr-doc-toplace-api: DELETE and POST .../place by id (PENDING_BY_ID in dredd-hooks.js): two operations
     $_.Name -match '^/workbench/research(/preview)?$' }).Count + 2 + 5  # rw-owner-private-view: the owner-only by-id reads (PRIVATE_BY_ID); rwr-flags-api: +2 = GET and PATCH /flags/{id} (FLAG_BY_ID; one path, two operations); rwr-doc-gaps-api: +5 = POST /gaps, POST /gaps/research and GET, PATCH, DELETE /gaps/{id} (isGapSkipped in dredd-hooks.js; only the list GET is run)

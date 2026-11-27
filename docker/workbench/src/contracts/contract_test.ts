@@ -76,7 +76,8 @@ Deno.test("every registry in registry.ts is seeded by the migrations (when the m
       await Deno.readTextFile(new URL("../../../init-research-credibility.sql", import.meta.url)) +
       await Deno.readTextFile(new URL("../../../init-flags.sql", import.meta.url)) + // rwr-flags-api
       await Deno.readTextFile(new URL("../../../init-cast.sql", import.meta.url)) + // rwr-cast-edit-api
-      await Deno.readTextFile(new URL("../../../init-document-gaps.sql", import.meta.url)); // rwr-doc-gaps-api
+      await Deno.readTextFile(new URL("../../../init-document-gaps.sql", import.meta.url)) + // rwr-doc-gaps-api
+      await Deno.readTextFile(new URL("../../../init-cleanup-dismissals.sql", import.meta.url)); // rwr-cleanup
   } catch {
     return; // inside the image the migrations are not in the build context
   }
