@@ -191,12 +191,12 @@ try {
 
   # ---------------------------------------------------------------- 2. network
   Write-Host '[2] disposable internal network'
-  $subnet = New-PinnedNetwork $net
-  Check ($subnet -ne '') "network $net created (internal, labelled, --subnet $subnet)"
-  if ($subnet -eq '') { throw 'network' }
+  $runSubnet = New-PinnedNetwork $net
+  Check ($runSubnet -ne '') "network $net created (internal, labelled, --subnet $runSubnet)"
+  if ($runSubnet -eq '') { throw 'network' }
   $made.net = $true
   $got = (Dk network inspect -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}' $net).Trim()
-  Check (($got -eq $subnet) -and (Test-SubnetAllowed $got)) "the network's subnet is the pinned one, outside 192.168.0.0/16 ($got)"
+  Check (($got -eq $runSubnet) -and (Test-SubnetAllowed $got)) "the network's subnet is the pinned one, outside 192.168.0.0/16 ($got)"
 
   # ---------------------------------------------------------------- 3. images
   Write-Host "[3] build $tag, $testTag, $parityTag"

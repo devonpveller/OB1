@@ -45,7 +45,7 @@ $label = "ai-stack.harness.owner=$Id"
 $ct = $PSScriptRoot
 $wb = Split-Path -Parent $ct
 $dockerDir = Split-Path -Parent $wb
-$init450 = if ($Init450) { (Resolve-Path $Init450).Path } else { Join-Path $dockerDir 'init-rest-door-auth.sql' }
+$init450Path = if ($Init450) { (Resolve-Path $Init450).Path } else { Join-Path $dockerDir 'init-rest-door-auth.sql' }
 $ob1 = Split-Path -Parent $dockerDir
 $short = ($Id -replace '^wt-', '')
 $rand = -join ((48..57 + 97..102) | Get-Random -Count 6 | ForEach-Object { [char]$_ })
@@ -223,10 +223,10 @@ try {
   Save 'exec-before.txt' ($execBefore -join "`n")
   Write-Host "[4] slot 450 $(if ($Red) { '(not in the base)' } else { 'by psql, twice' })"
   if (-not $Red) {
-    $o1 = PsqlFile $init450; $rc1 = $script:rc; Save '450-run1.log' $o1
+    $o1 = PsqlFile $init450Path; $rc1 = $script:rc; Save '450-run1.log' $o1
     Check ($rc1 -eq 0) "init-rest-door-auth.sql ran (exit $rc1): $((($o1 -split "`n") | Where-Object { $_ -match 'NOTICE' }) -join ' | ')"
     $aclAfter = (Psql $aclSql).Trim()
-    $o2 = PsqlFile $init450; $rc2 = $script:rc; Save '450-run2.log' $o2
+    $o2 = PsqlFile $init450Path; $rc2 = $script:rc; Save '450-run2.log' $o2
     Check ($rc2 -eq 0 -and $o2 -match '0 function grant\(s\) made in place of PUBLIC') "a second run changes nothing it has not already (exit $rc2): $((($o2 -split "`n") | Where-Object { $_ -match 'NOTICE' }) -join ' | ')"
     Check ((Psql $aclSql).Trim() -eq $aclAfter) 'the function ACLs after run 2 equal those after run 1'
   }
@@ -419,7 +419,7 @@ SELECT o.k || ' ' || o.name || ' -> ' || COALESCE((SELECT string_agg(d.rolname |
     $left = (Psql "SELECT count(*) FROM pg_roles WHERE rolname ~ '^ob_rest_'").Trim() + '/' + (Psql "SELECT count(*) FROM pg_namespace WHERE nspname = 'rest_door'").Trim() + '/' +
       (Psql "SELECT count(*) FROM pg_policy WHERE polname LIKE 'rest\_door\_%'").Trim() + '/' + (Psql "SELECT count(*) FROM pg_proc WHERE proname = 'rest_setting_get'").Trim()
     $r2 = PsqlFile (Join-Path $dockerDir 'revert-rest-door-auth.sql'); $rr2 = $script:rc; Save 'revert-run2.log' $r2
-    $o3 = PsqlFile $init450; $rr3 = $script:rc; Save '450-run3.log' $o3
+    $o3 = PsqlFile $init450Path; $rr3 = $script:rc; Save '450-run3.log' $o3
     $aclAgain = (Psql $aclSql).Trim()
     $ok7 = ($rr1 -eq 0) -and ($aclRev -eq $aclBefore) -and ($left -eq '0/0/0/0') -and ($rr2 -eq 0 -and $r2 -match 'no archive') -and ($rr3 -eq 0) -and ($aclAgain -eq $aclMid)
     Check ($rr1 -eq 0 -and $aclRev -eq $aclBefore) "[7-revert] after the revert every function's ACL equals the pre-450 one (md5 $aclRev vs $aclBefore)"
@@ -453,7 +453,7 @@ SELECT o.k || ' ' || o.name || ' -> ' || COALESCE((SELECT string_agg(d.rolname |
     }
     $vOwner = (Psql "SELECT COALESCE((SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = to_regclass('public.inlet_connection_mail')), 'none')").Trim()
     Check ($vOwner -eq 'ob_inlet_stamp_view' -or $vOwner -eq 'none') "[9-restore] the prune's view is its slot's view role's again after the re-apply ($vOwner)"
-    $o9 = PsqlFile $init450; $rr9 = $script:rc; Save 'restore-450.log' $o9
+    $o9 = PsqlFile $init450Path; $rr9 = $script:rc; Save 'restore-450.log' $o9
     $execReapplied = @((Psql $execSql) -split "`n" | Where-Object { $_ })
     $lost9 = @($execBefore | Where-Object { $execReapplied -notcontains $_ })
     Save 'restore-exec-lost.txt' ($lost9 -join "`n")
@@ -481,7 +481,7 @@ SELECT o.k || ' ' || o.name || ' -> ' || COALESCE((SELECT string_agg(d.rolname |
     New-Item -ItemType Directory -Force $stageFull | Out-Null; $script:made.dirs += $stageFull
     foreach ($m in $chain) { Copy-Item (Join-Path $chainDir $m[0]) (Join-Path $stageFull $m[1]) }
     $fullHas990 = @($chain | Where-Object { $_[1] -eq '990-init-rest-door-auth-final.sql' }).Count -eq 1
-    $o10 = PsqlFile $init450; $rr10 = $script:rc
+    $o10 = PsqlFile $init450Path; $rr10 = $script:rc
     $db2 = "$P-db2"
     $null = Run-Detached $db2 @('-e', "POSTGRES_PASSWORD=$pw", '-e', 'POSTGRES_DB=openbrain', '-v', "${stageFull}:/docker-entrypoint-initdb.d:ro", $PgImage)
     for ($i = 0; $i -lt 150; $i++) { $l2 = Dk logs $db2; if ($l2 -match 'PostgreSQL init process complete' -or $l2 -match 'exited with exit code|FATAL') { break }; Start-Sleep -Seconds 2 }
@@ -527,7 +527,7 @@ SELECT md5(COALESCE(string_agg(x, E'\n' ORDER BY x), '')) || ' ' || count(*) FRO
         Check ($script:rc -eq 0) "[10-fresh] $n run again on the fresh volume after ob_app_memory exists (exit $($script:rc))"
       }
     }
-    $null = Dk cp $init450 "${db2}:/tmp/i450.sql"
+    $null = Dk cp $init450Path "${db2}:/tmp/i450.sql"
     $gx = Dk exec $db2 psql -U postgres -d openbrain -X -v ON_ERROR_STOP=1 -f /tmp/i450.sql; Save 'fresh-450-again.log' $gx
     Check ($script:rc -eq 0) "[10-fresh] 450 once more on the fresh volume after the out-of-band role and the named-grant slots (exit $($script:rc))"
     $f3 = Join-Path $work 'all.sql'; [System.IO.File]::WriteAllText($f3, $allSql, (New-Object System.Text.UTF8Encoding $false))
@@ -569,7 +569,7 @@ SELECT x.signature FROM rest_door.regrants x WHERE x.role_name = 'ob_pantry'
     $f1 = (Psql "SELECT x.signature FROM rest_door.regrants x WHERE x.role_name = 'ob_pantry' AND x.signature <> '$f0' ORDER BY 1 LIMIT 1").Trim()
     # F-3: a stand-in revoked on purpose stays revoked through a 450 re-run
     $null = Psql "REVOKE EXECUTE ON FUNCTION $f1 FROM ob_pantry;"
-    $o = PsqlFile $init450; $rrRev = $script:rc
+    $o = PsqlFile $init450Path; $rrRev = $script:rc
     $rev = (Psql "SELECT has_function_privilege('ob_pantry', to_regprocedure('$f1'), 'EXECUTE')::text").Trim()
     $null = Psql "GRANT EXECUTE ON FUNCTION $f1 TO ob_pantry;"
     $oidSet = { param($sig) if ($hasOidCol) { "UPDATE rest_door.regrants SET fn_oid = to_regprocedure('$sig') WHERE signature = '$sig';" } else { '' } }
@@ -597,13 +597,13 @@ DROP OWNED BY lab_gone; DROP ROLE lab_gone;
     $exits = @()
     for ($i = 1; $i -le 10; $i++) {
       $null = Psql $staleSql
-      $o = PsqlFile $init450; $exits += $script:rc
+      $o = PsqlFile $init450Path; $exits += $script:rc
       if ($i -eq 1) { Save 'case11-run1.log' $o }
       if ($script:rc -ne 0) { $runs11 += "run $i exit $($script:rc): $((($o -split "`n") | Where-Object { $_ -match 'ERROR' } | Select-Object -First 1))" }
     }
     foreach ($opt in @('-c enable_hashjoin=off', '-c enable_nestloop=off', '-c enable_hashjoin=off -c enable_mergejoin=off', '-c enable_nestloop=off -c enable_mergejoin=off')) {
       $null = Psql $staleSql
-      $o = PsqlFile $init450 $opt; $exits += $script:rc
+      $o = PsqlFile $init450Path $opt; $exits += $script:rc
       if ($script:rc -ne 0) { $runs11 += "PGOPTIONS '$opt' exit $($script:rc): $((($o -split "`n") | Where-Object { $_ -match 'ERROR' } | Select-Object -First 1))" }
     }
     $bad11 = @($exits | Where-Object { $_ -ne 0 }).Count
@@ -625,7 +625,7 @@ SELECT 'public:' || has_function_privilege('public', to_regprocedure('$f0'), 'EX
     # given back once the role exists again (a new role object: the out-of-chain role made again after a rebuilt volume)
     $d1 = (Psql "SELECT (SELECT count(*) FROM rest_door.regrants WHERE role_name = 'lab_gone') || '/' || (SELECT count(*) FROM rest_door.regrants WHERE signature = 'lab_dropped_fn()')").Trim()
     $null = Psql "CREATE ROLE lab_gone NOLOGIN;"
-    $oD1 = PsqlFile $init450; $rrD1 = $script:rc
+    $oD1 = PsqlFile $init450Path; $rrD1 = $script:rc
     $d1back = (Psql "SELECT has_function_privilege('lab_gone', to_regprocedure('$f0'), 'EXECUTE')::text").Trim()
     $null = Psql "DROP OWNED BY lab_gone; DROP ROLE lab_gone; DELETE FROM rest_door.regrants WHERE role_name = 'lab_gone';"
     Save 'case11-d1.txt' ("rows (lab_gone / lab_dropped_fn) before the role is made again: $d1`n450 with the role back: exit $rrD1, granted: $d1back`n$((($oD1 -split "`n") | Where-Object { $_ -match 'NOTICE:  rest door: .*(archived|kept)' }) -join "`n")")
@@ -644,7 +644,7 @@ CREATE OR REPLACE FUNCTION public.lab_near_invoker_probe(p_ownerid text) RETURNS
 "@
     $null = Psql $probeFns
     $mapAnchor = "  ('ob_rest_wiki', 'function', 'contract_registry_has', NULL),"
-    $src450 = [System.IO.File]::ReadAllText($init450)
+    $src450 = [System.IO.File]::ReadAllText($init450Path)
     $f4 = @{}
     foreach ($fnName in @('lab_owner_probe', 'lab_pure_probe', 'lab_near_probe', 'lab_near_invoker_probe')) {
       $copy = Join-Path $work "450-$fnName.sql"
@@ -652,7 +652,7 @@ CREATE OR REPLACE FUNCTION public.lab_near_invoker_probe(p_ownerid text) RETURNS
       $o = PsqlFile $copy; $f4[$fnName] = "exit $($script:rc)$(if ($o -match 'owner-argument function') { ' (owner-argument refusal)' } elseif ($o -match 'owner-like argument') { ' (SECURITY DEFINER near-miss refusal)' })"
     }
     $null = Psql "DROP FUNCTION public.lab_owner_probe(text); DROP FUNCTION public.lab_pure_probe(text); DROP FUNCTION public.lab_near_probe(text); DROP FUNCTION public.lab_near_invoker_probe(text);"
-    $o = PsqlFile $init450; $rrF4 = $script:rc
+    $o = PsqlFile $init450Path; $rrF4 = $script:rc
     Write-Host "    owner family: SECURITY DEFINER p_owner_id -> $($f4['lab_owner_probe']); IMMUTABLE boolean p_subject -> $($f4['lab_pure_probe']); D3: SECURITY DEFINER p_ownerid -> $($f4['lab_near_probe']); INVOKER p_ownerid -> $($f4['lab_near_invoker_probe']); 450 again exit $rrF4"
     $okF4 = ($f4['lab_owner_probe'] -match '^exit 3 \(owner-argument refusal\)') -and ($f4['lab_pure_probe'] -eq 'exit 0') -and ($rrF4 -eq 0)
     Check $okF4 "[11-archive] the owner family: a SECURITY DEFINER map function taking p_owner_id is refused, a pure predicate taking p_subject is exempt ($($f4['lab_owner_probe']) / $($f4['lab_pure_probe']))"

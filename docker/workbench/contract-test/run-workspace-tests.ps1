@@ -768,11 +768,11 @@ try {
     # the mutants: the same file without one of its archive steps must refuse - it would delete what it did not archive
     $src = Get-Content -Raw $init
     foreach ($m in @(@('archive-step', 'a thought'), @('wiki-archive-step', 'a wiki page'))) {
-      $mutant = Join-Path $env:TEMP "$P-380-mutant-$($m[0]).sql"
+      $mutantSql = Join-Path $env:TEMP "$P-380-mutant-$($m[0]).sql"
       $cut = [regex]::Replace($src, "(?s)-- \[$($m[0])\].*?-- \[/$($m[0])\]", '-- (mutant: no archive step)')
-      [System.IO.File]::WriteAllText($mutant, $cut, (New-Object System.Text.UTF8Encoding $false))
-      $script:made.dirs += $mutant
-      $mrc = & $psqlFile $mutant "mutant without the $($m[0])"
+      [System.IO.File]::WriteAllText($mutantSql, $cut, (New-Object System.Text.UTF8Encoding $false))
+      $script:made.dirs += $mutantSql
+      $mrc = & $psqlFile $mutantSql "mutant without the $($m[0])"
       Check ($cut -ne $src -and $mrc -ne 0 -and $script:p380["mutant without the $($m[0])"] -match 'refused, nothing changed') "[5p] a 380 that deletes $($m[1]) it did not first archive FAILS (refused, nothing changed)"
       $s = & $phase 'reverted' "privacy-after-mutant-$($m[0]).log"
       Check ($s.Success -and $s.Groups[1].Value -eq 'ok') "[5p] the refused mutant ($($m[0])) changed nothing ($($s.Value))"
@@ -1271,11 +1271,11 @@ try {
       Check ($s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] after the revert the 21 tables are byte-identical (md5) to before the first run ($($s.Value))"
       $srcText = Get-Content -Raw $inInit
       foreach ($m in @(@('archive-thoughts', 'a thought'), @('archive-sources', 'a source'), @('archive-pages', 'a wiki page'), @('archive-jobs', 'a research job'), @('archive-events', 'a job event'), @('archive-steers', 'a research steer'), @('archive-leaf', 'a row that hangs on a seeded job'))) {
-        $mutant = Join-Path $env:TEMP "$P-440-mutant-$($m[0]).sql"
+        $mutantSql = Join-Path $env:TEMP "$P-440-mutant-$($m[0]).sql"
         $cut = [regex]::Replace($srcText, "(?s)-- \[$($m[0])\].*?-- \[/$($m[0])\]", '-- (mutant: no archive step)')
-        [System.IO.File]::WriteAllText($mutant, $cut, (New-Object System.Text.UTF8Encoding $false))
-        $script:made.dirs += $mutant
-        $mrc = & $inPsql $mutant "mutant without the $($m[0])" @()
+        [System.IO.File]::WriteAllText($mutantSql, $cut, (New-Object System.Text.UTF8Encoding $false))
+        $script:made.dirs += $mutantSql
+        $mrc = & $inPsql $mutantSql "mutant without the $($m[0])" @()
         Check ($cut -ne $srcText -and $mrc -ne 0 -and $script:p410["mutant without the $($m[0])"] -match 'refused, nothing changed') "[5r] a 440 that changes $($m[1]) it did not first archive FAILS (refused, nothing changed)"
         $s = & $inPhase 'reverted' "inlet-after-mutant-$($m[0]).log"
         Check ($s.Success -and $s.Groups[1].Value -eq 'ok') "[5r] the refused mutant ($($m[0])) changed nothing ($($s.Value))"
