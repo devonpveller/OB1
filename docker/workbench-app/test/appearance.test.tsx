@@ -91,23 +91,20 @@ describe("odd-typed, unknown and stale stored values never break the page", () =
     expect(parseLook([{ key: "ui.theme", value: "dark", is_default: true }]).theme).toBe("system");
   });
 
-  it("parseSaved: keeps the well-formed themes; an unknown choice inside one falls back to the default; junk is dropped; capped; no repeated name", () => {
+  it("parseSaved: keeps every well-formed theme exactly as stored; an unknown choice inside one falls back to the default; junk (not an object, a name that is not text) is skipped", () => {
     for (const odd of [null, undefined, 5, "x", {}, [[]], [null], [1, "a"]]) expect(parseSaved(odd), JSON.stringify(odd) ?? "undefined").toEqual([]);
     const good = { name: "Night", theme: "dark", accent: "rose", density: "compact", text_size: "16" };
     const r = parseSaved([
       good,
       { ...good, name: "Old", accent: "magenta" },                     // an accent that no longer exists
       { ...good, name: "Odd", theme: 3, accent: null, density: ["x"], text_size: 14 },
-      { ...good, name: "" }, { ...good, name: "   " }, { ...good, name: "x".repeat(41) }, { ...good, name: 7 },
-      { ...good, name: "bell\u0007" }, { ...good, name: "zero​width" },
-      { ...good, name: "night" },                                      // a repeat of "Night", ignoring case
+      { ...good, name: 7 }, { ...good, name: null }, { ...good, name: ["a"] },
+      { ...good, name: "night" },                                      // the server never stores this pair; if it ever did it is kept, not erased
     ]);
-    expect(r.map((t) => t.name)).toEqual(["Night", "Old", "Odd"]);
+    expect(r.map((t) => t.name)).toEqual(["Night", "Old", "Odd", "night"]);
     expect(r[0].look).toEqual({ theme: "dark", accent: "rose", density: "compact", textSize: "16" });
     expect(r[1].look).toEqual({ theme: "dark", accent: "teal", density: "compact", textSize: "16" });
     expect(r[2].look).toEqual(DEFAULT_LOOK);
-    const many = Array.from({ length: 14 }, (_, i) => ({ ...good, name: "t" + i }));
-    expect(parseSaved(many)).toHaveLength(SAVED_CAP);
   });
 
   it("an account holding stored theme 'sepia' (a theme that no longer exists), a number accent and a saved theme with a gone accent still loads: defaults, no error, no crash", async () => {
@@ -680,5 +677,91 @@ describe("review 1: R1 (a person switch during Apply) and the saved-theme read/w
     const [a, b] = await Promise.all([saveTheme("Same"), saveTheme("Same")]);
     expect([a.ok, b.ok].sort()).toEqual([false, true]);
     expect(savedNames()).toEqual(["Same"]);
+  });
+});
+
+describe("review 2: A (Workbench default across a person switch), B (nothing is dropped on read), F1 wire counts", () => {
+  const T = { name: "Work", theme: "dark", accent: "rose", density: "compact", text_size: "18" };
+  const nm = (n: string) => ({ ...T, name: n });
+  const settle = () => act(async () => { await new Promise((r) => setTimeout(r, 40)); });
+  const wire = (sub: string, method: string, key: string) => FAKE.wire.filter((w) => w.sub === sub && w.method === method && w.url.includes(key));
+  const storedNames = () => (FAKE.store.get("u-alice|ui.saved_themes")?.value as { name: string }[]).map((t) => t.name);
+
+  it("A: Alice presses Workbench default; her look-key DELETE is held; the person becomes Bob; A's start-screen DELETE never goes out as Bob and Bob's start screen survives", async () => {
+    FAKE.plant("u-alice", "ui.theme", "dark");
+    FAKE.plant("u-alice", "ui.start_screen", "documents");
+    FAKE.plant("u-bob", "ui.start_screen", "research");     // the same version number as Alice's: the server would accept the stale DELETE
+    connect();
+    const ui = (s: string) => <Settings subject={s} whoAnswered />;
+    const { rerender } = render(ui("u-alice"));
+    const ap = await screen.findByTestId("appearance");
+    let go: () => void = () => {};
+    const held = new Promise<void>((r) => { go = r; });
+    hold = (m) => (m === "DELETE" && who === "u-alice" ? held : null);
+    await waitFor(() => expect((within(ap).getByRole("button", { name: "Workbench default" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(within(ap).getByRole("button", { name: "Workbench default" }));
+    await settle();
+    who = "u-bob"; hold = null;
+    rerender(ui("u-bob"));
+    go();
+    await settle(); await settle();
+    expect(wire("u-bob", "DELETE", "ui.start_screen")).toEqual([]);
+    expect(FAKE.store.get("u-bob|ui.start_screen")?.value).toBe("research");
+  });
+
+  it("B: names the server stored that a page rule would have dropped survive a load, a save and a delete: dotted I pair, Greek sigma pair, bearer + no-break spaces, sharp s and SS", async () => {
+    const lists: string[][] = [
+      ["İ", "i̇"],
+      ["ΑΣ", "ας"],
+      ["bearer x", "bearer y", "bearer z"],
+      ["ß", "SS"],
+    ];
+    for (const names of lists) {
+      cleanup(); resetAppearance(); FAKE = createFake(); who = "u-alice"; connect();
+      FAKE.plant("u-alice", "ui.saved_themes", names.map(nm));
+      syncAppearanceSubject("u-alice");
+      await waitFor(() => expect(getAppearance().status).toBe("ready"));
+      expect(getAppearance().saved.map((t) => t.name), "listed").toEqual(names);
+      const r = await saveTheme("Zzz Other");
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      expect(storedNames(), "after a save").toEqual([...names, "Zzz Other"]);
+      expect(await deleteSavedTheme("Zzz Other")).toBe(true);
+      expect(storedNames(), "after a delete").toEqual(names);
+    }
+  });
+
+  it("B: a NEW name is still judged: bearer + ASCII or ideographic space is refused; bearer + no-break space is accepted, as by the server", async () => {
+    connect(); syncAppearanceSubject("u-alice");
+    await waitFor(() => expect(getAppearance().status).toBe("ready"));
+    expect((await saveTheme("my bearer x")).ok).toBe(false);
+    expect((await saveTheme("my bearer　x")).ok).toBe(false);
+    expect((await saveTheme("my bearer x")).ok).toBe(true);
+  });
+
+  it("F1 wire count: two same-tick saves of one name send exactly ONE PUT (removing the in-queue re-judge turns this red)", async () => {
+    connect(); syncAppearanceSubject("u-alice");
+    await waitFor(() => expect(getAppearance().status).toBe("ready"));
+    await Promise.all([saveTheme("Same"), saveTheme("same ")]);
+    expect(wire("u-alice", "PUT", "ui.saved_themes").length).toBe(1);
+  });
+
+  it("F1 wire count: twelve racing saves send exactly ten PUTs and keep ten", async () => {
+    connect(); syncAppearanceSubject("u-alice");
+    await waitFor(() => expect(getAppearance().status).toBe("ready"));
+    await Promise.all(Array.from({ length: 12 }, (_, i) => saveTheme("t" + i)));
+    expect(wire("u-alice", "PUT", "ui.saved_themes").length).toBe(10);
+    expect(getAppearance().saved.length).toBe(10);
+  });
+
+  it("F1 wire count: three Enter keydowns in the same tick send ONE PUT and no error text (removing the busy guard turns this red)", async () => {
+    connect();
+    render(<Settings subject="u-alice" whoAnswered />);
+    const ap = await screen.findByTestId("appearance");
+    const box = within(ap).getByRole("textbox", { name: /name for this theme/i });
+    fireEvent.change(box, { target: { value: "Dbl" } });
+    fireEvent.keyDown(box, { key: "Enter" }); fireEvent.keyDown(box, { key: "Enter" }); fireEvent.keyDown(box, { key: "Enter" });
+    await settle();
+    expect(wire("u-alice", "PUT", "ui.saved_themes").length).toBe(1);
+    expect(getAppearance().error).toBeNull();
   });
 });

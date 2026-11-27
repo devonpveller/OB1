@@ -33,7 +33,7 @@ export const REGISTRY = [
 const BAD_CHAR = /[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁠-⁤⁦-⁩﻿]/;
 // slot 700's rules: prefixes case-SENSITIVE (`~`), `bearer` case-insensitive (`~*`); btrim strips only the ASCII space; length() is code points
 const CRED_PREFIX = /(^|[^A-Za-z0-9])(sk-|sk_|ghp_|gho_|github_pat_|xox[abpr]-|AKIA|AIza|ya29\.|eyJ)/;
-const CRED_BEARER = /(^|[^a-z0-9])bearer\s/i;
+const CRED_BEARER = /(^|[^a-z0-9])bearer[\t\n\v\f\r \u1680\u2000-\u2006\u2008-\u200a\u2028\u2029\u205f\u3000\ufeff]/i; // Postgres' \s: not the no-break spaces U+00A0, U+2007, U+202F
 const btrim = (x) => x.replace(/^ +| +$/g, "");
 // jsonb's text for a value, only its length matters (the 4096 cap): close enough for the sizes the tests use
 const jlen = (v) => JSON.stringify(v).length;
@@ -61,7 +61,7 @@ export function problem(k, value) {
           && typeof e.density === "string" && v.densities.includes(e.density) && typeof e.text_size === "string" && v.text_sizes.includes(e.text_size));
       });
       if (bad) return 'every saved theme is {"name": short text, "theme", "accent", "density", "text_size"} using the offered choices';
-      if (new Set(value.map((e) => btrim(e.name).toLowerCase())).size !== value.length) return "two saved themes cannot have the same name";
+      if (new Set(value.map((e) => Array.from(btrim(e.name)).map((c) => (c === "\u0130" ? "i" : c.toLowerCase())).join(""))).size !== value.length) return "two saved themes cannot have the same name";
       return null;
     }
     default: return `${k.key} has a type this store cannot hold`;

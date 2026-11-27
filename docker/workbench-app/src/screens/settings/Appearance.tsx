@@ -7,7 +7,7 @@ import { useId, useRef, useState } from "react";
 import { TagChip } from "./TagChip";
 import { resetSetting, type Setting } from "./settings-data";
 import {
-  ACCENTS, DENSITIES, SAVED_CAP, TEXT_SIZES, THEMES, DEFAULT_LOOK, NAME_MAX,
+  ACCENTS, DENSITIES, appearanceEpoch, SAVED_CAP, TEXT_SIZES, THEMES, DEFAULT_LOOK, NAME_MAX,
   applySavedTheme, chooseLook, deleteSavedTheme, resetToWorkbenchDefault, saveTheme, useAppearance,
   type Look, type SavedTheme,
 } from "../../lib/appearance";
@@ -60,8 +60,16 @@ export function Appearance({ rows, onRow, children }: { rows: Setting[]; onRow: 
   const run = async (f: () => Promise<unknown>) => { if (busyRef.current) return; busyRef.current = true; setBusy(true); try { await f(); } finally { busyRef.current = false; setBusy(false); } };
   const pick = (patch: Partial<Look>) => void chooseLook(patch);
   const resetAll = () => void run(async () => {
+    // startRow is the row of the person who pressed the button; if the person changes while the look keys are being
+    // reset, the start-screen DELETE (versioned for them) must not go out under the next person's identity
+    const mine = appearanceEpoch();
     await resetToWorkbenchDefault();
-    if (startRow && !startRow.is_default) { const r = await resetSetting(startRow); if (r.ok) onRow(r.row); }
+    if (mine !== appearanceEpoch()) return;
+    if (startRow && !startRow.is_default) {
+      const r = await resetSetting(startRow);
+      if (mine !== appearanceEpoch()) return; // answered for the earlier person: nothing of it is merged into the next one's list
+      if (r.ok) onRow(r.row);
+    }
   });
   const save = () => void run(async () => { const r = await saveTheme(name); if (r.ok) setName(""); });
   const mean = (list: readonly { id: string; means: string }[], id: string) => list.find((x) => x.id === id)?.means;

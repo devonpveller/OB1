@@ -76,11 +76,15 @@ export function parseLook(rows: Row[]): Look {
 const BAD_CHAR = /[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁠-⁤⁦-⁩﻿]/;
 // slot 700's rules, exactly: the prefixes are case-SENSITIVE (`~`), only `bearer` is case-insensitive (`~*`)
 const CRED_PREFIX = /(^|[^A-Za-z0-9])(sk-|sk_|ghp_|gho_|github_pat_|xox[abpr]-|AKIA|AIza|ya29\.|eyJ)/;
-const CRED_BEARER = /(^|[^a-z0-9])bearer\s/i;
+// Postgres' \s does not match the no-break spaces (U+00A0, U+2007, U+202F) that JavaScript's does: an explicit class equal to the server's
+const CRED_BEARER = /(^|[^a-z0-9])bearer[\t\n\v\f\r \u1680\u2000-\u2006\u2008-\u200a\u2028\u2029\u205f\u3000\ufeff]/i;
 // btrim() strips only the ASCII space; length() counts code points; the duplicate test is lower(btrim())
 export const btrim = (v: string) => v.replace(/^ +| +$/g, "");
 const cpLen = (v: string) => Array.from(v).length;
-export const nameKey = (v: string) => btrim(v).toLowerCase();
+// lower() per code point (the database applies no contextual rule such as the final sigma, and U+0130 lowers to a plain i).
+// Only the check on a NEW name uses it; stored names are never judged by it.
+const fold = (c: string) => (c === "\u0130" ? "i" : c.toLowerCase());
+export const nameKey = (v: string) => Array.from(btrim(v)).map(fold).join("");
 
 // why a saved theme's name is refused, or null
 export function nameProblem(name: unknown): string | null {
@@ -91,19 +95,19 @@ export function nameProblem(name: unknown): string | null {
   return null;
 }
 
+// What the account holds, shown and sent back UNCHANGED. The server never stores a duplicate name, an over-long name, a
+// credential-shaped name or an unoffered choice (slot 700 judges every write), so nothing is judged by name here: a page rule
+// that differs from the database's (case folding, whitespace classes, length) would drop a stored theme and the next write
+// would erase it. The name rules (nameProblem, nameKey) apply only when the person saves a NEW name. A choice outside the
+// offered lists reads as the default (the page's own safety); a non-object, or a name that is not text, is skipped.
 export function parseSaved(v: unknown): SavedTheme[] {
   if (!Array.isArray(v)) return [];
   const out: SavedTheme[] = [];
-  const seen = new Set<string>();
   for (const e of v) {
     if (!e || typeof e !== "object" || Array.isArray(e)) continue;
     const o = e as Record<string, unknown>;
-    if (nameProblem(o.name) !== null) continue;
-    const name = o.name as string; // kept exactly as stored: the next write sends it back unchanged
-    if (seen.has(nameKey(name))) continue;
-    seen.add(nameKey(name));
-    out.push({ name, look: { theme: themeOf(o.theme), accent: accentOf(o.accent), density: densityOf(o.density), textSize: sizeOf(o.text_size) } });
-    if (out.length === SAVED_CAP) break;
+    if (typeof o.name !== "string") continue;
+    out.push({ name: o.name, look: { theme: themeOf(o.theme), accent: accentOf(o.accent), density: densityOf(o.density), textSize: sizeOf(o.text_size) } });
   }
   return out;
 }
