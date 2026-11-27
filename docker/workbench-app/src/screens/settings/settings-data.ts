@@ -48,6 +48,11 @@ const SECTION_TITLE: Record<string, string> = {
 };
 export const sectionTitle = (tier: "user" | "admin", section: string) => SECTION_TITLE[`${tier}:${section}`] ?? section;
 
+// The keys the Appearance panel draws itself (rwr-appearance, slot 700). The section 'ui' is "Appearance" when the registry holds
+// any of them, else (an account whose migration is not applied yet) it is the plain "Start screen" it was.
+export const APPEARANCE_ROWS = ["ui.theme", "ui.accent", "ui.density", "ui.text_size", "ui.saved_themes"];
+export const hasAppearance = (keys: Setting[]) => keys.some((k) => APPEARANCE_ROWS.includes(k.key));
+
 // Keys the app keeps for itself (the locked / last document, Recently viewed): identifiers it writes as you work, not
 // preferences, so the frame does not offer them as a form.
 export const isAppState = (s: Setting) => s.type === "ref_list" || s.validation?.ref === "doc_path";
@@ -60,7 +65,8 @@ export function sectionsOf(tier: "user" | "admin", list: Setting[]): Section[] {
     by.set(s.section, [...(by.get(s.section) ?? []), s]);
   }
   return [...by.entries()].map(([section, keys]) => ({
-    id: `${tier}-${section}`, tier, section, title: sectionTitle(tier, section),
+    id: `${tier}-${section}`, tier, section,
+    title: tier === "user" && section === "ui" && hasAppearance(keys) ? "Appearance" : sectionTitle(tier, section),
     keys: keys.sort((a, b) => a.position - b.position || a.key.localeCompare(b.key)),
   }));
 }

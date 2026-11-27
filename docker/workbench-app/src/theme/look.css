@@ -1,0 +1,11 @@
+/* Density and text size (rwr-appearance): data-density and data-text-size on <html>; no attribute = the defaults (comfortable,
+   14 px). Colour is never touched here. Compact tightens the list rows, the tables and the menu; the text size sets the body
+   size, and what is written in em / inherited follows it. */
+:root[data-density="compact"] .row { padding-top: 3px; padding-bottom: 3px; }
+:root[data-density="compact"] td, :root[data-density="compact"] th { padding-top: 2px; padding-bottom: 2px; }
+:root[data-density="compact"] .nav { min-height: 28px; padding-top: 2px; padding-bottom: 2px; }
+:root[data-density="compact"] .card { gap: 6px; }
+:root[data-text-size="13"] body { font-size: 13px; }
+:root[data-text-size="15"] body { font-size: 15px; }
+:root[data-text-size="16"] body { font-size: 16px; }
+:root[data-text-size="18"] body { font-size: 18px; }

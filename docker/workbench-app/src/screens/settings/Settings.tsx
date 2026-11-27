@@ -6,21 +6,15 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import "./settings.css";
 import { Link } from "../../shell/Link";
+import { TagChip } from "./TagChip";
+import { Appearance } from "./Appearance";
+import { syncAppearanceSubject } from "../../lib/appearance";
 import {
-  LEGEND, TAG_LABEL, loadSettings, resetSetting, saveSetting, sectionsOf, show,
+  LEGEND, APPEARANCE_ROWS, hasAppearance, loadSettings, resetSetting, saveSetting, sectionsOf, show,
   type Loaded, type Section, type Setting,
 } from "./settings-data";
 
 type Mode = { state: "loading" } | { state: "failed" } | { state: "ok"; data: Loaded };
-
-function TagChip({ tag }: { tag: string | null }) {
-  const known = tag !== null && tag in TAG_LABEL;
-  return (
-    <span className={"tag tag-" + (known ? tag : "none")} data-testid="tag" data-tag={tag ?? "none"}>
-      {known ? TAG_LABEL[tag!] : "No tag"}
-    </span>
-  );
-}
 
 type Status = { kind: "idle" } | { kind: "saving" } | { kind: "saved" } | { kind: "error"; message: string };
 
@@ -149,6 +143,8 @@ export function Settings({ subject = null, whoAnswered = true }: { subject?: str
       () => { if (mine === turn.current) setMode({ state: "failed" }); },
     );
   }, []);
+  // the person's look is kept in lib/appearance (the shell tells it the same thing; it is idempotent)
+  useEffect(() => { if (whoAnswered) syncAppearanceSubject(subject); }, [subject, whoAnswered]);
   useEffect(() => {
     if (!whoAnswered) return;
     setMode({ state: "loading" });
@@ -229,7 +225,13 @@ export function Settings({ subject = null, whoAnswered = true }: { subject?: str
               <>
                 <h2 id="h-section" data-testid="section-title">{current.title}</h2>
                 {current.tier === "admin" && <p className="meta">These settings are one value for everybody.</p>}
-                {current.keys.map((k) => (
+                {current.tier === "user" && current.section === "ui" && hasAppearance(current.keys) ? (
+                  <Appearance rows={current.keys} onRow={onRow}>
+                    {current.keys.filter((k) => !APPEARANCE_ROWS.includes(k.key)).map((k) => (
+                      <Field key={k.key} row={k} onRow={onRow} onStale={load} epoch={epoch} />
+                    ))}
+                  </Appearance>
+                ) : current.keys.map((k) => (
                   <Field key={k.key} row={k} onRow={onRow} onStale={load} epoch={epoch} />
                 ))}
               </>

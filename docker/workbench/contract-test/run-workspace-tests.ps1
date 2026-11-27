@@ -539,6 +539,20 @@ try {
   if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the settings tags integration test fails on the base ($($sum.Value))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the settings tags integration test ($($sum.Value))" }
 
+  # rwr-appearance [5j4]: the five Appearance keys (slot 700) over the real workbench and database: the catalog, every offered
+  # choice, odd-typed values, the saved-themes cap of 10 (a 400), versions that never go back, two identities
+  Write-Host '[5j4] the Appearance keys integration test (theme / accent / density / text size / saved themes: the cap, odd values, the database guard, two users)'
+  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
+    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
+    '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/settings/appearance_integration_test.ts')
+  $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+  Save 'appearance-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|Values are not equal|\[Diff\]|^\s+[-+]' }) -join "`n")
+  foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+  if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the Appearance integration test fails on the base ($($sum.Value))" }
+  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[2].Value -gt 0 -and [int]$sum.Groups[3].Value -eq 0) "the Appearance integration test ($($sum.Value))" }
+
   if (-not $Red) {
     # rw-settings-store [5k]: "a stored refinery value is what the service reads on its next run" - the REAL refinery
     # (its image, as ob_app_memory, the production role) ages two users' quiet ideas on POST /run
@@ -592,6 +606,11 @@ try {
   $rpc = { (Dk run --rm --label $label --network $net --entrypoint node $viewerTag -e "fetch('$legacyRest/rest/v1/rpc/setting_get',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({p_owner:'g2-probe',p_key:'refinery.dormancy_days'})}).then(async r=>{const j=await r.json().catch(()=>({}));console.log('rpc',r.status,j&&j.code?j.code:'')}).catch(e=>console.log('rpc ERR',e.message))") -replace '[^0-9A-Za-z ]', '' }
   $waitRpc = { param($want) $last = ''; for ($i = 0; $i -lt 15; $i++) { $last = & $rpc; if ($last -match "rpc $want") { break }; Start-Sleep -Seconds 1 }; $last }
   $g2 = @("before: $(& $rpc)")
+  if (-not $Red) {   # rwr-appearance: slot 700 sits on 400 + 490 + 550 (and replaces 490's setting_problem); its revert goes before all of them
+    $null = Dk cp (Join-Path $chainDir 'revert-appearance.sql') "${db}:/tmp/g2-revert-ap.sql"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-revert-ap.sql
+    Check ($script:rc -eq 0) '[5n] revert-appearance.sql (slot 700) runs before revert-settings-tags.sql'
+  }
   if (-not $Red) {   # rwr-settings-shell: slot 550 sits on 490's keys; its revert goes first of all
     $null = Dk cp (Join-Path $chainDir 'revert-settings-tags.sql') "${db}:/tmp/g2-revert-tags.sql"
     $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-revert-tags.sql
@@ -625,6 +644,9 @@ try {
     $null = Dk cp (Join-Path $chainDir 'init-settings-tags.sql') "${db}:/tmp/g2-init-tags.sql"
     $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-init-tags.sql
     Check ($script:rc -eq 0) '[5n] init-settings-tags.sql (slot 550) applies again after slot 490'
+    $null = Dk cp (Join-Path $chainDir 'init-appearance.sql') "${db}:/tmp/g2-init-ap.sql"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-init-ap.sql
+    Check ($script:rc -eq 0) '[5n] init-appearance.sql (slot 700) applies again after slot 550'
   }
   Save 'postgrest-reload.log' ($g2 -join "`n")
   foreach ($l in $g2) { Write-Host "    $l" }
@@ -1375,6 +1397,10 @@ try {
     $objs0 = "SELECT (SELECT count(*) FROM pg_proc WHERE proname IN ('setting_get','setting_problem','user_setting_set','trg_user_settings_guard'))::text || ' fns, ' || (to_regclass('public.settings_keys') IS NOT NULL)::text || ' ' || (to_regclass('public.user_settings') IS NOT NULL)::text"
     $objsFn = { $r = & $q $objs0; $p = $r -split ' '; if ($p[2] -eq 'true') { $k = (& $q "SELECT count(*) FROM public.settings_keys") + ' keys' } else { $k = 'no keys' }; "$($p[0]) $($p[1]) $k, $(if ($p[3] -eq 'true') { 'user_settings' } else { 'no user_settings' })" }
     $kept = "SELECT (SELECT coalesce(md5(string_agg(key || value::text || version, ',' ORDER BY key)), '-') FROM public.contract_settings) || ' / ' || (SELECT count(*)::text || ':' || coalesce(md5(string_agg(owner_sub || mode || coalesce(at_time::text, '') || tz, ',' ORDER BY owner_sub)), '-') FROM public.idea_schedule)"
+    # rwr-appearance: slot 700 sits on 400 + 490 + 550, so its revert goes before all of them (it is applied again in [5m4])
+    $null = Dk cp (Join-Path $dockerDir 'revert-appearance.sql') "${db}:/tmp/rv700.sql"
+    $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv700.sql
+    Check ($script:rc -eq 0) '[5m] revert-appearance.sql (slot 700) runs before 550''s revert'
     # rwr-settings-shell: slot 550 sits on 490's keys, so its revert goes first of all (it is applied again in [5m3])
     $null = Dk cp (Join-Path $dockerDir 'revert-settings-tags.sql') "${db}:/tmp/rv550.sql"
     $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv550.sql
@@ -1451,6 +1477,39 @@ try {
     Check ($rv6[3] -match "-> $f490b \| tag no column" -and $rv6[4] -match "-> $f490b \| tag no column") '[5m3] slot 550: after the revert (and again) the catalog is exactly as after slots 400 + 490, no column'
     Check ($rv6[1] -match '\| tag (\d+)/\1$' -and ($rv6[1] -replace '^\[[^\]]*\] ', '') -eq ($rv6[2] -replace '^\[[^\]]*\] ', '') -and ($rv6[1] -replace '^\[[^\]]*\] ', '') -eq ($rv6[5] -replace '^\[[^\]]*\] ', '')) '[5m3] slot 550: every key is tagged after an init, a second init changes nothing, init again restores the same catalog'
     Check ((& $q $keysMd5) -eq $keysBefore) '[5m3] slot 550: no other column of any key changed'
+
+    # rwr-appearance [5m4]: slot 700 runs cleanly 3 times, its revert twice, and init again; the revert leaves the catalog exactly
+    # as after slots 400 + 490 + 550 (five keys, the theme_list type and its setting_problem branch gone, 490's text back)
+    Write-Host '[5m4] init-appearance.sql x2, revert-appearance.sql x2 (the catalog is as after slots 400 + 490 + 550), init again'
+    $apKeys = { & $q "SELECT count(*)::text FROM public.settings_keys WHERE key IN ('ui.theme','ui.accent','ui.density','ui.text_size','ui.saved_themes')" }
+    $apFn = { & $q "SELECT md5(prosrc) FROM pg_proc WHERE proname = 'setting_problem' AND pronamespace = 'public'::regnamespace" }
+    $apChk = { & $q "SELECT md5(pg_get_constraintdef(oid)) FROM pg_constraint WHERE conname = 'settings_keys_type_check'" }
+    $f550 = & $fp
+    $fn550 = & $apFn
+    $chk550 = & $apChk
+    $keys550 = & $q $keysMd5
+    $apSeeded = -1 # set right after the FIRST init (the key row the value points to exists only while slot 700 is applied; [5m] left it reverted)
+    $rv7 = @("after slots 400 + 490 + 550: $f550 | keys $(& $apKeys)")
+    foreach ($f in @('init-appearance.sql', 'init-appearance.sql', 'revert-appearance.sql', 'revert-appearance.sql', 'init-appearance.sql')) {
+      $null = Dk cp (Join-Path $dockerDir $f) "${db}:/tmp/rv700.sql"
+      $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv700.sql
+      $rv7 += "[$f] exit $($script:rc)$(if ($o -match 'ERROR') { ': ' + (($o -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ') }) -> $(& $fp) | keys $(& $apKeys) | fn $(& $apFn) | check $(& $apChk) | values $(& $q "SELECT count(*) FROM public.user_settings WHERE key IN ('ui.theme','ui.accent','ui.density','ui.text_size','ui.saved_themes')")"
+      if ($apSeeded -lt 0) { $apSeeded = [int](& $q "WITH i AS (INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('ap-revert-$rand', 'ui.theme', '""dark""') ON CONFLICT DO NOTHING RETURNING 1) SELECT count(*) FROM i") }
+    }
+    Save 'revert-appearance.log' ($rv7 -join "`n")
+    foreach ($l in $rv7) { Write-Host "    $l" }
+    # rv7: [0] before, [1] init, [2] init, [3] revert, [4] revert, [5] init
+    Check (@($rv7 | Where-Object { $_ -match '^\[.*\] exit 0 ' }).Count -eq 5) '[5m4] slot 700: all five runs exit 0'
+    Check ($rv7[1] -match 'keys 5 ' -and $rv7[1] -notmatch "-> $f550 ") '[5m4] slot 700 changes the catalog (five keys, the type, the function)'
+    Check ($rv7[3] -match "-> $f550 \| keys 0 \| fn $fn550 \| check $chk550 \| values 0" -and $rv7[4] -match "-> $f550 \| keys 0 \| fn $fn550 \| check $chk550 \| values 0") '[5m4] slot 700: after the revert (and again) the catalog, setting_problem() and the type CHECK are exactly as after slots 400 + 490 + 550, and the stored values are gone (documented)'
+    Check ($apSeeded -eq 1) '[5m4] the seed value (ui.theme for a scratch owner) was inserted after the first init: 1 row, not refused by the key table (a seed that inserts 0 rows would make the next check vacuous)'
+    Check ($rv7[2] -match '\| values 1$' -and $rv7[1] -match '\| values 0$') '[5m4] slot 700: the seeded value is stored while slot 700 is applied (values 1 after the second init)'
+    Check ((($rv7[1] -replace '^\[[^\]]*\] ', '') -replace ' \| values \d+$', '') -eq (($rv7[2] -replace '^\[[^\]]*\] ', '') -replace ' \| values \d+$', '') -and ($rv7[1] -replace '^\[[^\]]*\] ', '') -replace ' \| values \d+$', '' -eq ($rv7[5] -replace '^\[[^\]]*\] ', '' -replace ' \| values \d+$', '')) '[5m4] slot 700: a second init changes nothing, init again restores the same catalog'
+    $null = & $q "DELETE FROM public.user_settings WHERE owner_sub = 'ap-revert-$rand'"
+    $null = Dk cp (Join-Path $dockerDir 'check-appearance.sql') "${db}:/tmp/chk700.sql"
+    $co = @((Dk exec $db psql -U postgres -d openbrain -X -tA -F '|' -v ON_ERROR_STOP=1 -f /tmp/chk700.sql) -split "`n" | Where-Object { $_ -ne '' })
+    Save 'check-appearance.log' ($co -join "`n")
+    Check ($script:rc -eq 0 -and @($co | Where-Object { $_ -match '\|t$' }).Count -eq 6 -and @($co | Where-Object { $_ -match '\|f$' }).Count -eq 0) '[5m4] check-appearance.sql (read-only) reports six checks, all true'
   }
   if (-not $Red) {
     # rw-p8a4-ideas: the slot-370 revert runs cleanly twice and leaves the slot-230 notification trigger as it was

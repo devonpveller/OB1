@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
-import { applyTheme, readTheme, type ThemeChoice } from "./lib/theme";
+import { type ThemeChoice } from "./lib/theme";
+import { chooseLook, syncAppearanceSubject, useAppearance } from "./lib/appearance";
 import { useRoute } from "./lib/router";
 import { getLastDocument, getLockedDocument, loadAccountState, setLockedDocument, stateEpoch, subscribeState } from "./lib/state";
 import { loadShellData, useShellData, type Load } from "./lib/shell-data";
@@ -19,7 +20,7 @@ function Shell({ load }: { load: Load }) {
   const d = useShellData(load);
   const locked = useSyncExternalStore(subscribeState, getLockedDocument);
   const last = useSyncExternalStore(subscribeState, getLastDocument);
-  const [theme, setTheme] = useState<ThemeChoice>(readTheme);
+  const theme = useAppearance().look.theme;
   const [searching, setSearching] = useState(false);
   const toast = useToast();
   const def = route.bad ? null : matchRoute(route.path);
@@ -43,6 +44,9 @@ function Shell({ load }: { load: Load }) {
   useEffect(() => {
     if (subject !== null) void loadAccountState();
   }, [subject]);
+  // The person's look (theme, accent, density, text size) is kept with the account too: read when the person is known, and
+  // forgotten at once (then read for the new person) when a different person is on the page.
+  useEffect(() => { syncAppearanceSubject(subject); }, [subject]);
 
   const unlock = useCallback(() => {
     const was = getLockedDocument();
@@ -62,7 +66,7 @@ function Shell({ load }: { load: Load }) {
       {d.defaultSubject && <DefaultSubjectBanner />}
       <div className="body">
         <Rail path={route.path} d={d} locked={locked} last={last} theme={theme}
-          onTheme={() => { const n = NEXT[theme]; applyTheme(n); setTheme(n); }} />
+          onTheme={() => { void chooseLook({ theme: NEXT[theme] }); }} />
         <main className="main" id="main" tabIndex={-1} data-testid="main">
           {def === "overview" ? <Overview />
             : def?.screen ? <def.screen route={route} params={routeParams(def, route)} subject={d.who?.subject ?? null} whoAnswered={d.whoDone === true} />

@@ -4,3 +4,6 @@ init-ui-state.sql text eol=lf
 revert-ui-state.sql text eol=lf
 init-settings-tags.sql text eol=lf
 revert-settings-tags.sql text eol=lf
+init-appearance.sql text eol=lf
+revert-appearance.sql text eol=lf
+check-appearance.sql text eol=lf

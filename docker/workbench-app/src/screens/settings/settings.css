@@ -36,3 +36,31 @@
 .settings .seg-o.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
 .settings .seg-o input { position: absolute; opacity: 0; width: 1px; height: 1px; }
 .settings .seg-o:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* Appearance (rwr-appearance): everything scoped under .settings; colour only through tokens (the accent follows the person's choice). */
+.settings .seg-o { position: relative; }
+.settings .appearance { display: flex; flex-direction: column; min-width: 0; }
+.settings .ap-preview-box { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; padding: 12px 0; min-width: 0; }
+.settings .ap-preview { flex: 0 1 280px; min-width: 0; max-width: 100%; background: var(--panel); color: var(--fg); border: 1px solid var(--line-strong); border-radius: 8px; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+.settings .ap-p-title { font-weight: 600; overflow-wrap: anywhere; }
+.settings .ap-p-meta { font-size: 12px; color: var(--muted); }
+.settings .ap-p-btns { display: flex; flex-wrap: wrap; gap: 6px; }
+.settings .ap-p-primary { background: var(--accent); color: var(--on-accent); border-radius: 6px; padding: 4px 10px; font-size: 12px; }
+.settings .ap-p-sec { border: 1px solid var(--line-strong); color: var(--accent-strong); border-radius: 6px; padding: 4px 10px; font-size: 12px; }
+.settings .ap-p-note { flex: 1 1 200px; min-width: 0; margin: 0; }
+.settings .ap-swatch { display: inline-block; width: 14px; height: 14px; margin-right: 6px; border-radius: 50%; border: 1px solid var(--line-strong); flex: none; }
+.settings .ap-swatch[data-accent="teal"] { background: var(--swatch-teal); }
+.settings .ap-swatch[data-accent="indigo"] { background: var(--swatch-indigo); }
+.settings .ap-swatch[data-accent="amber"] { background: var(--swatch-amber); }
+.settings .ap-swatch[data-accent="rose"] { background: var(--swatch-rose); }
+.settings .ap-swatch[data-accent="slate"] { background: var(--swatch-slate); }
+.settings .ap-saved { display: flex; flex-direction: column; gap: 8px; min-width: 0; width: 100%; }
+.settings .ap-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.settings .ap-list li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; padding: 6px 0; border-top: 1px solid var(--line); min-width: 0; }
+.settings .ap-list li:first-child { border-top: 0; }
+.settings .ap-name { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.settings .ap-sum { overflow-wrap: anywhere; min-width: 0; }
+.settings .ap-acts { display: flex; gap: 6px; margin-left: auto; }
+.settings .ap-new { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.settings .ap-name-l { flex: 1 1 100%; font-size: 13px; color: var(--fg-2); }
+.settings .ap-new input { flex: 1 1 140px; min-width: 0; font: inherit; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: 6px; padding: 4px 8px; }
