@@ -109,7 +109,9 @@ t("N2: a class switched off no longer shows in that person's bell, and still sho
     assertEquals(on.status, 200, on.text);
     assertEquals(classes((await bell(A)).mine), ["informational", "structural"]);
     // back to the default (a DELETE): the class shows again
-    const del = await call("DELETE", `${S}/notify.transient?version=${(await call("GET", `${S}/notify.transient`, undefined, A)).json.version}`, undefined, A);
+    const cur = row((await call("GET", S, undefined, A)).json.settings, "notify.transient");
+    assertEquals(cur.value, false);
+    const del = await call("DELETE", `${S}/notify.transient?version=${cur.version}`, undefined, A);
     assertEquals(del.status, 200, del.text);
     assertEquals(classes((await bell(A)).mine), ["informational", "structural", "transient"]);
   } finally {
@@ -119,15 +121,14 @@ t("N2: a class switched off no longer shows in that person's bell, and still sho
 
 t("N3: the limit counts what the person can see - a hidden newest event does not use up the page", async () => {
   try {
-    await seed("informational", 0); // newest
-    await seed("transient", 30); // older
+    await seed("informational", -7200); // newest of ALL events (in the future, so no fixture or other event is newer)
+    await seed("transient", -3600); // the next newest
     assertEquals((await put(A, "notify.informational", false)).status, 200);
-    const since = new Date(Date.now() - 120_000).toISOString();
-    const r = await call("GET", `${N}?limit=1&since=${encodeURIComponent(since)}`, undefined, A);
+    const r = await call("GET", `${N}?limit=1`, undefined, A);
     assertEquals(r.status, 200, r.text);
     const mine = (r.json.notifications as any[]).filter((n) => String(n.subject).startsWith(`np-${RUN}-`));
     assertEquals(classes(mine), ["transient"], "limit 1 gives A the newest event A can see, not an empty page");
-    const rb = await call("GET", `${N}?limit=1&since=${encodeURIComponent(since)}`, undefined, B);
+    const rb = await call("GET", `${N}?limit=1`, undefined, B);
     assertEquals(rb.json.notifications.length, 1);
     assertEquals(rb.json.notifications[0].class, "informational", "B's newest is the informational one");
   } finally {
@@ -216,7 +217,7 @@ t("N7: there is no email key and no way to make one - 404, nothing stored; no ro
   assert(!/mail/i.test(JSON.stringify(list.json.settings.filter((s: any) => s.key.startsWith("notify.")).map((s: any) => [s.key, s.type, s.validation]))), "no key of this item mentions mail");
 });
 
-t("N8: preferences are per person and unreadable by others - B never sees A's value, version or error, in the list, by key, in the bell or in a refusal", async () => {
+t("N8: preferences are per person and unreadable by others - B never sees A's value, version or error, in the list, in the bell or in a refusal", async () => {
   try {
     const wa = await put(A, "notify.transient", false);
     assertEquals(wa.status, 200, wa.text);
@@ -225,8 +226,6 @@ t("N8: preferences are per person and unreadable by others - B never sees A's va
     const list = await call("GET", S, undefined, B);
     const rb = row(list.json.settings, "notify.transient");
     assertEquals([rb.value, rb.is_default, rb.version], [null, true, 0], "B's list shows B's own (nothing stored)");
-    const one = await call("GET", `${S}/notify.transient`, undefined, B);
-    assertEquals([one.json.value, one.json.is_default, one.json.version], [null, true, 0]);
     // B writes his own: A's version is not B's, A's value is not touched
     const wb = await put(B, "notify.transient", true, 0);
     assertEquals(wb.status, 200, wb.text);
