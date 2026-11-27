@@ -20,10 +20,10 @@ import { idea as readIdea } from "../contracts/repo/ideas.ts";
 import { placeReference } from "../contracts/repo/references.ts";
 import { chipText, transclusionText } from "./grammar.ts";
 import { syncListing } from "./listing.ts";
-import { createDocument, DocError } from "./repo.ts";
+import { commitLocked, createDocument, DocError } from "./repo.ts";
 import { HOLDER_KIND } from "./paths.ts";
 import type { Identity } from "../middleware/identity.ts";
-import { vaultCommitPath, vaultDelete, vaultRead, vaultWrite } from "../util/vault.ts";
+import { vaultDelete, vaultRead, vaultWrite } from "../util/vault.ts";
 
 const DOSSIER_OPENING = 600;
 
@@ -52,7 +52,7 @@ export async function seedFromIdea(db: Db, reg: RegistryReader, ideaId: string, 
   } catch (e) {
     if (made.path) {
       await vaultDelete(made.path).catch(() => {});
-      await vaultCommitPath(made.path, `documents: seed of ${made.path} rolled back`, who.name).catch(() => {});
+      await commitLocked(made.path, `documents: seed of ${made.path} rolled back`, who.name).catch(() => {});
     }
     throw e;
   }
@@ -137,6 +137,6 @@ async function seedUnderClaim(
     }
   });
   const listed = await syncListing(db, reg, rel, content, who, "seed");
-  await vaultCommitPath(rel, `documents: seed ${rel} from idea ${idea.id}`, who.name);
+  await commitLocked(rel, `documents: seed ${rel} from idea ${idea.id}`, who.name);
   return { path: rel, refinery_id: idea.id, links: listed.links };
 }

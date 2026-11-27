@@ -8,7 +8,7 @@ import { safeJoin } from "./paths.ts";
 
 const dec = new TextDecoder();
 
-async function git(args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
+export async function git(args: string[]): Promise<{ ok: boolean; out: string; err: string }> {
   const cmd = new Deno.Command("git", {
     args: ["-C", config.vault.gitDir, ...args],
     stdout: "piped",
@@ -190,6 +190,10 @@ export async function gitMv(
     await new Promise((r) => setTimeout(r, 500));
     mv = await git(["mv", fromRel, toRel]);
   }
+  // The commit below is limited to this move's own paths (git commit --only): a file that anyone else has staged (a whole-tree
+  // `git add -A` of a note write, the wiki compile, a hand-staged change) stays staged and never rides in this commit under this
+  // move's subject. `from` is a pathspec only when git knew it (a plain-renamed untracked draft was never in the index).
+  let paths = mv.ok ? [fromRel, toRel] : [toRel];
   if (!mv.ok) {
     if (/not under version control|bad source|source.*not exist|did not match/i.test(mv.err)) {
       // Untracked draft (autosave never committed): git mv can't move it. Plain
@@ -203,16 +207,69 @@ export async function gitMv(
     }
   }
 
+  // The staged rename is committed ALONE and AS STAGED (renameCommit): not `git commit -- <paths>`, which takes the WORKING-TREE
+  // text of the moved file - an autosave left unsaved on disk would then ride in the move commit and, when it rewrites most
+  // of the file, turn the rename into a delete plus an add and cut the document's numbered history (rwr-doc-versions-api
+  // attempt 5). Anything anyone else has staged stays staged, and the moved file's unsaved text stays unsaved.
+  if (mv.ok && (await renameCommit(fromRel, toRel, message, author))) return { committed: true };
+
+  // Fallbacks (an untracked draft that git mv could not move, an empty repository, a failing plumbing step): a commit limited
+  // to this move's own paths (`git commit --only`), so a file that anyone else has staged still never rides in it. `from`
+  // is a pathspec only when git knew it (a plain-renamed untracked draft was never in the index).
   const args = ["commit", "-q"];
   if (author) args.push(`--author=${author} <${author}@notes.local>`);
-  args.push("-m", message);
-  let res = await git(args);
+  args.push("-m", message, "--", ...paths);
+  const cargs = ["--literal-pathspecs", ...args];
+  let res = await git(cargs);
   if (!res.ok && /index\.lock/.test(res.err)) {
     await new Promise((r) => setTimeout(r, 500));
-    res = await git(args);
+    res = await git(cargs);
+  }
+  if (!res.ok && paths.length === 2 && /did not match any file/.test(res.err)) {
+    // `from` was only ever staged, never committed (a whole-tree add staged it first): after the mv it is in neither HEAD nor
+    // the index, so it is not a pathspec git knows; the move is then just the new path
+    paths = [toRel];
+    res = await git(["--literal-pathspecs", ...args.slice(0, args.indexOf("--") + 1), ...paths]);
   }
   if (!res.ok) throw new Error(`git commit failed: ${res.err.slice(0, 300)}`);
   return { committed: true };
+}
+
+// Commit exactly the staged rename `from` -> `to`: HEAD's tree, minus `from`, plus `to` with the blob and mode the INDEX
+// holds (what `git mv` staged), through a private index file and git's plumbing; the real index and the working tree are
+// not touched. false = could not (the caller falls back to a path-limited commit). The branch moves only if HEAD is still
+// the commit this was built on.
+async function renameCommit(fromRel: string, toRel: string, message: string, author?: string): Promise<boolean> {
+  const gd = await git(["rev-parse", "--absolute-git-dir"]);
+  const head = await git(["rev-parse", "--verify", "-q", "HEAD"]);
+  if (!gd.ok || !head.ok) return false;
+  const tmp = `${gd.out.trim()}/index.rename.${crypto.randomUUID().slice(0, 8)}`;
+  const run = async (args: string[], env: Record<string, string> = {}) => {
+    const r = await new Deno.Command("git", {
+      args: ["-C", config.vault.gitDir, "--literal-pathspecs", ...args], env: { GIT_INDEX_FILE: tmp, ...env }, stdout: "piped", stderr: "piped",
+    }).output();
+    return { ok: r.success, out: dec.decode(r.stdout) };
+  };
+  try {
+    const staged = await git(["--literal-pathspecs", "ls-files", "-s", "-z", "--", toRel]);
+    const m = /^(\d{6}) ([0-9a-f]{40}) \d\t/.exec(staged.out);
+    if (!staged.ok || !m) return false;
+    if (!(await run(["read-tree", head.out.trim()])).ok) return false;
+    if (!(await run(["update-index", "--force-remove", "--", fromRel])).ok) return false;
+    if (!(await run(["update-index", "--add", "--cacheinfo", `${m[1]},${m[2]},${toRel}`])).ok) return false;
+    const tree = await run(["write-tree"]);
+    if (!tree.ok) return false;
+    const env: Record<string, string> = {};
+    if (author) Object.assign(env, { GIT_AUTHOR_NAME: author, GIT_AUTHOR_EMAIL: `${author}@notes.local` });
+    const made = await run(["commit-tree", tree.out.trim(), "-p", head.out.trim(), "-m", message], env);
+    if (!made.ok) return false;
+    const moved = await git(["update-ref", "-m", message.split("\n")[0], "HEAD", made.out.trim(), head.out.trim()]);
+    return moved.ok;
+  } catch {
+    return false;
+  } finally {
+    await Deno.remove(tmp).catch(() => {});
+  }
 }
 
 // Commit whatever is currently staged under `pathspec` (if anything), optionally
