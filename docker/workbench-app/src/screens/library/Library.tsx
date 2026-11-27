@@ -118,6 +118,7 @@ function LibraryFor({ route }: ScreenProps) {
     const r = await updateRecentSaved(fn);
     inflight.current--;
     if (r === "merged") setNote("Your Recently viewed list had been changed in another browser. Your change was applied on top of that.");
+    else if (r === "merged-unchanged") setNote("Your Recently viewed list had been changed in another browser. On its list there was nothing left for your change to do, so nothing was written.");
     else if (r === "failed") setNote(getAccountError() ? "That change was not saved. Try again." : "Your Recently viewed list changed in another browser, so it was reloaded. Do that again if you still want it.");
     return r !== "failed";
   };
@@ -205,10 +206,13 @@ function LibraryFor({ route }: ScreenProps) {
   const toggleLock = (key: string) => {
     setMenu(null);
     const was = recent.find((x) => keyOf(x) === key);
-    const r = lockIn(recent, key, !was?.locked);
-    if (r.refused) { setLockNote(r.refused); return; }
+    // the rule is judged on the list the write is made against (the server's latest), not only on this page's copy: the last time the
+    // change is applied decides whether it was refused
+    let refused: string | undefined;
     setLockNote(null);
-    void commit((l) => lockIn(l, key, !was?.locked).list);
+    const done = commit((l) => { const r = lockIn(l, key, !was?.locked); refused = r.refused; return r.list; });
+    if (refused) setLockNote(refused); // the page's own copy already refuses it
+    void done.then(() => setLockNote(refused ?? null)); // and the last time it was applied (to the server's list) decides
   };
 
   const label = (x: RecentItem) => chipLabel(x, stateFor(x));

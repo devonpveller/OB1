@@ -305,9 +305,9 @@ export async function loadAccountState(): Promise<void> {
       [UI_KEYS.lockedDocument]: s.lockedDocument.version, [UI_KEYS.lastDocument]: s.lastDocument.version,
       [UI_KEYS.startScreen]: s.startScreen.version, [UI_KEYS.recent]: s.recent.version,
     };
-    serverRecent = s.recent.value ?? [];
+    serverRecent = clone(s.recent.value ?? []);
     if (fresh(UI_KEYS.startScreen)) startScreen = s.startScreen.value;
-    if (fresh(UI_KEYS.recent)) recent = s.recent.value ?? [];
+    if (fresh(UI_KEYS.recent)) recent = clone(s.recent.value ?? []);
     const lk = s.lockedDocument.value ? await resolveDocument(s.lockedDocument.value) : null;
     const ls = s.lastDocument.value ? await resolveDocument(s.lastDocument.value) : null;
     if (epoch !== my) return;
@@ -368,9 +368,17 @@ export function setStartScreenSaved(s: StartScreen | null): Promise<boolean> {
 export function setStartScreen(s: StartScreen | null): void {
   void setStartScreenSaved(s);
 }
+// Replace the WHOLE Recently viewed list (null: back to the default). For a change a person made to the list they SEE, use
+// updateRecentSaved below instead: a whole list is computed from this page's copy and carries it over whatever another browser wrote.
+// On success this keeps serverRecent in step, so a later updateRecentSaved starts from what this write stored.
 export function setRecentSaved(items: RecentItem[] | null): Promise<boolean> {
-  recent = items ?? []; touched[UI_KEYS.recent]++; emit();
-  return push<RecentItem[]>(UI_KEYS.recent, (v) => saveRecent(items, v));
+  const my = epoch;
+  recent = clone(items ?? []); touched[UI_KEYS.recent]++; emit();
+  return push<RecentItem[]>(UI_KEYS.recent, async (v) => {
+    const saved = await saveRecent(items, v);
+    if (epoch === my) serverRecent = clone(items ?? []);
+    return saved;
+  });
 }
 export function setRecent(items: RecentItem[] | null): void {
   void setRecentSaved(items);
@@ -379,27 +387,34 @@ export function setRecent(items: RecentItem[] | null): void {
 // A CHANGE to the Recently viewed list, not a list: `fn` is applied to the page's copy at once (so the strip answers), and AGAIN, when the
 // write runs, to the list the server holds - so a change never carries a stale copy over what another browser wrote. A write refused as
 // stale reads the server's list and applies `fn` to it once more ("merged"); a change that leaves the list as it is sends nothing.
-export type RecentWrite = "saved" | "merged" | "failed";
+// "saved": written. "merged": another browser had written first and the change was written on top of its list. "merged-unchanged":
+// another browser had written first and, on its list, there was nothing left to change (it already holds the change, or the change is
+// refused there): nothing was written. "unchanged": no conflict and nothing to change. "failed": not saved.
+export type RecentWrite = "saved" | "merged" | "merged-unchanged" | "unchanged" | "failed";
+// a list is copied item by item before a change touches it: a change that edits in place must not edit the page's copy and the server's at once
+const clone = (l: readonly RecentItem[]): RecentItem[] => l.map((x) => ({ ...x }));
 const sameList = (a: RecentItem[], b: RecentItem[]) => JSON.stringify(a) === JSON.stringify(b);
 export function updateRecentSaved(fn: (list: RecentItem[]) => RecentItem[]): Promise<RecentWrite> {
   const my = epoch;
-  recent = fn(recent); touched[UI_KEYS.recent]++; recentPending++; emit();
+  recent = clone(fn(clone(recent))); touched[UI_KEYS.recent]++; recentPending++; emit();
   let merged = false;
+  let wrote = false;
   const run = push<RecentItem[]>(UI_KEYS.recent, async (version) => {
     let v = version;
     for (let attempt = 0; ; attempt++) {
       const base = serverRecent;
-      const next = fn(base);
+      const next = clone(fn(clone(base)));
       if (sameList(next, base)) return { value: base, version: v }; // nothing to send
       try {
         const saved = await saveRecent(next, v);
-        if (epoch === my) serverRecent = next;
+        wrote = true;
+        if (epoch === my) serverRecent = clone(next);
         return saved;
       } catch (e) {
         if (!(e instanceof StaleVersion) || attempt > 0) throw e;
         const s = await loadUiState(); // another browser wrote first: read its list and apply this change on top of it
         if (epoch !== my) throw e;
-        serverRecent = s.recent.value ?? [];
+        serverRecent = clone(s.recent.value ?? []);
         v = s.recent.version; ver[UI_KEYS.recent] = v; merged = true;
       }
     }
@@ -407,8 +422,9 @@ export function updateRecentSaved(fn: (list: RecentItem[]) => RecentItem[]): Pro
   return run.then((ok) => {
     if (epoch === my) recentPending--;
     // the last queued change is done: the page shows what the server holds (a change that was not saved is not shown as kept)
-    if (epoch === my && recentPending === 0) { recent = serverRecent; emit(); }
-    return ok ? (merged ? "merged" : "saved") : "failed";
+    if (epoch === my && recentPending === 0) { recent = clone(serverRecent); emit(); }
+    if (!ok) return "failed";
+    return merged ? (wrote ? "merged" : "merged-unchanged") : wrote ? "saved" : "unchanged";
   });
 }
 

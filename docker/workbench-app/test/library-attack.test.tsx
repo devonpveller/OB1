@@ -5,7 +5,7 @@ import { render, screen, fireEvent, cleanup, waitFor, within, act } from "@testi
 import { App } from "../src/App";
 import { setFetcher, clearRequestLog } from "../src/lib/api";
 import { navigate } from "../src/lib/router";
-import { resetState, getRecent } from "../src/lib/state";
+import { resetState, getRecent, updateRecentSaved, setRecentSaved } from "../src/lib/state";
 import { setFetcher as setDoor } from "../src/lib/api";
 import { titles } from "../src/lib/recent";
 import { createFake, PEOPLE } from "../e2e/docs-fake.mjs";
@@ -331,5 +331,44 @@ describe("T8 sign out mid-session", () => {
     await waitFor(() => expect(screen.getByTestId("strip-note").textContent).toMatch(/not saved/));
     who = "alice";
     expect(JSON.stringify(stored())).toBe(before);
+  });
+});
+
+describe("review 1: the notes say what happened (F1)", () => {
+  it("F1: a lock the other browser has made impossible (16 locked there) is refused with its reason, not reported as applied on top", async () => {
+    await boot("/library", () => lib.plantAccount("alice", "library.recent", [{ kind: "source", id: SRC(1) }]));
+    await waitFor(() => expect(keys()).toEqual([k(1)]));
+    lib.plantAccount("alice", "library.recent", [{ kind: "source", id: SRC(1) }, ...Array.from({ length: 16 }, (_, i) => ({ kind: "topic", id: "t" + i, locked: true }))]);
+    fireEvent.click(within(menu(k(1))).getByTestId("act-lock"));
+    await waitFor(() => expect(screen.getByTestId("strip-lock-note").textContent).toMatch(/At most 16/));
+    expect(document.querySelector('[data-testid="strip-note"]')?.textContent ?? "").not.toMatch(/applied on top/);
+    expect(stored().find((x) => x.id === SRC(1))?.locked).toBeUndefined();
+  });
+  it("F1: a close the other browser already made says there was nothing left to do", async () => {
+    await boot("/library", () => lib.plantAccount("alice", "library.recent", [1, 2].map((n) => ({ kind: "source", id: SRC(n) }))));
+    await waitFor(() => expect(keys()).toEqual([k(1), k(2)]));
+    lib.plantAccount("alice", "library.recent", [{ kind: "source", id: SRC(1) }]); // the other browser closed S2
+    fireEvent.click(within(menu(k(2))).getByTestId("act-close"));
+    await waitFor(() => expect(screen.getByTestId("strip-note").textContent).toMatch(/nothing left/));
+    expect(screen.getByTestId("strip-note").textContent).not.toMatch(/applied on top/);
+    expect(stored().map((x) => x.id)).toEqual([SRC(1)]);
+  });
+});
+
+describe("review 1: the two recent primitives (F2, R3)", () => {
+  it("F2: a change that edits the list in place is still written, and the page shows what the server holds", async () => {
+    await boot("/library", () => lib.plantAccount("alice", "library.recent", [{ kind: "source", id: SRC(1) }]));
+    await waitFor(() => expect(keys()).toEqual([k(1)]));
+    const r = await updateRecentSaved((l) => { l.unshift({ kind: "source", id: SRC(2) }); return l; });
+    expect(r).toBe("saved");
+    expect(stored().map((x) => x.id)).toEqual([SRC(2), SRC(1)]);
+    await waitFor(() => expect(keys()).toEqual([k(2), k(1)]));
+  });
+  it("R3: a whole-list write is what a later change starts from", async () => {
+    await boot("/library");
+    expect(await setRecentSaved([{ kind: "source", id: SRC(5) }, { kind: "source", id: SRC(1) }])).toBe(true);
+    const r = await updateRecentSaved((l) => l.filter((x) => x.id !== SRC(1)));
+    expect(r).toBe("saved");
+    expect(stored().map((x) => x.id)).toEqual([SRC(5)]);
   });
 });
