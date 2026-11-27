@@ -38,6 +38,9 @@ CREATE INDEX IF NOT EXISTS idx_cleanup_dismissals_owner ON public.cleanup_dismis
 ALTER TABLE public.cleanup_dismissals ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS cleanup_dismissals_service_role_all ON public.cleanup_dismissals;
 CREATE POLICY cleanup_dismissals_service_role_all ON public.cleanup_dismissals FOR ALL TO service_role USING (true) WITH CHECK (true);
+-- init-grants.sql's ALTER DEFAULT PRIVILEGES hands every new table GRANT ALL to service_role, and a GRANT only adds:
+-- take back what a dismissal never needs (no UPDATE: a dismissal is made or removed; TRUNCATE is not RLS-filterable).
+REVOKE ALL ON public.cleanup_dismissals FROM service_role;
 GRANT SELECT, INSERT, DELETE ON public.cleanup_dismissals TO service_role;
 
 NOTIFY pgrst, 'reload schema';

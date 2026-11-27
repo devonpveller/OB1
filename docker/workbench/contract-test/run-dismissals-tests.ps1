@@ -36,7 +36,7 @@ param(
   [string]$PgImage = 'pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b',
   [string]$PgrstImage = 'postgrest/postgrest:v12.2.3',
   [string]$CaddyImage = 'caddy:2-alpine',
-  [string]$BaseSha = 'ea41dd8',
+  [string]$BaseSha = '57cc0eef',
   [switch]$Red,
   [switch]$Prebuilt,
   [switch]$KeepImages
