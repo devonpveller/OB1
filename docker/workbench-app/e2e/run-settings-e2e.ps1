@@ -8,9 +8,16 @@ param(
   [Parameter(Mandatory = $true)][string]$Image,
   [Parameter(Mandatory = $true)][string]$AxeJs,
   [string]$Tag = "wt-rwr-settings-shell",
-  [int]$TimeoutSec = 600
+  [int]$TimeoutSec = 600,
+  # rw-lab-throughput: the lab /24 (was hard-coded; harness-subnet.ps1 rules: exactly a /24 outside Docker's pools and 192.168/16).
+  # Run `docker network ls` first and pick one no network overlaps.
+  [string]$Subnet = "10.250.96.0/24"
 )
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot '..\..\workbench\contract-test\harness-subnet.ps1')
+$w = Test-HarnessSubnet $Subnet
+if ($w) { throw "refusing: $w" }
+$pfx = $Subnet -replace '\.0/24$', ''
 if ($Image -notmatch ':wt-') { throw "refusing: the image must be a :wt-<id> test tag, got $Image" }
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $axe = (Resolve-Path $AxeJs).Path
@@ -21,12 +28,13 @@ function Clean { $e = $ErrorActionPreference; $ErrorActionPreference = "Continue
 Clean
 $code = 1
 try {
-  docker network create --internal --subnet 10.250.96.0/24 $net | Out-Null
-  docker run -d --name "$Tag-stub" --network $net --ip 10.250.96.20 --network-alias stub -e LAB_KEY=$labKey -v "${here}:/lab:ro" node:22-slim node /lab/settings.stub.mjs | Out-Null
-  docker run -d --name "$Tag-app" --network $net --ip 10.250.96.10 -e WORKBENCH_URL=http://stub:9000 -e WORKBENCH_KEY=$labKey -e WIKI_VIEWER_ALLOWED_HOSTS=10.250.96.10 $Image | Out-Null
-  docker run -d --name "$Tag-chrome" --network $net --ip 10.250.96.30 chromedp/headless-shell:latest | Out-Null
+  docker network create --internal --subnet $Subnet $net | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "could not create the lab network on $Subnet (another network may overlap it: pass a free -Subnet)" }
+  docker run -d --name "$Tag-stub" --network $net --ip "$pfx.20" --network-alias stub -e LAB_KEY=$labKey -v "${here}:/lab:ro" node:22-slim node /lab/settings.stub.mjs | Out-Null
+  docker run -d --name "$Tag-app" --network $net --ip "$pfx.10" -e WORKBENCH_URL=http://stub:9000 -e WORKBENCH_KEY=$labKey -e "WIKI_VIEWER_ALLOWED_HOSTS=$pfx.10" $Image | Out-Null
+  docker run -d --name "$Tag-chrome" --network $net --ip "$pfx.30" chromedp/headless-shell:latest | Out-Null
   Start-Sleep -Seconds 6
-  docker run --rm --name "$Tag-driver" --network "container:$Tag-chrome" -e APP_IP=10.250.96.10 -e CH=127.0.0.1 -e LAB_KEY=$labKey `
+  docker run --rm --name "$Tag-driver" --network "container:$Tag-chrome" -e "APP_IP=$pfx.10" -e CH=127.0.0.1 -e LAB_KEY=$labKey `
     -v "${here}:/lab:ro" -v "${axe}:/axe/axe.min.js:ro" node:22-slim timeout $TimeoutSec node /lab/settings.e2e.mjs
   $code = $LASTEXITCODE
 } finally {

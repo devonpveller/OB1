@@ -4,6 +4,15 @@
 # every route the app registers (the new ones included).
 #
 #   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-trust-tests.ps1 -Subnet <x.y.z.0/24> [-Id <owner>] [-Evidence <dir>] [-Red]
+#     [-NoSweep] [-Landing] [-Sweep] [-Mutant] [-WbMount 'src/<path>=<host file>'] [-SkipGate] [-NoReuse] [-NoDbTemplate]
+#
+# THROUGHPUT (rw-lab-throughput, lab-throughput.ps1): the isolation sweep runs once per LANDING - developer, mutant and red
+# runs skip it by default and say so; -Landing always sweeps and refuses -NoSweep; -Sweep opts a developer run in. Images
+# are tagged by OB1 tree + build args (:wt-tree-<tree>-<args>) and reused by the next run on the same tree (labels checked;
+# -NoReuse builds under :wt-<id> as before). The database is cloned from a template of the same chain at the same pin
+# (-NoDbTemplate replays the chain). -WbMount mounts one mutated source file over the lab workbench (a mutant, no build);
+# -SkipGate skips the in-build unit gate of a red-base or mutant image (refused for a green or landing run). Builds hold
+# one slot of the harness 'build' lease class.
 #
 # -Subnet is REQUIRED (harness-subnet.ps1: exactly a /24 outside Docker's default pools and 192.168.0.0/16);
 # -Evidence must be absent or empty. -Red runs THIS tree's tests against a workbench and viewer built from
@@ -38,6 +47,15 @@ param(
   [string]$CaddyImage = 'caddy:2-alpine',
   [string]$BaseSha = 'bc6d3a6',
   [switch]$Red,
+  [switch]$Landing,
+  [switch]$Sweep,
+  [switch]$NoSweep,
+  [switch]$Mutant,
+  [string[]]$WbMount = @(),
+  [switch]$SkipGate,
+  [switch]$NoReuse,
+  [switch]$NoDbTemplate,
+  [switch]$Prebuilt,   # attempt 4: declared so it is refused cleanly (unbound, it was taken as a positional value)
   [string]$RedCases = '',
   [switch]$SkipSweep,
   [switch]$KeepImages
@@ -50,6 +68,12 @@ $w = Test-HarnessSubnet $Subnet
 if ($w) { Write-Host "REFUSED: $w"; exit 2 }
 $subnets = Split-HarnessSubnet $Subnet
 if ($Evidence -and (Test-Path $Evidence) -and @(Get-ChildItem -Force $Evidence).Count) { Write-Host "REFUSED: -Evidence $Evidence is not empty"; exit 2 }
+. (Join-Path $PSScriptRoot 'lab-throughput.ps1')
+$run = Resolve-LabRun -Red $Red -Landing $Landing -NoSweep ($NoSweep -or $SkipSweep) -Sweep $Sweep -Mutant $Mutant -WbMount $WbMount -SkipGate $SkipGate -Prebuilt $Prebuilt
+if (-not $run.refused -and $Prebuilt) { $run.refused = 'this runner has no -Prebuilt mode: it builds, or reuses with the labels and /app checked, its own images' }
+if ($run.refused) { Write-Host "REFUSED: $($run.refused)"; exit 2 }
+$NoSweep = -not $run.sweep
+$SkipSweep = -not $run.sweep
 
 $label = "ai-stack.harness.owner=$Id"
 $ct = $PSScriptRoot
@@ -64,6 +88,8 @@ $net = "$P-net"
 $wbTag = "openbrain-workbench:wt-$short"; $wbTestTag = "openbrain-workbench:wt-$short-test"
 $viewerTag = "openbrain-wiki-viewer:wt-$short"
 if ($Red) { $wbTag = "openbrain-workbench:wt-$short-base"; $viewerTag = "openbrain-wiki-viewer:wt-$short-base" }
+$mount = Get-LabWbMountArgs $WbMount $wb
+if ($mount.refused) { Write-Host "REFUSED: $($mount.refused)"; exit 2 }
 $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $key = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
@@ -109,7 +135,7 @@ function Test-LabDockerArgs([string[]]$a) {
   }
   if ($a.Count -and $a[0] -eq 'build') {
     for ($i = 0; $i -lt $a.Count; $i++) {
-      if ($a[$i] -eq '-t' -and $a[$i + 1] -notmatch ":wt-$([regex]::Escape($short))(-[a-z0-9]+)?$") { return "a build tag that is not :wt-$short ($($a[$i + 1]))" }
+      if ($a[$i] -eq '-t' -and -not (Test-LabBuildTag $a[$i + 1] $short)) { return "a build tag that is not :wt-$short or a :wt-tree- reuse tag ($($a[$i + 1]))" }
     }
   }
   return ''
@@ -135,7 +161,7 @@ function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
 }
 function Dk { Lab-Docker 300 ([string[]]$args) }
 # builds: the workbench's test gate renders PDFs; with other lab runs sharing the daemon it can pass 40 min
-function DkLong { Lab-Docker 5400 ([string[]]$args) }
+function DkLong { Lab-Docker (Get-LabBuildTimeoutSec) ([string[]]$args) }
 
 # the shim's own RED: each refused shape is refused before docker runs
 $shimCases = @(
@@ -170,7 +196,7 @@ function Build-At([string]$sha, [string]$tag, [string]$target, [string]$what) {
     $script:made.dirs += $tree
     $tar = Join-Path $env:TEMP "$P-$sha.tar"
     & git -C $ob1 archive --format=tar -o $tar $sha
-    & tar -xf $tar -C $tree
+    & (Get-LabTar) -xf $tar -C $tree
     Remove-Item -Force $tar
   }
   $ctx = if ($what -eq 'workbench') { Join-Path $tree 'docker/workbench' } else { Join-Path $tree 'docker/wiki-viewer' }
@@ -182,6 +208,8 @@ function Build-At([string]$sha, [string]$tag, [string]$target, [string]$what) {
 
 try {
   Write-Host "== rw-p3b-trustpanels lab run  owner=$Id  net=$net  red=$([bool]$Red)  evidence=$Evidence"
+  Write-Host "  $($run.note)"
+  foreach ($l in $mount.lines) { Write-Host "  $l" }
   $sha = (& git -C $ob1 rev-parse HEAD).Trim()
   Write-Host '[1] the initdb chain, from docker-compose.yml'
   $compose = Get-Content -Raw (Join-Path $dockerDir 'docker-compose.yml')
@@ -198,27 +226,15 @@ try {
   $script:made.net = $true
 
   Write-Host '[3] images'
+  $img = Invoke-LabWorkbenchImages -Run $run -Ob1 $ob1 -Wb $wb -Sha $sha -BaseSha $BaseSha -Short $short -Owner $Id -P $P `
+    -SkipGate $SkipGate -NoReuse $NoReuse -Viewer (-not $Red) -ViewerDir $viewerDir -GateNote ', src/contracts/ incl. trust_test.ts'
+  if (-not $img.ok) { throw 'images' }
+  $wbTag = $img.wb; $wbTestTag = $img.test; if ($img.viewer) { $viewerTag = $img.viewer }
   if ($Red) {
-    $o = Build-At $BaseSha $wbTag '' 'workbench'; Save 'build-workbench-base.log' ($o -split "`n" | Select-Object -Last 40 | Out-String)
-    Check ($script:rc -eq 0) "RED: $wbTag built from OB1 $BaseSha"
-    $script:made.images += $wbTag
-    $o = Build-At $BaseSha $viewerTag '' 'viewer'; Save 'build-viewer-base.log' ($o -split "`n" | Select-Object -Last 40 | Out-String)
+    $o = Invoke-LabBuildLease $Id $ob1 { Build-At $BaseSha $viewerTag '' 'viewer' }; Save 'build-viewer-base.log' ($o -split "`n" | Select-Object -Last 60 | Out-String)
     Check ($script:rc -eq 0) "RED: $viewerTag built from OB1 $BaseSha"
     $script:made.images += $viewerTag
-  } else {
-    $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" -t $wbTag $wb; Save 'build-workbench.log' ($o -split "`n" | Select-Object -Last 60 | Out-String)
-    Check ($script:rc -eq 0) "$wbTag built at OB1 $($sha.Substring(0, 7)) (its test gate passed: src/contracts/ incl. trust_test.ts)"
-    if ($script:rc -ne 0) { throw 'build workbench' }
-    $script:made.images += $wbTag
-    $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --build-context "recipes=$(Join-Path $ob1 'recipes')" -t $viewerTag $viewerDir
-    Save 'build-viewer.log' ($o -split "`n" | Select-Object -Last 80 | Out-String)
-    Check ($script:rc -eq 0) "$viewerTag built (its build gate: the renderer's node tests)"
-    if ($script:rc -ne 0) { throw 'build viewer' }
-    $script:made.images += $viewerTag
   }
-  $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb; Save 'build-workbench-test.log' ($o -split "`n" | Select-Object -Last 30 | Out-String)
-  Check ($script:rc -eq 0) "$wbTestTag (the test stage of THIS tree) built"
-  $script:made.images += $wbTestTag
 
   Write-Host '[4] the lab'
   $db = "$P-db"
@@ -265,7 +281,7 @@ try {
       '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://stub-research:8000',
       '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'FETCH_PROXY_URL=http://stub-proxy:3128', '-e', "VIEWER_NAV_URL=http://$P-viewer:8082",
       '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub',
-      '-v', "${vault}:/wiki", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
+      '-v', "${vault}:/wiki", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro") + $mount.args
   $null = Run-Detached "$P-wb" ($wbArgs + @($wbTag))
   Check (Wait-Http "http://$P-wb:8000/health" 90) 'the workbench is up'
   Check (Wait-Http "http://$P-viewer:8080/workspace/" 90) 'the viewer is up'
@@ -335,6 +351,7 @@ try {
 } finally {
   Write-Host '[6] teardown'
   foreach ($c in $script:made.containers) { $null = Dk rm -f -v $c }
+  if ($script:made.ContainsKey('vols')) { foreach ($v in $script:made.vols) { $null = Dk volume rm -f $v } }
   if ($script:made.net) { $null = Dk network rm $net }
   if (-not $KeepImages) { foreach ($i in $script:made.images) { $null = Dk rmi -f $i } }
   $left = (Dk ps -a --filter "label=$label" --format '{{.Names}}' | Out-String).Trim()

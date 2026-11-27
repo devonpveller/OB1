@@ -4,6 +4,15 @@
 # lab docker shim, network, images and teardown.
 #
 #   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-panels-tests.ps1 -Subnet <x.y.z.0/24> [-Id <owner>] [-Evidence <dir>] [-Red]
+#     [-NoSweep] [-Landing] [-Sweep] [-Mutant] [-WbMount 'src/<path>=<host file>'] [-SkipGate] [-NoReuse] [-NoDbTemplate]
+#
+# THROUGHPUT (rw-lab-throughput, lab-throughput.ps1): the isolation sweep runs once per LANDING - developer, mutant and red
+# runs skip it by default and say so; -Landing always sweeps and refuses -NoSweep; -Sweep opts a developer run in. Images
+# are tagged by OB1 tree + build args (:wt-tree-<tree>-<args>) and reused by the next run on the same tree (labels checked;
+# -NoReuse builds under :wt-<id> as before). The database is cloned from a template of the same chain at the same pin
+# (-NoDbTemplate replays the chain). -WbMount mounts one mutated source file over the lab workbench (a mutant, no build);
+# -SkipGate skips the in-build unit gate of a red-base or mutant image (refused for a green or landing run). Builds hold
+# one slot of the harness 'build' lease class.
 #
 # -Subnet is REQUIRED (harness-subnet.ps1: exactly a /24 outside Docker's default pools and 192.168.0.0/16);
 # -Evidence must be absent or empty. -Red builds the workbench and the viewer from -BaseSha (the development
@@ -39,6 +48,14 @@ param(
   [string]$CaddyImage = 'caddy:2-alpine',
   [string]$BaseSha = 'deb9053',
   [switch]$Red,
+  [switch]$Landing,
+  [switch]$Sweep,
+  [switch]$NoSweep,
+  [switch]$Mutant,
+  [string[]]$WbMount = @(),
+  [switch]$SkipGate,
+  [switch]$NoReuse,
+  [switch]$NoDbTemplate,
   [switch]$WalkOff,
   [switch]$KeepImages,
   # rw-p8a1-core: the open-brain lease is held only while the lab RUNS, never while building. -BuildOnly builds
@@ -54,6 +71,11 @@ $w = Test-HarnessSubnet $Subnet
 if ($w) { Write-Host "REFUSED: $w"; exit 2 }
 $subnets = Split-HarnessSubnet $Subnet
 if ($Evidence -and (Test-Path $Evidence) -and @(Get-ChildItem -Force $Evidence).Count) { Write-Host "REFUSED: -Evidence $Evidence is not empty"; exit 2 }
+. (Join-Path $PSScriptRoot 'lab-throughput.ps1')
+$run = Resolve-LabRun -Red $Red -Landing $Landing -NoSweep $NoSweep -Sweep $Sweep -Mutant $Mutant -WbMount $WbMount -SkipGate $SkipGate -Prebuilt $Prebuilt
+if ($run.refused) { Write-Host "REFUSED: $($run.refused)"; exit 2 }
+if ($Prebuilt -and $SkipGate) { Write-Host 'REFUSED: -SkipGate builds an image; -Prebuilt uses images already built'; exit 2 }
+$NoSweep = -not $run.sweep
 
 $label = "ai-stack.harness.owner=$Id"
 $ct = $PSScriptRoot
@@ -69,6 +91,8 @@ $net = "$P-net"
 $wbTag = "openbrain-workbench:wt-$short"; $wbTestTag = "openbrain-workbench:wt-$short-test"
 $viewerTag = "openbrain-wiki-viewer:wt-$short"
 if ($Red) { $wbTag = "openbrain-workbench:wt-$short-base"; $wbTestTag = "openbrain-workbench:wt-$short-test"; $viewerTag = "openbrain-wiki-viewer:wt-$short-base" }
+$mount = Get-LabWbMountArgs $WbMount $wb
+if ($mount.refused) { Write-Host "REFUSED: $($mount.refused)"; exit 2 }
 $pw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $appPw = -join ((48..57 + 97..122) | Get-Random -Count 24 | ForEach-Object { [char]$_ })
 $key = -join ((48..57 + 97..102) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
@@ -118,7 +142,7 @@ function Test-LabDockerArgs([string[]]$a) {
   }
   if ($a.Count -and $a[0] -eq 'build') {
     for ($i = 0; $i -lt $a.Count; $i++) {
-      if ($a[$i] -eq '-t' -and $a[$i + 1] -notmatch ":wt-$([regex]::Escape($short))(-[a-z0-9]+)?$") { return "a build tag that is not :wt-$short ($($a[$i + 1]))" }
+      if ($a[$i] -eq '-t' -and -not (Test-LabBuildTag $a[$i + 1] $short)) { return "a build tag that is not :wt-$short or a :wt-tree- reuse tag ($($a[$i + 1]))" }
     }
   }
   return ''
@@ -143,7 +167,7 @@ function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
   return (($out.Result + $err.Result) -replace "`r", '').TrimEnd()
 }
 function Dk { Lab-Docker 300 ([string[]]$args) }
-function DkLong { Lab-Docker 2400 ([string[]]$args) }
+function DkLong { Lab-Docker (Get-LabBuildTimeoutSec) ([string[]]$args) }
 
 # the shim's own RED: each refused shape is refused before docker runs
 $shimCases = @(
@@ -178,7 +202,7 @@ function Build-At([string]$sha, [string]$tag, [string]$target, [string]$what) {
     $script:made.dirs += $tree
     $tar = Join-Path $env:TEMP "$P-$sha.tar"
     & git -C $ob1 archive --format=tar -o $tar $sha
-    & tar -xf $tar -C $tree
+    & (Get-LabTar) -xf $tar -C $tree
     Remove-Item -Force $tar
     if ($WalkOff) {
       # the base predates the switch: one line after the route runs, so the walk can be turned off
@@ -198,6 +222,8 @@ function Build-At([string]$sha, [string]$tag, [string]$target, [string]$what) {
 
 try {
   Write-Host "== rw-p8a1-core lab run  owner=$Id  net=$net  red=$([bool]$Red)  evidence=$Evidence"
+  Write-Host "  $($run.note)"
+  foreach ($l in $mount.lines) { Write-Host "  $l" }
   $sha = (& git -C $ob1 rev-parse HEAD).Trim()
   # ---------------------------------------------------------------- 1. the initdb chain
   Write-Host '[1] the initdb chain, from docker-compose.yml'
@@ -225,39 +251,36 @@ try {
       $script:made.images += $img
     }
   } else {
+    $img = Invoke-LabWorkbenchImages -Run $run -Ob1 $ob1 -Wb $wb -Sha $sha -BaseSha $BaseSha -Short $short -Owner $Id -P $P `
+      -SkipGate $SkipGate -NoReuse ($NoReuse -or $BuildOnly) -Viewer (-not $Red) -ViewerDir $viewerDir -GateNote ', grammar, hub clustering, contracts, export'
+    if (-not $img.ok) { throw 'images' }
+    $wbTag = $img.wb; $wbTestTag = $img.test; if ($img.viewer) { $viewerTag = $img.viewer }
     if ($Red) {
-      $o = Build-At $BaseSha $wbTag '' 'workbench'; Save 'build-workbench-base.log' $o
-      Check ($script:rc -eq 0) "RED: $wbTag built from OB1 $BaseSha"
-      $script:made.images += $wbTag
-      $o = Build-At $BaseSha $viewerTag '' 'viewer'; Save 'build-viewer-base.log' ($o -split "`n" | Select-Object -Last 60 | Out-String)
+      $o = Invoke-LabBuildLease $Id $ob1 { Build-At $BaseSha $viewerTag '' 'viewer' }; Save 'build-viewer-base.log' ($o -split "`n" | Select-Object -Last 60 | Out-String)
       Check ($script:rc -eq 0) "RED: $viewerTag built from OB1 $BaseSha"
       $script:made.images += $viewerTag
-    } else {
-      $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" -t $wbTag $wb; Save 'build-workbench.log' ($o -split "`n" | Select-Object -Last 80 | Out-String)
-      Check ($script:rc -eq 0) "$wbTag built at OB1 $($sha.Substring(0, 7)) (its test gate passed: grammar, hub clustering, contracts, export)"
-      if ($script:rc -ne 0) { throw 'build workbench' }
-      $script:made.images += $wbTag
-      $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --build-context "recipes=$(Join-Path $ob1 'recipes')" -t $viewerTag $viewerDir
-      Save 'build-viewer.log' ($o -split "`n" | Select-Object -Last 120 | Out-String)
-      Check ($script:rc -eq 0) "$viewerTag built (its build gate: bundle manifest, dependency resolution, the renderer's node tests)"
-      if ($script:rc -ne 0) { throw 'build viewer' }
-      $script:made.images += $viewerTag
     }
-    # the integration test runs from THIS tree's test stage in both modes (RED: against the base workbench)
-    $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb; Save 'build-workbench-test.log' ($o -split "`n" | Select-Object -Last 40 | Out-String)
-    Check ($script:rc -eq 0) "$wbTestTag (the test stage) built"
-    $script:made.images += $wbTestTag
-
+  }
+  if ($Prebuilt) {
+    # rw-lab-throughput attempt 3 (test attempt 2, A6/A6b/A7): a prebuilt image is resolved to its ID once and the run uses
+    # that ID; a green run takes it only when it is this tree's full-gate image (tree label, gate markers, /app/src)
+    if ($run.mode -eq 'green' -or $run.mode -eq 'landing') { $wbTag = Assert-LabGreenImage $wbTag $run.mode $ob1 'runtime'; $wbTestTag = Assert-LabGreenImage $wbTestTag $run.mode $ob1 'test' }
+    else {
+      $wbTag = Resolve-LabImageId $wbTag; $wbTestTag = Resolve-LabImageId $wbTestTag
+      if (-not $wbTag -or -not $wbTestTag) { throw 'could not resolve the prebuilt images to image IDs' }
+    }
+    # attempt 4 (test attempt 3, X3): the prebuilt viewer is tree-bound and ID-pinned like the workbench
+    if ($run.mode -eq 'green' -or $run.mode -eq 'landing') { $viewerTag = Assert-LabViewerImage $viewerTag $run.mode $ob1 }
+    else { $viewerTag = Resolve-LabImageId $viewerTag; if (-not $viewerTag) { throw 'could not resolve the prebuilt viewer to an image ID' } }
   }
   if ($BuildOnly) { $KeepImages = $true; Write-Host '  -BuildOnly: images built and kept; no lab ran'; throw 'BUILD-ONLY' }
 
   # ---------------------------------------------------------------- 4. the lab
   Write-Host '[4] the lab'
   $db = "$P-db"
-  if (-not (Run-Detached $db @('--network-alias', 'openbrain-db', '-e', "POSTGRES_PASSWORD=$pw", '-e', 'POSTGRES_DB=openbrain', '-v', "${stage}:/docker-entrypoint-initdb.d:ro", $PgImage))) { throw 'db' }
-  for ($i = 0; $i -lt 150; $i++) { if ((Dk logs $db) -match 'PostgreSQL init process complete') { break }; Start-Sleep -Seconds 2 }
-  for ($i = 0; $i -lt 60; $i++) { $null = Dk exec $db pg_isready -h 127.0.0.1 -U postgres -d openbrain; if ($script:rc -eq 0) { break }; Start-Sleep -Seconds 2 }
-  $logs = Dk logs $db
+  $dbStart = Start-LabDb -Name $db -PgImage $PgImage -Stage $stage -Pin $sha -Pw $pw -Extra @('--network-alias', 'openbrain-db') -NoTemplate $NoDbTemplate -LabVol "$P-dbvol"
+  if (-not $dbStart.ok) { throw 'db' }
+  $logs = $dbStart.logs
   Check ($logs -match 'PostgreSQL init process complete') 'the database ran the initdb chain'
   $errs = @(($logs -split "`n") | Where-Object { $_ -match 'ERROR:' })
   Check ($errs.Count -eq 0) "initdb logged no ERROR ($($errs.Count))"
@@ -299,7 +322,7 @@ try {
       '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://stub-research:8000',
       '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'WORKBENCH_GATE_URL=http://stub-gate:8080', '-e', "WORKBENCH_GATE_KEY=$gateKey", '-e', "VIEWER_NAV_URL=http://$P-viewer:8082",
       '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub',
-      '-v', "${vault}:/wiki", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
+      '-v', "${vault}:/wiki", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro") + $mount.args
   $walkEnv = if ($WalkOff) { @('-e', 'WORKSPACE_RESPONSE_WALK=off') } else { @() }
   $null = Run-Detached "$P-wb" ($wbArgs + $walkEnv + @($wbTag))
   # the front door is the viewer itself (rw-identity-harden): the portal Caddy's (wiki_app) snippet no
@@ -345,7 +368,7 @@ try {
   # [5b] the panels e2e (headless Chromium over the old workspace's panels) was removed with the workspace (rwr-remove-workspace);
   # the back-end panels suite is [5a] above and the isolation sweep is [5d] below.
 
-  if (-not $Red) {
+  if (-not $Red -and -not $NoSweep) {
     foreach ($walk in @('on', 'off')) {
       if ($walk -eq 'off') {
         $null = Dk rm -f "$P-wb"
@@ -378,6 +401,7 @@ try {
 } finally {
   Write-Host '[6] teardown'
   foreach ($c in $script:made.containers) { $null = Dk rm -f -v $c }
+  if ($script:made.ContainsKey('vols')) { foreach ($v in $script:made.vols) { $null = Dk volume rm -f $v } }
   if ($script:made.net) { $null = Dk network rm $net }
   if (-not $KeepImages) { foreach ($i in $script:made.images) { $null = Dk rmi -f $i } }
   $left = (Dk ps -a --filter "label=$label" --format '{{.Names}}' | Out-String).Trim()

@@ -7,6 +7,15 @@
 # no TLS and no CA in the lab any more: forward-auth verification makes no call (HS256 with the secret).
 #
 #   powershell -NoProfile -File OB1\docker\workbench\contract-test\run-identity-tests.ps1 -Subnet <x.y.z.0/24> [-Id <owner>] [-Evidence <dir>] [-Red]
+#     [-NoSweep] [-Landing] [-Sweep] [-Mutant] [-WbMount 'src/<path>=<host file>'] [-SkipGate] [-NoReuse] [-NoDbTemplate]
+#
+# THROUGHPUT (rw-lab-throughput, lab-throughput.ps1): the isolation sweep runs once per LANDING - developer, mutant and red
+# runs skip it by default and say so; -Landing always sweeps and refuses -NoSweep; -Sweep opts a developer run in. Images
+# are tagged by OB1 tree + build args (:wt-tree-<tree>-<args>) and reused by the next run on the same tree (labels checked;
+# -NoReuse builds under :wt-<id> as before). The database is cloned from a template of the same chain at the same pin
+# (-NoDbTemplate replays the chain). -WbMount mounts one mutated source file over the lab workbench (a mutant, no build);
+# -SkipGate skips the in-build unit gate of a red-base or mutant image (refused for a green or landing run). Builds hold
+# one slot of the harness 'build' lease class.
 #
 # -Subnet is REQUIRED (harness-subnet.ps1); -Evidence must be absent or empty. -Red runs the SAME tests
 # against the workbench, viewer and research images built from -BaseSha (rw-identity2: 3215724, the
@@ -45,6 +54,15 @@ param(
   [string]$CaddyImage = 'caddy:2-alpine',
   [string]$BaseSha = '3215724',
   [switch]$Red,
+  [switch]$Landing,
+  [switch]$Sweep,
+  [switch]$NoSweep,
+  [switch]$Mutant,
+  [string[]]$WbMount = @(),
+  [switch]$SkipGate,
+  [switch]$NoReuse,
+  [switch]$NoDbTemplate,
+  [switch]$Prebuilt,   # attempt 4: declared so it is refused cleanly (unbound, it was taken as a positional value)
   [switch]$KeepImages,
   [switch]$SkipSweeps,  # the integration test only (a targeted RED of one case)
   # round 4: a tester's probe test (deno, mounted into the test image as src/identity/t_probe_test.ts,
@@ -62,6 +80,12 @@ $w = Test-HarnessSubnet $Subnet
 if ($w) { Write-Host "REFUSED: $w"; exit 2 }
 $subnets = Split-HarnessSubnet $Subnet
 if ($Evidence -and (Test-Path $Evidence) -and @(Get-ChildItem -Force $Evidence).Count) { Write-Host "REFUSED: -Evidence $Evidence is not empty"; exit 2 }
+. (Join-Path $PSScriptRoot 'lab-throughput.ps1')
+$run = Resolve-LabRun -Red $Red -Landing $Landing -NoSweep ($NoSweep -or $SkipSweeps) -Sweep $Sweep -Mutant $Mutant -WbMount $WbMount -SkipGate $SkipGate -Prebuilt $Prebuilt
+if (-not $run.refused -and $Prebuilt) { $run.refused = 'this runner has no -Prebuilt mode: it builds, or reuses with the labels and /app checked, its own images' }
+if ($run.refused) { Write-Host "REFUSED: $($run.refused)"; exit 2 }
+$NoSweep = -not $run.sweep
+$SkipSweeps = -not $run.sweep
 
 $label = "ai-stack.harness.owner=$Id"
 $ct = $PSScriptRoot
@@ -81,6 +105,8 @@ $net = "$P-net"
 $sfx = if ($Red) { '-base' } else { '' }
 $wbTag = "openbrain-workbench:wt-$short$sfx"; $wbTestTag = "openbrain-workbench:wt-$short-test"
 $viewerTag = "openbrain-wiki-viewer:wt-$short$sfx"; $rsTag = "openbrain-research:wt-$short$sfx"
+$mount = Get-LabWbMountArgs $WbMount $wb
+if ($mount.refused) { Write-Host "REFUSED: $($mount.refused)"; exit 2 }
 $pw = Rand 24 'alnum'; $appPw = Rand 24 'alnum'
 $key = Rand 32; $door = Rand 32; $wsKey = Rand 32; $kOwui = Rand 32; $kAo = Rand 32; $faSecret = Rand 64 'alnum'
 $secrets = @($pw, $appPw, $key, $door, $wsKey, $kOwui, $kAo, $faSecret)
@@ -148,7 +174,7 @@ function Test-LabDockerArgs([string[]]$a) {
   }
   if ($a.Count -and $a[0] -eq 'build') {
     for ($i = 0; $i -lt $a.Count; $i++) {
-      if ($a[$i] -eq '-t' -and $a[$i + 1] -notmatch ":wt-$([regex]::Escape($short))(-[a-z0-9]+)?$") { return "a build tag that is not :wt-$short ($($a[$i + 1]))" }
+      if ($a[$i] -eq '-t' -and -not (Test-LabBuildTag $a[$i + 1] $short)) { return "a build tag that is not :wt-$short or a :wt-tree- reuse tag ($($a[$i + 1]))" }
     }
   }
   return ''
@@ -172,7 +198,7 @@ function Lab-Docker([int]$TimeoutSec, [string[]]$a) {
   return (($out.Result + $err.Result) -replace "`r", '').TrimEnd()
 }
 function Dk { Lab-Docker 300 ([string[]]$args) }
-function DkLong { Lab-Docker 2400 ([string[]]$args) }
+function DkLong { Lab-Docker (Get-LabBuildTimeoutSec) ([string[]]$args) }
 
 $shimCases = @(
   @('run', '-p', '8080:8080', 'x'), @('run', '--network', 'ai-stack_app-net', 'x'), @('network', 'create', '--driver', 'macvlan', 'n'),
@@ -208,6 +234,11 @@ function Build-At([string]$sha, [string]$tag, [string]$ctxRel, [string]$what, [s
     # Windows' own tar: a GNU tar first on PATH (Git Bash) reads 'C:\...' as a remote host
     & (Join-Path $env:SystemRoot 'System32/tar.exe') -xf $tar -C $tree
     Remove-Item -Force $tar
+    if ($SkipGate) {
+      # rw-lab-throughput: a red-base image skips the base's unit gate (the archive copy only, never the working tree)
+      $w = Convert-LabDockerfileSkipGate (Join-Path $tree 'docker\workbench\Dockerfile') $ob1
+      if ($w) { throw "RED -SkipGate: $w" }
+    }
   }
   $args2 = @('build', '--label', $label, '--build-arg', "OB1_SHA=$sha", '-t', $tag)
   if ($what -eq 'viewer') { $args2 += @('--build-context', "recipes=$(Join-Path $tree 'recipes')") }
@@ -217,6 +248,8 @@ function Build-At([string]$sha, [string]$tag, [string]$ctxRel, [string]$what, [s
 
 try {
   Write-Host "== rw-identity lab run  owner=$Id  net=$net  red=$([bool]$Red)  evidence=$Evidence"
+  Write-Host "  $($run.note)"
+  foreach ($l in $mount.lines) { Write-Host "  $l" }
   $sha = (& git -C $ob1 rev-parse HEAD).Trim()
   # ---------------------------------------------------------------- 1. the initdb chain
   Write-Host '[1] the initdb chain, from docker-compose.yml'
@@ -238,42 +271,44 @@ try {
   Write-Host '[3] images'
   if ($Red) {
     foreach ($b in @(@($wbTag, 'docker/workbench', 'workbench'), @($viewerTag, 'docker/wiki-viewer', 'viewer'), @($rsTag, 'integrations/research-service', 'research'))) {
-      $o = Build-At $BaseSha $b[0] $b[1] $b[2]; Save "build-$($b[2])-base.log" (($o -split "`n" | Select-Object -Last 40) -join "`n")
+      $o = Invoke-LabBuildLease $Id $ob1 { Build-At $BaseSha $b[0] $b[1] $b[2] }; Save "build-$($b[2])-base.log" (($o -split "`n" | Select-Object -Last 40) -join "`n")
       Check ($script:rc -eq 0) "RED: $($b[0]) built from OB1 $BaseSha"
       $script:made.images += $b[0]
     }
+    if ($RedCases) {
+      $o = Invoke-LabBuildLease $Id $ob1 { Build-At $BaseSha $wbTestTag 'docker/workbench' 'workbench' 'test' }; Save 'build-workbench-test.log' (($o -split "`n" | Select-Object -Last 40) -join "`n")
+      Check ($script:rc -eq 0) "$wbTestTag (the BASE's test stage; this tree's integration test is mounted over it) built"
+    } else {
+      $o = Invoke-LabBuildLease $Id $ob1 { DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb }; Save 'build-workbench-test.log' (($o -split "`n" | Select-Object -Last 40) -join "`n")
+      Check ($script:rc -eq 0) "$wbTestTag (this tree's test stage) built"
+    }
+    $script:made.images += $wbTestTag
   } else {
-    $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" -t $wbTag $wb; Save 'build-workbench.log' (($o -split "`n" | Select-Object -Last 80) -join "`n")
-    Check ($script:rc -eq 0) "$wbTag built at OB1 $($sha.Substring(0, 7)) (its test gate passed, src/identity/ included)"
-    if ($script:rc -ne 0) { throw 'build workbench' }
-    $script:made.images += $wbTag
-    $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --build-context "recipes=$(Join-Path $ob1 'recipes')" -t $viewerTag $viewerDir
-    Save 'build-viewer.log' (($o -split "`n" | Select-Object -Last 120) -join "`n")
-    Check ($script:rc -eq 0) "$viewerTag built (its node tests incl. the forwarder's identity cases)"
-    if ($script:rc -ne 0) { throw 'build viewer' }
-    $script:made.images += $viewerTag
-    $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" -t $rsTag $rsDir; Save 'build-research.log' (($o -split "`n" | Select-Object -Last 40) -join "`n")
+    $img = Invoke-LabWorkbenchImages -Run $run -Ob1 $ob1 -Wb $wb -Sha $sha -BaseSha $BaseSha -Short $short -Owner $Id -P $P `
+      -SkipGate $SkipGate -NoReuse $NoReuse -Viewer $true -ViewerDir $viewerDir -GateNote ', src/identity/ included'
+    if (-not $img.ok) { throw 'images' }
+    $wbTag = $img.wb; $wbTestTag = $img.test; if ($img.viewer) { $viewerTag = $img.viewer }
+    $o = Invoke-LabBuildLease $Id $ob1 { DkLong build --label $label --build-arg "OB1_SHA=$sha" -t $rsTag $rsDir }; Save 'build-research.log' (($o -split "`n" | Select-Object -Last 40) -join "`n")
     Check ($script:rc -eq 0) "$rsTag built"
     if ($script:rc -ne 0) { throw 'build research' }
     $script:made.images += $rsTag
   }
-  if ($Red -and $RedCases) {
-    $o = Build-At $BaseSha $wbTestTag 'docker/workbench' 'workbench' 'test'; Save 'build-workbench-test.log' (($o -split "`n" | Select-Object -Last 40) -join "`n")
-    Check ($script:rc -eq 0) "$wbTestTag (the BASE's test stage; this tree's integration test is mounted over it) built"
-  } else {
-    $o = DkLong build --label $label --build-arg "OB1_SHA=$sha" --target test -t $wbTestTag $wb; Save 'build-workbench-test.log' (($o -split "`n" | Select-Object -Last 40) -join "`n")
-    Check ($script:rc -eq 0) "$wbTestTag (this tree's test stage) built"
+  if ($Red) {
+    # rw-lab-throughput attempt 3: the run uses image IDs resolved once, never a tag that can move (test attempt 2, A7)
+    foreach ($v in @('wbTag', 'viewerTag', 'rsTag', 'wbTestTag')) {
+      $rid = Resolve-LabImageId (Get-Variable -Name $v -ValueOnly)
+      if (-not $rid) { throw "could not resolve `$$v to an image ID" }
+      Set-Variable -Name $v -Value $rid
+    }
   }
   $itMount = if ($Red -and $RedCases) { @('-v', "$(Join-Path $wb 'src/identity/identity_integration_test.ts'):/app/src/identity/identity_integration_test.ts:ro") } else { @() }
-  $script:made.images += $wbTestTag
 
   # ---------------------------------------------------------------- 5. the lab
   Write-Host '[5] the lab'
   $db = "$P-db"
-  if (-not (Run-Detached $db @('--network-alias', 'openbrain-db', '-e', "POSTGRES_PASSWORD=$pw", '-e', 'POSTGRES_DB=openbrain', '-v', "${stage}:/docker-entrypoint-initdb.d:ro", $PgImage))) { throw 'db' }
-  for ($i = 0; $i -lt 150; $i++) { if ((Dk logs $db) -match 'PostgreSQL init process complete') { break }; Start-Sleep -Seconds 2 }
-  for ($i = 0; $i -lt 60; $i++) { $null = Dk exec $db pg_isready -h 127.0.0.1 -U postgres -d openbrain; if ($script:rc -eq 0) { break }; Start-Sleep -Seconds 2 }
-  $logs = Dk logs $db
+  $dbStart = Start-LabDb -Name $db -PgImage $PgImage -Stage $stage -Pin $sha -Pw $pw -Extra @('--network-alias', 'openbrain-db') -NoTemplate $NoDbTemplate -LabVol "$P-dbvol"
+  if (-not $dbStart.ok) { throw 'db' }
+  $logs = $dbStart.logs
   Check ($logs -match 'PostgreSQL init process complete') 'the database ran the initdb chain'
   $errs = @(($logs -split "`n") | Where-Object { $_ -match 'ERROR:' })
   Check ($errs.Count -eq 0) "initdb logged no ERROR ($($errs.Count))"
@@ -321,7 +356,7 @@ try {
   $wbArgs = @('--network-alias', 'openbrain-workbench') + $common + @('-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub', '-v', "${vault}:/wiki",
       '-e', "WORKSPACE_DOOR_KEY=$door", '-e', "WORKSPACE_FORWARD_AUTH_ISSUER=$issuer", '-e', "WORKSPACE_FORWARD_AUTH_CLIENT_ID=$faClient",
       '-e', "WORKSPACE_FORWARD_AUTH_CLIENT_SECRET=$faSecret", '-e', 'WORKSPACE_FORWARD_AUTH_ADMIN_GROUP=research-admins',
-      '-e', "WORKSPACE_FORWARD_AUTH_SIGN_OUT_URL=$signOut")
+      '-e', "WORKSPACE_FORWARD_AUTH_SIGN_OUT_URL=$signOut") + $mount.args
   $null = Run-Detached "$P-wb" ($wbArgs + @($wbTag))
   # clause 5: the same image, NO sign-in configured, nothing rw-identity adds set (as shipped; its own vault; the same database)
   $null = Run-Detached "$P-wbplain" ($common + @('-v', "${vault2}:/wiki", $wbTag))
@@ -475,6 +510,7 @@ try {
 } finally {
   Write-Host '[7] teardown'
   foreach ($c in $script:made.containers + @("$P-wb", "$P-wbnodef")) { $null = Dk rm -f -v $c }
+  if ($script:made.ContainsKey('vols')) { foreach ($v in $script:made.vols) { $null = Dk volume rm -f $v } }
   if ($script:made.net) { $null = Dk network rm $net }
   if (-not $KeepImages) { foreach ($i in $script:made.images) { $null = Dk rmi -f $i } }
   $left = (Dk ps -a --filter "label=$label" --format '{{.Names}}' | Out-String).Trim()
