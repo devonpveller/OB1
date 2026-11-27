@@ -41,6 +41,7 @@ export type Loaded = { admin: boolean; user: Setting[]; shared: Setting[] };
 // not know still shows (under its own name), so a later item's keys are never silently dropped.
 const SECTION_TITLE: Record<string, string> = {
   "user:ui": "Start screen",
+  "user:notify": "Notifications",
   "user:refinery": "My ideas",
   "user:digest": "Daily digest and podcast",
   "admin:digest": "Podcast archive",
@@ -53,6 +54,13 @@ export const sectionTitle = (tier: "user" | "admin", section: string) => SECTION
 export const APPEARANCE_ROWS = ["ui.theme", "ui.accent", "ui.density", "ui.text_size", "ui.saved_themes"];
 export const hasAppearance = (keys: Setting[]) => keys.some((k) => APPEARANCE_ROWS.includes(k.key));
 
+// The notification keys (rwr-notify-prefs, slot 720) are registered in section 'ui' with the name notify.<class>; the screen
+// gives them their own section, "Notifications", drawn by Notifications.tsx. Which section a key belongs to is the SCREEN's
+// grouping only: the key keeps what the registry says. A key of another section is never pulled in.
+export const NOTIFY_SECTION = "notify";
+export const isNotify = (s: Setting) => s.tier === "user" && s.section === "ui" && s.key.startsWith("notify.");
+const groupOf = (s: Setting) => (isNotify(s) ? NOTIFY_SECTION : s.section);
+
 // Keys the app keeps for itself (the locked / last document, Recently viewed): identifiers it writes as you work, not
 // preferences, so the frame does not offer them as a form.
 export const isAppState = (s: Setting) => s.type === "ref_list" || s.validation?.ref === "doc_path";
@@ -62,7 +70,7 @@ export function sectionsOf(tier: "user" | "admin", list: Setting[]): Section[] {
   const by = new Map<string, Setting[]>();
   for (const s of list) {
     if (s.tier !== tier || (tier === "user" && isAppState(s))) continue;
-    by.set(s.section, [...(by.get(s.section) ?? []), s]);
+    by.set(groupOf(s), [...(by.get(groupOf(s)) ?? []), s]);
   }
   return [...by.entries()].map(([section, keys]) => ({
     id: `${tier}-${section}`, tier, section,

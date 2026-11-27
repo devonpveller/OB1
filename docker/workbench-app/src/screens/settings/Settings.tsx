@@ -8,9 +8,10 @@ import "./settings.css";
 import { Link } from "../../shell/Link";
 import { TagChip } from "./TagChip";
 import { Appearance } from "./Appearance";
+import { Notifications } from "./Notifications";
 import { syncAppearanceSubject } from "../../lib/appearance";
 import {
-  LEGEND, APPEARANCE_ROWS, hasAppearance, loadSettings, resetSetting, saveSetting, sectionsOf, show,
+  LEGEND, APPEARANCE_ROWS, NOTIFY_SECTION, hasAppearance, loadSettings, resetSetting, saveSetting, sectionsOf, show,
   type Loaded, type Section, type Setting,
 } from "./settings-data";
 
@@ -231,6 +232,8 @@ export function Settings({ subject = null, whoAnswered = true }: { subject?: str
                       <Field key={k.key} row={k} onRow={onRow} onStale={load} epoch={epoch} />
                     ))}
                   </Appearance>
+                ) : current.tier === "user" && current.section === NOTIFY_SECTION ? (
+                  <Notifications rows={current.keys} onRow={onRow} onStale={load} epoch={epoch} />
                 ) : current.keys.map((k) => (
                   <Field key={k.key} row={k} onRow={onRow} onStale={load} epoch={epoch} />
                 ))}

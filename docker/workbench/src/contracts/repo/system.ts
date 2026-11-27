@@ -42,6 +42,12 @@ export async function notifications(db: Db, cls: string | null, since: string | 
         -- delivered' event would otherwise tie another user's idea to a derived job's SHARED report source
         AND (n.entity IS NULL OR NOT starts_with(n.entity, 'idea:')
              OR EXISTS (SELECT 1 FROM public.ideas i WHERE i.id::text = split_part(n.entity, ':', 2) AND i.owner_sub = $4))
+        -- rwr-notify-prefs (slot 720): a class this person switched off (the boolean key notify.<class>, stored false) is
+        -- not shown to THEM; nobody else's bell changes. Only a boolean key can hide anything, so a stored value on the
+        -- sign-in key (an enum of "on") never hides a sign-in event. The filter is inside the query, before the LIMIT.
+        AND NOT EXISTS (SELECT 1 FROM public.user_settings u JOIN public.settings_keys k ON k.key = u.key
+                         WHERE u.owner_sub = $4 AND u.key = 'notify.' || n.class
+                           AND k.tier = 'user' AND k.type = 'boolean' AND u.value = 'false'::jsonb)
       ORDER BY n.last_seen DESC LIMIT $3`,
     [cls, since, limit, who.sub, who.key],
   );
