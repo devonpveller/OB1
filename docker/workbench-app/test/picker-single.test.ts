@@ -3,7 +3,8 @@
 // on the real tree (must be clean) and on the real tree plus each planted bypass (each must turn it red) - including the
 // six the tester of attempt 1 found getting past the earlier name-shaped guard.
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { check, readApp, SEARCH_ALLOW, type Files } from "./guard/structure";
 
@@ -124,6 +125,23 @@ describe("one picker, one list search (structural)", () => {
       red({ "src/screens/Sel.tsx": `export const x = () => <select multiple><option>a</option></select>;` }, /R1.*select/);
       red({ "src/screens/Dl.tsx": `export const x = () => <datalist id="d" />;` }, /R1.*datalist/);
       red({ "src/screens/Ad.tsx": `export const x = (p: object) => <input aria-activedescendant="x" {...p} />;` }, /R1.*activedescendant/);
+    });
+    // one planted case each for the rules the cases above reach only indirectly (rw-app-gate-fast: each rule must fail on its own plant)
+    it("R3 a dynamic import / require of a path that cannot be folded is refused outside the picker", () => {
+      red({ "src/screens/Dn.ts": `export const f = (p: string) => import(p);` }, /R3.*non-literal/);
+      red({ "src/screens/Dn2.js": `const m = (p) => require(p);` }, /R3.*non-literal/);
+    });
+    it("R3 a file outside the picker that exports ItemPicker without a module specifier is refused", () =>
+      red({ "src/screens/Ex.ts": `import { ItemPicker } from "../components/picker";
+export { ItemPicker };` }, /R3.*exports ItemPicker/));
+    it("R5 readApp reads every script kind under src/, a .jsx included", () => {
+      const dir = mkdtempSync(join(tmpdir(), "guard-r5-"));
+      try {
+        mkdirSync(join(dir, "src", "a"), { recursive: true });
+        for (const f of ["a.ts", "b.tsx", "c.js", "d.jsx", "e.mjs", "f.mts", "g.cjs"]) writeFileSync(join(dir, "src", "a", f), "export {};");
+        writeFileSync(join(dir, "src", "a", "h.css"), "a{}");
+        expect([...readApp(dir).keys()].sort()).toEqual(["a.ts", "b.tsx", "c.js", "d.jsx", "e.mjs", "f.mts", "g.cjs"].map((f) => `src/a/${f}`));
+      } finally { rmSync(dir, { recursive: true, force: true }); }
     });
     it("other ways to split the route", () => {
       red({ "src/a1.ts": `export const u = ["/workbench", "contract", "search"].join("/");` }, /R4/);
