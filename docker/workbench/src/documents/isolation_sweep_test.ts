@@ -375,8 +375,12 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // (synthesis_id set) is shared knowledge, kept shared. A reads it and so does B; its text is NOT a marker. The control that the filter
   // hides private-only claims and nothing more (hiding a mixed claim would be an oracle on B's report).
   const mixText = `The sweep mixed shared claim ${rnd()} held in 9 trials.`;
+  // its own shared synthesis (not the fixture's: earlier lab steps move or archive fixture rows)
+  const mixSyn = (await sql<{ id: string }>(
+    `INSERT INTO public.sources (title, content, content_type, research_key) VALUES ($1, $2, 'research_synthesis', $3) RETURNING id::text AS id`,
+    [`Sweep shared report ${rnd()}`, "A shared run.", `rk-sweep-shared-${rnd()}`]))[0].id;
   const bMixed = (await sql<{ id: string }>(
-    `SELECT f.id::text AS id FROM public.find_or_create_claim($1, NULL, '77777777-7777-4777-8777-777777777777'::uuid, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb) f`, [mixText]))[0].id;
+    `SELECT f.id::text AS id FROM public.find_or_create_claim($1, NULL, $2::uuid, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb) f`, [mixText, mixSyn]))[0].id;
   await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [bReport, bMixed]);
   // rw-boundary-core (plan 09 PD0a; slot 420): B's private hand-back (the inlet id, the delivery target and the owner's
   // review of a refused question, each a marker) - no route may read it; a service:shared-key prompt on an unclassified
