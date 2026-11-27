@@ -67,6 +67,10 @@ if (-not $Evidence) { $Evidence = Join-Path $env:TEMP "$P-evidence" }
 $evStage = Join-Path $env:TEMP "$P-evstage"; New-Item -ItemType Directory -Force $evStage | Out-Null
 $stage = Join-Path $env:TEMP "$P-initdb"
 $vault = Join-Path $env:TEMP "$P-vault"; New-Item -ItemType Directory -Force $vault | Out-Null
+# the vault the workbench and the tests share is a NAMED VOLUME (seeded from this temp dir below), not a bind mount of it: on a busy Windows
+# host the bind mount made every git call tens of seconds slow (a `git log` of a 300-commit vault took 22 s) and the integration step
+# timed out (rwr-doc-versions-api attempt 6)
+$vaultVol = "$P-vault"
 foreach ($fx in @(@('content/tool/tool-fixture', 'Tool Fixture', 'An entity page about contract retrieval fixtures.'),
     @('content/source/11111111-1111-4111-8111-111111111111', 'Active fixture source', 'Leaf.'),
     @('content/source/22222222-2222-4222-8222-222222222222', 'Suppressed fixture source', 'Leaf.'))) {
@@ -244,6 +248,9 @@ try {
   $stampState = "$(Dk exec $db psql -U postgres -d openbrain -X -A -t -c "SELECT CASE WHEN to_regclass('public.inlet_connections') IS NULL THEN 'absent' WHEN (SELECT count(*) FROM pg_trigger WHERE tgname IN ('trg_inlet_stamp_thoughts', 'trg_inlet_stamp_sources') AND tgenabled = 'A') = 2 THEN 'on' ELSE 'off' END")".Trim()
   Check ($stampState -eq 'on' -or ($stampState -eq 'absent' -and @($chain | Where-Object { $_[1] -eq '470-init-inlet-stamp.sql' }).Count -eq 0)) "rw-inlet-stamp: slot 470's guards are PRESENT and ALWAYS-enabled again after the fixture load ($stampState; absent passes only on a chain without slot 470)"
 
+  $null = Dk volume create --label $label $vaultVol
+  $null = Dk run --rm --label $label --network none --user root -v "${vault}:/src:ro" -v "${vaultVol}:/dst" --entrypoint sh $wbTestTag -c 'cp -a /src/. /dst/'
+  Check ($script:rc -eq 0) "the vault volume $vaultVol is seeded"
   $ctMount = "${ct}:/ct:ro"
   $null = Run-Detached "$P-embed" @('--network-alias', 'stub-embed', '-v', $ctMount, '--entrypoint', 'deno', $wbTestTag, 'run', '--allow-net', '/ct/stub-embed.ts')
   $null = Run-Detached "$P-research" @('--network-alias', 'stub-research', '-v', $ctMount, '-e', "DB_HOST=$db", '-e', "DB_PASSWORD=$pw",
@@ -255,20 +262,20 @@ try {
     $null = Run-Detached "$P-viewer" @('--network-alias', 'openbrain-wiki-viewer', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', 'WIKI_NAV_MIN_ROWS=0',
         '-e', 'WIKI_BUILDER=0', '-e', 'WIKI_DB_TCP=openbrain-db:5432', '-e', 'WIKI_DB_PROBE_MS=1000', '-e', 'WIKI_RECONCILE_INTERVAL_MS=5000',
         '-e', 'NODE_OPTIONS=--max-old-space-size=2048', '-e', 'WORKBENCH_URL=http://openbrain-workbench:8000', '-e', "WORKBENCH_KEY=$key",
-        '-e', "WIKI_VIEWER_ALLOWED_HOSTS=$P-viewer", '-v', "${vault}:/wiki:ro", $viewerTag)
+        '-e', "WIKI_VIEWER_ALLOWED_HOSTS=$P-viewer", '-v', "${vaultVol}:/wiki:ro", $viewerTag)
   }
   $wbArgs = @('-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$key",
       '-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw", '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
       '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid', '-e', 'WIKI_GIT_DIR=/wiki',
       '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://stub-research:8000',
       '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub',
-      '-v', "${vault}:/wiki", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
+      '-v', "${vaultVol}:/wiki", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
   $null = Run-Detached "$P-wb" (@('--network-alias', 'openbrain-workbench') + $wbArgs + @($wbTag))
   Check (Wait-Http "http://$P-wb:8000/health" 90) 'the workbench is up'
   if (-not $Red -and -not $NoSweep) { Check (Wait-Http "http://$P-viewer:8080/workspace/" 90) 'the front door (the viewer) answers' }
 
   Write-Host '[5a] the versions integration test (V1-V18): restore v11 at v14, stable numbers across moves, compare = git diff, two users, planted markers, edge cases, concurrency, the table'
-  $o = Lab-Docker 3600 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
+  $o = Lab-Docker 7200 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vaultVol}:/vault",
     '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault', '-e', 'WIKI_GIT_DIR=/vault',
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '--allow-run', 'src/documents/versions_integration_test.ts')
@@ -329,7 +336,7 @@ try {
         Check (($script:rc -eq 0) -and (Wait-Http "http://$P-wb:8000/health" 90)) 'the workbench restarted with the response walk off'
       }
       Write-Host "[5c] the route-wide isolation sweep (as user A, every registered route - the new ones included - both doors; B's data planted; response walk $walk)"
-      $o = Lab-Docker 1800 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
+      $o = Lab-Docker 1800 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vaultVol}:/vault",
         '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro",
         '-e', "SWEEP_BASE=http://$P-wb:8000", '-e', "SWEEP_VIEWER=http://$P-viewer:8080", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault',
         '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
@@ -350,6 +357,7 @@ try {
   Write-Host '[6] teardown'
   foreach ($c in $script:made.containers) { $null = Dk rm -f -v $c }
   if ($script:made.net) { $null = Dk network rm $net }
+  $null = Dk volume rm -f $vaultVol
   if (-not $KeepImages) { foreach ($i in $script:made.images) { $null = Dk rmi -f $i } }
   $left = (Dk ps -a --filter "label=$label" --format '{{.Names}}' | Out-String).Trim()
   Check (-not $left) "no container labelled $Id is left ($left)"
