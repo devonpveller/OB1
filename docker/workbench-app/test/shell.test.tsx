@@ -51,9 +51,9 @@ describe("every menu entry opens its route (acceptance 1)", () => {
     render(<App load={load()} />);
     const nav = screen.getByRole("navigation", { name: "Main" });
     const labels = within(nav).getAllByRole("link").map((a) => a.textContent);
-    expect(labels).toEqual(["Home", "Research", "Chat", "Documents", "Ideas", "Podcasts", "Library",
+    expect(labels).toEqual(["Home", "Research", "Chat", "Documents", "Ideas", "Podcasts", "Cast and voices", "Library",
       "Imports", "Removals and trail", "Cleanup", "Settings", "What moved where"]);
-    expect(MENU.filter((r) => r.group === "everywhere").map((r) => r.label)).toEqual(["Home", "Research", "Chat", "Documents", "Ideas", "Podcasts", "Library"]);
+    expect(MENU.filter((r) => r.group === "everywhere").map((r) => r.label)).toEqual(["Home", "Research", "Chat", "Documents", "Ideas", "Podcasts", "Cast and voices", "Library"]);
     expect(MENU.filter((r) => r.group === "housekeeping").map((r) => r.label)).toEqual(["Imports", "Removals and trail", "Cleanup", "Settings"]);
   });
   for (const r of MENU.filter((m) => !m.screen)) { // a built screen (a `screen` on its route) has its own tests

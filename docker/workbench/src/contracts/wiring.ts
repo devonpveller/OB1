@@ -9,6 +9,7 @@ import { chunkText } from "../util/chunk.ts";
 import { poolDb } from "./db.ts";
 import { RegistryReader } from "./registry.ts";
 import { httpScorer, unavailableScorer } from "./logic/reopen.ts";
+import { podcastSampler } from "./logic/sample.ts";
 import type { ContractDeps } from "./routes/http.ts";
 
 export function contractDeps(): ContractDeps {
@@ -29,6 +30,11 @@ export function contractDeps(): ContractDeps {
     // P7a: blank as shipped = a render request stays queued (nothing is rendered)
     podcastRenderUrl: (Deno.env.get("PODCAST_RENDER_URL") ?? "").trim(),
     podcastRenderKey: (Deno.env.get("WORKBENCH_KEY") || Deno.env.get("MCP_ACCESS_KEY") || "").trim(),
+    // rwr-voices: the voice sample is asked of openbrain-podcast (same address as the render hand-off, same key); blank = off
+    sampleVoice: podcastSampler({
+      renderUrl: (Deno.env.get("PODCAST_RENDER_URL") ?? "").trim(),
+      key: (Deno.env.get("WORKBENCH_KEY") || Deno.env.get("MCP_ACCESS_KEY") || "").trim(),
+    }) ?? undefined,
     // rw-owner-private-view: the private views (identity mode; the private search's own embedding key)
     privateEmbed: privateEmbedder(),
     privateView: privateViewConfig(),

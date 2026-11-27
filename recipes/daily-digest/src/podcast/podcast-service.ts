@@ -235,7 +235,7 @@ export class PodcastService {
 
 export function servePodcast(
   svc: PodcastService,
-  o: { port: number; hostname?: string; signal?: AbortSignal; onListen?: (a: Deno.NetAddr) => void; render?: RenderService; renderKey?: string },
+  o: { port: number; hostname?: string; signal?: AbortSignal; onListen?: (a: Deno.NetAddr) => void; render?: RenderService; renderKey?: string; sample?: (req: Request) => Promise<Response> },
 ): Deno.HttpServer<Deno.NetAddr> {
   return Deno.serve({ port: o.port, hostname: o.hostname ?? "0.0.0.0", signal: o.signal, onListen: o.onListen }, async (req) => {
     const url = new URL(req.url);
@@ -271,6 +271,8 @@ export function servePodcast(
         return Response.json({ error: String(e).slice(0, 300) }, { status: 502 });
       }
     }
+    // rwr-voices: a short voice sample for the workbench (sample.ts; keyed with the same key as /render)
+    if (o.sample && req.method === "POST" && url.pathname === "/sample") return await o.sample(req);
     return new Response("not found", { status: 404 });
   });
 }

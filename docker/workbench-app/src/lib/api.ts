@@ -108,3 +108,17 @@ export async function raw(url: string): Promise<Response> {
   log.push({ method: "GET", url: target });
   return await fetcher(target, { method: "GET", credentials: "same-origin", cache: "no-store" });
 }
+
+// A request whose good answer is a FILE (audio): the bytes as a Blob with their content type, through the same door, guard
+// and log. A refusal is an ApiError (its JSON body when it has one), as in api().
+export async function blob(method: "GET" | "POST", url: string): Promise<{ blob: Blob; type: string }> {
+  const target = guard(url);
+  log.push({ method, url: target });
+  const r = await fetcher(target, { method, credentials: "same-origin", cache: "no-store" });
+  if (!r.ok) {
+    let data: any = {};
+    try { data = JSON.parse(await r.text()); } catch { data = {}; }
+    throw new ApiError(r.status, data);
+  }
+  return { blob: await r.blob(), type: r.headers.get("content-type") ?? "" };
+}

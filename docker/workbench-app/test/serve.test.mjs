@@ -197,6 +197,8 @@ test("the HTML carries a Content-Security-Policy: same-origin only, no framing",
   assert.match(d["style-src"], /^'self' 'nonce-[A-Za-z0-9+/]{22}=='$/);
   assert.equal(d["img-src"], "'self' data:");
   assert.equal(d["font-src"], "'self'");
+  // rwr-voices: a voice sample is fetched through the door and played from a blob: URL; media is the app's own or a blob: of its own making
+  assert.equal(d["media-src"], "'self' blob:");
   assert.equal(d["connect-src"], "'self'");
   assert.equal(d["frame-ancestors"], "'none'");
   assert.equal(d["base-uri"], "'none'");

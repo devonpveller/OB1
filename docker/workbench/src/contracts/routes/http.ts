@@ -24,6 +24,8 @@ export interface ContractDeps {
   // P7a: where a render request is handed to openbrain-podcast (POST {"request_id"}); "" = inert
   podcastRenderUrl?: string;
   podcastRenderKey?: string; // sent as X-Brain-Key to the render service (WORKBENCH_KEY)
+  // rwr-voices: a few seconds of one voice link, voiced by openbrain-podcast (logic/sample.ts); absent = the stated 503
+  sampleVoice?: (v: { route: string; voice: string; speed: number }) => Promise<Uint8Array>;
   // rw-owner-private-view: the private search's query embedder (the workbench's own key, no fallback); null = off
   privateEmbed?: ((text: string) => Promise<number[]>) | null;
   // rw-owner-private-view: who may see the private views (the identity mode; identity/private_view.ts)

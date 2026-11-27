@@ -16,6 +16,7 @@ import {
 } from "../schemas/cast.ts";
 import { ErrorBody, limit, pathParam, queryParam } from "../schemas/common.ts";
 import { parseLimit } from "../logic/scope.ts";
+import { SampleFailed, sampleLimiter } from "../logic/sample.ts";
 import { body, type ContractApp, type ContractDeps, errors, fail, json, op, PREFIX, send } from "./http.ts";
 
 const T = ["cast (rwr-cast-edit-api)"];
@@ -131,6 +132,40 @@ export function registerCast(app: ContractApp, deps: ContractDeps) {
     request: { params: idParam(CX.voiceDel) },
     responses: { 200: json(CastDeleted, { id: CX.voiceDel, deleted: true }, "deleted"), ...errs },
   }), (c) => guard(c, "voice", async (id) => send(c, CastDeleted, await cast.deleteVoice(db, (await identityOf(c)).sub, id))));
+
+  // rwr-voices: a few seconds of one of the caller's voice links. The voice link is read as the caller (anyone else's, a
+  // shared pool's, a missing or a malformed id is the one 404); the sentence is fixed and the voicing is done by
+  // openbrain-podcast through LiteLLM (logic/sample.ts): this route holds no speech address and no speech key.
+  const limiter = sampleLimiter();
+  op(app, createRoute({
+    method: "post", path: `${P}/voices/{id}/sample`, operationId: "castVoiceSample", tags: T,
+    summary: "a short audio sample (a fixed sentence) of one of the caller's voice links, voiced through the gateway by openbrain-podcast",
+    description: "One sample at a time and at most 12 a minute per person (429). Never cached. 503 while the voice service is not set up.",
+    request: { params: idParam(CX.voice) },
+    responses: {
+      200: { content: { "audio/wav": { schema: z.string().openapi({ type: "string", format: "binary" }) } }, description: "a WAV: 24 kHz, mono, 16-bit" },
+      ...errs,
+      429: { content: { "application/json": { schema: ErrorBody } }, description: "one sample at a time, and at most 12 a minute" },
+      502: { content: { "application/json": { schema: ErrorBody } }, description: "the voice service did not answer or did not return audio" },
+      503: { content: { "application/json": { schema: ErrorBody } }, description: "voice samples are not set up on this server" },
+    },
+  }), (c) => guard(c, "voice", async (id) => {
+    const who = await identityOf(c);
+    const v = await cast.getVoice(db, who.sub, id) as { route: string; voice: string; speed: number } | null;
+    if (!v) return notFound(c, "voice");
+    if (!deps.sampleVoice) return c.json({ error: "voice samples are not available on this server" }, 503);
+    const release = limiter.take(who.sub);
+    if (!release) return c.json({ error: "one sample at a time, and not too many: wait a moment" }, 429);
+    try {
+      const audio = await deps.sampleVoice({ route: String(v.route), voice: String(v.voice), speed: Number(v.speed) });
+      return new Response(audio as BodyInit, { status: 200, headers: { "content-type": "audio/wav", "cache-control": "no-store" } });
+    } catch (e) {
+      if (e instanceof SampleFailed) return c.json({ error: "the voice engine did not answer: try again in a moment" }, 502);
+      throw e;
+    } finally {
+      release();
+    }
+  }));
 
   // ── presenters ──────────────────────────────────────────────────────────────────────────────
   op(app, createRoute({

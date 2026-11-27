@@ -35,6 +35,7 @@ import { PresenterStore } from "./src/podcast/presenter-store.ts";
 import { RenderService } from "./src/podcast/render-service.ts";
 import { SegmentCache } from "./src/podcast/segment-cache.ts";
 import { gatewaySpeech } from "./src/podcast/tts-client.ts";
+import { sampleHandler } from "./src/podcast/sample.ts";
 import { realClock } from "./src/routine/clock.ts";
 import { routineConfigFromEnv } from "./src/routine/routine.ts";
 import { RoutineStore } from "./src/routine/store.ts";
@@ -62,11 +63,12 @@ const svc = new PodcastService({
 
 const restBase = env("BRAIN_REST_URL", "http://openbrain-rest");
 const destination = storeDestination({ workbenchUrl: env("WORKBENCH_URL", "http://openbrain-workbench:8000"), key: env("MCP_ACCESS_KEY") });
+const speech = gatewaySpeech({ apiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"), apiKey: env("PODCAST_TTS_KEY") });
 const render = new RenderService({
   store: new PresenterStore(restBase),
   cache: new SegmentCache(
     env("PODCAST_SEGMENT_CACHE_DIR", `${env("REPORTS_DIR", "/reports")}/podcast-segment-cache`),
-    gatewaySpeech({ apiBase: env("CHAT_API_BASE", "http://llama-cpp:8080/v1"), apiKey: env("PODCAST_TTS_KEY") }),
+    speech,
   ),
   archive: new ArchiveWriter(destination),
   destination,
@@ -78,6 +80,7 @@ const render = new RenderService({
 servePodcast(svc, {
   render,
   renderKey: env("MCP_ACCESS_KEY"), // /render and /transcode need it (the workbench sends its WORKBENCH_KEY)
+  sample: sampleHandler({ speech, key: env("MCP_ACCESS_KEY") }), // rwr-voices: POST /sample, the same speech function and key
   port: parseInt(env("PORT", "8080"), 10),
   onListen: (a) => console.log(`openbrain-podcast listening on :${a.port} (args: ${RUN_ARGS.join(" ") || "(none)"})`),
 });

@@ -58,6 +58,10 @@ const PODCAST_MODEL = /\/(podcasts|presenters|teams)(\/|$| )/;
 //    lab-caster-0001 (lab-caster-0002 owns the shared pool's rows the copy examples use); every /cast/ operation is
 //    called as lab-caster-0001. Every one of them is checked (none is skipped): the DELETE examples remove *-del rows.
 const CAST = /\/workbench\/contract\/cast\//;
+// rwr-voices: the voice sample (POST /cast/voices/{id}/sample) answers a WAV that openbrain-podcast voices. Only a lab that runs the podcast
+// stand-in (run-cast-tests.ps1: contract-test/stub-podcast.ts, DREDD_SAMPLE=1) checks it; every other lab has no podcast service, the route
+// answers its documented 503 there, and the hooks skip it (run-contract-tests.ps1 counts that one operation in $hookSkipped).
+const isSampleSkipped = (t) => process.env.DREDD_SAMPLE !== '1' && /\/cast\/voices\/\{id\}\/sample/.test(String((t && t.name) || ''));
 
 // 7. rw-owner-private-view (slot 480): the owner's private views answer the signed-in owner only (or the configured
 //    default identity while sign-in is off). The Dredd workbench has neither (no WORKSPACE_DEFAULT_SUB), so the three
@@ -95,7 +99,7 @@ hooks.beforeEach((transaction, done) => {
     transaction.request.headers['X-Test-Sub'] = 'lab-caster-0001';
   }
   const code = String(transaction.expected && transaction.expected.statusCode);
-  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || FLAG_BY_ID.test(String(transaction.name || '')) || PENDING_BY_ID.test(String(transaction.name || '')) || PRIVATE_BY_ID.test(String(transaction.name || '')) || isResearchStart(transaction) || isGapSkipped(transaction);
+  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || FLAG_BY_ID.test(String(transaction.name || '')) || PENDING_BY_ID.test(String(transaction.name || '')) || PRIVATE_BY_ID.test(String(transaction.name || '')) || isResearchStart(transaction) || isGapSkipped(transaction) || isSampleSkipped(transaction);
   done();
 });
 

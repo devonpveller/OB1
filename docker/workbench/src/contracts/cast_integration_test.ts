@@ -3,7 +3,7 @@
 // its disposable lab (the real initdb chain incl. 560-init-cast.sql, fixtures.sql, the :wt workbench logged in as
 // ob_workbench with WORKSPACE_IDENTITY_HEADER=X-Test-Sub, PostgREST + the rest Caddy). Never point it at a live stack.
 //
-// C1..C16 name the acceptance statements (test-plans/rwr-cast-edit-api.md). A and B are fresh lab subjects per run.
+// C1..C18 name the acceptance statements (C17, C18: rwr-voices) (test-plans/rwr-cast-edit-api.md). A and B are fresh lab subjects per run.
 // Environment: CAST_TEST_BASE, CAST_TEST_KEY, CAST_TEST_SUB_HEADER (default X-Test-Sub), CAST_TEST_REST (the lab's
 // PostgREST root, for C5), CAST_TEST_RECIPES (the recipes mount, for C5), CAST_TEST_MARKER_OUT (a file the run writes
 // its planted markers to, so the runner can search the workbench's log for them),
@@ -672,6 +672,110 @@ t("C16: two requests setting a default format at the same moment: the loser is t
     assert(/default format/.test(r.text), r.text);
   }
   assertEquals((await sql(`SELECT count(*)::int AS n FROM public.podcast_formats WHERE owner_sub = $1 AND is_default`, [A]))[0].n, 1);
+});
+
+// rwr-voices. The screen's own write sequences, then the render reading what they stored (C17), and the voice sample route (C18).
+// CAST_TEST_PODCAST is the lab's openbrain-podcast stand-in: it runs the REAL recipes sample handler with a recording speech
+// function, and there is NO speech host anywhere on the lab network; GET /__calls is its record of what it was told to voice.
+const STUB_PODCAST = (Deno.env.get("CAST_TEST_PODCAST") ?? "").replace(/\/+$/, "");
+async function podcastCalls(): Promise<{ route: string; voice: string; speed: number; text: string }[]> {
+  return await (await fetch(`${STUB_PODCAST}/__calls`)).json();
+}
+
+Deno.test({
+  name: "C17: save then render uses the edited values - the screen's sequences (own voice link edited in place; shared link split; presenter fields) are what the renderer's store reads next (real PostgREST)",
+  ignore: ignore || !REST || !RECIPES, sanitizeOps: false, sanitizeResources: false,
+  fn: async () => {
+    const storeMod = await import(`file://${RECIPES}/daily-digest/src/podcast/presenter-store.ts`);
+    const pres = await import(`file://${RECIPES}/daily-digest/src/podcast/presenters.ts`);
+    const owner = `lab-cast-voices-${RUN}`;
+    const store = new storeMod.PresenterStore("http://rest.invalid",
+      ((u: string | URL | Request, init?: RequestInit) => fetch(String(u).replace("http://rest.invalid/rest/v1", REST), init)) as typeof fetch);
+    const as = (m: string, pth: string, b?: unknown) => call(m, pth, b, owner);
+    const v1 = (await as("POST", "/voices", { route: "local-tts", voice: "af_heart", speed: 1 })).json;
+    const v2 = (await as("POST", "/voices", { route: "local-tts", voice: "bm_george", speed: 1 })).json;
+    const pa = (await as("POST", "/presenters", { name: "Voices A", voice_id: v1.id, tone: "dry" })).json;
+    const pb = (await as("POST", "/presenters", { name: "Voices B", voice_id: v1.id })).json;
+    const pc = (await as("POST", "/presenters", { name: "Voices C", voice_id: v2.id })).json;
+    const tm = (await as("POST", "/teams", { name: `voices-team-${RUN}`, members: [pa.id, pb.id, pc.id], user_seat: 1 })).json;
+    const read = async () => await store.team(owner, tm.id);
+    const before = await read();
+    const castBefore = pres.castBlock(before);
+    const voiceOf = (t: any, id: string) => t.presenters.find((p: any) => p.id === id).voice;
+    assertEquals(voiceOf(before, pa.id), { id: v1.id, route: "local-tts", voice: "af_heart", speed: 1 });
+    // (1) a voice link only one presenter uses: edited in place
+    const e1 = await as("PATCH", `/voices/${v2.id}`, { voice: "bf_emma", speed: 1.25 });
+    assertEquals(e1.status, 200, e1.text);
+    assertEquals(voiceOf(await read(), pc.id), { id: v2.id, route: "local-tts", voice: "bf_emma", speed: 1.25 });
+    // (2) a link two presenters share: the screen makes a link of its own for the one being changed (the other keeps its voice)
+    const nv = await as("POST", "/voices", { route: "local-tts", voice: "am_michael", speed: 0.9 });
+    assertEquals(nv.status, 201, nv.text);
+    const e2 = await as("PATCH", `/presenters/${pb.id}`, { voice_id: nv.json.id, tone: "warm and unhurried" });
+    assertEquals(e2.status, 200, e2.text);
+    const after = await read();
+    assertEquals(voiceOf(after, pb.id), { id: nv.json.id, route: "local-tts", voice: "am_michael", speed: 0.9 });
+    assertEquals(voiceOf(after, pa.id), voiceOf(before, pa.id), "the presenter that kept the shared link keeps its voice");
+    // (3) the cast the script prompt carries changed exactly where the edit was
+    const castAfter = pres.castBlock(after);
+    assertNotEquals(castAfter, castBefore);
+    assert(castAfter.includes("Tone: warm and unhurried") && castAfter.includes("Tone: dry"), castAfter);
+    // (4) the screen's delete order: the presenter out of its team, the presenter, then its own voice link
+    const left = await as("PATCH", `/teams/${tm.id}`, { members: [pa.id, pc.id] });
+    assertEquals(left.status, 200, left.text);
+    assertEquals((await as("DELETE", `/presenters/${pb.id}`)).status, 200);
+    assertEquals((await as("DELETE", `/voices/${nv.json.id}`)).status, 200);
+    assertEquals((await read()).presenters.map((p: any) => p.id), [pa.id, pc.id]);
+    // a voice link still voicing a presenter is refused (the screen never deletes a link another presenter uses)
+    assertEquals((await as("DELETE", `/voices/${v1.id}`)).status, 409);
+  },
+});
+
+Deno.test({
+  name: "C18: the voice sample - own voice link only (B's, a missing and a malformed id are one 404 and nothing is voiced), a fixed sentence, a WAV, voiced by the podcast service alone",
+  ignore: ignore || !STUB_PODCAST, sanitizeOps: false, sanitizeResources: false,
+  fn: async () => {
+    await setup();
+    const callsBefore = (await podcastCalls()).length;
+    const raw = async (sub: string | null, id: string, body?: unknown) => {
+      const headers: Record<string, string> = { "x-brain-key": KEY };
+      if (sub) headers[SUB_HEADER] = sub;
+      if (body !== undefined) headers["content-type"] = "application/json";
+      return await fetch(`${BASE}/workbench/contract/cast/voices/${id}/sample`, { method: "POST", headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    };
+    const ok = await raw(A, W.voice);
+    assertEquals(ok.status, 200);
+    assertEquals(ok.headers.get("content-type"), "audio/wav");
+    assertEquals(ok.headers.get("cache-control"), "no-store");
+    const wav = new Uint8Array(await ok.arrayBuffer());
+    assertEquals(new TextDecoder().decode(wav.slice(0, 4)) + new TextDecoder().decode(wav.slice(8, 12)), "RIFFWAVE");
+    assert(wav.length > 44);
+    const calls = await podcastCalls();
+    assertEquals(calls.length, callsBefore + 1, "exactly one voicing, by the podcast service");
+    const last = calls[calls.length - 1];
+    assertEquals([last.route, last.voice, last.speed], ["local-tts", "bm_george", 1.1], "the route, voice and speed of A's voice link, as stored");
+    assert(last.text.length > 0 && last.text.length < 200, "one short fixed sentence");
+    // B asks for A's voice link, a missing id and a malformed id: the same 404, and the podcast service is not asked
+    const bodies: string[] = [];
+    for (const id of [W.voice, missing("voice"), "..%2Fx"]) {
+      const r = await raw(B, id);
+      assertEquals(r.status, 404, id);
+      bodies.push(await r.text());
+    }
+    assertEquals(new Set(bodies).size, 1, "one answer for all three");
+    noMarkers("the refusal", bodies[0]);
+    assertEquals((await podcastCalls()).length, callsBefore + 1, "nothing was voiced for B");
+    // the sample takes no body: a text of the caller's is never spoken
+    const withBody = await raw(A, W.voice, { text: "say something else" });
+    await withBody.arrayBuffer();
+    const calls2 = await podcastCalls();
+    assertNotEquals(calls2[calls2.length - 1].text, "say something else");
+    // a service key has no cast, so no sample (and nothing is voiced)
+    const n = (await podcastCalls()).length;
+    const svc = await raw(null, W.voice);
+    await svc.arrayBuffer();
+    assert(svc.status >= 400, `a service key has no cast: ${svc.status}`);
+    assertEquals((await podcastCalls()).length, n);
+  },
 });
 
 t("closes the pool", async () => {

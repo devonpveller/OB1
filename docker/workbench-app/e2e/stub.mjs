@@ -72,6 +72,9 @@ http.createServer((req, res) => {
   }
   // the Documents screen's two reads (rwr-docs-list; its own e2e is docs.e2e.mjs): nothing listed in this lab
   if (p === "/workbench/contract/documents") return json({ documents: [] });
+  // the Cast and voices screen (rwr-voices) is a real screen: empty lists so the shell run can open it (its own e2e is voices.e2e.mjs)
+  const cast = p.match(/^\/workbench\/contract\/cast\/(voices|presenters|teams|formats)$/);
+  if (cast) return json({ [cast[1]]: [], total: 0 });
   if (p === "/workbench/documents/folders") return json({ root: "documents/k-7f3a", folders: [""] });
   if (p === "/workbench/documents/state") {
     const path = new URL(req.url, "http://x").searchParams.get("path");

@@ -41,7 +41,7 @@ const MIME = {
 // policy and in <meta name="csp-nonce">, and the editor hands that nonce to CodeMirror (EditorView.cspNonce). Only a
 // <style> element carrying the nonce runs; a style attribute or an injected element without it is still refused.
 export const cspFor = (nonce) => [
-  "default-src 'self'", "script-src 'self'", `style-src 'self' 'nonce-${nonce}'`, "img-src 'self' data:", "font-src 'self'",
+  "default-src 'self'", "script-src 'self'", `style-src 'self' 'nonce-${nonce}'`, "img-src 'self' data:", "font-src 'self'", "media-src 'self' blob:",
   "connect-src 'self'", "frame-ancestors 'none'", "base-uri 'none'", "form-action 'self'",
 ].join("; ");
 export const NONCE_PLACEHOLDER = "__CSP_NONCE__";

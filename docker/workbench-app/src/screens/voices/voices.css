@@ -1,0 +1,50 @@
+/* Cast and voices (rwr-voices). Every rule applies only inside .voices (test/voices-css-scope.test.ts). Colour only through the tokens
+   whose AA contrast pairs the app already tests. Nothing may be wider than the screen at 400 px: every flex row wraps, every
+   grid collapses, long text breaks anywhere. */
+.voices { min-width: 0; }
+.voices button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; text-align: left; }
+.voices .addlist li { min-width: 0; max-width: 100%; }
+.voices .voices-head { display: flex; flex-direction: column; gap: 4px; }
+.voices .vtabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.voices .vtab { border-color: var(--line-strong); }
+.voices .vtab.on, .voices .vtab[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-strong); border-color: var(--accent); }
+.voices .vgrid { display: grid; grid-template-columns: minmax(0, 260px) minmax(0, 1fr); gap: 16px; align-items: start; }
+.voices .vlist { min-width: 0; }
+.voices .vlist ul.plain, .voices .vedit ul.plain { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.voices .vrow { width: 100%; text-align: left; display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-color: var(--line); background: var(--panel); min-width: 0; }
+.voices .vrow.isel, .voices .vrow.isel:hover { background: var(--accent-soft); border-color: var(--accent); }
+.voices .row-name { font-weight: 500; overflow-wrap: anywhere; }
+.voices .vedit { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.voices .vform { padding: 20px; gap: 14px; }
+.voices .vform-top { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
+.voices .vform h2 { margin: 0; font-size: 20px; font-weight: 600; overflow-wrap: anywhere; }
+.voices .untested-pill { background: var(--amber-soft); border-color: var(--amber-line); color: var(--amber-text); }
+.voices .f { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.voices .f label { display: flex; flex-direction: column; gap: 4px; }
+.voices .f-label { font-weight: 600; font-size: 13px; }
+.voices .f input[type="text"], .voices .f input[type="number"], .voices .f textarea { font: inherit; color: var(--fg); background: var(--panel-2); border: 1px solid var(--line-strong); border-radius: 6px; padding: 6px 10px; width: 100%; min-width: 0; box-sizing: border-box; }
+.voices .f textarea { resize: vertical; }
+.voices fieldset.radios { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 0; min-width: 0; display: flex; flex-wrap: wrap; gap: 6px 16px; }
+.voices fieldset.radios legend { font-weight: 600; font-size: 13px; padding: 0 6px; }
+.voices .opt { display: inline-flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
+.voices .opt input { width: 18px; height: 18px; flex: none; }
+.voices .voice { flex-direction: column; flex-wrap: nowrap; align-items: stretch; }
+.voices .vgroup { display: flex; flex-direction: column; gap: 4px; }
+.voices .vopts { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.voices .sample { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.voices .order { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.voices .order li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.voices .order li.you { background: var(--accent-soft); border-color: var(--accent); }
+.voices .seat-no { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.voices .seat-name { font-weight: 500; overflow-wrap: anywhere; }
+.voices .seat-btns { margin-left: auto; display: flex; flex-wrap: wrap; gap: 6px; }
+.voices .addlist { flex-direction: row !important; flex-wrap: wrap; }
+.voices .vfoot { display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; }
+.voices .vfoot-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.voices .saved { color: var(--accent-strong); font-size: 13px; }
+.voices .note-err { color: var(--danger); margin: 0; overflow-wrap: anywhere; font-size: 13px; }
+@media (max-width: 760px) {
+  .voices .vgrid { grid-template-columns: minmax(0, 1fr); }
+  .voices .vform { padding: 14px; }
+  .voices .seat-btns { margin-left: 0; }
+}

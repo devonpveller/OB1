@@ -236,22 +236,26 @@ try {
   $null = Run-Detached "$P-embed" @('--network-alias', 'stub-embed', '-v', $ctMount, '--entrypoint', 'deno', $wbTestTag, 'run', '--allow-net', '/ct/stub-embed.ts')
   $null = Run-Detached "$P-research" @('--network-alias', 'stub-research', '-v', $ctMount, '-e', "DB_HOST=$db", '-e', "DB_PASSWORD=$pw",
       '-e', "STUB_CALLERS=workspace=workspace:$wsKey", '--entrypoint', 'deno', $wbTestTag, 'run', '--allow-net', '--allow-env', '--allow-read', '--config', '/app/deno.json', '/ct/stub-research.ts')
+  # rwr-voices: openbrain-podcast's stand-in (stub-podcast.ts): the REAL sample handler over a recording speech function. The lab has NO voice
+  # engine, so a sample that tried to reach one directly would fail; the workbench asks this service (PODCAST_RENDER_URL) and nothing else.
+  $null = Run-Detached "$P-podcast" @('--network-alias', 'stub-podcast', '-v', $ctMount, '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro", '-e', "STUB_PODCAST_KEY=$key",
+      '--entrypoint', 'deno', $wbTestTag, 'run', '--allow-net', '--allow-env', '--allow-read', '/ct/stub-podcast.ts')
   $null = Run-Detached "$P-postgrest" @('--network-alias', 'openbrain-postgrest', '-e', "PGRST_DB_URI=postgres://postgres:$pw@openbrain-db:5432/openbrain",
       '-e', 'PGRST_DB_SCHEMAS=public', '-e', 'PGRST_DB_ANON_ROLE=service_role', '-e', 'PGRST_DB_POOL=4', '-e', 'PGRST_SERVER_PORT=3000', $PgrstImage)
   $wbArgs = @('-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$key",
       '-e', "DB_HOST=$db", '-e', "DB_USER=$($wbDb.role)", '-e', "DB_PASSWORD=$($wbDb.pw)", '-e', 'OPEN_BRAIN_URL=http://unreachable.invalid',
       '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid', '-e', 'WIKI_GIT_DIR=/wiki',
-      '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://stub-research:8000',
+      '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://stub-research:8000', '-e', 'PODCAST_RENDER_URL=http://stub-podcast:8080/render',
       '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub',
       '-v', "${vault}:/wiki", '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro")
   $null = Run-Detached "$P-wb" (@('--network-alias', 'openbrain-workbench') + $wbArgs + @($wbTag))
   Check (Wait-Http "http://$P-wb:8000/health" 90) "$P-wb is up (DB role $($wbDb.role))"
   Check (Wait-Http "http://openbrain-postgrest:3000/" 60) 'PostgREST is up'
 
-  Write-Host '[5a] the cast integration test (C1-C16)'
+  Write-Host '[5a] the cast integration test (C1-C18)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
     '-e', "CAST_TEST_BASE=http://$P-wb:8000", '-e', "CAST_TEST_KEY=$key", '-e', 'CAST_TEST_REST=http://openbrain-postgrest:3000',
-    '-e', 'CAST_TEST_RECIPES=/recipes', '-e', 'CAST_TEST_MARKER_OUT=/out/markers.txt',
+    '-e', 'CAST_TEST_RECIPES=/recipes', '-e', 'CAST_TEST_PODCAST=http://stub-podcast:8080', '-e', 'CAST_TEST_MARKER_OUT=/out/markers.txt',
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
     '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro", '-v', "${outDir}:/out",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write=/out', 'src/contracts/cast_integration_test.ts')
@@ -259,7 +263,7 @@ try {
   Save 'cast-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED|ignored)|^(ok|FAILED) \||^C\d+:|error:|Assertion|=> |^\s+at ' } | Select-Object -First 200) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED|ignored)' }) { Write-Host "    $l" }
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed(?: \| (\d+) ignored)?').Match($clean)
-  Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 17 -and (-not $sum.Groups[4].Success -or $sum.Groups[4].Value -eq '0')) "the cast integration test: C1-C16 and the pool close, none ignored ($($sum.Value))"
+  Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 19 -and (-not $sum.Groups[4].Success -or $sum.Groups[4].Value -eq '0')) "the cast integration test: C1-C18 and the pool close, none ignored ($($sum.Value))"
   $null = Dk cp (Join-Path $dockerDir 'check-cast.sql') "${db}:/tmp/check-cast.sql"
   $chk = (Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/check-cast.sql | Out-String)
   Save 'check-cast-lab.log' $chk
@@ -366,13 +370,13 @@ try {
   $castNames = @(($names -replace '\x1b\[[0-9;]*m', '' -split "`n") | Where-Object { $_ -match '^info: (/workbench/contract/cast/.* > 2\d\d > .*)$' } | ForEach-Object { $Matches[1].Trim() })
   Save 'dredd-cast-names.log' ($castNames -join "`n")
   $onlyArgs = @(); foreach ($n in $castNames) { $onlyArgs += @('--only', $n) }
-  $o = Lab-Docker 600 (@('run', '--rm', '--label', $label, '--network', $net, '-v', "${gen}:/spec:ro", '-v', "${ct}:/ct:ro", $dreddTag,
+  $o = Lab-Docker 600 (@('run', '--rm', '--label', $label, '--network', $net, '-e', 'DREDD_SAMPLE=1', '-v', "${gen}:/spec:ro", '-v', "${ct}:/ct:ro", $dreddTag,
       '/spec/openapi.json', "http://$P-wb:8000", '--header', "X-Brain-Key: $key", '--hookfiles=/ct/dredd-hooks.js') + $onlyArgs)
   $clean = ($o -replace [regex]::Escape($key), '***') -replace '\x1b\[[0-9;]*m', ''
   Save 'dredd-cast.log' $clean
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '^(fail|error):|^\s+(expected|real|body)' } | Select-Object -First 40) { Write-Host "    $l" }
   $dm = ([regex]'complete: (\d+) passing, (\d+) failing, (\d+) errors, (\d+) skipped, (\d+) total').Match($clean)
-  Check ($dm.Success -and $dm.Groups[2].Value -eq '0' -and $dm.Groups[3].Value -eq '0' -and ([int]$dm.Groups[5].Value - [int]$dm.Groups[4].Value) -eq $castOps -and $castOps -eq 26 -and $castNames.Count -eq $castOps -and [int]$dm.Groups[1].Value -eq $castOps) "Dredd over the cast routes: $($dm.Value) (cast operations in the document: $castOps; 2xx transactions named: $($castNames.Count); every cast one run, the rest left out by --only)"
+  Check ($dm.Success -and $dm.Groups[2].Value -eq '0' -and $dm.Groups[3].Value -eq '0' -and ([int]$dm.Groups[5].Value - [int]$dm.Groups[4].Value) -eq $castOps -and $castOps -eq 27 -and $castNames.Count -eq $castOps -and [int]$dm.Groups[1].Value -eq $castOps) "Dredd over the cast routes: $($dm.Value) (cast operations in the document: $castOps; 2xx transactions named: $($castNames.Count); every cast one run, the rest left out by --only)"
   Save 'workbench.log' (Dk logs --tail 120 "$P-wb")
 } catch {
   Fail "the run stopped: $_"

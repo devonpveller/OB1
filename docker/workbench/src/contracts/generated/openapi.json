@@ -19721,6 +19721,133 @@
         }
       }
     },
+    "/workbench/contract/cast/voices/{id}/sample": {
+      "post": {
+        "operationId": "castVoiceSample",
+        "tags": [
+          "cast (rwr-cast-edit-api)"
+        ],
+        "summary": "a short audio sample (a fixed sentence) of one of the caller's voice links, voiced through the gateway by openbrain-podcast",
+        "description": "One sample at a time and at most 12 a minute per person (429). Never cached. 503 while the voice service is not set up.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "the row's id"
+            },
+            "required": true,
+            "description": "the row's id",
+            "name": "id",
+            "in": "path",
+            "example": "cast-fx-voice"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "a WAV: 24 kHz, mono, 16-bit",
+            "content": {
+              "audio/wav": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "invalid request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "a shared row of another user's: read-only (copy it)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "refused by the lifecycle (the body says why)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "a value is not a key of its registry, or a reference the selector rule refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "one sample at a time, and at most 12 a minute",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "internal error or a response that violated its schema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "the voice service did not answer or did not return audio",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "voice samples are not set up on this server",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/workbench/contract/cast/presenters": {
       "get": {
         "operationId": "castPresenters",
