@@ -13,6 +13,7 @@ import { FOREIGN_DOC, FOREIGN_HELD_TARGET, FOREIGN_IDEA, type Viewer } from "../
 import { mayLiftTombstone } from "../logic/lift.ts";
 import type { Identity } from "../../middleware/identity.ts";
 import { ownsRef } from "./actions.ts";
+import { claimIdVisibleTo } from "./private_claims.ts";
 
 export class Conflict extends Error {
   constructor(message: string, public detail: Record<string, unknown> = {}) {
@@ -72,12 +73,19 @@ const SCOPED_DEPENDENCE = `
 // admitted source still counts from every user's document.
 const OWNED_DEPENDENCE = `
   SELECT d.kind,
-         CASE WHEN o.others THEN 'another-user-document:' || (row_number() OVER (ORDER BY d.ref))::text ELSE d.ref END AS ref,
-         CASE WHEN o.others THEN jsonb_build_object('owner', 'another user') ELSE d.detail END AS detail
+         CASE WHEN o.others THEN 'another-user-document:' || (row_number() OVER (ORDER BY d.ref))::text
+              WHEN o.privc THEN 'private-claim:' || (row_number() OVER (ORDER BY d.ref))::text ELSE d.ref END AS ref,
+         CASE WHEN o.others THEN jsonb_build_object('owner', 'another user')
+              -- rw-private-claim-reads: a private-report claim that is not the caller's is still COUNTED (it is a connection of the
+              -- source) but its id and text are not shown; the edge type stays, so claims_by_edge_type is unchanged
+              WHEN o.privc THEN jsonb_build_object('edge_type', d.detail -> 'edge_type', 'claim', 'a private claim')
+              ELSE d.detail END AS detail
     FROM (SELECT s.*, row_number() OVER () AS n FROM (${SCOPED_DEPENDENCE}) s) d
     CROSS JOIN LATERAL (SELECT $3::text IS NOT NULL AND (
         (d.kind = 'document_link' AND ${FOREIGN_DOC("d.ref", "$3", "$4")})
-     OR (d.kind = 'reference_record' AND ${FOREIGN_DOC("d.detail ->> 'holder_ref'", "$3", "$4")})) AS others) o
+     OR (d.kind = 'reference_record' AND ${FOREIGN_DOC("d.detail ->> 'holder_ref'", "$3", "$4")})) AS others,
+      $3::text IS NOT NULL AND d.kind = 'claim_edge'
+        AND NOT ${claimIdVisibleTo("(d.detail ->> 'claim_id')::uuid", "$3")} AS privc) o
    WHERE NOT ($3::text IS NOT NULL AND d.kind = 'document_link' AND EXISTS (
            SELECT 1 FROM public.user_document_listings hl WHERE hl.path = d.ref AND ${FOREIGN_HELD_TARGET("$1::uuid", "hl.owner_sub")}))
    ORDER BY d.n`;

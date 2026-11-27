@@ -106,3 +106,11 @@ Deno.test("search, timeline and claims go through claimVisibleTo with the caller
     assert(body.includes("claimVisibleTo("), `${fn} filters through claimVisibleTo`);
   }
 });
+
+Deno.test("dependence for a user: a private-report claim's edge is counted but its id and text are withheld", async () => {
+  const l = (await Deno.readTextFile(new URL("./repo/lifecycle.ts", import.meta.url))).replace(/\r\n/g, "\n");
+  const i = l.indexOf("const OWNED_DEPENDENCE");
+  const body = l.slice(i, l.indexOf("export async function dependence(", i));
+  assert(body.includes("claimIdVisibleTo("), "OWNED_DEPENDENCE tests the claim edge's claim id");
+  assert(body.includes("'private-claim:'") && body.includes("'a private claim'"), "the row is shown as a private claim, not by id or text");
+});

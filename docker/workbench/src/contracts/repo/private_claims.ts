@@ -10,9 +10,13 @@ const MARKED = (alias: string) =>
 
 export const claimNotPrivate = (alias: string): string => `NOT ${MARKED(alias)}`;
 
-export const claimVisibleTo = (alias: string, ownerParam: string | null): string =>
+/** The same rule over a claim id EXPRESSION (a jsonb field of a function's row), not a claims alias. */
+export const claimIdVisibleTo = (idExpr: string, ownerParam: string | null): string =>
   ownerParam === null
-    ? claimNotPrivate(alias)
-    : `(NOT ${MARKED(alias)} OR EXISTS (SELECT 1 FROM public.research_private_report_claims pc2
-                                          JOIN public.research_private_reports pr ON pr.id = pc2.report_id
-                                         WHERE pc2.claim_id = ${alias}.id AND pr.owner_sub = ${ownerParam}::text))`;
+    ? `NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = ${idExpr})`
+    : `(NOT EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = ${idExpr})
+       OR EXISTS (SELECT 1 FROM public.research_private_report_claims pc2
+                    JOIN public.research_private_reports pr ON pr.id = pc2.report_id
+                   WHERE pc2.claim_id = ${idExpr} AND pr.owner_sub = ${ownerParam}::text))`;
+
+export const claimVisibleTo = (alias: string, ownerParam: string | null): string => claimIdVisibleTo(`${alias}.id`, ownerParam);
