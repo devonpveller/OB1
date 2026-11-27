@@ -13,7 +13,7 @@ import { createGapsFake } from "./gaps-fake.mjs";
 
 const KEY = process.env.LAB_KEY || "";
 const fake = createFake();
-const gaps = createGapsFake({ ownsDocument: (w, p) => fake.db().docs.get(p)?.owner === w.sub });
+const gaps = createGapsFake({ ownsDocument: (w, p) => fake.db().docs.get(p)?.owner === w.sub, isListed: (_w, p) => fake.db().docs.has(p) });
 const CPU = "documents/k-a/Hardware/cpu.md";
 const BRAVO = "documents/k-b/bravo.md";
 const A = PEOPLE.alice, B = PEOPLE.bob;

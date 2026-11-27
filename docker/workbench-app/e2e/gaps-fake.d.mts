@@ -9,6 +9,7 @@ export type GapRowStored = {
 };
 export function createGapsFake(opts?: {
   ownsDocument?: (who: { sub: string; key: string }, path: string) => boolean;
+  isListed?: (who: { sub: string; key: string }, path: string) => boolean;
   now?: () => number;
 }): {
   handle(who: { sub: string; key: string }, method: string, url: string, body?: any): { status: number; body: any } | null;

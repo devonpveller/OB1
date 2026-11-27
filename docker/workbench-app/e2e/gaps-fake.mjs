@@ -13,7 +13,8 @@
 //                                    {"error":"no such gap"}. PATCH text/state (a state "researching" is 400; a researching gap
 //                                    cannot be reworded, 409); DELETE refuses a dismissed or researching gap (409).
 //   - POST   /contract/gaps/research {ids}: 1..50 ids; all the caller's own (else ONE 404 "no such gap", before anything else is
-//                                    said), all open (409), all of one document (400); ONE job, every gap researching with that
+//                                    said), all open (409), all of one document (400), the document LISTED (409 "the document is not
+//                                    listed yet; save it first", the gaps stay open; modelled when `isListed` is given); ONE job, every gap researching with that
 //                                    job id; 202 {job_id, gaps}. 503 when the research service is not configured.
 //   - GET    /contract/documents/coverage?path=   {path, computed_at, hubs, sessions:[{id,status,created_at,by_status,credibility}]}
 //                                    of the caller's own sessions for the document; path missing 400, not theirs 404.
@@ -49,7 +50,7 @@ const bad = (m) => ({ status: 400, body: { error: m } });
 const unreg = (registry, value) => ({ status: 422, body: { error: `'${value}' is not a registered ${registry}`, detail: { registry, value } } });
 const byStatus = (needs) => { const o = { answered: 0, partial: 0, open: 0, search_failed: 0 }; for (const n of needs) o[n.status] = (o[n.status] ?? 0) + 1; return o; };
 
-export function createGapsFake({ ownsDocument, now = () => Date.now() } = {}) {
+export function createGapsFake({ ownsDocument, isListed, now = () => Date.now() } = {}) {
   let rows = [];
   let seq = 0;
   let jobSeq = 0;
@@ -146,6 +147,8 @@ export function createGapsFake({ ownsDocument, now = () => Date.now() } = {}) {
       if (held.length !== want.length) return NO_GAP; // another user's gap and a missing one: the same refusal
       if (new Set(held.map((r) => r.path)).size !== 1) return bad("tick gaps of one document");
       if (held.some((r) => r.state !== "open")) return { status: 409, body: { error: "only open gaps can be researched", detail: {} } };
+      // queueResearch (documents/refinery.ts): a document with no listing row cannot be researched; the gaps are put back to open
+      if (isListed && !isListed(who, held[0].path)) return { status: 409, body: { error: "the document is not listed yet; save it first", detail: {} } };
       if (queue === "fail") return { status: 500, body: { error: "internal" } }; // the gaps stay open (the server puts them back)
       const job = `9a900000-0000-4000-8000-${String(0xa1 + ++jobSeq).padStart(12, "0")}`;
       runs.set(job, { status: "running", covers: new Set() });

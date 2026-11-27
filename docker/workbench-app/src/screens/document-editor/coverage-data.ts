@@ -62,11 +62,13 @@ export async function researchGaps(ids: string[]): Promise<{ job: string; n: num
 
 // What the person's own research runs for this document say is still needed: the needs that were not answered, and the
 // run's own gap lines. Newest run first; the same words from a later run are shown once, under the newest run that said them.
-export async function readFound(path: string): Promise<{ found: Found[]; unread: number }> {
+export async function readFound(path: string): Promise<{ found: Found[]; unread: number; unseen: number }> {
   const { data } = await api<any>("GET", `/workbench/contract/documents/coverage?path=${encodeURIComponent(path)}`);
   const runs: { id: string; created_at: string }[] = (Array.isArray(data?.sessions) ? data.sessions : [])
     .filter((s: any) => s && typeof s.id === "string" && typeof s.created_at === "string")
-    .sort((a: any, b: any) => String(b.created_at).localeCompare(String(a.created_at))).slice(0, SESSIONS_READ);
+    .sort((a: any, b: any) => String(b.created_at).localeCompare(String(a.created_at)));
+  const unseen = Math.max(0, runs.length - SESSIONS_READ); // older runs than the newest SESSIONS_READ are not read: the tab says so
+  runs.length = Math.min(runs.length, SESSIONS_READ);
   const out: Found[] = [];
   const seen = new Set<string>();
   let unread = 0;
@@ -85,7 +87,7 @@ export async function readFound(path: string): Promise<{ found: Found[]; unread:
     for (const n of Array.isArray(d.needs) ? d.needs : []) if (n && n.status !== "answered") add(n.need, "need", String(n.status));
     for (const g of Array.isArray(d.gaps) ? d.gaps : []) add(g, "gap", "gap");
   }
-  return { found: out, unread };
+  return { found: out, unread, unseen };
 }
 
 // The words for a refusal. Never the server's text (it may carry another person's words in a future change), always ours.
@@ -93,6 +95,8 @@ export function gapProblem(e: unknown, what: "add" | "research" | "change" | "re
   const s = e instanceof ApiError ? e.status : 0;
   if (what === "read") return "Could not read your gaps. Nothing was changed.";
   if (s === 409 && what === "add") return "That is already on your list.";
+  // the document has no listing row yet (the server's own fixed sentence says so): not "a gap changed"
+  if (s === 409 && what === "research" && e instanceof ApiError && /not listed yet/i.test(String(e.body?.error ?? ""))) return "This document has not been saved yet, so it cannot be researched. Save it first, then try again.";
   if (s === 409) return "A gap changed since this list was read. The list is up to date now.";
   if (s === 404 && what === "add") return "This document is not available to add a gap to.";
   if (s === 404) return what === "research" ? "One of the ticked gaps is no longer there. The list is up to date now." : "That gap is no longer there. The list is up to date now.";
@@ -108,16 +112,35 @@ export function runDate(iso: string): string {
   return Number.isNaN(d.getTime()) ? "an unknown date" : d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 }
 
-// "Show in the text": the first place in the writing surface where these words stand (any run of white space matches any
-// other, as the text may have been re-wrapped since), selected and scrolled to. False = they are not in the text any more.
-export function locatePassage(view: EditorView | null, passage: string): boolean {
-  if (!view) return false;
+// "Show in the text". The store keeps no position, so the words are searched for (any run of white space matches any other:
+// the text may have been re-wrapped since). Where the words stand more than once the tab cannot know which one the gap was
+// taken from after a reload: locatePassage says how many there are and which one it showed, and the caller says so.
+export type Shown = { n: number; at: number };
+const esc = (w: string) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function places(view: EditorView, passage: string): { from: number; to: number }[] {
   const words = passage.trim().split(/\s+/).filter(Boolean);
-  if (!words.length) return false;
-  const esc = (w: string) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const m = new RegExp(words.map(esc).join("\\s+")).exec(view.state.doc.toString());
-  if (!m) return false;
-  view.dispatch({ selection: { anchor: m.index, head: m.index + m[0].length }, scrollIntoView: true });
+  if (!words.length) return [];
+  const re = new RegExp(words.map(esc).join("\\s+"), "g");
+  return [...view.state.doc.toString().matchAll(re)].map((m) => ({ from: m.index!, to: m.index! + m[0].length }));
+}
+// Select the nth place (counted from 0, wrapping round) where these words stand and scroll to it. null = not in the text any more.
+export function locatePassage(view: EditorView | null, passage: string, nth = 0): Shown | null {
+  if (!view) return null;
+  const all = places(view, passage);
+  if (!all.length) return null;
+  const at = ((nth % all.length) + all.length) % all.length;
+  view.dispatch({ selection: { anchor: all[at].from, head: all[at].to }, scrollIntoView: true });
   view.focus();
-  return true;
+  return { n: all.length, at };
+}
+// Which place (from 0) the selected words are, among the places where those same words stand: remembered with a gap added from
+// the selection, for this page only (the store has no field for it).
+export function occurrenceOfSelection(view: EditorView | null): number {
+  if (!view) return 0;
+  const r = view.state.selection.main;
+  const text = view.state.sliceDoc(r.from, r.to);
+  const all = places(view, text);
+  const lead = text.length - text.trimStart().length;
+  const i = all.findIndex((p) => p.from === r.from + lead);
+  return i < 0 ? 0 : i;
 }

@@ -17,7 +17,7 @@ import { createGapsFake } from "../e2e/gaps-fake.mjs";
 configure({ asyncUtilTimeout: 5000 });
 const NOW = Date.now();
 const docs = createFake({ now: () => NOW });
-const gaps = createGapsFake({ ownsDocument: (w, p) => docs.db().docs.get(p)?.owner === w.sub, now: () => NOW });
+const gaps = createGapsFake({ ownsDocument: (w, p) => docs.db().docs.get(p)?.owner === w.sub, isListed: (_w, p) => docs.db().docs.has(p), now: () => NOW });
 let who: "alice" | "bob" = "alice";
 let bodies: { method: string; url: string; body: any; who: string }[] = [];
 let failGaps = false;

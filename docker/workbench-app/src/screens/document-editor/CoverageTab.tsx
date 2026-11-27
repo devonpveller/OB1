@@ -13,8 +13,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "../../shell/Toast";
 import { isSamePerson } from "./editor-data";
 import {
-  addGap, chars, cleanText, gapProblem, GAP_MAX, markGap, normalizeGapText, POLL_MS, readFound, readGaps, removeGap, researchGaps, runDate,
-  type Found, type Gap, type GapList,
+  addGap, chars, SESSIONS_READ, cleanText, gapProblem, GAP_MAX, markGap, normalizeGapText, POLL_MS, readFound, readGaps, removeGap, researchGaps, runDate,
+  type Found, type Gap, type GapList, type Shown,
 } from "./coverage-data";
 import "./coverage.css";
 
@@ -22,11 +22,13 @@ export type CoverageCtx = {
   path: string;
   subject: string;
   selection: string;                 // the text selected in the writing surface ("" = none)
-  locate: (passage: string) => boolean; // select that passage in the writing surface; false = it is not in the text any more
+  locate: (passage: string, nth?: number) => Shown | null; // select the nth place the passage stands in the writing surface; null = not in the text any more
+  occurrence: () => number;          // which place (from 0) the selected words are, among the places those words stand
 };
 
 const NOT_SAME = "Not sent: this page could not confirm that you are still the person who opened this document. Nothing was sent.";
-type Read = { s: "loading" } | { s: "failed" } | { s: "ready"; list: GapList };
+// stale: the last read of the list failed; the list shown is the last one that was read (kept, and said to be out of date)
+type Read = { s: "loading" } | { s: "failed" } | { s: "ready"; list: GapList; stale: boolean };
 
 // The tab's state. Lives in InThisDoc so the tab's number is there when another tab is showing.
 export function useCoverage(ctx: CoverageCtx | null) {
@@ -41,6 +43,8 @@ export function useCoverage(ctx: CoverageCtx | null) {
   const alive = useRef(true);
   const gen = useRef(0);
   const working = useRef(false);
+  const where = useRef(new Map<string, number>()); // gap id -> which place of its words it was taken from (this page only)
+  const [foundTick, setFoundTick] = useState(0);
   const path = ctx?.path ?? "", subject = ctx?.subject ?? "";
 
   const load = useCallback(async () => {
@@ -49,17 +53,18 @@ export function useCoverage(ctx: CoverageCtx | null) {
     try {
       const list = await readGaps(path);
       if (!alive.current || mine !== gen.current) return;
-      setRead({ s: "ready", list });
+      setRead({ s: "ready", list, stale: false });
       setTicked((t) => t.filter((id) => list.gaps.some((g) => g.id === id && g.state === "open")));
-      setRemoving((r) => (r && list.gaps.some((g) => g.id === r) ? r : null));
+      // the question stays only for a gap that can still be removed (not gone, not sent to research elsewhere)
+      setRemoving((r) => (r && list.gaps.some((g) => g.id === r && g.state !== "researching") ? r : null));
     } catch {
-      if (alive.current && mine === gen.current) setRead((r) => (r.s === "ready" ? r : { s: "failed" }));
+      if (alive.current && mine === gen.current) setRead((r) => (r.s === "ready" ? { ...r, stale: true } : { s: "failed" }));
     }
   }, [path]);
 
   useEffect(() => {
     alive.current = true;
-    setRead({ s: "loading" }); setTicked([]); setErr(""); setRemoving(null);
+    setRead({ s: "loading" }); setTicked([]); setErr(""); setRemoving(null); where.current.clear();
     void load();
     return () => { alive.current = false; gen.current++; };
   }, [load, subject]);
@@ -89,12 +94,16 @@ export function useCoverage(ctx: CoverageCtx | null) {
     return ok;
   }, [subject, load]);
 
-  const add = (text: string, origin: "user" | "selection" | "research") => run("add", async () => {
-    const t = cleanText(text);
-    if (!t) return false;
-    if (chars(t) > GAP_MAX) { setErr(`That is longer than ${GAP_MAX} characters. Use a shorter text.`); return false; }
-    await addGap(path, t, origin);
-  });
+  const add = (text: string, origin: "user" | "selection" | "research") => {
+    const at = origin === "selection" ? ctx?.occurrence() : undefined; // read now: the selection may move while the request is out
+    return run("add", async () => {
+      const t = cleanText(text);
+      if (!t) return false;
+      if (chars(t) > GAP_MAX) { setErr(`That is longer than ${GAP_MAX} characters. Use a shorter text.`); return false; }
+      const g = await addGap(path, t, origin);
+      if (at !== undefined) where.current.set(g.id, at);
+    });
+  };
   const mark = (id: string, state: "open" | "covered") => run("change", () => markGap(id, state));
   const remove = (id: string) => run("remove", async () => { setRemoving(null); await removeGap(id); });
   const research = () => run("research", async () => {
@@ -102,12 +111,14 @@ export function useCoverage(ctx: CoverageCtx | null) {
     if (!ids.length) return false;
     const r = await researchGaps(ids);
     setTicked([]);
-    toastRef.current({ message: `Research started on ${r.n} ${r.n === 1 ? "gap" : "gaps"} in one run.` });
+    if (alive.current) toastRef.current({ message: `Research started on ${r.n} ${r.n === 1 ? "gap" : "gaps"} in one run.` });
   });
   const tick = (id: string, on: boolean) => setTicked((t) => (on ? (t.includes(id) ? t : [...t, id]) : t.filter((x) => x !== id)));
 
-  const open = read.s === "ready" ? read.list.counts.open : null;
-  return { read, load, ticked, tick, err, setErr, busy, removing, setRemoving, add, mark, remove, research, open };
+  // a number only while it is known: a failed re-read leaves the list on screen but no number on the tab
+  const open = read.s === "ready" && !read.stale ? read.list.counts.open : null;
+  const recheck = () => { setFoundTick((n) => n + 1); return load(); };
+  return { read, load, recheck, foundTick, where: (id: string) => where.current.get(id), ticked, tick, err, setErr, busy, removing, setRemoving, add, mark, remove, research, open };
 }
 export type CoverageState = ReturnType<typeof useCoverage>;
 
@@ -130,6 +141,11 @@ export function CoverageTab({ cov, ctx }: { cov: CoverageState; ctx: CoverageCtx
       {read.s === "failed" && (
         <p className="docs-err" role="alert" data-testid="cov-gaps-err">
           Could not read your gaps. Nothing was changed. <button type="button" onClick={() => void cov.load()}>Try again</button>
+        </p>
+      )}
+      {read.s === "ready" && read.stale && (
+        <p className="docs-err" role="alert" data-testid="cov-gaps-err">
+          Could not read your gaps again, so the list below may be out of date and the tab shows no number. <button type="button" onClick={() => void cov.load()}>Try again</button>
         </p>
       )}
       {list && (
@@ -157,7 +173,7 @@ export function CoverageTab({ cov, ctx }: { cov: CoverageState; ctx: CoverageCtx
               <button type="button" className="btn sm pri" data-testid="cov-research" disabled={busy || cov.ticked.length === 0 || cov.removing !== null} onClick={() => void cov.research()}>
                 {cov.ticked.length === 0 ? "Research the ticked gaps (one run)" : `Research the ${cov.ticked.length} ticked ${cov.ticked.length === 1 ? "gap" : "gaps"} (one run)`}
               </button>
-              <button type="button" className="btn sm" data-testid="cov-recheck" disabled={busy} onClick={() => void cov.load()}>Check again</button>
+              <button type="button" className="btn sm" data-testid="cov-recheck" disabled={busy} onClick={() => void cov.recheck()}>Check again</button>
             </div>
           </section>
           {going.length > 0 && (
@@ -188,7 +204,16 @@ function GapRow({ g, cov, ctx }: { g: Gap; cov: CoverageState; ctx: CoverageCtx 
   const [note, setNote] = useState("");
   const confirming = cov.removing === g.id;
   const locked = cov.removing !== null && !confirming; // another gap's question is open: the other destructive buttons wait
-  const show = () => setNote(ctx.locate(g.text) ? "" : "That passage is no longer in the text.");
+  const [tries, setTries] = useState(0);
+  // the first press goes to the place this page remembers (a gap added here); otherwise, or when pressed again, to the next place
+  const show = () => {
+    const known = cov.where(g.id);
+    const r = ctx.locate(g.text, (known ?? 0) + tries);
+    if (!r) { setNote("That passage is no longer in the text."); return; }
+    setTries(tries + 1);
+    setNote(r.n > 1 && !(known !== undefined && tries === 0)
+      ? `These words stand ${r.n} times in the text. This is ${r.at + 1} of ${r.n}; press again for the next one, as the list cannot tell which one this gap was taken from.` : "");
+  };
   return (
     <li className="cov-row" data-testid={"gap-" + g.id}>
       <div className="cov-line">
@@ -220,11 +245,12 @@ function GapRow({ g, cov, ctx }: { g: Gap; cov: CoverageState; ctx: CoverageCtx 
   );
 }
 
-type FoundRead = { s: "loading" } | { s: "failed" } | { s: "ready"; found: Found[]; unread: number };
+type FoundRead = { s: "loading" } | { s: "failed" } | { s: "ready"; found: Found[]; unread: number; unseen: number };
 
 function FoundByResearch({ cov, ctx, open }: { cov: CoverageState; ctx: CoverageCtx; open: Gap[] }) {
   const [f, setF] = useState<FoundRead>({ s: "loading" });
   const { path, subject } = ctx;
+  const tick = cov.foundTick;
   const gen = useRef(0);
   const reload = useCallback(() => {
     const mine = ++gen.current;
@@ -233,7 +259,8 @@ function FoundByResearch({ cov, ctx, open }: { cov: CoverageState; ctx: Coverage
       () => { if (mine === gen.current) setF({ s: "failed" }); },
     );
   }, [path]);
-  useEffect(() => { setF({ s: "loading" }); reload(); return () => { gen.current++; }; }, [reload, subject]);
+  useEffect(() => { setF({ s: "loading" }); }, [path, subject]); // another person or document: nothing of the last one stays up while this one is read
+  useEffect(() => { reload(); return () => { gen.current++; }; }, [reload, subject, tick]);
   const onList = new Set(open.map((g) => normalizeGapText(g.text)));
   return (
     <section aria-labelledby="cov-h-found" className="cov-sec">
@@ -244,6 +271,7 @@ function FoundByResearch({ cov, ctx, open }: { cov: CoverageState; ctx: Coverage
         <p className="docs-err" role="alert" data-testid="cov-found-err">Could not read what your research runs found. <button type="button" onClick={reload}>Try again</button></p>
       )}
       {f.s === "ready" && f.unread > 0 && <p className="meta" role="status" data-testid="cov-found-partial">{f.unread === 1 ? "One research run" : `${f.unread} research runs`} could not be read, so this list may be incomplete.</p>}
+      {f.s === "ready" && f.unseen > 0 && <p className="meta" role="status" data-testid="cov-found-capped">Only the newest {SESSIONS_READ} of {SESSIONS_READ + f.unseen} research runs on this document are read; the {f.unseen === 1 ? "older one is" : `${f.unseen} older ones are`} not shown.</p>}
       {f.s === "ready" && f.found.length === 0 && <p className="meta" data-testid="cov-found-none">Your research runs on this document have no open needs.</p>}
       {f.s === "ready" && f.found.length > 0 && (
         <ul className="cov-list" data-testid="cov-found">
