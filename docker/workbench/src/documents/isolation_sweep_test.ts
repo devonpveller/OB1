@@ -765,7 +765,13 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     else if (a.text !== b.text) {
       // deno-lint-ignore no-explicit-any
       const rows = (t: any) => (Array.isArray(t?.results) ? t.results : Array.isArray(t?.sources) ? t.sources : []).map((r: any) => `${r.kind ?? ""}:${r.id ?? r.slug ?? ""}`);
-      const ra = rows(a.json), rb = rows(b.json);
+      // rw-private-claim-reads: a PRIVATE-ONLY claim (marked, no shared synthesis: slot 570's definition) is not shared knowledge - its owner
+      // reads it and nobody else does, so it is the one row that may differ between the two users. The lab's own fixtures hold one: the
+      // operator's idea report (fixtures.sql, slot 390) moved the fixture claim aaaa...a1 into it (the marker, synthesis_id NULL).
+      // Everything else must still read alike (a MIXED claim is shared and is NOT excluded).
+      const privOnly = new Set((await sql<{ id: string }>(
+        `SELECT c.id::text AS id FROM public.claims c WHERE c.synthesis_id IS NULL AND EXISTS (SELECT 1 FROM public.research_private_report_claims pc WHERE pc.claim_id = c.id)`)).map((x) => `claim:${x.id}`));
+      const ra = rows(a.json).filter((x: string) => !privOnly.has(x)), rb = rows(b.json).filter((x: string) => !privOnly.has(x));
       sharedDiffs.push(`${p}: shared knowledge reads differently for the two users (A only: ${ra.filter((x: string) => !rb.includes(x)).join(",") || "-"}; B only: ${rb.filter((x: string) => !ra.includes(x)).join(",") || "-"}; same rows, other fields: ${ra.length === rb.length && ra.every((x: string) => rb.includes(x))})`);
     }
   }
