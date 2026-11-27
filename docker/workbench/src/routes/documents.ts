@@ -236,7 +236,7 @@ export function documentsRouter(rdeps: DocumentsDeps) {
   }));
   r.get("/hub-context", wrap(async (c, who) => {
     const rel = await docs.ownedPath(db, str(c.req.query("path")), who);
-    return c.json(await hubContext(db, rel, await refinery.linksOf(db, rel, who)));
+    return c.json(await hubContext(db, rel, await refinery.linksOf(db, rel, who), who.sub));
   }));
   r.post("/research", wrap(async (c, who) => {
     const b = await body(c);

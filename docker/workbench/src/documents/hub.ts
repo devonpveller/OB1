@@ -16,7 +16,7 @@
 import type { Db } from "../contracts/db.ts";
 import type { OutboundLink } from "./listing.ts";
 import { LEAF_LIFECYCLE } from "../contracts/repo/knowledge.ts";
-import { claimNotPrivate } from "../contracts/repo/private_claims.ts";
+import { claimVisibleTo } from "../contracts/repo/private_claims.ts";
 
 export const THIN_SOURCES = 3;
 export const SOURCE_PREFIX = "content/source/";
@@ -65,7 +65,7 @@ export function clusterSeeds(seeds: string[], neighbours: Neighbour[]): { centre
   return out;
 }
 
-async function seedsOf(db: Db, links: OutboundLink[]): Promise<Map<string, { kind: string; id: string }[]>> {
+async function seedsOf(db: Db, links: OutboundLink[], viewer: string | null): Promise<Map<string, { kind: string; id: string }[]>> {
   const seeds = new Map<string, { kind: string; id: string }[]>();
   const add = (slug: string, l: { kind: string; id: string }) => seeds.set(slug, [...(seeds.get(slug) ?? []), l]);
   for (const l of links) {
@@ -75,7 +75,8 @@ async function seedsOf(db: Db, links: OutboundLink[]): Promise<Map<string, { kin
   const claimIds = [...new Set(links.filter((l) => l.kind === "claim").map((l) => l.id))];
   if (claimIds.length) {
     const rows = await db.query<{ claim_id: string; source_id: string }>(
-      `SELECT claim_id::text, source_id::text FROM public.claim_sources WHERE claim_id::text = ANY($1::text[])`, [claimIds],
+      `SELECT cs.claim_id::text, cs.source_id::text FROM public.claim_sources cs JOIN public.claims c ON c.id = cs.claim_id
+        WHERE cs.claim_id::text = ANY($1::text[]) AND ${claimVisibleTo("c", "$2")}`, [claimIds, viewer],
     );
     for (const r of rows) add(`${SOURCE_PREFIX}${r.source_id}`, { kind: "claim", id: r.claim_id });
   }
@@ -101,7 +102,7 @@ async function neighboursOf(db: Db, seeds: string[]): Promise<Neighbour[]> {
   );
 }
 
-async function markers(db: Db, centre: string, hubSources: string[]) {
+async function markers(db: Db, centre: string, hubSources: string[], viewer: string | null) {
   const around = await db.query<{ n: number }>(
     `SELECT count(DISTINCT x.slug)::int AS n FROM (
        SELECT t.target AS slug FROM public.wiki_pages w CROSS JOIN LATERAL jsonb_array_elements_text(w.links) AS t(target) WHERE w.slug = $1
@@ -116,9 +117,9 @@ async function markers(db: Db, centre: string, hubSources: string[]) {
       `SELECT DISTINCT c.id::text AS claim_id, left(c.text, 160) AS text
          FROM public.claim_sources cs JOIN public.claims c ON c.id = cs.claim_id
         WHERE cs.source_id::text = ANY($1::text[]) AND (c.contradicted OR cs.edge_type = 'contradicts')
-          AND ${claimNotPrivate("c")}
+          AND ${claimVisibleTo("c", "$2")}
         ORDER BY 1 LIMIT 20`,
-      [ids],
+      [ids, viewer],
     )
     : [];
   const sources = around[0]?.n ?? 0;
@@ -131,8 +132,8 @@ async function markers(db: Db, centre: string, hubSources: string[]) {
   };
 }
 
-export async function hubContext(db: Db, path: string, links: OutboundLink[]) {
-  const seeds = await seedsOf(db, links);
+export async function hubContext(db: Db, path: string, links: OutboundLink[], viewer: string | null = null) {
+  const seeds = await seedsOf(db, links, viewer);
   const seedSlugs = [...seeds.keys()];
   const clusters = clusterSeeds(seedSlugs, await neighboursOf(db, seedSlugs));
   // P8a-1 round 2 (tester D1): a centre that is a source's leaf page carries its source's lifecycle (D5)
@@ -142,7 +143,7 @@ export async function hubContext(db: Db, path: string, links: OutboundLink[]) {
   ) : []).map((r) => [r.slug, r.lifecycle ?? null]));
   const hubs = [];
   for (const c of clusters) {
-    const m = await markers(db, c.centre.slug, c.seeds);
+    const m = await markers(db, c.centre.slug, c.seeds, viewer);
     hubs.push({
       centre: { slug: c.centre.slug, title: c.centre.title, page_class: c.centre.page_class, in_degree: c.centre.in_degree, lifecycle: life.get(c.centre.slug) ?? null },
       seeds: c.seeds,

@@ -371,6 +371,13 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   await sql(`SELECT public.link_claim_to_source($1::uuid, $2::uuid, 'states', 1.0)`, [bLinked, otherSrc]);
   await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [bReport, bLinked]);
   assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.claims WHERE id = $1::uuid`, [bLinked]))[0].n, 1, "the marked claim is a row of public.claims (the shape a shared read can leak)");
+  // the MIXED class (slot 570's own definition, init-private-report-claims.sql:18-22): a marked claim that a shared synthesis also filed
+  // (synthesis_id set) is shared knowledge, kept shared. A reads it and so does B; its text is NOT a marker. The control that the filter
+  // hides private-only claims and nothing more (hiding a mixed claim would be an oracle on B's report).
+  const mixText = `The sweep mixed shared claim ${rnd()} held in 9 trials.`;
+  const bMixed = (await sql<{ id: string }>(
+    `SELECT f.id::text AS id FROM public.find_or_create_claim($1, NULL, '77777777-7777-4777-8777-777777777777'::uuid, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb) f`, [mixText]))[0].id;
+  await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [bReport, bMixed]);
   // rw-boundary-core (plan 09 PD0a; slot 420): B's private hand-back (the inlet id, the delivery target and the owner's
   // review of a refused question, each a marker) - no route may read it; a service:shared-key prompt on an unclassified
   // job (the 88 live ones' shape: hidden from every non-admin, D5) - A must not read it; and a DERIVED job, whose
@@ -711,21 +718,29 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     // the owner still reads it: the control that the zero above is the owner rule, not the claim missing
     for (const p of [`/workbench/contract/search?q=${q}&kinds=claim&limit=50`, `/workbench/contract/claims?q=${q}&limit=200`]) {
       const own = await wb("GET", p, undefined, B);
-      assert(own.status === 200 && own.text.includes(bLinked), `B (the owner) still reads the marked claim at ${p.split("?")[0]}: ${own.status} ${own.text.slice(0, 200)}`);
+      // recorded as a hit, never thrown: a throw here would print no HIT line and hide the leak lines above it (the red run needs them)
+      if (!(own.status === 200 && own.text.includes(bLinked))) hits.push(`HIT owner-control B cannot read its own marked claim at ${p.split("?")[0]}: ${own.status} ${own.text.slice(0, 120)}`);
+    }
+    // a MIXED claim stays shared: A and B both read it by search and claims (hiding it would be an oracle on B's report)
+    for (const [who, hdr] of [["A", {}], ["B", B]] as const) {
+      for (const p of [`/workbench/contract/search?q=${encodeURIComponent("sweep mixed shared claim")}&kinds=claim&limit=50`, `/workbench/contract/claims?q=${encodeURIComponent("sweep mixed shared claim")}&limit=200`]) {
+        const r = await wb("GET", p, undefined, hdr as Record<string, string>);
+        if (!(r.status === 200 && r.text.includes(bMixed))) hits.push(`HIT mixed-hidden ${who} cannot read the shared (mixed) claim at ${p.split("?")[0]}: ${r.status}`);
+      }
     }
     // the to-place add and the flag: A's answer on B's marked claim is the answer on a missing id (nothing stored)
     const aDoc = await wb("POST", "/workbench/documents", { title: `ASweepDoc${rnd()}`, body: "a" });
-    assertEquals(aDoc.status, 201, aDoc.text);
+    if (aDoc.status !== 201) hits.push(`HIT sweep-setup A document not created: ${aDoc.status}`);
     const addRef = (id: string) => call(VIEWER, "POST", "/workbench/contract/documents/pending-refs", { path: aDoc.json.path, claim_id: id, added_from: "search" });
     const control = await addRef("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1");
-    assertEquals(control.status, 201, `a shared claim is accepted into A's queue (the positive control): ${control.text}`);
+    if (control.status !== 201) hits.push(`HIT sweep-setup a shared claim is not accepted into A's queue (the positive control): ${control.status} ${control.text.slice(0, 120)}`);
     const realAdd = await addRef(bLinked), noneAdd = await addRef(crypto.randomUUID());
     calls += 3;
     judge("POST contract/documents/pending-refs claim_id=<B marked claim> (viewer)", "", realAdd);
     if (realAdd.status !== noneAdd.status || realAdd.text.split(bLinked).join("<ID>") !== noneAdd.text.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/, "<ID>")) {
       hits.push(`HIT pending-refs-oracle <B marked claim> -> ${realAdd.status} ${realAdd.text} vs a missing claim ${noneAdd.status} ${noneAdd.text}`);
     }
-    assertEquals(await sql(`SELECT 1 FROM public.document_pending_refs WHERE claim_id = $1::uuid`, [bLinked]), [], "nothing was stored for the marked claim");
+    if ((await sql(`SELECT 1 FROM public.document_pending_refs WHERE claim_id = $1::uuid`, [bLinked])).length) hits.push("HIT pending-refs-stored a row was stored for B's marked claim");
     const flagClaim = (id: string) => call(VIEWER, "POST", "/workbench/contract/flags",
       { item_kind: "claim", item_id: id, reason: "wrong_claim", from: { kind: "source", ref: FX_ACTIVE } });
     const realFlag = await flagClaim(bLinked), noneFlag = await flagClaim(crypto.randomUUID());

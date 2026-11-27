@@ -153,7 +153,7 @@ function registerKnowledgeReads(app: ContractApp, deps: ContractDeps) {
       const q = c.req.valid("query");
       const depth = Math.min(5, Math.max(1, Number(q.depth ?? 2) || 2));
       return send(c, Neighbours, await kn.neighbours(deps.db, q.id.replace(/^\/+|\/+$/g, ""), depth,
-        parseLimit(q.limit, 400, 800), parseList(q.kinds), parseMetadataFilter(q.metadata_filter)));
+        parseLimit(q.limit, 400, 800), parseList(q.kinds), parseMetadataFilter(q.metadata_filter), (await identityOf(c)).sub));
     } catch (e) {
       return fail(c, e);
     }

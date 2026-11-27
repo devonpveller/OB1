@@ -8,7 +8,7 @@ import type { MetadataFilter } from "../logic/scope.ts";
 import { OWN_QUERY } from "./sessions.ts";
 import type { Who } from "../../sessions/repo.ts";
 import { adminSeesOwnerless, FOREIGN_JOB } from "../../documents/ownership.ts";
-import { claimNotPrivate, claimVisibleTo } from "./private_claims.ts";
+import { claimVisibleTo } from "./private_claims.ts";
 
 // research-workbench P8a-1 (D5): a source's lifecycle state NOW, from its row - or 'erased' when only its
 // tombstone is left; NULL when the id names neither. `id` is a uuid expression.
@@ -35,7 +35,7 @@ const PAGE_STATE = `CASE WHEN EXISTS (SELECT 1 FROM public.page_compile_marks m
                             WHERE m.page_ref = w.slug AND m.marked_at >= w.updated_at)
                          THEN 'pending_compile' ELSE 'current' END`;
 
-export async function neighbours(db: Db, slug: string, depth: number, limit: number, classes: string[], f: MetadataFilter) {
+export async function neighbours(db: Db, slug: string, depth: number, limit: number, classes: string[], f: MetadataFilter, viewer: string | null = null) {
   if (f) return { root: slug, depth, truncated: false, nodes: [], links: [] };
   const rows = await bounded(db, (t) =>
     t.query<{ slug: string; title: string; page_class: string; links: unknown; d: number; state: string; lifecycle: string | null; contested: boolean }>(
@@ -55,14 +55,14 @@ export async function neighbours(db: Db, slug: string, depth: number, limit: num
               CASE WHEN w.slug ~ ${LEAF_RX} THEN ${LIFECYCLE_OF(LEAF_ID("w.slug"))} END AS lifecycle,
               CASE WHEN w.slug ~ ${LEAF_RX} THEN EXISTS (
                 SELECT 1 FROM public.claim_sources cs JOIN public.claims c ON c.id = cs.claim_id
-                 WHERE cs.source_id = ${LEAF_ID("w.slug")} AND (c.contradicted OR cs.edge_type = 'contradicts') AND ${claimNotPrivate("c")})
+                 WHERE cs.source_id = ${LEAF_ID("w.slug")} AND (c.contradicted OR cs.edge_type = 'contradicts') AND ${claimVisibleTo("c", "$5")})
                    ELSE false END AS contested
          FROM public.wiki_pages w
          JOIN (SELECT slug, min(d) AS d FROM nbr GROUP BY slug) k ON k.slug = w.slug
         WHERE (cardinality($4::text[]) = 0 OR w.page_class = ANY($4::text[]) OR w.slug = $1)
         ORDER BY k.d ASC, w.slug ASC
         LIMIT $3`,
-      [slug, depth, limit, classes],
+      [slug, depth, limit, classes, viewer],
     )
   );
   const present = new Set(rows.map((r) => r.slug));

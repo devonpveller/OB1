@@ -251,7 +251,7 @@ export async function sessionCoverage(db: Db, id: string, who: Viewer & { admin?
   if (!j || j.others) return null;
   const needs = needsOf(j.needs_status);
   const reportId = j.report_id && UUID.test(j.report_id) ? j.report_id.toLowerCase() : null;
-  const hubs = (await hubContext(db, `session:${j.id}`, await sessionLinks(db, reportId, j.source_ids))).hubs;
+  const hubs = (await hubContext(db, `session:${j.id}`, await sessionLinks(db, reportId, j.source_ids), who.sub)).hubs;
   const anchor = j.is_branch ? j.parent_question : j.own_question;
   return {
     session_id: j.id, status: j.status, created_at: new Date(j.created_at).toISOString(),
@@ -286,7 +286,7 @@ export async function documentCoverage(db: Db, rel: string, who: Viewer & { admi
   const links = (await db.query<{ outbound_links: OutboundLink[] }>(
     `SELECT outbound_links FROM public.user_document_listings WHERE path = $1 AND owner_sub = $2`, [rel, who.sub],
   ))[0]?.outbound_links ?? [];
-  const hub = await hubContext(db, rel, links);
+  const hub = await hubContext(db, rel, links, who.sub);
   const rows = await db.query<JobRow>(
     `SELECT ${JOB_COLS("$2", "$3", adminSeesOwnerless(who), who as unknown as Who, "$4")}
        FROM public.research_jobs j LEFT JOIN public.research_jobs r ON r.id = COALESCE(j.root_job_id, j.id)
