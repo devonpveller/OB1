@@ -27,9 +27,12 @@ export type Setting = {
   help: string;
   default: unknown;
   env: string | null;
+  read_by?: string; // which service or screen reads it, and when (the registry's words)
   validation: Record<string, unknown>;
   editable: boolean;
   tag: string | null;
+  ceiling?: number; // rwr-settings-defaults: the highest value the admin's limit allows this key (only a key that has one)
+  ceiling_phrase?: string; // what that ceiling is, in the server's words
   value: unknown;
   is_default: boolean;
   version: number;
@@ -43,6 +46,8 @@ const SECTION_TITLE: Record<string, string> = {
   "user:ui": "Start screen",
   "user:notify": "Notifications",
   "user:refinery": "My ideas",
+  "user:research": "Research defaults",
+  "user:library": "Library",
   "user:digest": "Daily digest and podcast",
   "admin:digest": "Podcast archive",
   "admin:research": "Research and curator limits",
@@ -59,17 +64,23 @@ export const hasAppearance = (keys: Setting[]) => keys.some((k) => APPEARANCE_RO
 // grouping only: the key keeps what the registry says. A key of another section is never pulled in.
 export const NOTIFY_SECTION = "notify";
 export const isNotify = (s: Setting) => s.tier === "user" && s.section === "ui" && s.key.startsWith("notify.");
-const groupOf = (s: Setting) => (isNotify(s) ? NOTIFY_SECTION : s.section);
+// ONE grouping function for the screen: the notification keys (section 'ui') are "Notifications", the Library keys
+// (rwr-settings-defaults, slot 730; also registered in 'ui') are "library"; anything else keeps its registry section.
+const groupOf = (s: Setting) =>
+  isNotify(s) ? NOTIFY_SECTION : s.tier === "user" && s.key.startsWith("library.") ? "library" : s.section;
 
 // Keys the app keeps for itself (the locked / last document, Recently viewed): identifiers it writes as you work, not
 // preferences, so the frame does not offer them as a form.
 export const isAppState = (s: Setting) => s.type === "ref_list" || s.validation?.ref === "doc_path";
 
+// A hidden-suggestions list is app state (its own control below), so the generic form does not draw it.
+export const HIDDEN_SUGGESTIONS = "library.hidden_suggestions";
+
 export type Section = { id: string; tier: "user" | "admin"; section: string; title: string; keys: Setting[] };
 export function sectionsOf(tier: "user" | "admin", list: Setting[]): Section[] {
   const by = new Map<string, Setting[]>();
   for (const s of list) {
-    if (s.tier !== tier || (tier === "user" && isAppState(s))) continue;
+    if (s.tier !== tier || (tier === "user" && isAppState(s) && s.key !== HIDDEN_SUGGESTIONS)) continue;
     by.set(groupOf(s), [...(by.get(groupOf(s)) ?? []), s]);
   }
   return [...by.entries()].map(([section, keys]) => ({
@@ -77,6 +88,13 @@ export function sectionsOf(tier: "user" | "admin", list: Setting[]): Section[] {
     title: tier === "user" && section === "ui" && hasAppearance(keys) ? "Appearance" : sectionTitle(tier, section),
     keys: keys.sort((a, b) => a.position - b.position || a.key.localeCompare(b.key)),
   }));
+}
+
+// A key no screen or service reads yet says so, in the registry's own words ("... (kept now, applied when the Library opens)"): the
+// row shows "Kept now; applied when the Library opens." so a stored value never looks like it does something. null = it is applied.
+export function notAppliedNote(s: Pick<Setting, "read_by">): string | null {
+  const m = /kept now, applied when ([^)]+?) opens\)/i.exec(s.read_by ?? "");
+  return m ? `Kept now; applied when ${m[1]} opens.` : null;
 }
 
 const URL = "/workbench/settings";
@@ -118,6 +136,53 @@ export async function resetSetting(s: Setting): Promise<SaveResult> {
   } catch (e) {
     return fail(e);
   }
+}
+
+// ---- the admin research limits (rwr-settings-defaults): named presets inside fixed ranges, never a number typed in ----
+export type LimitValue = { key: string; label: string; value: unknown; is_default: boolean; min: number | null; max: number | null };
+export type LimitPreset = { preset: string; label: string; help: string; values: { key: string; label: string; value: unknown }[] };
+export type LimitGroup = { group: string; label: string; help: string; current: string; presets: LimitPreset[]; values: LimitValue[] };
+export type LogLine = { id: number; at: string; actor: string; action: string; key: string; old_value: unknown; new_value: unknown; group: string | null; preset: string | null };
+
+const LIMITS = `${URL}/admin/limits`;
+export async function loadLimits(): Promise<LimitGroup[]> {
+  const { data } = await api<{ groups?: LimitGroup[] }>("GET", LIMITS);
+  return Array.isArray(data.groups) ? data.groups : [];
+}
+export type LimitResult = { ok: true; group: LimitGroup } | { ok: false; status: number; message: string };
+const limitFail = (e: unknown): LimitResult =>
+  e instanceof ApiError ? { ok: false, status: e.status, message: e.message } : { ok: false, status: 0, message: "could not reach the server" };
+export async function applyPreset(group: string, preset: string): Promise<LimitResult> {
+  try {
+    const { data } = await api<LimitGroup>("PUT", `${LIMITS}/${encodeURIComponent(group)}`, { preset });
+    return { ok: true, group: data };
+  } catch (e) {
+    return limitFail(e);
+  }
+}
+export async function resetGroup(group: string): Promise<LimitResult> {
+  try {
+    const { data } = await api<LimitGroup>("DELETE", `${LIMITS}/${encodeURIComponent(group)}`);
+    return { ok: true, group: data };
+  } catch (e) {
+    return limitFail(e);
+  }
+}
+export async function loadLog(): Promise<LogLine[]> {
+  const { data } = await api<{ log?: LogLine[] }>("GET", `${LIMITS}/log?limit=30`);
+  return Array.isArray(data.log) ? data.log : [];
+}
+
+// The server's own rules for a typed number (the registry's min / max, a whole number for an integer, and the admin ceiling for a
+// key that has one), in the server's words, so the field refuses what the server would refuse before it is sent. A null is fine.
+export function numberProblem(s: Setting, n: number): string | null {
+  if (!Number.isFinite(n)) return "must be a number";
+  if (s.type === "integer" && n !== Math.trunc(n)) return "must be a whole number";
+  const v = s.validation ?? {};
+  if (typeof v.min === "number" && n < v.min) return `must be at least ${v.min}`;
+  if (typeof v.max === "number" && n > v.max) return `must be at most ${v.max}`;
+  if (typeof s.ceiling === "number" && n > s.ceiling) return `must be at most ${s.ceiling}${s.ceiling_phrase ? ` (${s.ceiling_phrase})` : ""}`;
+  return null;
 }
 
 // What a value looks like in words (read-only rows, the default beside a field).

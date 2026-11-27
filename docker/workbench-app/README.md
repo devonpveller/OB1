@@ -60,6 +60,13 @@ image, `openbrain-workbench-app`. Later items fill it in. Not a stack service ye
 - Reads: `GET /workbench/settings` (the caller's own user tier + `admin`), and only when that says admin, `GET /workbench/settings/admin`. A non-admin's page never requests the shared tier and the server would refuse it (403); nothing is hidden by CSS. Writes: `PUT /workbench/settings/:key {value, version}` (a stale version is refused 409 and the latest is shown), `DELETE ...?version=N` for Back to default. Nothing is kept in the browser.
 - Tests: `test/settings.test.tsx` (vitest) and `e2e/settings.e2e.mjs` (headless Chromium, `e2e/run-settings-e2e.ps1`, subnet 10.250.96.0/24): the wire for a non-admin, a value saved in one tab shown in a fresh one, two people, a stale save, axe light and dark.
 
+### Defaults and the research limits (item `rwr-settings-defaults`)
+
+- Sections of Yours: Research defaults (`research.*`), My ideas, Library (`library.*`, drawn as its own section whatever the registry's section says; hidden suggestions show a count and "Show them again", never the items) and the podcast keys. A key with a ceiling shows "Highest allowed: N" and the field refuses a value above it before sending, with the server's words (`numberProblem`).
+- Admin only, "Research and curator limits": `LimitsPanel` - each group a set of radio presets (no number, text or select input), "In force: <preset>" (or a custom setting), "Use the server's own values", and "Who changed what" (the append-only log). Every answer is guarded by the person epoch.
+- The Start research dialog reads `research.default_depth` (offered first, never replacing a depth you chose) and `research.ask_over_fetch` (when the preview's page budget is above it the note names both numbers and the button reads "Start anyway").
+- Tests: `test/settings-defaults.test.tsx`; the e2e `e2e/settings.e2e.mjs` covers the ceiling, presets, the log, 400 px.
+
 ## Home (item `rwr-home`)
 
 - `src/screens/home/`: `Home.tsx` (the ask box and six cards) and `home-data.ts` (one read per card, its own loading/failed/ok state, a Try again). `App.tsx` mounts it for `/`; nothing else of the shell changed.

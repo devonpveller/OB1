@@ -52,6 +52,16 @@ export async function keyRow(db: Db, key: string): Promise<KeyRow | null> {
   return (await db.query<KeyRow>(`SELECT ${KEY_COLS} FROM public.settings_keys WHERE key = $1`, [key]))[0] ?? null;
 }
 
+// rwr-settings-defaults (slot 730): the ceiling in force for a user key, as a number, for the keys that have one (a default may not
+// exceed it). Only the number is sent - never the admin key behind it, its name or its label.
+async function ceilings(db: Db): Promise<Map<string, { ceiling: number; ceiling_phrase: string }>> {
+  const rows = await db.query<{ user_key: string; c: string | null; phrase: string }>(
+    `SELECT user_key, public.settings_user_ceiling(user_key)::text AS c, phrase FROM public.settings_user_ceilings`,
+  );
+  return new Map(rows.filter((r) => r.c !== null && Number.isFinite(Number(r.c))).map((r) => [r.user_key, { ceiling: Number(r.c), ceiling_phrase: r.phrase }]));
+}
+const withCeiling = <T extends object>(row: T, key: string, cap: Map<string, { ceiling: number; ceiling_phrase: string }>) => (cap.has(key) ? { ...row, ...cap.get(key)! } : row);
+
 // The caller's own user-tier settings (owner = the seam's subject; never anyone else's).
 export async function userSettings(db: Db, owner: string) {
   const keys = await db.query<KeyRow>(`SELECT ${KEY_COLS} FROM public.settings_keys WHERE tier = 'user' ORDER BY section, position, key`);
@@ -62,7 +72,8 @@ export async function userSettings(db: Db, owner: string) {
   const gone = new Map((await db.query<{ key: string; version: number }>(
     `SELECT key, version FROM public.user_setting_tombstones WHERE owner_sub = $1`, [owner],
   )).map((r) => [r.key, r.version]));
-  return keys.map((k) => keyOut(k, by.get(k.key), gone.get(k.key) ?? 0));
+  const cap = await ceilings(db);
+  return keys.map((k) => withCeiling(keyOut(k, by.get(k.key), gone.get(k.key) ?? 0), k.key, cap));
 }
 
 export async function userSetting(db: Db, owner: string, k: KeyRow) {
@@ -72,7 +83,7 @@ export async function userSetting(db: Db, owner: string, k: KeyRow) {
   const gone = s ? 0 : (await db.query<{ version: number }>(
     `SELECT version FROM public.user_setting_tombstones WHERE owner_sub = $1 AND key = $2`, [owner, k.key],
   ))[0]?.version ?? 0;
-  return keyOut(k, s, gone);
+  return withCeiling(keyOut(k, s, gone), k.key, await ceilings(db));
 }
 
 export class SettingRefused extends Error {
@@ -141,16 +152,82 @@ export async function setAdminSetting(db: Db, reg: RegistryReader, mountsRoot: s
   }
   const why = (await db.query<{ p: string | null }>(`SELECT public.setting_problem(NULL, $1, $2::jsonb) AS p`, [k.key, JSON.stringify(value)]))[0].p;
   if (why) throw new SettingRefused(400, `${k.key}: ${why}`);
-  await db.query(
-    `INSERT INTO public.contract_settings (key, value, updated_by) VALUES ($1, $2::jsonb, $3)
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, version = public.contract_settings.version + 1,
-       updated_at = now(), updated_by = EXCLUDED.updated_by`,
-    [k.key, JSON.stringify(value), actor],
-  );
+  await db.query(`SELECT public.admin_setting_write($1, $2, $3::jsonb)`, [actor, k.key, JSON.stringify(value)]);
   return await adminSetting(db, reg, mountsRoot, k);
 }
 
-export async function clearAdminSetting(db: Db, reg: RegistryReader, mountsRoot: string, k: KeyRow) {
-  await db.query(`DELETE FROM public.contract_settings WHERE key = $1`, [k.key]);
+// the removal is logged with who made it (slot 730: admin_setting_clear sets the actor the audit trigger records)
+export async function clearAdminSetting(db: Db, reg: RegistryReader, mountsRoot: string, actor: string, k: KeyRow) {
+  await db.query(`SELECT public.admin_setting_clear($1, $2)`, [actor, k.key]);
   return await adminSetting(db, reg, mountsRoot, k);
+}
+
+// ── the admin research limits: presets inside fixed ranges, never raw numbers (rwr-settings-defaults, slot 730) ──────────
+export interface LimitValue { key: string; label: string; value: unknown; is_default: boolean; min: number | null; max: number | null }
+export interface LimitPreset { preset: string; label: string; help: string; values: { key: string; label: string; value: unknown }[] }
+export interface LimitGroup {
+  group: string; label: string; help: string;
+  current: string; // the preset the values in force match, or "custom" (a value no preset names); nothing is rewritten to make it match
+  presets: LimitPreset[]; values: LimitValue[];
+}
+
+export async function limitGroups(db: Db): Promise<LimitGroup[]> {
+  const groups = await db.query<{ grp: string; label: string; help: string; cur: string }>(
+    `SELECT g.grp, g.label, g.help, public.settings_limits_current(g.grp) AS cur FROM public.settings_limit_groups g ORDER BY g.position, g.grp`);
+  const presets = await db.query<{ grp: string; preset: string; label: string; help: string }>(
+    `SELECT grp, preset, label, help FROM public.settings_limit_presets ORDER BY grp, position, preset`);
+  const pv = await db.query<{ grp: string; preset: string; key: string; label: string; value: unknown }>(
+    `SELECT v.grp, v.preset, v.key, k.label, v.value FROM public.settings_limit_preset_values v JOIN public.settings_keys k ON k.key = v.key
+      ORDER BY v.grp, v.preset, k.position, v.key`);
+  const live = await db.query<{ grp: string; key: string; label: string; value: unknown; stored: boolean; lo: string | null; hi: string | null }>(
+    `SELECT DISTINCT g.grp, k.key, k.label, k.position, COALESCE(c.value, k.default_value) AS value, (c.key IS NOT NULL) AS stored,
+            k.validation->>'min' AS lo, k.validation->>'max' AS hi
+       FROM public.settings_limit_groups g
+       JOIN public.settings_limit_preset_values v ON v.grp = g.grp
+       JOIN public.settings_keys k ON k.key = v.key
+       LEFT JOIN public.contract_settings c ON c.key = k.key
+      ORDER BY g.grp, k.position, k.key`);
+  return groups.map((g) => ({
+    group: g.grp, label: g.label, help: g.help, current: g.cur,
+    presets: presets.filter((p) => p.grp === g.grp).map((p) => ({
+      preset: p.preset, label: p.label, help: p.help,
+      values: pv.filter((v) => v.grp === g.grp && v.preset === p.preset).map((v) => ({ key: v.key, label: v.label, value: v.value })),
+    })),
+    values: live.filter((l) => l.grp === g.grp).map((l) => ({
+      key: l.key, label: l.label, value: l.value, is_default: !l.stored, min: l.lo === null ? null : Number(l.lo), max: l.hi === null ? null : Number(l.hi),
+    })),
+  }));
+}
+
+// Apply a named preset to its group (the database writes exactly the preset's keys, each re-judged against its range, in one
+// transaction, and logs every change with the actor). An unknown group or preset is a 404; a value out of range a 400.
+export async function applyLimitPreset(db: Db, actor: string, grp: string, preset: string): Promise<LimitGroup> {
+  try {
+    await db.query(`SELECT public.settings_limits_apply($1, $2, $3)`, [actor, grp, preset]);
+  } catch (e) {
+    const code = pgCode(e);
+    if (code === "P0002") throw new SettingRefused(404, pgMessage(e));
+    if (code === "22023") throw new SettingRefused(400, pgMessage(e));
+    throw e;
+  }
+  return (await limitGroups(db)).find((g) => g.group === grp)!;
+}
+
+// Take a group's stored values away: the services use their own env values again.
+export async function resetLimitGroup(db: Db, actor: string, grp: string): Promise<LimitGroup> {
+  try {
+    await db.query(`SELECT public.settings_limits_reset($1, $2)`, [actor, grp]);
+  } catch (e) {
+    if (pgCode(e) === "P0002") throw new SettingRefused(404, pgMessage(e));
+    throw e;
+  }
+  return (await limitGroups(db)).find((g) => g.group === grp)!;
+}
+
+export interface AuditLine { id: number; at: string; actor: string; action: string; key: string; old_value: unknown; new_value: unknown; group: string | null; preset: string | null }
+// The admin log, newest first (admins only: the route decides). `before` pages by id.
+export async function limitsLog(db: Db, limit: number, before: number | null): Promise<AuditLine[]> {
+  return await db.query<AuditLine>(
+    `SELECT id::int AS id, at::text AS at, actor, action, key, old_value, new_value, grp AS "group", preset
+       FROM public.settings_admin_audit WHERE ($2::bigint IS NULL OR id < $2) ORDER BY id DESC LIMIT $1`, [limit, before]);
 }

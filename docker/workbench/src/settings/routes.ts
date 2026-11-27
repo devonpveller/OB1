@@ -8,6 +8,10 @@
 //                            research tuning among them, read-only
 //   PUT    /admin/:key {value}   admins only: set a shared one (editable admin keys only)
 //   DELETE /admin/:key       admins only: a shared one back to its default
+//   GET    /admin/limits     admins only (rwr-settings-defaults): the research limits as named presets in groups, the preset in force
+//   PUT    /admin/limits/:group {preset}   admins only: apply one preset (the database writes its keys inside their fixed ranges, logged)
+//   DELETE /admin/limits/:group            admins only: the group back to the services' own (env) values
+//   GET    /admin/limits/log[?limit=N&before=ID]   admins only: the admin change log (who, what, old value, new value), newest first
 //
 // Every read and write of the user tier is the caller's subject (the identity seam): there is no route that
 // names another owner, so one user's value is never readable or writable by another. A refused write
@@ -86,6 +90,48 @@ export function settingsRouter(deps: SettingsDeps) {
     settingsAdmin(who) ? c.json({ error: hint }, 403) : c.json({ error: `${k.key} is not a setting` }, 404);
   const ADMIN_ONLY = { error: "only an admin may read or change the shared settings" };
 
+  // ── the admin research limits: PRESETS inside fixed ranges, never a raw number (rwr-settings-defaults) ──
+  // Every one of these answers a non-admin exactly as /admin/<anything> does (403, the same words), so the door teaches nothing.
+  const GROUP_RX = /^[a-z][a-z_]{0,40}$/;
+  r.get("/admin/limits", async (c) => {
+    if (!await adminOnly(c)) return c.json(ADMIN_ONLY, 403);
+    return c.json({ groups: await store.limitGroups(deps.db) });
+  });
+  r.get("/admin/limits/log", async (c) => {
+    if (!await adminOnly(c)) return c.json(ADMIN_ONLY, 403);
+    const lim = c.req.query("limit"), before = c.req.query("before");
+    if ((lim !== undefined && !/^\d{1,3}$/.test(lim)) || (before !== undefined && !/^\d{1,15}$/.test(before))) return c.json({ error: "limit and before are whole numbers" }, 400);
+    const n = Math.min(200, Math.max(1, lim === undefined ? 50 : Number(lim)));
+    return c.json({ log: await store.limitsLog(deps.db, n, before === undefined ? null : Number(before)) });
+  });
+  r.put("/admin/limits/:group", async (c) => {
+    const who = await adminOnly(c);
+    if (!who) return c.json(ADMIN_ONLY, 403);
+    const group = c.req.param("group") ?? "";
+    if (!GROUP_RX.test(group)) return c.json({ error: `${group.slice(0, 40)} is not a limits group` }, 404);
+    const b = await c.req.json().catch(() => null) as Record<string, unknown> | null;
+    // the body is {"preset": name} and nothing else: a number, a list of values or any other field is refused (a preset is the only way in)
+    if (!b || typeof b !== "object" || Array.isArray(b) || Object.keys(b).some((k) => k !== "preset") || typeof b.preset !== "string" || !GROUP_RX.test(b.preset)) {
+      return c.json({ error: "send {\"preset\": the name of a preset}; the limits are chosen from presets, not typed" }, 400);
+    }
+    try {
+      return c.json(await store.applyLimitPreset(deps.db, who.actor, group, b.preset));
+    } catch (e) {
+      return refused(c, e);
+    }
+  });
+  r.delete("/admin/limits/:group", async (c) => {
+    const who = await adminOnly(c);
+    if (!who) return c.json(ADMIN_ONLY, 403);
+    const group = c.req.param("group") ?? "";
+    if (!GROUP_RX.test(group)) return c.json({ error: `${group.slice(0, 40)} is not a limits group` }, 404);
+    try {
+      return c.json(await store.resetLimitGroup(deps.db, who.actor, group));
+    } catch (e) {
+      return refused(c, e);
+    }
+  });
+
   // ── the admin tier (registered before /:key; a key always holds a '.', so it is never "admin") ──
   r.get("/admin", async (c) => {
     if (!await adminOnly(c)) return c.json(ADMIN_ONLY, 403);
@@ -107,12 +153,13 @@ export function settingsRouter(deps: SettingsDeps) {
     }
   });
   r.delete("/admin/:key", async (c) => {
-    if (!await adminOnly(c)) return c.json(ADMIN_ONLY, 403);
+    const who = await adminOnly(c);
+    if (!who) return c.json(ADMIN_ONLY, 403);
     const k = await known(c);
     if (k instanceof Response) return k;
     if (k.tier !== "admin") return c.json({ error: `${k.key} is a user setting` }, 400);
     if (!k.editable) return c.json({ error: `${k.key} is read-only here` }, 409);
-    return c.json(await store.clearAdminSetting(deps.db, deps.reg, deps.mountsRoot, k));
+    return c.json(await store.clearAdminSetting(deps.db, deps.reg, deps.mountsRoot, who.actor, k));
   });
 
   // ── the user tier: always the caller's own ───────────────────────────────────────────────────

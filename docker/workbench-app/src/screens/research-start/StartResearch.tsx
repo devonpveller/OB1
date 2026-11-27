@@ -19,7 +19,7 @@ import { ForDocumentBar } from "../../shell/ForDocumentBar";
 import { useToast } from "../../shell/Toast";
 import { Link } from "../../shell/Link";
 import {
-  DEPTHS, MAX_QUESTION, bodyOf, documentFromSearch, limitsText, previewResearch, readMyDocuments, refusalText, sameBody, startResearch,
+  DEPTHS, MAX_QUESTION, bodyOf, documentFromSearch, limitsText, needsAsk, previewResearch, readMyDocuments, readStartDefaults, refusalText, sameBody, startResearch,
   type DocChoice, type Depth, type PreviewOut, type StartBody,
 } from "./start-data";
 import "./start.css";
@@ -61,6 +61,8 @@ function Dialog({ search, debounceMs }: { search: string; debounceMs: number }) 
   const [docState, setDocState] = useState<DocState>(fromRef ? "checking" : "none");
   const [question, setQuestion] = useState("");
   const [depth, setDepth] = useState<Depth>("standard");
+  const [askOver, setAskOver] = useState<number | null>(null); // the person's "ask me before a run reads more than this many pages"
+  const depthTouched = useRef(false); // a depth the person chose is never replaced by the default that arrives late
   const [prev, setPrev] = useState<Prev>(null);
   const [starting, setStarting] = useState(false);
   const [note, setNote] = useState<string | null>(null); // the last start's outcome, in words
@@ -69,6 +71,17 @@ function Dialog({ search, debounceMs }: { search: string; debounceMs: number }) 
 
   useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
   useEffect(() => { qRef.current?.focus(); }, []);
+
+  // the person's own defaults (this dialog is drawn for one subject: a different person remounts it, so a late answer for
+  // the earlier one cannot land here)
+  useEffect(() => {
+    let on = true;
+    readStartDefaults().then(
+      (d) => { if (!on) return; if (d.depth && !depthTouched.current) setDepth(d.depth); setAskOver(d.askOver); },
+      () => { /* no defaults: the dialog is as it always was */ },
+    );
+    return () => { on = false; };
+  }, []);
 
   // the prefilled document: read through the owner-scoped state and file routes. Not the person's own, trashed
   // and missing are one answer; the title is shown only when it is theirs and live.
@@ -113,6 +126,7 @@ function Dialog({ search, debounceMs }: { search: string; debounceMs: number }) 
 
   const current = prev && body && sameBody(prev.body, body) ? prev : null;
   const ready = !!current?.res?.ok;
+  const asks = ready && needsAsk(askOver, current?.res?.depth ?? null);
   const goBack = () => navigate(asked.current ? docHref(asked.current) : "/");
 
   async function refresh(b: StartBody) {
@@ -180,7 +194,7 @@ function Dialog({ search, debounceMs }: { search: string; debounceMs: number }) 
           <div className="seg">
             {DEPTHS.map((d) => (
               <button key={d.id} type="button" className={"opt" + (depth === d.id ? " sel" : "")} aria-pressed={depth === d.id} data-testid={"depth-" + d.id}
-                onClick={() => setDepth(d.id)}><span>{d.label}</span><span className="meta">{d.blurb}</span></button>
+                onClick={() => { depthTouched.current = true; setDepth(d.id); }}><span>{d.label}</span><span className="meta">{d.blurb}</span></button>
             ))}
           </div>
         </div>
@@ -191,12 +205,17 @@ function Dialog({ search, debounceMs }: { search: string; debounceMs: number }) 
           <span className="meta">Research gets only a cleaned question: the topic, the question and public links. Your document text, names and personal ids stay here. The report becomes shared knowledge; the link back to you stays private.</span>
         </div>
 
+        {asks && current?.res?.depth && (
+          <p className="note" role="status" data-testid="ask-first">
+            This run may read up to {current.res.depth.max_fetch} pages, more than the {askOver} you asked to be asked about. Press Start anyway to go ahead.
+          </p>
+        )}
         {note && <p className="note" role="alert" data-testid="start-note">{note}</p>}
         <div className="dlg-foot">
           <span className="meta" data-testid="estimate">{DEPTHS.find((d) => d.id === depth)!.estimate}</span>
           <span className="dlg-actions">
             <button type="button" className="btn" onClick={goBack} data-testid="start-cancel">Cancel</button>
-            <button type="button" className="btn pri" disabled={!ready || starting} onClick={() => void start()} data-testid="start-go">{starting ? "Starting..." : "Start"}</button>
+            <button type="button" className="btn pri" disabled={!ready || starting} onClick={() => void start()} data-testid="start-go">{starting ? "Starting..." : asks ? "Start anyway" : "Start"}</button>
           </span>
         </div>
       </div>

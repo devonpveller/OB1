@@ -19,7 +19,7 @@ import { ErrorBody, limit, pathParam, queryParam } from "../schemas/common.ts";
 import { Notifications, Registries, RegistryDetail, Setting, Settings, SettingWrite } from "../schemas/system.ts";
 import { EX } from "../schemas/examples.ts";
 import { REGISTRY } from "../registry.ts";
-import { authorOf, body, type ContractApp, type ContractDeps, errors, op, fail, json, PREFIX, send } from "./http.ts";
+import { body, type ContractApp, type ContractDeps, errors, op, fail, json, PREFIX, send } from "./http.ts";
 
 // rwr-settings-shell (tester attempt 1, case 1): the contract's settings reads hold the shared (admin-tier) keys. A PERSON who is
 // not an admin never receives one: the list leaves them out, and one key read answers exactly as for a key that does not exist
@@ -129,10 +129,13 @@ export function registerSystem(app: ContractApp, deps: ContractDeps) {
       // rw-p7a-tts round 2 (tester D3): a setting is GLOBAL (it redirects every user's next render), so
       // only an admin writes it: a signed-in member of the admin group, or - without sign-in, the
       // single-user mode - the default subject itself. A service, another header user: 403.
-      if (!settingsAdmin(await identityOf(c))) return c.json({ error: "only an admin may change a setting" }, 403);
+      const who = await identityOf(c);
+      if (!settingsAdmin(who)) return c.json({ error: "only an admin may change a setting" }, 403);
       const b = c.req.valid("json");
+      // rwr-settings-defaults (attempt 2): who made the change is the request's identity (it is what the append-only admin log and
+      // updated_by record); the body's optional `by` is accepted for compatibility and ignored
       return send(c, Setting, await sys.writeSetting(deps.db, deps.registry, c.req.valid("param").key, b.value,
-        b.by ?? authorOf(c), deps.mountsRoot));
+        who.actor, deps.mountsRoot));
     } catch (e) {
       return fail(c, e);
     }

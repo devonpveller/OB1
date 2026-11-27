@@ -588,6 +588,28 @@ try {
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
   if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the Appearance integration test fails on the base ($($sum.Value))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[2].Value -gt 0 -and [int]$sum.Groups[3].Value -eq 0) "the Appearance integration test ($($sum.Value))" }
+  # rwr-settings-defaults [5j4d]: the eight new user keys, the ceiling a default may not pass, the admin research limits as presets
+  # inside fixed ranges (each preset's exact key values, the ranges the database enforces whoever writes, the append-only log),
+  # a non-admin never sent or able to write a limit, two identities (slot 730)
+  Write-Host '[5j4d] the settings defaults integration test (presets, ranges, ceiling, audit log, non-admin, two users)'
+  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
+    '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key",
+    '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/settings/settings_defaults_integration_test.ts')
+  $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+  Save 'settings-defaults-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|Values are not equal|\[Diff\]|^\s+[-+]' }) -join "`n")
+  foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+  if ($Red) { Check ($sum.Success -and $sum.Groups[1].Value -eq 'FAILED' -and [int]$sum.Groups[3].Value -gt 0) "RED: the settings defaults integration test fails on the base ($($sum.Value))" }
+  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -eq 12) "the settings defaults integration test, all 12 cases ($($sum.Value))" }
+  if (-not $Red) {
+    # rwr-settings-defaults [5j4b]: the limits are written in four places (compose, slot 400 + 730 defaults, slot 730 ranges and presets, both
+    # limits.ts); this host-side test fails when any two drift. It reads files only (no docker, no network).
+    Write-Host '[5j4b] limits-agreement.test.ts: compose defaults = registry defaults = Standard preset; SQL ranges = both limits.ts SPEC'
+    $agree = ((& deno test --allow-read (Join-Path $dockerDir 'limits-agreement.test.ts') 2>&1 | Out-String) -replace '\x1b\[[0-9;]*m', '')
+    Save 'limits-agreement.log' $agree
+    Check ($agree -match 'ok \| 5 passed \| 0 failed') '[5j4b] the limits agree across the compose file, slot 730 and both limits.ts (5 / 5)'
+  }
 
   if (-not $Red) {
     # rw-settings-store [5k]: "a stored refinery value is what the service reads on its next run" - the REAL refinery
@@ -642,6 +664,11 @@ try {
   $rpc = { (Dk run --rm --label $label --network $net --entrypoint node $viewerTag -e "fetch('$legacyRest/rest/v1/rpc/setting_get',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({p_owner:'g2-probe',p_key:'refinery.dormancy_days'})}).then(async r=>{const j=await r.json().catch(()=>({}));console.log('rpc',r.status,j&&j.code?j.code:'')}).catch(e=>console.log('rpc ERR',e.message))") -replace '[^0-9A-Za-z ]', '' }
   $waitRpc = { param($want) $last = ''; for ($i = 0; $i -lt 15; $i++) { $last = & $rpc; if ($last -match "rpc $want") { break }; Start-Sleep -Seconds 1 }; $last }
   $g2 = @("before: $(& $rpc)")
+  if (-not $Red) {   # rwr-settings-defaults: slot 730 sits on the keys and tables of 400 / 490 / 550; its revert goes before all of them
+    $null = Dk cp (Join-Path $chainDir 'revert-settings-defaults.sql') "${db}:/tmp/g2-revert-defaults.sql"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-revert-defaults.sql
+    Check ($script:rc -eq 0) '[5n] revert-settings-defaults.sql (slot 730) runs before revert-settings-tags.sql'
+  }
   if (-not $Red) {   # rwr-appearance: slot 700 sits on 400 + 490 + 550 (and replaces 490's setting_problem); its revert goes before all of them
     $null = Dk cp (Join-Path $chainDir 'revert-appearance.sql') "${db}:/tmp/g2-revert-ap.sql"
     $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-revert-ap.sql
@@ -683,6 +710,9 @@ try {
     $null = Dk cp (Join-Path $chainDir 'init-appearance.sql') "${db}:/tmp/g2-init-ap.sql"
     $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-init-ap.sql
     Check ($script:rc -eq 0) '[5n] init-appearance.sql (slot 700) applies again after slot 550'
+    $null = Dk cp (Join-Path $chainDir 'init-settings-defaults.sql') "${db}:/tmp/g2-init-defaults.sql"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-init-defaults.sql
+    Check ($script:rc -eq 0) '[5n] init-settings-defaults.sql (slot 730) applies again after slot 550'
   }
   Save 'postgrest-reload.log' ($g2 -join "`n")
   foreach ($l in $g2) { Write-Host "    $l" }
@@ -1436,6 +1466,11 @@ try {
     $objs0 = "SELECT (SELECT count(*) FROM pg_proc WHERE proname IN ('setting_get','setting_problem','user_setting_set','trg_user_settings_guard'))::text || ' fns, ' || (to_regclass('public.settings_keys') IS NOT NULL)::text || ' ' || (to_regclass('public.user_settings') IS NOT NULL)::text"
     $objsFn = { $r = & $q $objs0; $p = $r -split ' '; if ($p[2] -eq 'true') { $k = (& $q "SELECT count(*) FROM public.settings_keys") + ' keys' } else { $k = 'no keys' }; "$($p[0]) $($p[1]) $k, $(if ($p[3] -eq 'true') { 'user_settings' } else { 'no user_settings' })" }
     $kept = "SELECT (SELECT coalesce(md5(string_agg(key || value::text || version, ',' ORDER BY key)), '-') FROM public.contract_settings) || ' / ' || (SELECT count(*)::text || ':' || coalesce(md5(string_agg(owner_sub || mode || coalesce(at_time::text, '') || tz, ',' ORDER BY owner_sub)), '-') FROM public.idea_schedule)"
+    # rwr-settings-defaults: slot 730 sits on all of them, so its revert goes before everything (it is cycled and applied again in [5m4])
+    $fp730 = { & $q "SELECT md5(coalesce((SELECT string_agg(k::text, '|' ORDER BY k.key) FROM public.settings_keys k), '') || '#' || coalesce((SELECT string_agg(tgrelid::regclass::text || ':' || tgname, ',' ORDER BY tgrelid::regclass::text, tgname) FROM pg_trigger WHERE NOT tgisinternal AND tgrelid IN ('public.user_settings'::regclass, 'public.contract_settings'::regclass)), '') || '#' || (SELECT count(*)::text FROM pg_proc WHERE proname IN ('settings_limits_apply','settings_limits_reset','settings_limits_current','settings_user_ceiling','admin_setting_clear','admin_setting_write','trg_contract_settings_no_truncate','trg_user_settings_rules','trg_contract_settings_bounds','trg_contract_settings_audit','settings_admin_audit_no_edit')) || '#' || (SELECT count(*)::text FROM pg_class WHERE relname IN ('settings_admin_audit','settings_limit_groups','settings_limit_presets','settings_limit_preset_values','settings_user_ceilings','settings_audit_context') AND relnamespace = 'public'::regnamespace) || '#' || (SELECT count(*)::text || coalesce(md5(string_agg(key || value::text || version, ',' ORDER BY key)), '-') FROM public.contract_settings) || '#' || (SELECT count(*)::text FROM public.user_settings))" }
+    $null = Dk cp (Join-Path $dockerDir 'revert-settings-defaults.sql') "${db}:/tmp/rv730.sql"
+    $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv730.sql
+    Check ($script:rc -eq 0) '[5m] revert-settings-defaults.sql (slot 730) runs before 550 is reverted'
     # rwr-appearance: slot 700 sits on 400 + 490 + 550, so its revert goes before all of them (it is applied again in [5m4])
     $null = Dk cp (Join-Path $dockerDir 'revert-appearance.sql') "${db}:/tmp/rv700.sql"
     $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv700.sql
@@ -1549,6 +1584,42 @@ try {
     $co = @((Dk exec $db psql -U postgres -d openbrain -X -tA -F '|' -v ON_ERROR_STOP=1 -f /tmp/chk700.sql) -split "`n" | Where-Object { $_ -ne '' })
     Save 'check-appearance.log' ($co -join "`n")
     Check ($script:rc -eq 0 -and @($co | Where-Object { $_ -match '\|t$' }).Count -eq 6 -and @($co | Where-Object { $_ -match '\|f$' }).Count -eq 0) '[5m4] check-appearance.sql (read-only) reports six checks, all true'
+    # rwr-settings-defaults [5m4d]: slot 730 runs cleanly 3 times, its revert twice, and init again; the revert leaves the catalog EXACTLY as
+    # before it ran (keys, triggers, functions, tables, the shared store and the user tier), init restores the eight keys and the presets,
+    # the check file passes, and the revert discards what it says it discards (the stored limits, the log)
+    Write-Host '[5m4d] init-settings-defaults.sql x2, revert-settings-defaults.sql x2 (the catalog is as before slot 730), init again, check-settings-defaults.sql'
+    $userKeys730 = { & $q "SELECT count(*)::text FROM public.settings_keys WHERE key IN ('research.default_depth','research.ask_over_fetch','library.how_far_out','library.recent_size','library.clear_on_signout','library.hidden_suggestions','podcast.default_format','podcast.episode_minutes')" }
+    $f730 = @("before slot 730 (the catalog as [5m] left it): $(& $fp730)")
+    $base730 = & $fp730   # slot 730 is absent here (the [5m] revert above); 400 / 490 / 550 were cycled and are back
+    $f730ok = ((& $q "SELECT coalesce(to_regclass('public.settings_admin_audit')::text, 'none')") -eq 'none')
+    $init730 = ''
+    foreach ($f in @('init-settings-defaults.sql', 'init-settings-defaults.sql', 'revert-settings-defaults.sql', 'revert-settings-defaults.sql', 'init-settings-defaults.sql')) {
+      $null = Dk cp (Join-Path $dockerDir $f) "${db}:/tmp/rv730.sql"
+      $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv730.sql
+      $rc730 = $script:rc
+      if ($f -eq 'init-settings-defaults.sql' -and $rc730 -eq 0 -and -not $init730) {
+        $init730 = & $fp730
+        # a stored limit (and its audit line) exist, so the revert has something to discard; a person's value of a new key too
+        $null = & $q "INSERT INTO public.contract_settings (key, value, updated_by) VALUES ('research.max_fetch', '12', 'lab') ON CONFLICT DO NOTHING"
+        $null = & $q "INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('defaults-revert-$rand', 'library.recent_size', '5') ON CONFLICT DO NOTHING"
+      }
+      $f730 += "[$f] exit $rc730$(if ($o -match 'ERROR') { ': ' + (($o -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ') }) -> keys $(& $userKeys730) | audit $(& $q "SELECT (to_regclass('public.settings_admin_audit') IS NOT NULL)::text") | $(& $fp730)"
+    }
+    Save 'revert-settings-defaults.log' ($f730 -join "`n")
+    foreach ($l in $f730) { Write-Host "    $l" }
+    # f730: [0] before, [1] init, [2] init, [3] revert, [4] revert, [5] init
+    Check (@($f730 | Where-Object { $_ -match '^\[.*\] exit 0 ' }).Count -eq 5) '[5m4d] slot 730: all five runs exit 0'
+    Check ($f730ok -and $init730 -and $init730 -ne $base730) '[5m4d] slot 730 changes the catalog (it is not a no-op), from the state [5m] left it in'
+    $afterFp = @($f730 | ForEach-Object { ($_ -split ' \| ')[-1] })
+    Check ($afterFp[3] -eq $base730 -and $afterFp[4] -eq $base730) '[5m4d] slot 730: after the revert (and again) the catalog is exactly as before it (fingerprint)'
+    Check ($f730[3] -match 'keys 0 \| audit false \|' -and $f730[4] -match 'keys 0 \| audit false \|') '[5m4d] slot 730: the revert took the eight keys, the audit log and the presets away'
+    Check ($f730[1] -match 'keys 8 ' -and $f730[2] -match 'keys 8 ' -and $f730[5] -match 'keys 8 ') '[5m4d] slot 730: init (and init again) puts the eight keys back'
+    Check ((& $q "SELECT count(*) FROM public.contract_settings WHERE key LIKE 'research.%' OR key LIKE 'curator.%'") -eq '0') '[5m4d] slot 730: the revert discarded the stored admin limits (documented): the services read their env values'
+    Check ((& $q "SELECT count(*) FROM public.user_settings WHERE owner_sub = 'defaults-revert-$rand'") -eq '0') '[5m4d] slot 730: the revert discarded a person''s value of a new key (documented)'
+    $null = Dk cp (Join-Path $dockerDir 'check-settings-defaults.sql') "${db}:/tmp/chk730.sql"
+    $o = Dk exec $db psql -U postgres -d openbrain -X -A -t -q -f /tmp/chk730.sql
+    Save 'check-settings-defaults.log' ($o -join "`n")
+    Check ($script:rc -eq 0 -and ($o -join "`n") -match 'check: OK' -and ($o -join "`n") -notmatch 'FAIL') '[5m4d] check-settings-defaults.sql prints check: OK after the cycle'
   }
   if (-not $Red) {
     # rw-p8a4-ideas: the slot-370 revert runs cleanly twice and leaves the slot-230 notification trigger as it was

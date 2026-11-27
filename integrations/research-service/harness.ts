@@ -41,6 +41,8 @@ import {
   type NeedState, type NeedStatus, type NotFiled, type SearchRecord,
 } from "./report.ts";
 
+import { runLimits, type RunLimits } from "./limits.ts";
+
 // Tunables (env-read; reading env does not start a server).
 const env = (k: string, d: string) => Deno.env.get(k) ?? d;
 const SEARCH_K = parseInt(env("SEARCH_K", "8"), 10);
@@ -109,6 +111,12 @@ const SOURCE_SLICE_CHARS = parseInt(env("SOURCE_SLICE_CHARS", "4000"), 10);
 // correct answer is worth minutes. Digest/article/notebook paths are unaffected —
 // this is applied only on the default topic-research path for origin "owui".
 const MAX_WALL_MS_OWUI = parseInt(env("MAX_WALL_MS_OWUI", String(MAX_WALL_MS)), 10);
+// rwr-settings-defaults: the env values above are the FALLBACK. runResearch lays the admin's stored limits (set from the workbench's
+// Settings, read through public.setting_get(NULL, key)) over them at the start of every run, see limits.ts.
+const ENV_LIMITS: RunLimits = {
+  SEARCH_K, CONFIDENCE_FLOOR, MAX_FETCH, MAX_FETCH_TIMEOUTS, MAX_WALL_MS, MAX_WALL_MS_OWUI, KB_SOURCES_K, REUSE_MAX_DISTANCE, MAX_ROUNDS, RELEVANT_TARGET,
+};
+const OWUI_WALL_EXPLICIT = Deno.env.get("MAX_WALL_MS_OWUI") !== undefined;
 
 // ── The gap-closing pass (research-trust-report) ─────────────────────────────
 // The operator's complaint was not that the engine stops early - it is that it
@@ -593,6 +601,10 @@ export async function runResearch(
   progress: Progress = async () => {},
 ): Promise<RunResult> {
   const t0 = Date.now();
+  // rwr-settings-defaults: this run's limits: the admin's stored values over the env ones (shadowing the module's env constants for
+  // the whole run; a stored value is read once, here, so a run keeps one set of limits from start to end)
+  const { SEARCH_K, CONFIDENCE_FLOOR, MAX_FETCH, MAX_FETCH_TIMEOUTS, MAX_WALL_MS, MAX_WALL_MS_OWUI, KB_SOURCES_K, REUSE_MAX_DISTANCE, MAX_ROUNDS, RELEVANT_TARGET } =
+    await runLimits(client, ENV_LIMITS, OWUI_WALL_EXPLICIT);
   const floor = opts.confidenceFloor ?? CONFIDENCE_FLOOR;
   const threadId = opts.threadId ?? null;
   const now = new Date();

@@ -45,8 +45,8 @@ function fakeDb() {
       if (/FROM public\.user_settings WHERE owner_sub = \$1/.test(sql)) {
         return Promise.resolve([...rows].filter(([k]) => k.startsWith(`${args[0]}|`)).map(([k, v]) => ({ key: k.split("|")[1], value: v, version: 1, updated_at: "t", updated_by: null })));
       }
-      if (/INSERT INTO public\.contract_settings/.test(sql)) {
-        rows.set(`admin|${args[0]}`, JSON.parse(String(args[1])));
+      if (/admin_setting_write/.test(sql)) {
+        rows.set(`admin|${args[1]}`, JSON.parse(String(args[2])));
         return Promise.resolve([]);
       }
       if (/FROM public\.contract_settings WHERE key = \$1/.test(sql)) {
@@ -122,7 +122,7 @@ Deno.test("S-U2: a non-admin's PUT of an admin key is refused (both doors) and n
   assertEquals((await none.json()).error, "test.no_such_key is not a setting");
   assertEquals((await a.request("/s/test.shared_flag", { method: "DELETE", headers: h })).status, 404);
   assertEquals((await put(a, "/s/test.shared_flag", { value: true }, { "x-who": "root", "x-kind": "user", "x-admin": "1" })).status, 403);
-  assertEquals(seen.some((x) => /contract_settings|user_setting_set/.test(x.sql) && /INSERT|DELETE|user_setting_set/.test(x.sql)), false);
+  assertEquals(seen.some((x) => /contract_settings|admin_setting_|user_setting_set/.test(x.sql) && /INSERT|DELETE|admin_setting_write|admin_setting_clear|user_setting_set/.test(x.sql)), false);
   // the GET says so: no Admin section for this user
   assertEquals((await (await a.request("/s", { headers: h })).json()).admin, false);
 });

@@ -222,3 +222,24 @@ Deno.test("registry/settings: an entry settings_keys does not know is hidden fro
   const orphan = door(FA, {}); // no key known at all
   assertEquals(await regKeys(await orphan(REG, h)), []);
 });
+
+// rwr-settings-defaults (tester attempt 2, Case 6): the audit's "who" is the request's identity, never a field of the body. A body that
+// names another person in `by` must not reach admin_setting_write as the actor.
+Deno.test("PUT /settings/{key}: the actor passed to the logging writer is the admin's own identity, whatever `by` says", async () => {
+  const seen: { sql: string; args: unknown[] }[] = [];
+  const db = { query: (sql: string, args: unknown[] = []) => { seen.push({ sql, args }); return Promise.resolve([]); } } as unknown as Db;
+  const app = new Hono();
+  app.use("/workbench/*", identitySeam(seamDeps(null, env(FA))));
+  const c = newApp();
+  registerSystem(c, { db, registry: reg, mountsRoot: "/mounts-none" } as unknown as ContractDeps);
+  app.route("/", c);
+  const h = { "x-brain-key": FA.WORKSPACE_DOOR_KEY, [TOKEN_HEADER]: await person("ak-root", ["users", "research-admins"]), "content-type": "application/json" };
+  for (const body of [{ value: { v: 2 }, by: "u-someone-else" }, { value: { v: 2 } }, { value: { v: 2 }, by: "" }]) {
+    seen.length = 0;
+    const r = await app.request(ONE("ui.sample"), { method: "PUT", headers: h, body: JSON.stringify(body) });
+    assertEquals(r.status, 200, JSON.stringify(body));
+    const w = seen.find((x) => /admin_setting_write/.test(x.sql));
+    assert(w, "the write went through the logging writer");
+    assertEquals(w!.args[0], "ak-root", `actor for ${JSON.stringify(body)}`);
+  }
+});

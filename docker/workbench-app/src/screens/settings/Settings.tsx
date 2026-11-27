@@ -11,11 +11,17 @@ import { Appearance } from "./Appearance";
 import { Notifications } from "./Notifications";
 import { syncAppearanceSubject } from "../../lib/appearance";
 import {
-  LEGEND, APPEARANCE_ROWS, NOTIFY_SECTION, hasAppearance, loadSettings, resetSetting, saveSetting, sectionsOf, show,
-  type Loaded, type Section, type Setting,
+  HIDDEN_SUGGESTIONS, LEGEND, APPEARANCE_ROWS, NOTIFY_SECTION, hasAppearance, notAppliedNote, applyPreset, loadLimits, loadLog, loadSettings, numberProblem, resetGroup, resetSetting, saveSetting, sectionsOf, show,
+  type Loaded, type LimitGroup, type LogLine, type Section, type Setting,
 } from "./settings-data";
 
 type Mode = { state: "loading" } | { state: "failed" } | { state: "ok"; data: Loaded };
+
+// the highest a number field takes: the registry's max, or the admin's ceiling when that is lower
+const maxOf = (r: Setting): number | undefined => {
+  const hi = [r.validation?.max, r.ceiling].filter((x): x is number => typeof x === "number");
+  return hi.length ? Math.min(...hi) : undefined;
+};
 
 type Status = { kind: "idle" } | { kind: "saving" } | { kind: "saved" } | { kind: "error"; message: string };
 
@@ -64,6 +70,9 @@ function Field({ row, onRow, onStale, epoch }: { row: Setting; onRow: (r: Settin
     if (row.type === "integer" || row.type === "number") {
       const n = Number(t);
       if (!Number.isFinite(n)) { setStatus({ kind: "error", message: "Not saved: enter a number." }); return; }
+      // the server's own rules, in its words, before anything is sent (it judges again, and its answer is the one that counts)
+      const why = numberProblem(row, n);
+      if (why) { setStatus({ kind: "error", message: `Not saved: ${row.key}: ${why}` }); setDraft(effective === null || effective === undefined ? "" : String(effective)); return; }
       save(n);
     } else save(t);
   };
@@ -99,7 +108,7 @@ function Field({ row, onRow, onStale, epoch }: { row: Setting; onRow: (r: Settin
       <input id={id} data-testid="control" disabled={busy}
         type={num ? "number" : row.type === "time" ? "time" : "text"}
         min={num ? (row.validation?.min as number | undefined) : undefined}
-        max={num ? (row.validation?.max as number | undefined) : undefined}
+        max={num ? maxOf(row) : undefined}
         step={row.type === "number" ? "any" : undefined}
         maxLength={row.type === "string" ? (row.validation?.max_len as number | undefined) ?? 200 : undefined}
         value={draft} onChange={(e) => setDraft(e.target.value)} onBlur={commit} onKeyDown={onKey} />
@@ -111,7 +120,14 @@ function Field({ row, onRow, onStale, epoch }: { row: Setting; onRow: (r: Settin
       <div className="s-main">
         <label className="s-label" id={id + "-l"} htmlFor={editable && row.type !== "enum" ? id : undefined}>{row.label}</label>
         {row.help && <p className="meta">{row.help}</p>}
+        {notAppliedNote(row) && <p className="meta not-applied" data-testid={"notapplied-" + row.key}>{notAppliedNote(row)}</p>}
         <p className="meta">{row.is_default ? `Using the default: ${show(row.default)}` : (row.tier === "admin" ? "Set by an admin" : "Set by you")}</p>
+        {typeof row.ceiling === "number" && (
+          <p className="meta" data-testid={"ceiling-" + row.key}>
+            Highest allowed: {row.ceiling}{row.ceiling_phrase ? ` (${row.ceiling_phrase})` : ""}.
+            {!row.is_default && typeof row.value === "number" && row.value > row.ceiling ? ` Your saved value is above it, so you are asked above ${row.ceiling}.` : ""}
+          </p>
+        )}
       </div>
       <div className="s-side">
         <TagChip tag={row.tag} />
@@ -122,6 +138,150 @@ function Field({ row, onRow, onStale, epoch }: { row: Setting; onRow: (r: Settin
           </span>
           {status.kind === "error" && <span role="alert" className="err" data-testid={"error-" + row.key}>{status.message}</span>}
           {editable && !row.is_default && !busy && <button type="button" className="link" onClick={reset}>Back to default</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Hidden suggestions are app state (a list of identifiers the Library writes as you hide things); here a person sees how many are
+// hidden and can show them all again. The count is the stored list's length, never its contents.
+function HiddenSuggestions({ row, onRow, onStale, epoch }: { row: Setting; onRow: (r: Setting) => void; onStale: () => void; epoch: () => number }) {
+  const [status, setStatus] = useState<Status>({ kind: "idle" });
+  const n = row.is_default || !Array.isArray(row.value) ? 0 : row.value.length;
+  const showAgain = async () => {
+    setStatus({ kind: "saving" });
+    const mine = epoch();
+    const r = await resetSetting(row);
+    if (mine !== epoch()) return;
+    if (r.ok) { onRow(r.row); setStatus({ kind: "saved" }); }
+    else if (r.status === 409) { setStatus({ kind: "error", message: "Changed on another browser. Showing the latest value." }); onStale(); }
+    else setStatus({ kind: "error", message: `Not saved: ${r.message}` });
+  };
+  return (
+    <div className="srow" data-testid={"setting-" + row.key} data-key={row.key}>
+      <div className="s-main">
+        <span className="s-label">{row.label}</span>
+        {notAppliedNote(row) && <p className="meta not-applied" data-testid={"notapplied-" + row.key}>{notAppliedNote(row)}</p>}
+        <p className="meta" data-testid="hidden-count">{n === 0 ? "None hidden." : `${n} hidden.`}</p>
+      </div>
+      <div className="s-side">
+        <TagChip tag={row.tag} />
+        <div className="s-ctl">
+          <button type="button" disabled={n === 0 || status.kind === "saving"} onClick={() => void showAgain()} data-testid="hidden-show-again">Show them again</button>
+        </div>
+        <div className="s-state">
+          <span role="status" aria-live="polite" className="saved" data-testid={"saved-" + row.key}>{status.kind === "saved" ? "Saved" : ""}</span>
+          {status.kind === "error" && <span role="alert" className="err" data-testid={"error-" + row.key}>{status.message}</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const when = (t: string) => t.replace("T", " ").replace(/(\.\d+)?(Z|[+-]\d{2}(:?\d{2})?)?$/, "");
+const showValue = (v: unknown) => (v === null || v === undefined ? "nothing stored" : String(v));
+
+// Admin only: the research limits as named presets, never a number typed in. Each group (how big a run is, how strict it is about
+// evidence, how claims are filed) is a set of radio choices; the server writes the preset's values inside their fixed ranges and
+// logs the change (who, what, old, new). A person change while a call is in flight drops its answer (epoch).
+function LimitsPanel({ epoch }: { epoch: () => number }) {
+  const [groups, setGroups] = useState<LimitGroup[] | null>(null);
+  const [failed, setFailed] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState<Record<string, string>>({});
+  const [confirming, setConfirming] = useState<string | null>(null); // the group whose "back to the deployed defaults" awaits a yes (one at a time, keyed by group)
+  const [log, setLog] = useState<LogLine[] | null>(null);
+  const [logFailed, setLogFailed] = useState(false);
+
+  const load = useCallback(() => {
+    const mine = epoch();
+    setFailed(false);
+    loadLimits().then((g) => { if (mine === epoch()) setGroups(g); }, () => { if (mine === epoch()) setFailed(true); });
+  }, [epoch]);
+  useEffect(() => { load(); }, [load]);
+
+  const run = async (g: LimitGroup, preset: string | null) => {
+    if (busy) return;
+    setBusy(g.group);
+    setMsg((m) => ({ ...m, [g.group]: "" }));
+    const mine = epoch();
+    const r = preset === null ? await resetGroup(g.group) : await applyPreset(g.group, preset);
+    if (mine !== epoch()) return; // the person changed: nothing of this answer is shown
+    setBusy(null);
+    if (r.ok) {
+      setGroups((all) => (all ?? []).map((x) => (x.group === g.group ? r.group : x)));
+      setMsg((m) => ({ ...m, [g.group]: "Saved" }));
+      if (log !== null) showLog();
+    } else setMsg((m) => ({ ...m, [g.group]: `Not saved: ${r.message}` }));
+  };
+  const showLog = () => {
+    const mine = epoch();
+    setLogFailed(false);
+    loadLog().then((l) => { if (mine === epoch()) setLog(l); }, () => { if (mine === epoch()) setLogFailed(true); });
+  };
+  const label = (k: string) => (groups ?? []).flatMap((g) => g.values).find((v) => v.key === k)?.label ?? k;
+
+  if (failed) return <p className="meta" data-testid="limits-failed">Could not load the research limits. <button type="button" onClick={load}>Try again</button></p>;
+  if (groups === null) return <p className="meta" role="status" data-testid="limits-loading">Loading the research limits...</p>;
+  return (
+    <div data-testid="limits">
+      <p className="meta">These are the dials of every research run and of the curator, for everyone. Pick a preset; every change is written to the log below.</p>
+      {groups.map((g) => (
+        <div className="srow limits-group" key={g.group} data-testid={"limits-" + g.group} data-current={g.current}>
+          <div className="s-main">
+            <span className="s-label" id={"lg-" + g.group}>{g.label}</span>
+            <p className="meta">{g.help}</p>
+            <p className="meta" data-testid={"limits-now-" + g.group}>
+              {g.current === "custom" ? "In force: values no preset names (a custom setting)." : `In force: ${g.presets.find((p) => p.preset === g.current)?.label ?? g.current}.`}
+              {" "}{g.values.map((v) => `${v.label}: ${show(v.value)}${v.is_default ? " (deployed default)" : ""}`).join("; ")}
+            </p>
+          </div>
+          <div className="s-side">
+            <TagChip tag="admin_all" />
+            <div className="s-ctl">
+              <div role="radiogroup" aria-labelledby={"lg-" + g.group} className="seg" data-testid={"limits-choice-" + g.group}>
+                {g.presets.map((p) => (
+                  <label key={p.preset} className={"seg-o" + (g.current === p.preset ? " on" : "")} title={p.help}>
+                    <input type="radio" name={"lg-" + g.group} value={p.preset} checked={g.current === p.preset} disabled={busy !== null}
+                      onChange={() => void run(g, p.preset)} data-testid={`preset-${g.group}-${p.preset}`} />
+                    <span>{p.label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="s-state">
+              <span role="status" aria-live="polite" className="saved" data-testid={"limits-saved-" + g.group}>{msg[g.group] === "Saved" ? "Saved" : ""}</span>
+              {msg[g.group] && msg[g.group] !== "Saved" && <span role="alert" className="err" data-testid={"limits-error-" + g.group}>{msg[g.group]}</span>}
+              <button type="button" className="link" disabled={busy !== null} onClick={() => setConfirming(g.group)} data-testid={"limits-reset-" + g.group}>Back to the deployed defaults</button>
+              {confirming === g.group && (
+                <span role="alertdialog" aria-label={"Put " + g.label + " back"} data-testid={"limits-confirm-" + g.group}>
+                  <span className="meta">Put &ldquo;{g.label}&rdquo; back to the deployed defaults for everyone?</span>{" "}
+                  <button type="button" disabled={busy !== null} onClick={() => { setConfirming(null); void run(g, null); }} data-testid={"limits-confirm-yes-" + g.group}>Yes, put back</button>{" "}
+                  <button type="button" onClick={() => setConfirming(null)} data-testid={"limits-confirm-no-" + g.group}>Cancel</button>
+                </span>
+              )}
+            </div>
+          </div>
+        </div>
+      ))}
+      <div className="srow" data-testid="limits-log">
+        <div className="s-main">
+          <span className="s-label">Who changed what</span>
+          {log === null && !logFailed && <p className="meta"><button type="button" onClick={showLog} data-testid="log-show">Show the latest changes</button></p>}
+          {logFailed && <p className="meta" role="alert" data-testid="log-failed">Could not read the log. <button type="button" onClick={showLog}>Try again</button></p>}
+          {log !== null && log.length === 0 && <p className="meta" data-testid="log-empty">No change has been made yet.</p>}
+          {log !== null && log.length > 0 && (
+            <ul className="log" data-testid="log-list">
+              {log.map((l) => (
+                <li key={l.id} data-testid="log-line">
+                  {when(l.at)}: {l.actor} {l.action === "clear" ? "went back to the deployed default for" : "set"} {label(l.key)}
+                  {l.action === "clear" ? ` (was ${showValue(l.old_value)})` : `: ${showValue(l.old_value)} to ${showValue(l.new_value)}`}
+                  {l.preset && l.group ? ` (preset ${l.preset})` : ""}
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </div>
     </div>
@@ -234,9 +394,16 @@ export function Settings({ subject = null, whoAnswered = true }: { subject?: str
                   </Appearance>
                 ) : current.tier === "user" && current.section === NOTIFY_SECTION ? (
                   <Notifications rows={current.keys} onRow={onRow} onStale={load} epoch={epoch} />
-                ) : current.keys.map((k) => (
-                  <Field key={k.key} row={k} onRow={onRow} onStale={load} epoch={epoch} />
-                ))}
+                ) : (
+                  <>
+                    {current.tier === "admin" && current.section === "research" && <LimitsPanel key={current.id} epoch={epoch} />}
+                    {current.keys.filter(() => !(current.tier === "admin" && current.section === "research")).map((k) => (
+                      k.key === HIDDEN_SUGGESTIONS
+                        ? <HiddenSuggestions key={k.key} row={k} onRow={onRow} onStale={load} epoch={epoch} />
+                        : <Field key={k.key} row={k} onRow={onRow} onStale={load} epoch={epoch} />
+                    ))}
+                  </>
+                )}
               </>
             ) : <p className="empty" data-testid="settings-empty">There are no settings to show yet. <Link to="/">Back to Home</Link></p>}
           </div>

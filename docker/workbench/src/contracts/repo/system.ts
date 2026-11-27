@@ -145,12 +145,9 @@ export async function writeSetting(db: Db, reg: RegistryReader, key: string, val
   const e = await reg.entry("settings", key);
   if (!e) throw new NotFound(`'${key}' is not a key of the settings registry`);
   const v = e.definition.type === "destination" ? validateDestination(value, mountsRoot, allowedMounts(e.definition)) : value;
-  await db.query(
-    `INSERT INTO public.contract_settings (key, value, updated_by) VALUES ($1, $2::jsonb, $3)
-     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, version = public.contract_settings.version + 1,
-       updated_at = now(), updated_by = EXCLUDED.updated_by`,
-    [key, JSON.stringify(v), by],
-  );
+  // slot 730: the write goes through the logging writer, so the audit line names the admin who made it (it is the only
+  // way the log's "who" is set; a direct INSERT is logged as the database role)
+  await db.query(`SELECT public.admin_setting_write($1, $2, $3::jsonb)`, [by ?? "contract door", key, JSON.stringify(v)]);
   return await setting(db, reg, key, mountsRoot);
 }
 
