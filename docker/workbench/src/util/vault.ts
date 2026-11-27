@@ -190,6 +190,10 @@ export async function gitMv(
     await new Promise((r) => setTimeout(r, 500));
     mv = await git(["mv", fromRel, toRel]);
   }
+  // The commit below is limited to this move's own paths (git commit --only): a file that anyone else has staged (a whole-tree
+  // `git add -A` of a note write, the wiki compile, a hand-staged change) stays staged and never rides in this commit under this
+  // move's subject. `from` is a pathspec only when git knew it (a plain-renamed untracked draft was never in the index).
+  let paths = mv.ok ? [fromRel, toRel] : [toRel];
   if (!mv.ok) {
     if (/not under version control|bad source|source.*not exist|did not match/i.test(mv.err)) {
       // Untracked draft (autosave never committed): git mv can't move it. Plain
@@ -205,11 +209,18 @@ export async function gitMv(
 
   const args = ["commit", "-q"];
   if (author) args.push(`--author=${author} <${author}@notes.local>`);
-  args.push("-m", message);
-  let res = await git(args);
+  args.push("-m", message, "--", ...paths);
+  const cargs = ["--literal-pathspecs", ...args];
+  let res = await git(cargs);
   if (!res.ok && /index\.lock/.test(res.err)) {
     await new Promise((r) => setTimeout(r, 500));
-    res = await git(args);
+    res = await git(cargs);
+  }
+  if (!res.ok && paths.length === 2 && /did not match any file/.test(res.err)) {
+    // `from` was only ever staged, never committed (a whole-tree add staged it first): after the mv it is in neither HEAD nor
+    // the index, so it is not a pathspec git knows; the move is then just the new path
+    paths = [toRel];
+    res = await git(["--literal-pathspecs", ...args.slice(0, args.indexOf("--") + 1), ...paths]);
   }
   if (!res.ok) throw new Error(`git commit failed: ${res.err.slice(0, 300)}`);
   return { committed: true };

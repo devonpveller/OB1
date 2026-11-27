@@ -18,7 +18,7 @@
 // that does not exist (404 "no such document"), before anything about versions, snapshots or counts is read.
 import type { Identity } from "../middleware/identity.ts";
 import { afterWrite, commitLocked, DocError, ownedPath, sha256, type DocDeps } from "./repo.ts";
-import { isArchived, isTrashed } from "./paths.ts";
+import { isArchived, isTrashed, liveRel } from "./paths.ts";
 import { withPathLock } from "./path_lock.ts";
 import { vaultExists, vaultRead, vaultWrite } from "../util/vault.ts";
 import { type LegacyOwnerCheck, vaultBlob, vaultDiff, vaultFileCommits, vaultWorkingBlob } from "../util/vault_versions.ts";
@@ -62,16 +62,22 @@ export async function versionsOf(rel: string, ctx?: { db: DocDeps["db"]; who: Id
   return out;
 }
 
-// Is a legacy pairing from -> to the caller's own file moving? Both must hold:
-//  1. the commit is the app's own move of `from` (subject `documents: trash|restore|archive|unarchive|move <from>`; the app
-//     moves a file only after checking the mover owns `from`). A whole-tree sweep (wiki compile, a note write) is not: its
-//     pairing of one legacy file with another is never a move, so history is lost there, never leaked.
-//  2. no other owner is on record for `from`: a listing row at `from`, or the removal trail's line for it, names someone else
-//     (the listing row's owner is the owner of a legacy file). A failed lookup means not established: not followed.
+// FROZEN RULE (rwr-doc-versions-api fix round 4): a legacy (scope '': no owner key in the path) pairing is followed ONLY when
+// the commit provably holds nothing but that one move of that one file. Three parts, all required:
+//  1. the commit is the app's own move commit: its subject is exactly what moveTo writes for `from` (`documents: trash|restore|
+//     archive|unarchive|move <from>`). The app moves a file only after checking the mover owns `from`, and gitMv commits ONLY the
+//     move's two paths (--only), so no other writer's staged file rides in it. Whole-tree sweepers (wiki compile, a note write,
+//     the changes log) have their own subject prefixes: their pairings are never followed (history lost, never leaked).
+//  2. `to` is the destination that subject's verb implies for `from` (trash: .trash/<rest>, archive: .archive/<rest>; restore and
+//     unarchive: the live path; move: the `-> <to>` in the subject), so git pairing `from` with some other path of the commit
+//     is refused.
+//  3. no other owner is on record for `from`: a listing row, or a removal trail line, at `from` naming someone else (a lookup
+//     that fails is not established: not followed).
+// Residuals (written down, not covered): a hand-staged index plus a hand-made commit whose subject imitates an app move AND whose
+// paired `to` is exactly the implied destination; and a legacy file whose name holds " -> " (its own move is refused: history lost).
 export function legacyOwnerCheck(db: DocDeps["db"], who: Identity): LegacyOwnerCheck {
-  return async (from, _to, message) => {
-    const m = /^documents: (trash|restore|archive|unarchive|move) (.+?)(?: -> .*| \(folder .*\))?$/.exec(message);
-    if (!m || m[2] !== from) return false;
+  return async (from, to, message) => {
+    if (!movedAsTheAppDoes(from, to, message)) return false;
     try {
       for (const sql of [
         `SELECT owner_sub FROM public.user_document_listings WHERE path = $1`,
@@ -84,6 +90,20 @@ export function legacyOwnerCheck(db: DocDeps["db"], who: Identity): LegacyOwnerC
     }
     return true;
   };
+}
+
+// Is `message` exactly the subject the app writes for moving `from` to `to` (see legacyOwnerCheck 1 and 2)? Exported for the tests.
+export function movedAsTheAppDoes(from: string, to: string, message: string): boolean {
+  if (from === to) return false;
+  const rest = liveRel(from).slice("documents/".length);
+  if (message === `documents: move ${from} -> ${to}`) return true;
+  if (message === `documents: restore ${from}`) return (isTrashed(from) || isArchived(from)) && to === liveRel(from); // restore also takes an archived file
+  if (message === `documents: unarchive ${from}`) return isArchived(from) && to === liveRel(from);
+  if (message === `documents: archive ${from}`) return to === `documents/.archive/${rest}`;
+  if (message === `documents: trash ${from}` || (message.startsWith(`documents: trash ${from} (folder `) && message.endsWith(")"))) {
+    return to === `documents/.trash/${rest}`;
+  }
+  return false;
 }
 
 async function loadDocument(deps: DocDeps, path: string, who: Identity) {

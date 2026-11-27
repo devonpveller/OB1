@@ -16,6 +16,7 @@ await git("init", "-q");
 await git("config", "user.email", "t@lab.local");
 await git("config", "user.name", "lab");
 const v = await import("./versions.ts");
+const { movedAsTheAppDoes } = v;
 const vlt = { ...(await import("../util/vault.ts")), ...(await import("../util/vault_versions.ts")) };
 const { DocError } = await import("./repo.ts");
 
@@ -513,6 +514,133 @@ Deno.test("legacy owner proof: the app's own move is followed only when no other
   await put(l2, legacyBody("q2"), "documents: edit");
   await vlt.gitMv(l2, t2, `documents: trash documents/other.md`, A.name);
   assertEquals((await v.versionsOf(t2, ctxA)).length, 1);
+});
+
+// ── fix round 4 (attempt 4 FAIL, H15 / H15b / T4-U1..U3): the app's OWN move commit carried B's staged file ─────────────────
+// FROZEN RULE: a legacy pairing is followed only when the commit holds nothing but that one move: (1) every app move commit is
+// limited to its own two paths (gitMv: `git commit --only`), (2) the subject is the app's and `to` is the destination its verb
+// implies (movedAsTheAppDoes), (3) whole-tree sweepers are never followed. Residuals: see legacyOwnerCheck.
+const hasOlderA = (s: string) => /OLDER-A-/.test(s);
+async function blobsOf(vs: { blob: string }[]) {
+  const out: string[] = [];
+  for (const x of vs) out.push((await vlt.vaultBlob(x.blob)) ?? "");
+  return out.join("\n");
+}
+const headFiles = async () => (await git("show", "--name-only", "--no-renames", "--format=", "HEAD")).trim().split("\n").filter(Boolean).sort();
+
+for (const verb of ["trash", "archive"] as const) {
+  Deno.test(`T4-U1 (${verb}): A's own legacy ${verb} commit is limited to A's two paths: B's staged byte-identical file at the same live name never rides in it, and B never gets A's history`, async () => {
+    const id = ++doc;
+    const live = `documents/t4u1-${verb}-${id}.md`;
+    const to = verb === "trash" ? `documents/.trash/t4u1-${verb}-${id}.md` : `documents/.archive/t4u1-${verb}-${id}.md`;
+    const bPath = verb === "trash" ? `documents/.archive/t4u1-${verb}-${id}.md` : `documents/.trash/t4u1-${verb}-${id}.md`;
+    for (const t of [`OLDER-A-1-${id}`, `OLDER-A-2-${id}`, `CURRENT-${id}`]) await put(live, legacyBody(t), "documents: edit");
+    await vlt.vaultWrite(bPath, await vlt.vaultRead(live)); // B's legacy file, staged by a whole-tree add
+    await git("add", "--", bPath);
+    await vlt.gitMv(live, to, `documents: ${verb} ${live}`, A.name); // the app's own move, honest subject
+    assertEquals(await headFiles(), [live, to].sort(), "the move commit holds only the move's own paths");
+    assert((await git("diff", "--cached", "--name-only")).split("\n").includes(bPath), "B's file is still staged, not committed");
+    assertEquals((await v.versionsOf(to, ctxA)).length, 3, "A's own history follows A's own move");
+    // a sweeper later commits B's file: B starts at its own v1
+    await git("-c", "user.name=wiki-compile", "-c", "user.email=w@x", "commit", "-q", "-m", "wiki compile");
+    const vsB = await v.versionsOf(bPath, ctxB);
+    assertEquals([vsB.length, hasOlderA(await blobsOf(vsB))], [1, false]);
+  });
+}
+
+Deno.test("T4-U2 (restore): A's own legacy restore commit is limited to A's two paths; B's staged .archive file of the same name never gets A's history", async () => {
+  const id = ++doc;
+  const live = `documents/t4u2-${id}.md`, trash = `documents/.trash/t4u2-${id}.md`, bPath = `documents/.archive/t4u2-${id}.md`;
+  for (const t of [`OLDER-A-1-${id}`, `OLDER-A-2-${id}`, `CURRENT-${id}`]) await put(live, legacyBody(t), "documents: edit");
+  await vlt.gitMv(live, trash, `documents: trash ${live}`, A.name);
+  await vlt.vaultWrite(bPath, await vlt.vaultRead(trash));
+  await git("add", "--", bPath);
+  await vlt.gitMv(trash, live, `documents: restore ${trash}`, A.name);
+  assertEquals(await headFiles(), [live, trash].sort());
+  assertEquals((await v.versionsOf(live, ctxA)).length, 3);
+  await git("-c", "user.name=wiki-compile", "-c", "user.email=w@x", "commit", "-q", "-m", "wiki compile");
+  const vsB = await v.versionsOf(bPath, ctxB);
+  assertEquals([vsB.length, hasOlderA(await blobsOf(vsB))], [1, false]);
+});
+
+// the same pairing made by a commit the move limit cannot protect (a hand-made whole-tree commit with the app's subject): the
+// destination binding refuses it, because git paired A's `from` with B's path, not with the `.trash` path the subject implies
+Deno.test("T4-U3: an app-subject commit that holds A's trash (with A's unsaved edit) and B's staged exact copy at another state: git pairs `from` with B's path, the `to` binding refuses it", async () => {
+  const id = ++doc;
+  const live = `documents/t4u3-${id}.md`, trash = `documents/.trash/t4u3-${id}.md`, bPath = `documents/.archive/t4u3-${id}.md`;
+  for (const t of [`OLDER-A-1-${id}`, `OLDER-A-2-${id}`, `CURRENT-${id}`]) await put(live, legacyBody(t), "documents: edit");
+  const cur = await vlt.vaultRead(live);
+  await Deno.mkdir(`${vault}/documents/.trash`, { recursive: true });
+  await git("mv", live, trash);
+  await vlt.vaultWrite(trash, cur + "A's unsaved line\n");
+  await vlt.vaultWrite(bPath, cur);
+  await git("add", "-A");
+  await git("-c", "user.name=Alice", "-c", "user.email=a@x", "commit", "-q", "-m", `documents: trash ${live}`);
+  listingRows.set(trash, A.sub);
+  listingRows.set(bPath, B.sub);
+  const vsB = await v.versionsOf(bPath, ctxB);
+  assertEquals([vsB.length, hasOlderA(await blobsOf(vsB))], [1, false]);
+  listingRows.delete(trash);
+  listingRows.delete(bPath);
+});
+
+Deno.test("V16 (unit): a hand-made commit with the app's `move` subject that removes A's legacy file and adds B's legacy file of ANOTHER name is not a move (sameOwnerMove, whatever the subject)", async () => {
+  for (const mode of ["exact", "near"] as const) {
+    const id = ++doc;
+    const x = `documents/v16a-${id}.md`, y = `documents/v16b-${id}.md`;
+    for (const t of [`OLDER-A-1-${id}`, `OLDER-A-2-${id}`, `CURRENT-${id}`]) await put(x, legacyBody(t), "documents: edit");
+    const cur = await vlt.vaultRead(x);
+    await git("rm", "-q", "--", x);
+    await vlt.vaultWrite(y, mode === "exact" ? cur : cur.replace("CURRENT-", "CURRENT2-"));
+    await git("add", "-A");
+    await git("-c", "user.name=Alice", "-c", "user.email=a@x", "commit", "-q", "-m", `documents: move ${x} -> ${y}`);
+    const vsB = await v.versionsOf(y, ctxB);
+    assertEquals([mode, vsB.length, hasOlderA(await blobsOf(vsB))], [mode, 1, false]);
+  }
+});
+
+Deno.test("gitMv commits only its own paths: a staged file of anyone else stays staged; an untracked draft's move still commits", async () => {
+  const id = ++doc;
+  const a = `documents/gm-${id}.md`, b = `documents/.trash/gm-${id}.md`, other = `notes/other-${id}.md`;
+  await put(a, legacyBody("x"), "documents: edit");
+  await vlt.vaultWrite(other, "someone else's staged note\n");
+  await git("add", "--", other);
+  await vlt.gitMv(a, b, `documents: trash ${a}`, A.name);
+  assertEquals(await headFiles(), [a, b].sort());
+  assert((await git("diff", "--cached", "--name-only")).split("\n").includes(other), "the other file is still staged");
+  await git("-c", "user.name=n", "-c", "user.email=n@x", "commit", "-q", "-m", "notes: other");
+  const d = `documents/draft-${id}.md`, d2 = `documents/.trash/draft-${id}.md`;
+  await vlt.vaultWrite(d, "a draft never committed\n"); // untracked: the plain-rename fallback
+  await vlt.gitMv(d, d2, `documents: trash ${d}`, A.name);
+  assertEquals(await headFiles(), [d2]);
+  const e = `documents/staged-${id}.md`, e2 = `documents/.trash/staged-${id}.md`;
+  await vlt.vaultWrite(e, "staged by a whole-tree add, never committed\n");
+  await git("add", "--", e);
+  await vlt.gitMv(e, e2, `documents: trash ${e}`, A.name); // `from` is in neither HEAD nor the index after the mv
+  assertEquals(await headFiles(), [e2]);
+});
+
+Deno.test("movedAsTheAppDoes: the subject must be the app's and `to` the destination its verb implies", () => {
+  const rows: [string, string, string, boolean][] = [
+    ["documents/a.md", "documents/.trash/a.md", "documents: trash documents/a.md", true],
+    ["documents/a.md", "documents/.trash/a.md", "documents: trash documents/a.md (folder documents/f)", true],
+    ["documents/.archive/a.md", "documents/.trash/a.md", "documents: trash documents/.archive/a.md", true],
+    ["documents/a.md", "documents/.archive/a.md", "documents: archive documents/a.md", true],
+    ["documents/.trash/a.md", "documents/a.md", "documents: restore documents/.trash/a.md", true],
+    ["documents/.archive/a.md", "documents/a.md", "documents: unarchive documents/.archive/a.md", true],
+    ["documents/.archive/a.md", "documents/a.md", "documents: restore documents/.archive/a.md", true],
+    ["documents/a.md", "documents/.archive/a.md", "documents: trash documents/a.md", false], // the H15 pairing: the verb says .trash
+    ["documents/a.md", "documents/.trash/a.md", "documents: archive documents/a.md", false],
+    ["documents/.trash/a.md", "documents/.archive/a.md", "documents: restore documents/.trash/a.md", false],
+    ["documents/.trash/a.md", "documents/b.md", "documents: restore documents/.trash/a.md", false],
+    ["documents/a.md", "documents/.trash/a.md", "wiki compile 2026 (x)", false],
+    ["documents/a.md", "documents/.trash/a.md", "documents: edit documents/a.md", false],
+    ["documents/a.md", "documents/.trash/a.md", "documents: trash documents/b.md", false],
+    ["documents/a.md", "documents/.trash/a.md", "notes: move documents/a.md -> documents/.trash/a.md", false],
+    ["documents/a.md", "documents/b.md", "documents: move documents/a.md -> documents/b.md", true], // (sameOwnerMove refuses legacy names that differ)
+    ["documents/a.md", "documents/a.md", "documents: trash documents/a.md", false],
+  ];
+  assertEquals(rows.filter(([f, t, m, w]) => movedAsTheAppDoes(f, t, m) !== w).map(([f, t, m]) => `${f} -> ${t} (${m})`), []);
 });
 
 Deno.test("sameOwnerMove: the rule table (documents/ only; the same key; legacy only for one file's own move)", async () => {

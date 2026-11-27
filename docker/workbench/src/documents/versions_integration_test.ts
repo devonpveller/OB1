@@ -613,3 +613,150 @@ t("V14b: A's hard-deleted legacy .trash file and B's new legacy file of the SAME
     assert(!(await textOf(live)).includes(`${older} 1`), "a restore never writes A's older text");
   }
 });
+
+// ── fix round 4 (attempt 4 FAIL): the app's OWN move commit carried B's staged file ───────────────────────────────────────────
+// FROZEN RULE: a legacy (scope '') pairing is followed ONLY when the commit provably holds nothing but that one move: (1) every
+// app move commit is limited to its own two paths (gitMv: git commit --only), (2) the subject is the app's and `to` is the
+// destination its verb implies, (3) whole-tree sweepers' pairings are never followed. H15 / H15b are the tester's cases; V15 guards (1),
+// V17 guards (2), V14b guards (3), V16 guards sameOwnerMove (the names must match).
+// A's OLDER versions carry `<older> 1` / `<older> 2`; B's own text may equal A's CURRENT text, which holds `<older>` too, so only those lines are A's history
+const hasOld = (text: string, older: string) => text.includes(`${older} 1`) || text.includes(`${older} 2`);
+const SHARED4 = Array.from({ length: 10 }, (_, k) => `shared paragraph ${k} of a plan two people wrote word for word`).join("\n") + "\n";
+const fm4 = (title: string, b: string) => `---\ntitle: ${JSON.stringify(title)}\n---\n\n${b}`;
+async function aSub4(): Promise<string> {
+  const p = await newDoc(A, `v15-who-${run}-${crypto.randomUUID().slice(0, 4)}`, "who");
+  return (await sql<{ owner_sub: string }>(`SELECT owner_sub FROM public.user_document_listings WHERE path = $1`, [p]))[0].owner_sub;
+}
+async function aCommits(file: string, older: string, aSub: string) {
+  for (const txt of [fm4("L", `${older} 1\n` + SHARED4), fm4("L", `${older} 2\n` + SHARED4), fm4("L", SHARED4 + `CURRENT-${older}\n`)]) {
+    await Deno.mkdir(`${VAULT}/${file.slice(0, file.lastIndexOf("/"))}`, { recursive: true });
+    await Deno.writeTextFile(`${VAULT}/${file}`, txt);
+    await git("add", "--", file);
+    await git("-c", `user.name=${aSub}`, "-c", "user.email=a@l", "commit", "-q", "-m", `documents: edit ${file}`);
+  }
+}
+const listRow4 = (path: string, title: string, owner: string) =>
+  sql(`INSERT INTO public.user_document_listings (path, title, owner_sub, actor_sub) VALUES ($1, $2, $3, $3)`, [path, title, owner]);
+const headFiles4 = async () => (await git("show", "--name-only", "--no-renames", "--format=", "HEAD")).trim().split("\n").filter(Boolean).sort();
+const stagedFiles4 = async () => (await git("diff", "--cached", "--name-only")).trim().split("\n").filter(Boolean);
+
+t("H15: A's own legacy trash commit (POST /trash) with B's staged byte-identical legacy file of the same name: the commit holds only A's two paths, and B never gets A's history", async () => {
+  const aSub = await aSub4();
+  for (const form of ["exact", "a-unsaved-edit"] as const) {
+    const id = `h15-${form}`;
+    const older = `OLDER-A-${run}-${id}`;
+    const la = `documents/lgh15-${run}-${id}.md`, laT = `documents/.trash/lgh15-${run}-${id}.md`, lbA = `documents/.archive/lgh15-${run}-${id}.md`;
+    await aCommits(la, older, aSub);
+    await listRow4(la, "L", aSub);
+    await listRow4(lbA, "B", B[SUB_HEADER]);
+    const cur = await Deno.readTextFile(`${VAULT}/${la}`);
+    const pb = await call("PUT", `${D}/file?path=${q(lbA)}`, { content: cur }, B); // B's autosave, then staged as an unlocked `git add -A` would
+    assert(pb.status === 200 || pb.status === 207, pb.text);
+    await git("add", "--", lbA);
+    if (form === "a-unsaved-edit") assert([200, 207].includes((await call("PUT", `${D}/file?path=${q(la)}`, { content: cur + "A's unsaved line\n" })).status));
+    const tr = await call("POST", `${D}/trash`, { path: la });
+    assertEquals(tr.status, 200, tr.text);
+    assertEquals(await headFiles4(), [la, laT].sort(), `${form}: the trash commit holds only A's two paths`);
+    assert((await stagedFiles4()).includes(lbA), `${form}: B's file is still staged, not committed`);
+    const l = await call("GET", `${D}/versions?path=${q(lbA)}`, undefined, B);
+    assertEquals(l.status, 200, l.text);
+    assert((l.json.total ?? 0) <= 1 && !hasOld(l.text, older) && !l.text.includes(la), `${form}: B's list: ${l.text.slice(0, 200)}`);
+    for (const vv of l.json.versions as { version: number }[]) {
+      const c = await call("GET", `${D}/compare?path=${q(lbA)}&from=${vv.version}&to=${l.json.current_version}`, undefined, B);
+      assert(!hasOld(c.text, older), `${form}: B's compare carries A's older text`);
+      await call("POST", `${D}/restore-version`, { path: lbA, version: vv.version }, B);
+      assert(!hasOld((await textOf(lbA)), older), `${form}: B's restore wrote A's older text`);
+    }
+  }
+});
+
+t("H15b: the H15 shape, then B unarchives its own document and restores v1: B's file never holds A's older text", async () => {
+  const aSub = await aSub4();
+  const id = "h15b";
+  const older = `OLDER-A-${run}-${id}`;
+  const la = `documents/lgh15b-${run}.md`, lbA = `documents/.archive/lgh15b-${run}.md`;
+  await aCommits(la, older, aSub);
+  await listRow4(la, "L", aSub);
+  await listRow4(lbA, "B", B[SUB_HEADER]);
+  const cur = await Deno.readTextFile(`${VAULT}/${la}`);
+  assert([200, 207].includes((await call("PUT", `${D}/file?path=${q(lbA)}`, { content: cur }, B)).status));
+  await git("add", "--", lbA);
+  assertEquals((await call("POST", `${D}/trash`, { path: la })).status, 200);
+  const ua = await call("POST", `${D}/restore`, { path: lbA }, B); // B's own unarchive of a file that was only ever staged
+  assertEquals(ua.status, 200, ua.text);
+  const live = String(ua.json.restored ?? ua.json.unarchived ?? "");
+  assertEquals(live, la.replace("documents/", "documents/"), "B's file is back at its live path");
+  const l = await call("GET", `${D}/versions?path=${q(live)}`, undefined, B);
+  assertEquals([l.status, l.json.total], [200, 1], l.text);
+  const rv = await call("POST", `${D}/restore-version`, { path: live, version: 1 }, B);
+  assertEquals(rv.status, 200, rv.text);
+  assert(!hasOld((await textOf(live)), older), "B's file never holds A's older text");
+});
+
+t("V15: every app move commit (trash, archive, restore, unarchive) holds only its own two paths: a file anyone else staged stays staged", async () => {
+  const aSub = await aSub4();
+  const f = `documents/v15-${run}.md`;
+  await aCommits(f, `OLDER-A-${run}-v15`, aSub);
+  await listRow4(f, "L", aSub);
+  const steps: [string, string, string][] = [["trash", f, `documents/.trash/v15-${run}.md`], ["restore", `documents/.trash/v15-${run}.md`, f],
+    ["archive", f, `documents/.archive/v15-${run}.md`], ["restore", `documents/.archive/v15-${run}.md`, f]];
+  let i = 0;
+  for (const [verb, from, to] of steps) {
+    const foreign = `notes/v15-${run}-${++i}.md`; // staged by someone else (a note write's add -A) before the move
+    await Deno.mkdir(`${VAULT}/notes`, { recursive: true });
+    await Deno.writeTextFile(`${VAULT}/${foreign}`, `someone else's staged note ${i}\n`);
+    await git("add", "--", foreign);
+    const r = await call("POST", `${D}/${verb}`, { path: from });
+    assertEquals(r.status, 200, r.text);
+    assertEquals(await headFiles4(), [from, to].sort(), `${verb}: the move commit holds only its own paths`);
+    assert((await stagedFiles4()).includes(foreign), `${verb}: the foreign staged file stays staged`);
+    await git("-c", "user.name=notes", "-c", "user.email=n@l", "commit", "-q", "-m", "notes: write"); // the sweeper's own commit
+  }
+  assertEquals((await call("GET", `${D}/versions?path=${q(f)}`)).json.total, 3, "A's history followed A's own moves");
+});
+
+// A commit the move limit cannot protect: a hand-made whole-tree commit that imitates the app's subject. The destination the verb
+// implies is what binds it (V17); legacy names that differ never pair (V16).
+t("V16: a hand-made commit with the app's `move` subject that removes A's legacy file and adds B's legacy file of ANOTHER name: not a move", async () => {
+  const aSub = await aSub4();
+  for (const kind of ["exact", "near"] as const) {
+    const older = `OLDER-A-${run}-v16-${kind}`;
+    const x = `documents/v16a-${run}-${kind}.md`, y = `documents/v16b-${run}-${kind}.md`;
+    await aCommits(x, older, aSub);
+    await listRow4(y, "B", B[SUB_HEADER]);
+    const cur = await Deno.readTextFile(`${VAULT}/${x}`);
+    await git("rm", "-q", "--", x);
+    await Deno.writeTextFile(`${VAULT}/${y}`, kind === "exact" ? cur : cur.replace("CURRENT-", "CURRENT2-"));
+    await git("add", "-A");
+    await git("-c", "user.name=Alice", "-c", "user.email=a@l", "commit", "-q", "-m", `documents: move ${x} -> ${y}`);
+    const l = await call("GET", `${D}/versions?path=${q(y)}`, undefined, B);
+    assertEquals([l.status, l.json.total], [200, 1], `${kind}: ${l.text}`);
+    assert(!hasOld(l.text, older), `${kind}: nothing of A's text`);
+    await call("POST", `${D}/restore-version`, { path: y, version: 1 }, B);
+    assert(!hasOld((await textOf(y)), older), `${kind}: a restore never writes A's older text`);
+  }
+});
+
+t("V17: a hand-made commit with the app's `trash` subject that holds A's trash AND B's staged copy at another state: git pairs `from` with B's path, the `to` the verb implies refuses it", async () => {
+  const aSub = await aSub4();
+  const older = `OLDER-A-${run}-v17`;
+  const la = `documents/v17-${run}.md`, laT = `documents/.trash/v17-${run}.md`, lbA = `documents/.archive/v17-${run}.md`;
+  await aCommits(la, older, aSub);
+  await listRow4(laT, "L", aSub);
+  await listRow4(lbA, "B", B[SUB_HEADER]);
+  const cur = await Deno.readTextFile(`${VAULT}/${la}`);
+  await Deno.mkdir(`${VAULT}/documents/.trash`, { recursive: true });
+  await Deno.mkdir(`${VAULT}/documents/.archive`, { recursive: true });
+  await git("mv", la, laT);
+  await Deno.writeTextFile(`${VAULT}/${laT}`, cur + "A's unsaved line\n");
+  await Deno.writeTextFile(`${VAULT}/${lbA}`, cur);
+  await git("add", "-A");
+  await git("-c", "user.name=Alice", "-c", "user.email=a@l", "commit", "-q", "-m", `documents: trash ${la}`);
+  const raw = (await git("diff-tree", "-r", "-M", "--name-status", "--no-commit-id", "HEAD")).replaceAll("\t", " ");
+  assert(raw.includes(`${la} ${lbA}`), `git paired A's from with B's path: ${raw}`);
+  const l = await call("GET", `${D}/versions?path=${q(lbA)}`, undefined, B);
+  assertEquals([l.status, l.json.total], [200, 1], l.text);
+  assert(!hasOld(l.text, older) && !l.text.includes(la), "nothing of A's history in B's list");
+  await call("POST", `${D}/restore-version`, { path: lbA, version: 1 }, B);
+  assert(!hasOld((await textOf(lbA)), older), "a restore never writes A's older text");
+});
