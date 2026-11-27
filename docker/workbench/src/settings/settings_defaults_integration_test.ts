@@ -430,6 +430,12 @@ t("D12: no change of the admin tier is unlogged or forged - TRUNCATE is refused 
     assertEquals((await inTx([[`SET LOCAL ROLE ${role}`], [`INSERT INTO public.settings_audit_context (txid, actor) VALUES (txid_current(), 'u-admin')`]])).code, "42501", `${role} insert`);
     assertEquals((await inTx([[`SET LOCAL ROLE ${role}`], [`SELECT * FROM public.settings_audit_context`]])).code, "42501", `${role} select`);
   }
+  // the contract door's PUT: a body naming someone else in `by` is ignored, the log names the real admin
+  const forged = await call("PUT", `/workbench/contract/settings/podcast.archive_destination`, { value: { mount: "podcast-archive" }, by: "u-someone-else" }, ADMIN);
+  assertEquals(forged.status, 200, forged.text);
+  const fl = (await sql<any>(`SELECT actor FROM public.settings_admin_audit WHERE key = 'podcast.archive_destination' ORDER BY id DESC LIMIT 1`))[0];
+  assert(fl && fl.actor !== "u-someone-else" && !/^db role /.test(fl.actor), `the log says ${fl?.actor}`);
+  await sql(`DELETE FROM public.contract_settings WHERE key = 'podcast.archive_destination'`);
   // the real writer still names the admin and the preset (through the route), and leaves no context row behind
   await call("PUT", `${S}/admin/limits/run_size`, { preset: "large" }, ADMIN);
   const last = (await sql<any>(`SELECT actor, preset FROM public.settings_admin_audit WHERE key = 'research.max_fetch' ORDER BY id DESC LIMIT 1`))[0];
