@@ -23,6 +23,7 @@ function recorder(rows: Record<string, unknown[]> = {}) {
       log.push({ sql: s, args });
       if (/INSERT INTO public\.cleanup_dismissals/.test(s)) return Promise.resolve((rows.insert ?? [{ id: ID, kind: "reopen_candidate", ref: TOMB, created_at: "t" }]) as T[]);
       if (/DELETE FROM public\.cleanup_dismissals/.test(s)) return Promise.resolve((rows.del ?? []) as T[]);
+      if (/^SELECT .* FROM public\.cleanup_dismissals WHERE owner_sub = \$1 AND kind = \$2/.test(s)) return Promise.resolve((rows.select ?? []) as T[]);
       if (/count\(\*\)/.test(s)) return Promise.resolve([{ n: 0 }] as T[]);
       return Promise.resolve([] as T[]);
     },
@@ -48,9 +49,34 @@ Deno.test("D1: a dismissal writes only its own row, keyed to the seam's subject"
   assertEquals(writes[0].args[0], "user-a");
   assert(!/DO UPDATE|UPDATE public/i.test(writes[0].sql), "the table is not granted UPDATE: a repeat is DO NOTHING and a read-back");
   assert(!("owner_sub" in d), "the row never names its owner");
-  assert(/FROM public\.cleanup_dismissals WHERE owner_sub = \$1 AND kind = \$2 AND ref = \$3/.test(writes[0].sql), "the read-back of an existing row is scoped to the person too: "+writes[0].sql);
+  assert(/ON CONFLICT \(owner_sub, kind, ref\) DO NOTHING/.test(writes[0].sql), writes[0].sql);
 });
 
+Deno.test("D1b: a repeat reads the existing row back in a SEPARATE statement, scoped to the person (a concurrent insert is invisible to the insert's own snapshot)", async () => {
+  const mine = { id: ID, kind: "reopen_candidate", ref: TOMB, created_at: "t" };
+  const { db, log } = recorder({ insert: [], select: [mine] });
+  const d = await addDismissal(db, reader(db), A, { kind: "reopen_candidate", ref: TOMB });
+  assertEquals(d, mine);
+  const stmts = log.filter((l) => /cleanup_dismissals/.test(l.sql));
+  assertEquals(stmts.length, 2);
+  assert(/^INSERT/.test(stmts[0].sql) && !/SELECT/.test(stmts[0].sql), "the insert carries no read-back of its own: " + stmts[0].sql);
+  assert(/^SELECT .* WHERE owner_sub = \$1 AND kind = \$2 AND ref = \$3$/.test(stmts[1].sql), stmts[1].sql);
+  assertEquals(stmts[1].args, ["user-a", "reopen_candidate", TOMB]);
+});
+
+Deno.test("D1c: a row taken back between the two statements is inserted again; it never answers nothing", async () => {
+  let n = 0;
+  const row = { id: ID, kind: "reopen_candidate", ref: TOMB, created_at: "t" };
+  const db: Db = {
+    query: <T>(sql: string) => {
+      if (/^INSERT/.test(sql.replace(/\s+/g, " ").trim())) return Promise.resolve((++n === 2 ? [row] : []) as T[]);
+      return Promise.resolve([] as T[]);
+    },
+    tx: (fn) => fn(db),
+  };
+  assertEquals(await addDismissal(db, reader(db), A, { kind: "reopen_candidate", ref: TOMB }), row);
+  assertEquals(n, 2);
+});
 Deno.test("D2: a kind the registry does not know is refused before anything is written", async () => {
   const { db, log } = recorder();
   await assertRejects(() => addDismissal(db, reader(db), A, { kind: "nope", ref: TOMB }), UnregisteredValue);

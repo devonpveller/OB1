@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { render, screen, fireEvent, cleanup, waitFor, within, act, configure } from "@testing-library/react";
 import { App } from "../src/App";
 import { ToastProvider } from "../src/shell/Toast";
-import { Cleanup } from "../src/screens/cleanup/Cleanup";
+import { Cleanup, CleanupScreen } from "../src/screens/cleanup/Cleanup";
 import { reasonLabel, visibleSuggestions, readSuggestions, type ReasonWords } from "../src/screens/cleanup/cleanup-data";
 import { docHref } from "../src/screens/documents/docs-data";
 import { setFetcher, clearRequestLog } from "../src/lib/api";
@@ -622,5 +622,151 @@ describe("UI rules", () => {
     rawFlag("alice", "other", { kind: "source", ref: SRC_A }); flags.rows()[1].item_kind = "mystery";
     await open("alice", "flagged");
     expect(titles().sort()).toEqual(["A claim you flagged", "An item you flagged"]);
+  });
+});
+
+// ---- fix round 1 (tester attempt 1, Cases 10 and 11 and the mutants UM1, UM2, UM4); sources adopted from wt-t-cleanup
+describe("rwr-cleanup fix round 1: a change of person while a request is held", () => {
+  it("TA1 alice's held Apply-to-all does not swallow bob's Apply-to-all after the switch (in-flight guard is per person)", async () => {
+    who = "alice";
+    const r = render(<ToastProvider><Cleanup key="u-alice" subject="u-alice" ready /></ToastProvider>);
+    fireEvent.click(screen.getByTestId("tab-ready")); await waitFor(() => expect(cards().length).toBe(3));
+    let release = () => {};
+    slow["POST /workbench/contract/cleanup/process-all"] = new Promise<void>((res) => { release = res; });
+    fireEvent.click(screen.getByTestId("apply-all")); typeWord("ERASE"); fireEvent.click(screen.getByTestId("typed-ok"));
+    await settle();
+    who = "bob";
+    r.rerender(<ToastProvider><Cleanup key="u-bob" subject="u-bob" ready /></ToastProvider>);
+    fireEvent.click(screen.getByTestId("tab-ready")); await waitFor(() => expect(cards().length).toBe(3));
+    fireEvent.click(screen.getByTestId("apply-all")); typeWord("ERASE"); fireEvent.click(screen.getByTestId("typed-ok"));
+    await settle(); await settle();
+    const bobs = sent.filter((s) => s.who === "bob" && s.method === "POST" && /process-all$/.test(s.url));
+    const bobSaw = screen.queryByTestId("batch-error")?.textContent ?? screen.queryByTestId("batch-result")?.textContent ?? "(nothing: no request, no message)";
+    release(); await settle();
+    expect({ bobRequests: bobs.length, bobSaw }).toEqual({ bobRequests: 1, bobSaw: expect.stringMatching(/Erased/) });
+  });
+  it("TA2 alice's held dismissal of a shared candidate does not swallow bob's dismissal of it after the switch", async () => {
+    who = "alice";
+    const r = render(<ToastProvider><Cleanup key="u-alice" subject="u-alice" ready /></ToastProvider>);
+    fireEvent.click(screen.getByTestId("tab-reopen")); await waitFor(() => expect(cards().length).toBe(2));
+    let release = () => {};
+    slow["POST /workbench/contract/cleanup/dismissals"] = new Promise<void>((res) => { release = res; });
+    fireEvent.click(within(cards()[0]).getByTestId("dismiss")); await settle();
+    who = "bob";
+    r.rerender(<ToastProvider><Cleanup key="u-bob" subject="u-bob" ready /></ToastProvider>);
+    fireEvent.click(screen.getByTestId("tab-reopen")); await waitFor(() => expect(cards().length).toBe(2));
+    fireEvent.click(within(cards()[0]).getByTestId("dismiss")); await settle(); await settle();
+    const bobs = sent.filter((s) => s.who === "bob" && s.method === "POST" && /dismissals$/.test(s.url));
+    release(); await settle();
+    expect(bobs.length).toBe(1);
+  });
+  it("TA3 a held request released after the switch (same toast provider, no state reset) shows nothing on bob's screen and leaves his list whole", async () => {
+    who = "alice";
+    const r = render(<ToastProvider><CleanupScreen subject="u-alice" whoAnswered {...({} as any)} /></ToastProvider>);
+    fireEvent.click(screen.getByTestId("tab-reopen")); await waitFor(() => expect(cards().length).toBe(2));
+    let release = () => {};
+    slow["POST /workbench/contract/cleanup/dismissals"] = new Promise<void>((res) => { release = res; });
+    fireEvent.click(within(cards()[0]).getByTestId("dismiss")); await settle();
+    who = "bob";
+    r.rerender(<ToastProvider><CleanupScreen subject="u-bob" whoAnswered {...({} as any)} /></ToastProvider>);
+    fireEvent.click(screen.getByTestId("tab-reopen")); await waitFor(() => expect(cards().length).toBe(2));
+    const before = sent.length;
+    release(); await settle(); await settle();
+    expect(screen.queryByTestId("toast")).toBeNull();
+    expect(screen.queryByTestId("card-error")).toBeNull();
+    expect(cards().length).toBe(2);                       // alice's dismissal is hers: bob's list is whole
+    expect(sent.slice(before).filter((s) => s.method === "GET").length).toBe(0); // no refresh of bob's lists by alice's answer
+  });
+  it("TA4 CleanupScreen (the route's screen) itself drops an open panel and typed word on a person switch (the key guard)", async () => {
+    who = "alice";
+    const r = render(<ToastProvider><CleanupScreen subject="u-alice" whoAnswered {...({} as any)} /></ToastProvider>);
+    fireEvent.click(screen.getByTestId("tab-ready")); await waitFor(() => expect(cards().length).toBe(3));
+    fireEvent.click(within(cards()[0]).getByTestId("erase")); typeWord("ERASE");
+    who = "bob";
+    r.rerender(<ToastProvider><CleanupScreen subject="u-bob" whoAnswered {...({} as any)} /></ToastProvider>);
+    expect(screen.queryByTestId("typed-confirm")).toBeNull();
+    expect(screen.getByTestId("tab-suggestions").getAttribute("aria-selected")).toBe("true");
+  });
+});
+
+describe("rwr-cleanup fix round 1: armed confirmations and the review", () => {
+  it("TB1 starting a review while a card's erase panel is open leaves nothing armed and nothing stuck", async () => {
+    await open("alice", "ready");
+    fireEvent.click(within(cards()[1]).getByTestId("erase")); typeWord("ERASE");
+    const start = screen.getByTestId("review-start") as HTMLButtonElement;
+    expect(start.disabled).toBe(false); // an open panel does not stop the review from starting; it is closed by starting it
+    fireEvent.click(start);
+    await waitFor(() => expect(screen.getByTestId("review")).toBeTruthy());
+    // card 1 of the review is the first source; its Erase must be usable (nothing armed elsewhere)
+    const erase = screen.queryByTestId("erase") as HTMLButtonElement | null;
+    expect(erase && !erase.disabled).toBe(true);
+  });
+  it("TB2 the same on Worth reopening: a reopen panel open, then Review one at a time", async () => {
+    await open("alice", "reopen");
+    const mine = cards().find((c) => within(c).queryByTestId("reopen"))!;
+    fireEvent.click(within(mine).getByTestId("reopen"));
+    const start = screen.getByTestId("review-start") as HTMLButtonElement;
+    expect(start.disabled).toBe(false);
+    fireEvent.click(start);
+    await waitFor(() => expect(screen.getByTestId("review")).toBeTruthy());
+    const reopen = screen.queryByTestId("reopen") as HTMLButtonElement | null;
+    const panel = screen.queryByTestId("reopen-panel");
+    // either the review's first card is the open one (its panel shows, armed from outside the review) or another (its button must not be stuck off)
+    expect({ armedFromOutside: !!panel, stuckOff: !!reopen && reopen.disabled }).toEqual({ armedFromOutside: false, stuckOff: false });
+  });
+});
+describe("rwr-cleanup fix round 1: reason words really come from the registry", () => {
+  it("TD1 a registry label that differs from its key is what the card says (the fallback would say the key's words)", async () => {
+    const real = cl.handle;
+    (cl as any).handle = (w: any, m: string, u: string, b: any) => {
+      const r = real(w, m, u, b);
+      if (r && m === "GET" && /registries\/flag_reasons$/.test(u)) r.body.entries = r.body.entries.map((e: any) => e.key === "wrong_claim" ? { ...e, label: "claim looks false" } : e);
+      return r;
+    };
+    try {
+      flag("alice", "wrong_claim");
+      await open("alice", "flagged");
+      await waitFor(() => expect(screen.getByTestId("flag-reason").textContent).toBe("Claim looks false"));
+    } finally { (cl as any).handle = real; }
+  });
+});
+
+describe("rwr-cleanup fix round 1: one guard per screen, and a refusal says so", () => {
+  it("UM4 a flag withdrawn from the list (request held) and offered again in a review sends ONE request and the second card says why", async () => {
+    flag("alice", "wrong_claim");
+    await open("alice", "flagged");
+    let release = () => {};
+    slow["PATCH /workbench/contract/flags/" + flags.rows()[flags.rows().length - 1].id] = new Promise<void>((res) => { release = res; });
+    fireEvent.click(within(cards()[0]).getByTestId("withdraw")); await settle();
+    fireEvent.click(screen.getByTestId("review-start"));
+    await waitFor(() => expect(screen.getByTestId("review")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("withdraw")); await settle();
+    expect(posts(/flags\//).length).toBe(1);
+    expect(screen.getByTestId("card-error").textContent).toMatch(/already being done/);
+    release(); await settle();
+  });
+  it("a double click on one card is one request and no complaint", async () => {
+    flag("alice", "wrong_claim");
+    await open("alice", "flagged");
+    const b = within(cards()[0]).getByTestId("withdraw");
+    fireEvent.click(b); fireEvent.click(b); await settle(); await settle();
+    expect(posts(/flags\//).length).toBe(1);
+    expect(screen.queryByTestId("card-error")).toBeNull();
+  });
+  it("TB3 a flag card has no panel, so a review of flags starts clean; an open erase panel is closed by starting any review", async () => {
+    await open("alice", "ready");
+    fireEvent.click(within(cards()[0]).getByTestId("erase"));
+    expect(screen.getByTestId("erase-panel")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("review-start"));
+    await waitFor(() => expect(screen.getByTestId("review")).toBeTruthy());
+    expect(screen.queryByTestId("erase-panel")).toBeNull();
+    expect((screen.getByTestId("erase") as HTMLButtonElement).disabled).toBe(false);
+  });
+  it("the apply-all panel is closed by starting a review too", async () => {
+    await open("alice", "ready");
+    fireEvent.click(screen.getByTestId("apply-all")); expect(screen.getByTestId("apply-panel")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("review-start"));
+    await waitFor(() => expect(screen.getByTestId("review")).toBeTruthy());
+    expect(screen.queryByTestId("apply-panel")).toBeNull();
   });
 });

@@ -249,7 +249,7 @@ try {
   $null = Run-Detached "$P-wb" (@('--network-alias', 'openbrain-workbench') + $wbArgs + @($wbTag))
   Check (Wait-Http "http://$P-wb:8000/health" 90) "$P-wb is up"
 
-  Write-Host '[5a] the dismissals integration test (D1-D8)'
+  Write-Host '[5a] the dismissals integration test (D1-D9)'
   $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
     '-e', "DISMISS_TEST_BASE=http://$P-wb:8000", '-e', "DISMISS_TEST_KEY=$key",
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
@@ -258,9 +258,9 @@ try {
   Save 'dismissals-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||^F\d:|error:|Assertion|=> ' }) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
-  if ($Red) { Check ($sum.Success -and [int]$sum.Groups[3].Value -ge 6 -and $clean -notmatch 'D[1-6]: [^
-]*\.\.\. ok') "RED: every route case D1-D6 fails on the base $BaseSha ($($sum.Value); D7 holds vacuously with no route and D8 reads only the database, which is this tree's chain)" }
-  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 8) "the dismissals integration test ($($sum.Value))" }
+  if ($Red) { Check ($sum.Success -and [int]$sum.Groups[3].Value -ge 7 -and $clean -notmatch 'D[1-69]: [^
+]*\.\.\. ok') "RED: every route case D1-D6 and D9 fails on the base $BaseSha ($($sum.Value); D7 holds vacuously with no route and D8 reads only the database, which is this tree's chain)" }
+  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 9) "the dismissals integration test ($($sum.Value))" }
 
   if (-not $Red) {
     Write-Host '[5b] the migration round trip (forward x2, revert, forward; the schema dump compares)'

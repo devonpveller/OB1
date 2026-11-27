@@ -35,17 +35,27 @@ type Env = { subject: string | null; ask: Ask; reasons: ReasonWords | null };
 // `toast` is a fixed sentence (no title); `text` is for the review summary on the screen.
 type Done = { text: string; toast: string; undo?: () => Promise<unknown> };
 
-// One action per target at a time, for the whole screen (a list card and a review card of the same item share it).
-const inFlight = new Set<string>();
+// One action per target at a time, for the whole screen (a list card and a review card of the same item share it). The key
+// carries the person: a request still held for the person who was signed in must never swallow the next person's action on the
+// same (shared) target, and the owner of an entry is the card instance that took it, so a different card asking for the same
+// target says so instead of returning silently.
+const inFlight = new Map<string, object>();
 
 function useDo(env: Env, key: string, onDone: (d: Done) => void) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const live = useRef(true);
+  const me = useRef({}).current;
   useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
   const run = async (what: string, call: () => Promise<unknown>, done: Done | ((r: any) => Done)) => {
-    if (inFlight.has(key)) return false;
-    inFlight.add(key);
+    const gate = (env.subject ?? "") + "|" + key;
+    const holder = inFlight.get(gate);
+    if (holder) {
+      // the same card asking twice (a double click) is one request, quietly; another card for the same target is told
+      if (holder !== me && live.current) setErr("That is already being done from another place on this screen.");
+      return false;
+    }
+    inFlight.set(gate, me);
     setBusy(true); setErr("");
     try {
       // the request goes only while the person who opened it is still the one signed in
@@ -57,7 +67,7 @@ function useDo(env: Env, key: string, onDone: (d: Done) => void) {
       if (live.current) setErr(plainFailure(e, what));
       return false;
     } finally {
-      inFlight.delete(key);
+      inFlight.delete(gate);
       if (live.current) setBusy(false);
     }
   };
@@ -303,7 +313,7 @@ function ReadyTab({ env, tick, refresh }: { env: Env; tick: number; refresh: () 
       <Section read={read} count={n} page={page} extra={
         <div className="cl-bulk">
           <div className="rm-actions">
-            <ReviewButton n={n} onStart={() => setMode("review")} disabled={asking} />
+            <ReviewButton n={n} onStart={() => { env.ask.set(null); setMode("review"); }} />
             <button type="button" className="danger" data-testid="apply-all" disabled={n === 0 || batch.busy || off || asking} onClick={() => env.ask.set(allKey)}>Apply to all {n}</button>
           </div>
           <p className="meta" data-testid="one-reason-note">Apply to all uses one reason for the whole batch. To give each its own reason, review them one at a time.</p>
@@ -339,7 +349,7 @@ function ReopenTab({ env, tick, refresh }: { env: Env; tick: number; refresh: ()
       render={(c, d) => <CandidateCard c={c} env={env} onDone={(x) => { refresh(); d(x); }} />} />;
   }
   return (
-    <Section read={read} count={items.length} page={page} extra={<div className="rm-actions"><ReviewButton n={items.length} onStart={() => setMode("review")} /></div>}>
+    <Section read={read} count={items.length} page={page} extra={<div className="rm-actions"><ReviewButton n={items.length} onStart={() => { env.ask.set(null); setMode("review"); }} /></div>}>
       {items.map((c) => <li key={c.tombstoneId}><CandidateCard c={c} env={env} onDone={onDone} /></li>)}
     </Section>
   );
@@ -356,7 +366,7 @@ function FlaggedTab({ env, tick, refresh }: { env: Env; tick: number; refresh: (
       render={(f, d) => <FlagCard f={f} env={env} onDone={(x) => { refresh(); d(x); }} />} />;
   }
   return (
-    <Section read={read} count={items.length} page={page} extra={<div className="rm-actions"><ReviewButton n={items.length} onStart={() => setMode("review")} /></div>}>
+    <Section read={read} count={items.length} page={page} extra={<div className="rm-actions"><ReviewButton n={items.length} onStart={() => { env.ask.set(null); setMode("review"); }} /></div>}>
       {items.map((f) => <li key={f.id}><FlagCard f={f} env={env} onDone={onDone} /></li>)}
     </Section>
   );

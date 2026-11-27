@@ -2,7 +2,7 @@
 // database, as TWO users. SKIPPED unless DISMISS_TEST_BASE and CONTRACT_TEST_DB_HOST are set;
 // contract-test/run-dismissals-tests.ps1 runs it in its disposable lab (the real initdb chain incl. 710-init-cleanup-dismissals.sql,
 // fixtures.sql, the :wt workbench with WORKSPACE_IDENTITY_HEADER=X-Test-Sub). Never point it at a live stack.
-// STATUS: written with the unit tests; NOT RUN yet (the lab needs a plane lease).
+// STATUS: D1-D8 run in the lab 2026-11-26 (D8 found the default-grant bug); D9 added in fix round 1 (the tester's concurrent-POST 500).
 // Environment: DISMISS_TEST_BASE, DISMISS_TEST_KEY, DISMISS_TEST_SUB_HEADER (default X-Test-Sub),
 // CONTRACT_TEST_DB_HOST/_PORT/_USER/_PASSWORD (superuser: plants and snapshots).
 import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert@1";
@@ -19,7 +19,7 @@ const pool = !ignore
     user: Deno.env.get("CONTRACT_TEST_DB_USER") ?? "postgres", password: Deno.env.get("CONTRACT_TEST_DB_PASSWORD") ?? "",
   }, 3, true)
   : null;
-// D1..D8 name the acceptance statements (test-plans/rwr-cleanup.md)
+// D1..D9 name the acceptance statements (test-plans/rwr-cleanup.md)
 const t = (name: string, fn: () => Promise<void>) => Deno.test({ name, ignore, fn, sanitizeOps: false, sanitizeResources: false });
 
 async function sql<T = Record<string, any>>(text: string, args: unknown[] = []): Promise<T[]> {
@@ -75,6 +75,9 @@ t("D1: a person dismisses; it is theirs - their list has it, another person's li
 
 t("D2: the same dismissal twice is one row, and one id", async () => {
   const one = await mk(A), two = await mk(A);
+  // both answers are a 201 and name the SAME real id (an undefined id on both sides is not "the same row")
+  assertEquals([one.status, two.status], [201, 201], one.text + two.text);
+  assert(typeof one.json.id === "string" && one.json.id.length > 0, one.text);
   assertEquals(one.json.id, two.json.id);
   assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.cleanup_dismissals WHERE ref = $1`, [MARKER]))[0].n, 1);
 });
@@ -135,4 +138,25 @@ t("D7: dismissing changes nothing about any shared table (sources, tombstones, c
 t("D8: the table holds exactly the grants the app needs: service_role selects, inserts and deletes; nothing updates a dismissal", async () => {
   const g = await sql<{ p: string }>(`SELECT privilege_type AS p FROM information_schema.role_table_grants WHERE table_name = 'cleanup_dismissals' AND grantee = 'service_role' ORDER BY 1`);
   assertEquals(g.map((r) => r.p), ["DELETE", "INSERT", "SELECT"]);
+});
+
+t("D9: the same dismissal made at the same moment, 25 requests x 8 rounds: every answer is a 201 with the one id, and the table holds one row", async () => {
+  const bad: string[] = [];
+  for (let round = 0; round < 8; round++) {
+    const ref = `${MARKER}-race-${round}`;
+    const rs = await Promise.all(Array.from({ length: 25 }, () => mk(A, { ref })));
+    const st = rs.map((r) => r.status);
+    const ids = new Set(rs.map((r) => r.json?.id).filter(Boolean));
+    if (st.some((x) => x !== 201) || ids.size !== 1) bad.push(`round ${round}: statuses ${JSON.stringify(st)}, ${ids.size} id(s), first refusal ${rs.find((r) => r.status !== 201)?.text?.slice(0, 160)}`);
+    const n = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.cleanup_dismissals WHERE owner_sub = $1 AND ref = $2`, [A, ref]))[0].n;
+    if (n !== 1) bad.push(`round ${round}: ${n} rows`);
+    // a second person racing the same ref gets their own row, never A's id
+    if (round === 0) {
+      const mix = await Promise.all([...Array.from({ length: 10 }, () => mk(A, { ref })), ...Array.from({ length: 10 }, () => mk(B, { ref }))]);
+      const aId = ids.values().next().value;
+      const bIds = new Set(mix.filter((_, i) => i >= 10).map((r) => r.json?.id));
+      if (mix.some((r) => r.status !== 201) || bIds.size !== 1 || bIds.has(aId)) bad.push(`round ${round}: two people racing: ${JSON.stringify(mix.map((r) => r.status))}`);
+    }
+  }
+  assertEquals(bad, []);
 });
