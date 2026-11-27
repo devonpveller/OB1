@@ -104,7 +104,6 @@ describe("ATTACK", () => {
     await waitFor(() => expect(queued()).not.toContain(a));
     await wait(300);
     const btns = screen.getAllByRole("button").filter((b) => /^Remove$|Place at cursor/.test(b.textContent ?? ""));
-    console.log("A1 destructive buttons:", btns.length, "all disabled:", btns.every((b) => (b as HTMLButtonElement).disabled));
     expect(btns.every((b) => (b as HTMLButtonElement).disabled)).toBe(false);
   });
   it("A2 two browsers: a place whose save conflicts must not say Placed", async () => {
@@ -115,7 +114,6 @@ describe("ATTACK", () => {
     fireEvent.click(screen.getByTestId(`place-${row.id}`));
     await waitFor(() => expect(queued()).not.toContain(row.id));
     await wait(600);
-    console.log("A2 msg=", screen.queryByTestId("refs-msg")?.textContent, "| conflict banner:", !!screen.queryByTestId("doc-conflict"), "| row still on server:", fake.state().pending.has(row.id));
     expect(!!screen.queryByTestId("doc-conflict") && /^Placed/.test(screen.queryByTestId("refs-msg")?.textContent ?? "")).toBe(false);
     // D2: nothing was placed: the message says so, the citation is out of the text again and the cite is back in To place
     expect(screen.getByTestId("refs-msg").textContent).toMatch(/^Not placed/);
@@ -137,7 +135,6 @@ describe("ATTACK", () => {
     open();
     await waitFor(() => expect(queued()).not.toContain(row.id));
     const t = text();
-    console.log("A3 text:", JSON.stringify(t));
     expect(t.includes(`The board fits it.[@ref:`) && !t.includes(`under load.{{/ref}}[@ref:`)).toBe(true);
   });
   it("A4 section label follows the text typed since the tab opened", async () => {
@@ -146,7 +143,6 @@ describe("ATTACK", () => {
     await wait(50);
     typeAt("## Power", "## Newhead\nfiller\n\n");
     await wait(100);
-    console.log("A4 power section:", screen.getByTestId(`cited-section-${REF_POWER}`).textContent);
     expect(screen.getByTestId(`cited-section-${REF_POWER}`).textContent).toMatch(/In: Power/);
   });
   it("A4b (D4) Re-pin on a citation deleted from the text while dirty sends no repin and makes no record", async () => {
@@ -203,7 +199,6 @@ describe("ATTACK", () => {
     fireEvent.click(await screen.findByTestId(`find-add-${S_BARE}`));
     await waitFor(() => expect(queued().length).toBe(3));
     await wait(300);
-    console.log("A6 title now:", screen.getByTestId(`toplace-title-${row.id}`).textContent);
     expect(screen.queryByText("ALPHA Memory timings")).toBeNull();
     expect(screen.getByTestId(`toplace-title-${row.id}`).textContent).toMatch(/not available any more/);
   });
@@ -212,7 +207,6 @@ describe("ATTACK", () => {
     fake.handle("alice", "POST", "/workbench/documents/references", { path: CPU, source_id: S_NEW, form: "added" }); // other tab
     searchFor("Memory timings");
     await wait(600);
-    console.log("A7 find rows:", screen.queryAllByTestId("find-row").map((r) => r.getAttribute("data-source")));
     expect(screen.queryByTestId(`find-row-${S_NEW}`)).toBeNull();
   });
   it("A8 results of an open search never list a source once it is cited (place)", async () => {
@@ -224,7 +218,6 @@ describe("ATTACK", () => {
     fireEvent.click(screen.getByTestId(`place-${row.id}`));
     await waitFor(() => expect(queued()).not.toContain(row.id));
     await wait(600);
-    console.log("A8 find rows after place:", screen.queryAllByTestId("find-row").map((r) => r.getAttribute("data-source")));
     expect(screen.queryByTestId(`find-row-${S_NEW}`)).toBeNull();
   });
   it("A9 place at cursor 0 in a non-empty doc sends nothing", async () => {

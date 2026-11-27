@@ -9,9 +9,9 @@
 // list, draft, confirmation and view lives in this component, which is gone when the person changes (the screen is keyed
 // by the subject). EVERY write re-reads who is signed in first (ifSamePerson), exactly as the writing surface does.
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
-import type { EditorView } from "@codemirror/view";
 import { ApiError } from "../../lib/api";
-import { EditorSelection } from "@codemirror/state";
+import { EditorSelection, StateEffect } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { protectedSpans } from "../../editor/protected";
 import type { DrawerTarget } from "./SourceDrawer";
 import {
@@ -131,21 +131,21 @@ export function ReferencesTab({ path, body, getBody, view, save, ifSamePerson, o
   const place = async (row: PendingRow) => {
     const v = view.current;
     if (!v) { setMsg("The text box is not ready yet."); return; }
-    // the cursor is read NOW, at the click: where the person pointed is where the citation goes, whatever they do while the
-    // answer is on its way (the text may move meanwhile, so the words around the cursor are kept to find the place again)
-    const head = v.state.selection.main.head;
-    if (head === 0 && v.state.doc.length > 0) { setMsg("Click in the text where the citation should go, then place it."); return; }
-    const text0 = v.state.doc.toString();
-    const around = text0.slice(Math.max(0, head - 40), head);
+    // the cursor is read NOW, at the click: where the person pointed is where the citation goes. It is carried through every change
+    // made to the text while the answer is on its way (CodeMirror's own position mapping), so an edit above it, or a repeated
+    // passage, cannot move the citation to another place.
+    let pos = v.state.selection.main.head;
+    if (pos === 0 && v.state.doc.length > 0) { setMsg("Click in the text where the citation should go, then place it."); return; }
+    let tracking = true;
+    v.dispatch({ effects: StateEffect.appendConfig.of(EditorView.updateListener.of((u) => { if (tracking && u.docChanged) pos = u.changes.mapPos(pos, -1); })) });
     setBusy(true);
     const r = await write(() => placePending(row.id), "Not placed: the citation could not be made. It is still waiting.");
+    tracking = false;
     if (r.ok) {
       const now = view.current;
       if (!now) { setMsg("The citation was made but the text box had closed; it was not put in the text. It will drop out of the references."); await reload(); }
       else {
-        const t = now.state.doc.toString();
-        let at = t.slice(0, head) === text0.slice(0, head) ? head : (around && t.indexOf(around) >= 0 ? t.indexOf(around) + around.length : now.state.selection.main.head);
-        at = Math.min(at, t.length);
+        const at = Math.min(pos, now.state.doc.length);
         const insert = r.v.insert;
         now.dispatch({ changes: { from: at, insert }, selection: EditorSelection.cursor(at + insert.length), userEvent: "input.inject" });
         // the file is written so the server's holders follow the text; when it cannot be written (changed elsewhere, a failed
@@ -154,12 +154,20 @@ export function ReferencesTab({ path, body, getBody, view, save, ifSamePerson, o
         if (!live.current) return;
         if (saved) { view.current?.focus(); setMsg("Placed. The citation is in the text at the cursor."); await reload(); }
         else {
+          // the citation is found by its own unique token, wherever the person's typing has moved it
           const cur = view.current;
-          if (cur && cur.state.sliceDoc(at, at + insert.length) === insert) cur.dispatch({ changes: { from: at, to: at + insert.length, insert: "" } });
-          const back = await ifSamePerson(() => addPendingRow(path, row, "requeue")).catch(() => ({ ran: true as const, error: true }));
-          if (!live.current) return;
-          setMsg("Not placed: the document could not be saved (see the message above), so the citation was taken back out of the text. " +
-            (back.ran && !("error" in back) ? "The cite is back in To place." : "The cite could not be put back in To place; add it again from its source."));
+          const i = cur ? cur.state.doc.toString().indexOf(insert) : -1;
+          if (cur && i >= 0) {
+            cur.dispatch({ changes: { from: i, to: i + insert.length, insert: "" } });
+            const back = await ifSamePerson(() => addPendingRow(path, row, "requeue")).catch((e) => ({ ran: true as const, error: e }));
+            if (!live.current) return;
+            const dup = !back.ran ? false : "error" in back && back.error instanceof ApiError && back.error.status === 409;
+            setMsg("Not placed: the document could not be saved (see the message above), so the citation was taken back out of the text. " +
+              (back.ran && (!("error" in back) || dup) ? (dup ? "It is already waiting in To place." : "The cite is back in To place.")
+                : "The cite could not be put back in To place; add it again from its source."));
+          } else {
+            setMsg("Not placed: the document could not be saved (see the message above), and the citation is no longer in the text, so it was not put back in To place.");
+          }
           await reload();
         }
       }
