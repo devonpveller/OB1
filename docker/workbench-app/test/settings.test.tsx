@@ -55,6 +55,10 @@ function connect(srv: Server, who: string, admin: boolean, tag?: (k: Row) => str
     if (path === "/workbench/settings/admin" && method === "GET") {
       return admin ? send({ settings: REGISTRY.filter((k) => k.tier === "admin").sort((a, b) => a.section.localeCompare(b.section) || a.position - b.position).map((k) => out(k, "*")) }) : send({ error: "only an admin may read or change the shared settings" }, 403);
     }
+    // rwr-settings-defaults: the research limits are presets in groups (the panel replaces the per-key rows in that section)
+    if (path === "/workbench/settings/admin/limits" && method === "GET") {
+      return admin ? send({ groups: [{ group: "run_size", label: "ADMINONLY run size", help: "", current: "standard", presets: [{ preset: "small", label: "Small", help: "", values: [] }, { preset: "standard", label: "Standard", help: "", values: [] }], values: [] }] }) : send({ error: "only an admin may read or change the shared settings" }, 403);
+    }
     const m = path.match(/^\/workbench\/settings\/(?:admin\/)?([^/]+)$/);
     if (m) {
       const key = decodeURIComponent(m[1]);
@@ -120,7 +124,9 @@ describe("the frame: sections, legend, stance", () => {
       "Start screen", "My ideas", "Daily digest and podcast", "Podcast archive", "Research and curator limits"]);
     await pick("Research and curator limits");
     expect(screen.getByTestId("section-title").textContent).toBe("Research and curator limits");
-    expect(within(screen.getByTestId("spanel")).getAllByTestId("tag").map((t) => t.textContent)).toEqual(["Admin changes it for everyone", "Admin changes it for everyone"]);
+    // the research limits are one preset group with its own tag (no per-key number rows: rwr-settings-defaults)
+    expect(await screen.findByTestId("limits")).toBeTruthy();
+    expect(within(screen.getByTestId("spanel")).getAllByTestId("tag").map((t) => t.textContent)).toEqual(["Admin changes it for everyone"]);
   });
 
   it("the legend names the four tags, and the cloud tag says no setting carries it yet", async () => {

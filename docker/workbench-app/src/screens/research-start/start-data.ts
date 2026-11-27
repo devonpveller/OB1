@@ -117,6 +117,25 @@ export function refusalText(code: string | null): string {
   return REFUSALS[(code ?? "").slice(0, 80)] ?? "Nothing can leave the workbench from this as written. Try saying it more generally, or add a link to a public page.";
 }
 
+// The person's own defaults for this dialog (rwr-settings-defaults): the depth to offer first, and the number of pages above which a
+// run asks first. Both come from the account (GET /workbench/settings), and a value the page does not recognise is no default at all,
+// so a bad or missing value changes nothing. Never kept in the browser.
+export type StartDefaults = { depth: Depth | null; askOver: number | null };
+export async function readStartDefaults(): Promise<StartDefaults> {
+  const { data } = await api<{ settings?: { key: string; value: unknown; is_default?: boolean }[] }>("GET", "/workbench/settings");
+  const list = Array.isArray(data.settings) ? data.settings : [];
+  const val = (k: string) => list.find((s) => s.key === k && s.is_default !== true)?.value;
+  const d = val("research.default_depth");
+  const n = val("research.ask_over_fetch");
+  return {
+    depth: d === "quick" || d === "standard" || d === "deep" ? d : null,
+    askOver: typeof n === "number" && Number.isInteger(n) && n > 0 ? n : null,
+  };
+}
+// The dialog asks before a run whose depth may read more pages than the person's limit (the depth's own page budget, as the
+// preview shows it): true = ask.
+export const needsAsk = (askOver: number | null, shown: Shown["depth"]) => askOver !== null && shown !== null && shown.max_fetch > askOver;
+
 export const minutes = (ms: number) => Math.max(1, Math.round(ms / 60000));
 export function limitsText(d: NonNullable<Shown["depth"]>): string {
   return `Up to ${d.rounds} ${d.rounds === 1 ? "round" : "rounds"} of searching, up to ${d.max_fetch} pages read, and it stops after ${minutes(d.wall_ms)} minutes.`;

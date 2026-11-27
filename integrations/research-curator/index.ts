@@ -38,6 +38,7 @@ import { Client, Pool } from "postgres";
 import { FILING_LOCK_WAIT_MS_DEFAULT, FilingInProgress, FilingLock, type LockClient, lockWaitMsFromEnv } from "./filing-lock.ts";
 import { claimMetadataFor, writeClaims, detectConflicts, parseSynthesisClaims, META_JUDGE_SYS, type WriteClaimsResult, type ConflictVerdict } from "./claims.ts";
 import { ResilientPool } from "./pool.ts";
+import { makeLimits } from "./limits.ts";
 import { restatesPrivateClaim, threadTextFor } from "./private-claims.ts";
 
 // --- Config -----------------------------------------------------------------
@@ -69,6 +70,11 @@ const MERGE_FLOOR_DISTANCE = parseFloat(Deno.env.get("MERGE_FLOOR_DISTANCE") || 
 // Conflict detection (#2): a new claim within this cosine distance of an existing
 // thread claim (different synthesis) is judged for contradiction.
 const CONFLICT_DISTANCE = parseFloat(Deno.env.get("CONFLICT_DISTANCE") || "0.25");
+// rwr-settings-defaults: the four values above are the FALLBACK; an admin's stored limits (the workbench's Settings, read through
+// public.setting_get(NULL, key)) are laid over them, re-read at most every few seconds (limits.ts).
+const LIMITS = makeLimits({
+  shortlistK: SHORTLIST_K, newThreadMinConfidence: NEW_THREAD_MIN_CONFIDENCE, mergeFloorDistance: MERGE_FLOOR_DISTANCE, conflictDistance: CONFLICT_DISTANCE,
+});
 const PORT = parseInt(Deno.env.get("PORT") || "8000", 10);
 // rw-curator-filed3: how long a resend waits for the first attempt's filing lock before answering 503 filing_in_progress.
 const FILE_LOCK_WAIT_MS = lockWaitMsFromEnv(Deno.env.get("CURATOR_FILE_LOCK_WAIT_MS"), FILING_LOCK_WAIT_MS_DEFAULT);
@@ -328,7 +334,16 @@ type Resolved = {
   name: string;
   shortlist: Candidate[];
 };
+async function currentLimits() {
+  const c = await pool.connect();
+  try {
+    return await LIMITS.refresh(c);
+  } finally {
+    c.release();
+  }
+}
 async function resolve(pkg: Pkg, claimEmb: number[], mayCreate = true): Promise<Resolved> {
+  const L = await currentLimits();
   const unthreaded = (confidence: number, shortlist: Candidate[]): Resolved =>
     ({ thread_id: null, decision: "unthreaded", confidence, name: "", shortlist });
   // Explicit-thread bypass: a deliberately-set thread_id is honored as-is.
@@ -346,7 +361,7 @@ async function resolve(pkg: Pkg, claimEmb: number[], mayCreate = true): Promise<
     }
   }
 
-  const shortlist = await shortlistThreads(claimEmb, SHORTLIST_K);
+  const shortlist = await shortlistThreads(claimEmb, L.shortlistK);
   const hint = (pkg.topic_hint || pkg.notebook || "research").trim() || "research";
 
   let decision: Decision;
@@ -356,7 +371,7 @@ async function resolve(pkg: Pkg, claimEmb: number[], mayCreate = true): Promise<
     // LLM down -> attach to the Stage-1 top candidate if close enough, else cold-start.
     console.error("resolve: decision LLM failed, using distance fallback:", (e as Error).message);
     const top = shortlist[0];
-    if (top && top.distance <= MERGE_FLOOR_DISTANCE) {
+    if (top && top.distance <= L.mergeFloorDistance) {
       return { thread_id: top.thread_id, decision: "existing", confidence: 1 - top.distance, name: top.name, shortlist };
     }
     if (!mayCreate) return unthreaded(0.5, shortlist);
@@ -377,7 +392,7 @@ async function resolve(pkg: Pkg, claimEmb: number[], mayCreate = true): Promise<
 
   // decision = new. Conservative-merge gate: if a candidate exists but the LLM
   // isn't confident enough, attach to the top candidate instead of fragmenting.
-  if (top && decision.confidence < NEW_THREAD_MIN_CONFIDENCE) {
+  if (top && decision.confidence < L.newThreadMinConfidence) {
     return { thread_id: top.thread_id, decision: "existing", confidence: decision.confidence, name: top.name, shortlist };
   }
 
@@ -457,6 +472,7 @@ async function writeGroundedClaims(
   const claimMetadata = claimMetadataFor(pkg);
   const client = await pool.connect();
   try {
+    await LIMITS.refresh(client); // outside the transaction: a failed read must never abort it
     await client.queryArray("BEGIN");
     const res = await writeClaims(client, synthesis, {
       threadId,
@@ -484,7 +500,7 @@ async function writeGroundedClaims(
     if (threadId && res.claimIds.length && !privateReport) {
       try {
         await client.queryArray("BEGIN");
-        const conf = await detectConflicts(client, res.claimIds, threadId, conflictJudge, CONFLICT_DISTANCE);
+        const conf = await detectConflicts(client, res.claimIds, threadId, conflictJudge, LIMITS.get().conflictDistance);
         await client.queryArray("COMMIT");
         (res as WriteClaimsResult & { conflicts?: number }).conflicts = conf.conflicts;
         if (conf.conflicts) console.log(`claims: ${conf.conflicts} conflict(s) flagged in thread ${threadId}`);

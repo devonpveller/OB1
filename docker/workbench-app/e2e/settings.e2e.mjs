@@ -71,7 +71,7 @@ ok(!(await A.ev(`!!document.querySelector('[data-testid=coming]')`)), "no 'comin
 ok(JSON.stringify(await texts(A, "[data-testid=legend] .tag")) === JSON.stringify(["Only you", "Stays on this server", "Sent to a cloud provider", "Admin changes it for everyone"]), "the legend names the four tags");
 ok(/No setting carries this tag yet/.test((await text(A, "[data-testid=legend-cloud]")) || ""), "and says no setting carries the cloud tag yet");
 ok(!/cloud/i.test(await A.ev(`(()=>{const s=document.querySelector('[data-testid=stance]').cloneNode(true);s.querySelector('[data-testid=legend]').remove();return s.textContent})()`)), "the privacy stance prose says nothing about cloud");
-ok(JSON.stringify(await texts(A, "[data-testid=snav] button")) === JSON.stringify(["Start screen", "My ideas", "Daily digest and podcast"]), "Yours sections: Start screen, My ideas, Daily digest and podcast");
+ok(JSON.stringify(await texts(A, "[data-testid=snav] button")) === JSON.stringify(["Start screen", "My ideas", "Research defaults", "Library", "Daily digest and podcast"]), "Yours sections: Start screen, My ideas, Research defaults, Library, Daily digest and podcast");
 ok((await text(A, "[data-testid=admin-heading]")) === null && !/Admin only/.test(await A.ev(`document.body.innerText`)), "no 'Admin only' section for alice");
 await section(A, "user-refinery");
 ok(JSON.stringify(await texts(A, "[data-testid^=setting-] [data-testid=tag]")) === JSON.stringify(["Stays on this server", "Stays on this server"]), "every row of My ideas carries its tag");
@@ -135,12 +135,47 @@ await setMode("admin");
 const D = await client();
 await D.go("/settings");
 ok((await text(D, "[data-testid=admin-heading]")) === "Admin only", "the admin has an 'Admin only' heading");
-ok(JSON.stringify(await texts(D, "[data-testid=snav] button")) === JSON.stringify(["Start screen", "My ideas", "Daily digest and podcast", "Podcast archive", "Research and curator limits"]), "and the shared sections");
+ok(JSON.stringify(await texts(D, "[data-testid=snav] button")) === JSON.stringify(["Start screen", "My ideas", "Research defaults", "Library", "Daily digest and podcast", "Podcast archive", "Research and curator limits"]), "and the shared sections");
 await section(D, "admin-research");
-ok(JSON.stringify(await texts(D, "[data-testid^=setting-] [data-testid=tag]")) === JSON.stringify(["Admin changes it for everyone", "Admin changes it for everyone"]), "each shared setting is tagged 'Admin changes it for everyone'");
+ok(JSON.stringify(await texts(D, "[data-testid^=limits-] [data-testid=tag]")) === JSON.stringify(["Admin changes it for everyone", "Admin changes it for everyone"]), "each shared limit group is tagged 'Admin changes it for everyone'");
 const lgD = await stub("/__log");
 ok(lgD.filter((x) => x.mode === "admin" && /settings\/admin/.test(x.url)).length >= 1, "the admin's page read the shared tier");
 ok(D.problems().length === 0, `no console errors for the admin page (${D.problems().length})`);
+
+// ---- 5b. rwr-settings-defaults: the ceiling, presets (no number input), the log, the hidden list, and the dialog's own defaults
+await setMode("alice");
+await A.go("/settings");
+await section(A, "user-research");
+ok(/Highest allowed: 24 \(the most pages one research run may read, set by an admin\)/.test((await text(A, "[data-testid=ceiling-research\\.ask_over_fetch]")) || ""), "a default with a ceiling shows the highest allowed value, in the server's words");
+const reqsBefore = (await stub("/__log")).length;
+await A.type("[data-testid=setting-research\\.ask_over_fetch] [data-testid=control]", "25");
+ok(await A.waitFor(`/must be at most 24 \\(the most pages one research run may read, set by an admin\\)/.test(document.querySelector('[data-testid="error-research.ask_over_fetch"]')?.textContent||'')`), "a default above the admin ceiling is refused with the ceiling named");
+ok((await stub("/__log")).slice(reqsBefore).every((x) => x.method !== "PUT"), "and the page sent nothing for it");
+await A.type("[data-testid=setting-research\\.ask_over_fetch] [data-testid=control]", "20");
+ok(await A.waitFor(`document.querySelector('[data-testid="saved-research.ask_over_fetch"]')?.textContent==='Saved'`), "a value at or under it saves");
+await section(A, "user-library");
+ok(JSON.stringify(await A.ev(`JSON.stringify([...document.querySelectorAll('[data-testid=spanel] [data-key]')].map(e=>e.dataset.key))`)) === JSON.stringify(`["library.how_far_out","library.recent_size","library.clear_on_signout","library.hidden_suggestions"]`), "the Library section holds its four preferences");
+ok((await text(A, "[data-testid=hidden-count]")) === "None hidden.", "hidden suggestions show a count (none hidden)");
+await setMode("admin");
+await D.go("/settings");
+await section(D, "admin-research");
+ok(await D.waitFor(`!!document.querySelector('[data-testid=limits]')`), "the admin sees the research limits as presets");
+ok((await D.ev(`document.querySelectorAll('[data-testid=limits] input[type=number], [data-testid=limits] input[type=text], [data-testid=limits] select').length`)) === 0, "with no number field, text field or select: only presets");
+await D.ev(`document.querySelector('[data-testid="preset-run_size-small"]').click()`);
+ok(await D.waitFor(`document.querySelector('[data-testid="limits-saved-run_size"]')?.textContent==='Saved'`), "choosing a preset saves it ('Saved')");
+ok(/In force: Small\./.test((await text(D, "[data-testid=limits-now-run_size]")) || ""), "and the page says which preset is in force");
+await D.ev(`document.querySelector('[data-testid=log-show]').click()`);
+ok(await D.waitFor(`/u-admin set .*: 24 to 12 \(preset small\)/.test(document.querySelector('[data-testid=log-line]')?.textContent||'')`), "the log shows who changed what, from what to what");
+await setMode("alice");
+await A.go("/settings");
+await section(A, "user-research");
+ok(/Highest allowed: 12/.test((await text(A, "[data-testid=ceiling-research\\.ask_over_fetch]")) || ""), "the person's ceiling follows the admin's preset (12)");
+ok(!(await A.ev(`/ADMINONLY|Pages retrieved/.test(document.documentElement.outerHTML)`)), "and the person's page holds no admin limit");
+await setMode("admin");
+await D.go("/settings"); await section(D, "admin-research");
+await D.ev(`document.querySelector('[data-testid="limits-reset-run_size"]').click()`);
+ok(await D.waitFor(`/In force: Standard\\./.test(document.querySelector('[data-testid=limits-now-run_size]')?.textContent||'')`), "the server's own values come back with one button");
+await setMode("alice");
 
 // ---- 6. keyboard and WCAG AA (axe), light and dark, for a person and for the admin
 await setMode("alice");
@@ -159,14 +194,24 @@ for (const sch of ["light", "dark"]) {
   await axe(A, `${sch} Settings (alice, Start screen)`);
   await section(A, "user-refinery"); await axe(A, `${sch} Settings (alice, My ideas, with a saved value and a Back to default link)`);
   await section(A, "user-digest"); await axe(A, `${sch} Settings (alice, Daily digest)`);
+  await section(A, "user-research"); await axe(A, `${sch} Settings (alice, Research defaults, with the ceiling)`);
+  await section(A, "user-library"); await axe(A, `${sch} Settings (alice, Library)`);
   await setMode("admin");
-  await D.scheme(sch); await D.go("/settings"); await section(D, "admin-research"); await axe(D, `${sch} Settings (admin, Research and curator limits)`);
+  await D.scheme(sch); await D.go("/settings"); await section(D, "admin-research"); await D.ev(`document.querySelector('[data-testid=log-show]')?.click()`); await sleep(200); await axe(D, `${sch} Settings (admin, Research and curator limits, presets and log)`);
   await setMode("alice");
 }
 await A.scheme("light");
 await A.send("Emulation.setDeviceMetricsOverride", { width: 390, height: 800, deviceScaleFactor: 1, mobile: false });
 await A.go("/settings");
 ok(!(await A.ev(`document.documentElement.scrollWidth > document.documentElement.clientWidth + 1`)), "at 390 px wide the page does not scroll sideways");
+// 400 px: nothing inside main overflows its own box, for a person (defaults) and for the admin (presets and the log)
+await A.send("Emulation.setDeviceMetricsOverride", { width: 400, height: 800, deviceScaleFactor: 1, mobile: false });
+const overflow = `JSON.stringify([...document.querySelectorAll('main *')].filter(e=>e.scrollWidth>e.clientWidth+1&&getComputedStyle(e).overflowX!=='visible'&&e.clientWidth>0).map(e=>e.tagName+'.'+e.className).slice(0,5))`;
+for (const sec of ["user-research", "user-library", "user-digest"]) { await A.go("/settings"); await section(A, sec); ok((await A.ev(overflow)) === "[]" && !(await A.ev(`document.querySelector('main').scrollWidth > document.querySelector('main').clientWidth + 1`)), `400 px: no overflow inside main (${sec})`); }
+await setMode("admin");
+await D.send("Emulation.setDeviceMetricsOverride", { width: 400, height: 800, deviceScaleFactor: 1, mobile: false });
+await D.go("/settings"); await section(D, "admin-research"); await D.ev(`document.querySelector('[data-testid=log-show]')?.click()`); await sleep(200);
+ok(!(await D.ev(`document.querySelector('main').scrollWidth > document.querySelector('main').clientWidth + 1`)), "400 px: no overflow inside main (the admin's presets and log)");
 
 console.log(fails ? `${fails} FAILED` : "all passed");
 process.exit(fails ? 1 : 0);

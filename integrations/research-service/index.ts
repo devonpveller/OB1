@@ -36,6 +36,7 @@ import { type BoundaryDeps, insertDerivedJob, openHandback, parseDeliveries, par
 import { canonicalLink } from "./boundary-gate.ts";
 import { approveIdeaQuestion, drainIdeaHandbacks } from "./boundary-ideas.ts";
 import { runCeilings } from "./depth.ts";
+import { storedCeilings } from "./limits.ts";
 import { doorRefusesIdea, formForDoor, IDEA_DOOR_REFUSAL, previewBody, startChanged } from "./start.ts";
 import { actorOf, FOREIGN_PROMPTS_SQL, HIDDEN_STEER_TEXTS_SQL, nonActorView, LISTED_FOR, MAY_ACT_SQL, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
 import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
@@ -359,6 +360,16 @@ class ResilientPool {
 }
 
 const pool = new ResilientPool();
+
+// rwr-settings-defaults: the start door's ceilings (rounds, pages, wall time): the admin's stored limits over the env ones
+async function currentCeilings() {
+  const c = await pool.connect();
+  try {
+    return await storedCeilings(c, runCeilings());
+  } finally {
+    c.release();
+  }
+}
 
 // ── Real seams ───────────────────────────────────────────────────────────────
 async function embed(text: string): Promise<number[]> {
@@ -1394,7 +1405,7 @@ Deno.serve({ port: PORT }, async (req) => {
     // the start door below refuses an idea (slot 580 PD0b): so does its preview - the same 400, nothing formed
     if (doorRefusesIdea(parsed)) return Response.json({ error: IDEA_DOOR_REFUSAL }, { status: 400 });
     try {
-      return Response.json(previewBody(await formForDoor(parsed, boundaryDeps), parsed.run, runCeilings()), { status: 200 });
+      return Response.json(previewBody(await formForDoor(parsed, boundaryDeps), parsed.run, await currentCeilings()), { status: 200 });
     } catch (e) {
       console.error(`[boundary] previewing the request failed (${(e as Error).name})`);
       return Response.json({ error: "boundary_failed" }, { status: 422 });
@@ -1433,13 +1444,14 @@ Deno.serve({ port: PORT }, async (req) => {
     // rwr-research-start-api: the owner approved a preview; what would leave is not that question any more -> nothing
     // is created, and the answer carries the new one for a fresh preview
     if (startChanged(verdict, parsed.approved) && verdict.ok) {
-      return Response.json({ changed: true, ...previewBody(verdict, run, runCeilings()) }, { status: 409 });
+      return Response.json({ changed: true, ...previewBody(verdict, run, await currentCeilings()) }, { status: 409 });
     }
     if (!verdict.ok && verdict.refusal === "no_owner") return Response.json({ refused: "no_owner", handback_id: null }, { status: 200 });
     const c = await pool.connect();
     try {
       await c.queryObject("BEGIN");
-      const jobId = verdict.ok ? await insertDerivedJob(c, verdict.request, run, runCeilings()) : null;
+      const ceilings = await storedCeilings(c, runCeilings());
+      const jobId = verdict.ok ? await insertDerivedJob(c, verdict.request, run, ceilings) : null;
       // rw-boundary-ideas: an idea never comes through this door (refused above), so a refusal here is final
       const state = verdict.ok ? "queued" as const : "refused" as const;
       const handbackId = await openHandback(c, {
@@ -1449,7 +1461,7 @@ Deno.serve({ port: PORT }, async (req) => {
       await c.queryObject("COMMIT");
       if (jobId) {
         wake();
-        return Response.json({ job_id: jobId, status: "queued", ...(purpose === "user-start" ? previewBody(verdict, run, runCeilings()) : {}) }, { status: 202 });
+        return Response.json({ job_id: jobId, status: "queued", ...(purpose === "user-start" ? previewBody(verdict, run, ceilings) : {}) }, { status: 202 });
       }
       return Response.json({ refused: (verdict as { refusal: string }).refusal, handback_id: handbackId }, { status: 200 });
     } catch (e) {

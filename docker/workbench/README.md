@@ -736,6 +736,25 @@ a key that does not exist (404), so trying names teaches nothing (an admin is st
 `revert-ui-state.sql` / `revert-settings.sql`. Lab: `run-workspace-tests.ps1` step `[5j3]` (the tag catalog, the wire for a non-admin, two identities) and `[5m3]`
 (the slot's init / revert cycle); `[5n]` and `[5m]` revert it before 490 and put it back after.
 
+### Defaults and the admin research limits (rwr-settings-defaults, slot 730)
+
+`init-settings-defaults.sql` (slot 730; revert `revert-settings-defaults.sql`; check `check-settings-defaults.sql`) adds eight user keys (`research.default_depth`,
+`research.ask_over_fetch`, `library.how_far_out`, `library.recent_size`, `library.clear_on_signout`, `library.hidden_suggestions`, `podcast.default_format`,
+`podcast.episode_minutes`), a **user ceiling** (`settings_user_ceilings`: `research.ask_over_fetch` may not exceed the admin's pages-per-run limit; a trigger on
+`user_settings` refuses it and names the ceiling; the user list carries the ceiling NUMBER and its phrase, never the admin key), **fixed ranges** on the thirteen
+admin research / curator keys (`settings_keys.validation` min / max, enforced by a trigger on `contract_settings` whoever writes) and **presets**
+(`settings_limit_groups` / `_presets` / `_preset_values`: run size small / standard / large, judgement strict / standard / open, curator careful / standard / broad).
+The admin keys stay `editable = false`, so the per-key admin PUT stays closed: the only way in is `PUT /workbench/settings/admin/limits/:group {preset}` (body `{preset}`
+and nothing else), which calls `settings_limits_apply(actor, group, preset)` - one transaction, every value re-judged against its range, EXECUTE for `ob_workbench` alone.
+`DELETE .../limits/:group` takes the group's values away (the services use their env values again); `GET .../limits` lists the groups and the preset in force
+(`custom` when the stored values match none; nothing is rewritten); `GET .../limits/log` is the **append-only `settings_admin_audit` log** (who, what, old value, new
+value, the preset), written by a trigger on `contract_settings` so a change by any route or by psql is logged. Every one of these routes answers a non-admin exactly as
+`/admin/<anything>` does (403, the same words). Services read a limit through `public.setting_get(NULL, key)`: openbrain-research (`limits.ts`: the nine research keys, and the
+start door's ceilings) and the curator (`limits.ts`: its four keys); NULL keeps the env value. Order: forward = a fresh DB backup, `init-settings-defaults.sql` (after slots 400,
+480, 490, 550), then the new workbench image, then (a gated deploy) the research and curator images; rollback = the previous images FIRST, then `revert-settings-defaults.sql`
+(discards the audit log and the stored limits). Lab: `run-workspace-tests.ps1` `[5j4]` (the integration test: presets table-driven, ranges, audit log, non-admin, ceiling, two users) and
+`[5m4]` (init x2 / revert x2 / init, the catalog byte-for-byte); `[5n]` and `[5m]` revert it before 550 and put it back after.
+
 ## My private material (rw-owner-private-view, plan 08 PD-PV, slot 480)
 
 The owner's own private material, which slot 440 moved out of the shared tables: their private claims, the shared

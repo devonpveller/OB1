@@ -30,6 +30,8 @@ export type Setting = {
   validation: Record<string, unknown>;
   editable: boolean;
   tag: string | null;
+  ceiling?: number; // rwr-settings-defaults: the highest value the admin's limit allows this key (only a key that has one)
+  ceiling_phrase?: string; // what that ceiling is, in the server's words
   value: unknown;
   is_default: boolean;
   version: number;
@@ -42,6 +44,8 @@ export type Loaded = { admin: boolean; user: Setting[]; shared: Setting[] };
 const SECTION_TITLE: Record<string, string> = {
   "user:ui": "Start screen",
   "user:refinery": "My ideas",
+  "user:research": "Research defaults",
+  "user:library": "Library",
   "user:digest": "Daily digest and podcast",
   "admin:digest": "Podcast archive",
   "admin:research": "Research and curator limits",
@@ -52,12 +56,18 @@ export const sectionTitle = (tier: "user" | "admin", section: string) => SECTION
 // preferences, so the frame does not offer them as a form.
 export const isAppState = (s: Setting) => s.type === "ref_list" || s.validation?.ref === "doc_path";
 
+// The Library's keys sit in the registry's 'ui' section next to the start screen; the screen draws them as their own section.
+export const sectionOf = (s: Setting) => (s.tier === "user" && s.key.startsWith("library.") ? "library" : s.section);
+// A hidden-suggestions list is app state (its own control below), so the generic form does not draw it.
+export const HIDDEN_SUGGESTIONS = "library.hidden_suggestions";
+
 export type Section = { id: string; tier: "user" | "admin"; section: string; title: string; keys: Setting[] };
 export function sectionsOf(tier: "user" | "admin", list: Setting[]): Section[] {
   const by = new Map<string, Setting[]>();
   for (const s of list) {
-    if (s.tier !== tier || (tier === "user" && isAppState(s))) continue;
-    by.set(s.section, [...(by.get(s.section) ?? []), s]);
+    if (s.tier !== tier || (tier === "user" && isAppState(s) && s.key !== HIDDEN_SUGGESTIONS)) continue;
+    const sec = sectionOf(s);
+    by.set(sec, [...(by.get(sec) ?? []), s]);
   }
   return [...by.entries()].map(([section, keys]) => ({
     id: `${tier}-${section}`, tier, section, title: sectionTitle(tier, section),
@@ -104,6 +114,53 @@ export async function resetSetting(s: Setting): Promise<SaveResult> {
   } catch (e) {
     return fail(e);
   }
+}
+
+// ---- the admin research limits (rwr-settings-defaults): named presets inside fixed ranges, never a number typed in ----
+export type LimitValue = { key: string; label: string; value: unknown; is_default: boolean; min: number | null; max: number | null };
+export type LimitPreset = { preset: string; label: string; help: string; values: { key: string; label: string; value: unknown }[] };
+export type LimitGroup = { group: string; label: string; help: string; current: string; presets: LimitPreset[]; values: LimitValue[] };
+export type LogLine = { id: number; at: string; actor: string; action: string; key: string; old_value: unknown; new_value: unknown; group: string | null; preset: string | null };
+
+const LIMITS = `${URL}/admin/limits`;
+export async function loadLimits(): Promise<LimitGroup[]> {
+  const { data } = await api<{ groups?: LimitGroup[] }>("GET", LIMITS);
+  return Array.isArray(data.groups) ? data.groups : [];
+}
+export type LimitResult = { ok: true; group: LimitGroup } | { ok: false; status: number; message: string };
+const limitFail = (e: unknown): LimitResult =>
+  e instanceof ApiError ? { ok: false, status: e.status, message: e.message } : { ok: false, status: 0, message: "could not reach the server" };
+export async function applyPreset(group: string, preset: string): Promise<LimitResult> {
+  try {
+    const { data } = await api<LimitGroup>("PUT", `${LIMITS}/${encodeURIComponent(group)}`, { preset });
+    return { ok: true, group: data };
+  } catch (e) {
+    return limitFail(e);
+  }
+}
+export async function resetGroup(group: string): Promise<LimitResult> {
+  try {
+    const { data } = await api<LimitGroup>("DELETE", `${LIMITS}/${encodeURIComponent(group)}`);
+    return { ok: true, group: data };
+  } catch (e) {
+    return limitFail(e);
+  }
+}
+export async function loadLog(): Promise<LogLine[]> {
+  const { data } = await api<{ log?: LogLine[] }>("GET", `${LIMITS}/log?limit=30`);
+  return Array.isArray(data.log) ? data.log : [];
+}
+
+// The server's own rules for a typed number (the registry's min / max, a whole number for an integer, and the admin ceiling for a
+// key that has one), in the server's words, so the field refuses what the server would refuse before it is sent. A null is fine.
+export function numberProblem(s: Setting, n: number): string | null {
+  if (!Number.isFinite(n)) return "must be a number";
+  if (s.type === "integer" && n !== Math.trunc(n)) return "must be a whole number";
+  const v = s.validation ?? {};
+  if (typeof v.min === "number" && n < v.min) return `must be at least ${v.min}`;
+  if (typeof v.max === "number" && n > v.max) return `must be at most ${v.max}`;
+  if (typeof s.ceiling === "number" && n > s.ceiling) return `must be at most ${s.ceiling}${s.ceiling_phrase ? ` (${s.ceiling_phrase})` : ""}`;
+  return null;
 }
 
 // What a value looks like in words (read-only rows, the default beside a field).
