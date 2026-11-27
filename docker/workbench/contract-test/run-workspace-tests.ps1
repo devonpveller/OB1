@@ -1499,7 +1499,7 @@ try {
         $null = & $q "INSERT INTO public.contract_settings (key, value, updated_by) VALUES ('research.max_fetch', '12', 'lab') ON CONFLICT DO NOTHING"
         $null = & $q "INSERT INTO public.user_settings (owner_sub, key, value) VALUES ('defaults-revert-$rand', 'library.recent_size', '5') ON CONFLICT DO NOTHING"
       }
-      $f730 += "[$f] exit $rc730$(if ($o -match 'ERROR') { ': ' + (($o -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ') }) -> keys $(& $userKeys730) | audit $(& $q "SELECT CASE WHEN to_regclass('public.settings_admin_audit') IS NULL THEN 'none' ELSE (SELECT count(*)::text FROM public.settings_admin_audit) END") | $(& $fp730)"
+      $f730 += "[$f] exit $rc730$(if ($o -match 'ERROR') { ': ' + (($o -split "`n" | Where-Object { $_ -match 'ERROR' }) -join ' ') }) -> keys $(& $userKeys730) | audit $(& $q "SELECT (to_regclass('public.settings_admin_audit') IS NOT NULL)::text") | $(& $fp730)"
     }
     Save 'revert-settings-defaults.log' ($f730 -join "`n")
     foreach ($l in $f730) { Write-Host "    $l" }
@@ -1508,7 +1508,7 @@ try {
     Check ($f730ok -and $init730 -and $init730 -ne $base730) '[5m4] slot 730 changes the catalog (it is not a no-op), from the state [5m] left it in'
     $afterFp = @($f730 | ForEach-Object { ($_ -split ' \| ')[-1] })
     Check ($afterFp[3] -eq $base730 -and $afterFp[4] -eq $base730) '[5m4] slot 730: after the revert (and again) the catalog is exactly as before it (fingerprint)'
-    Check ($f730[3] -match 'keys 0 \| audit none \|' -and $f730[4] -match 'keys 0 \| audit none \|') '[5m4] slot 730: the revert took the eight keys, the audit log and the presets away'
+    Check ($f730[3] -match 'keys 0 \| audit false \|' -and $f730[4] -match 'keys 0 \| audit false \|') '[5m4] slot 730: the revert took the eight keys, the audit log and the presets away'
     Check ($f730[1] -match 'keys 8 ' -and $f730[2] -match 'keys 8 ' -and $f730[5] -match 'keys 8 ') '[5m4] slot 730: init (and init again) puts the eight keys back'
     Check ((& $q "SELECT count(*) FROM public.contract_settings WHERE key LIKE 'research.%' OR key LIKE 'curator.%'") -eq '0') '[5m4] slot 730: the revert discarded the stored admin limits (documented): the services read their env values'
     Check ((& $q "SELECT count(*) FROM public.user_settings WHERE owner_sub = 'defaults-revert-$rand'") -eq '0') '[5m4] slot 730: the revert discarded a person''s value of a new key (documented)'
