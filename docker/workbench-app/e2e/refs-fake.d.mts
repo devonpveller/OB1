@@ -22,7 +22,7 @@ export type RefsState = {
   sources: Map<string, { title: string; held: boolean; hidden?: boolean; owner: string | null; revs: { rev: number; content: string }[] }>;
   records: Map<string, { id: string; source_id: string; pinned_revision: number; selectors: { quote: { exact: string } } }>;
   holders: Map<string, { origin: string; seq: number; reference_id: string }[]>;
-  pending: Map<string, { id: string; owner: string; path: string; source_id: string | null; claim_id: string | null; section: string; quote: string; added_from: string }>;
+  pending: Map<string, { id: string; owner: string; path: string; source_id: string | null; claim_id: string | null; section: string; quote: string; added_from: string; created_at?: string }>;
 };
 export function createRefsFake(opts?: { now?: () => number }): {
   handle(person: string, method: string, url: string, body?: Record<string, unknown>): { status: number; body: any } | null;

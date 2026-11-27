@@ -19,12 +19,10 @@ ENV PICKER_HARNESS=$PICKER_HARNESS
 # rwr-flag-buttons: FLAG_HARNESS=1 also builds /flag-harness.html (dev-only: the flags list with its link-back builder); the default image has none.
 ARG FLAG_HARNESS=
 ENV FLAG_HARNESS=$FLAG_HARNESS
-# a loaded host can starve the vitest workers ("Timeout calling onTaskUpdate"): --build-arg VITEST_ARGS=--maxWorkers=2 runs the same suite on fewer workers
-ARG VITEST_ARGS=
 COPY --from=viewerlib workbench-proxy.mjs security-headers.mjs workbench-proxy.test.mjs security-headers.test.mjs /app/lib/shared/
 RUN set -e; \
   npx tsc --noEmit; \
-  npx vitest run $VITEST_ARGS; \
+  npx vitest run; \
   node scripts/notices.mjs --check; \
   node --test test/*.test.mjs lib/shared/*.test.mjs; \
   npm run build; \
