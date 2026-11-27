@@ -40,6 +40,7 @@ import { requireKey } from "./middleware/auth.ts";
 import { identitySeam, seamDeps } from "./middleware/identity.ts";
 import { authRouter } from "./routes/auth.ts";
 import { ownerScope } from "./middleware/owner-scope.ts";
+import { bodyLimit } from "./middleware/body_limit.ts";
 import { internalError } from "./middleware/errors.ts";
 import { health } from "./routes/health.ts";
 import { notebooks } from "./routes/notebooks.ts";
@@ -143,6 +144,8 @@ app.use("/workbench/*", identitySeam(seam));
 // round 2 (tester attempt 1 F1-F6): the owner scope - every request naming a documents/ path must be
 // the caller's own, and every JSON response is walked for another user's document or refinery id
 // (src/middleware/owner-scope.ts). Before every router, so no route can skip it.
+// rw-body-size-stall: the body cap runs first, so an oversized write is answered 413 before anything reads it.
+app.use("/workbench/*", bodyLimit());
 app.use("/workbench/*", ownerScope(cdeps.db));
 
 // Resource sub-routers (prefix-inclusive). Added per phase.

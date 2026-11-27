@@ -80,6 +80,10 @@ Deno.test("parseWrite: a value is required; version is optional and whole", () =
   assertEquals(typeof parseWrite({}), "string");
   assertEquals(typeof parseWrite({ value: null }), "string");
   assertEquals(typeof parseWrite({ value: 3, version: 1.5 }), "string");
+  // rw-body-size-stall: a version over the database's INT is a 400 message, never a 500
+  assertEquals(typeof parseWrite({ value: 3, version: 2147483648 }), "string");
+  assertEquals(typeof parseWrite({ value: 3, version: Number.MAX_SAFE_INTEGER }), "string");
+  assertEquals(parseWrite({ value: 3, version: 2147483647 }), { value: 3, version: 2147483647 });
   assertEquals(parseWrite({ value: 3 }), { value: 3, version: null });
   // round 2 (review D1): a NUL in a string or a key is a 400 with a reason, never a 500 from jsonb
   assert(String(parseWrite({ value: "a\u0000b" })).includes("NUL"));
