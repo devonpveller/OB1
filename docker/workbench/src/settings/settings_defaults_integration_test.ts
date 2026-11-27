@@ -297,10 +297,13 @@ t("D8: the user keys - types, ranges and refusals; a default format must be one 
   const bad: [string, unknown][] = [
     ["research.default_depth", "shallow"], ["research.default_depth", 3], ["research.ask_over_fetch", 0], ["research.ask_over_fetch", 201], ["research.ask_over_fetch", 2.5],
     ["library.how_far_out", 0], ["library.how_far_out", 4], ["library.recent_size", 0], ["library.recent_size", 25], ["library.clear_on_signout", "yes"],
-    ["library.hidden_suggestions", [{ kind: "document", id: "documents/x" }]], ["library.hidden_suggestions", "a"],
+    ["library.hidden_suggestions", [{ kind: "run", id: "r-1" }]], ["library.hidden_suggestions", [{ kind: "topic", id: "has space" }]], ["library.hidden_suggestions", [{ kind: "topic" }]], ["library.hidden_suggestions", "a"],
     ["podcast.episode_minutes", 2], ["podcast.episode_minutes", 31], ["podcast.default_format", "no-such-format"],
   ];
-  for (const [k, v] of bad) assert((await putUser(A, k, v)).status === 400, `${k}=${JSON.stringify(v)} must be refused`);
+  for (const [k, v] of bad) {
+    const r = await putUser(A, k, v);
+    assert(r.status === 400, `${k}=${JSON.stringify(v)} must be refused (400), got ${r.status} ${r.text.slice(0, 200)}`);
+  }
   const good: [string, unknown][] = [
     ["research.default_depth", "deep"], ["research.ask_over_fetch", 10], ["library.how_far_out", 3], ["library.recent_size", 5], ["library.clear_on_signout", true],
     ["library.hidden_suggestions", [{ kind: "topic", id: "t-1" }, { kind: "gap", id: "g_2" }]], ["podcast.episode_minutes", 15],

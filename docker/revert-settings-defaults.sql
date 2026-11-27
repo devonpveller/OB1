@@ -28,13 +28,14 @@ DROP FUNCTION IF EXISTS public.trg_contract_settings_bounds();
 DROP FUNCTION IF EXISTS public.trg_contract_settings_audit();
 DROP FUNCTION IF EXISTS public.trg_user_settings_rules();
 DROP FUNCTION IF EXISTS public.settings_user_ceiling(TEXT);
-DROP FUNCTION IF EXISTS public.settings_admin_audit_no_edit();
 
+-- the tables first (their triggers depend on settings_admin_audit_no_edit), then that function
 DROP TABLE IF EXISTS public.settings_admin_audit;
 DROP TABLE IF EXISTS public.settings_limit_preset_values;
 DROP TABLE IF EXISTS public.settings_limit_presets;
 DROP TABLE IF EXISTS public.settings_limit_groups;
 DROP TABLE IF EXISTS public.settings_user_ceilings;
+DROP FUNCTION IF EXISTS public.settings_admin_audit_no_edit();
 
 DELETE FROM public.user_settings WHERE key IN (
     'research.default_depth', 'research.ask_over_fetch', 'library.how_far_out', 'library.recent_size', 'library.clear_on_signout',
