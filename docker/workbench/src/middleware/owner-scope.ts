@@ -23,6 +23,7 @@
 import type { Context, Next } from "hono";
 import type { Db } from "../contracts/db.ts";
 import { identityOf, type Identity, seamPath } from "./identity.ts";
+import { BODY_BYTES_KEY, FORM_SCAN_MAX_BYTES, FORM_TEXT_MAX_CHARS, isUploadRoute } from "./body_limit.ts";
 import { documentPathsIn, ownsDocumentPaths } from "../documents/ownership.ts";
 
 const OTHER = "(another user's document)";
@@ -50,7 +51,7 @@ function stringsOf(v: unknown, out: string[], key = "", fields: Set<string> = TE
 }
 
 class BodyRefused extends Error {
-  constructor(readonly status: 400 | 415, msg: string) { super(msg); }
+  constructor(readonly status: 400 | 413 | 415, msg: string) { super(msg); }
 }
 
 const MUTATING = (m: string) => !["GET", "HEAD", "OPTIONS"].includes(m);
@@ -66,6 +67,30 @@ async function requestStrings(c: Context): Promise<string[]> {
   for (const vs of Object.values(c.req.queries())) out.push(...vs);
   if (!MUTATING(c.req.method)) return out;
   const media = (c.req.header("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  const isForm = media === "multipart/form-data" || media === "application/x-www-form-urlencoded";
+  // rw-body-size-stall (D2): a form body (an upload, up to the upload cap) is NEVER read as text - that decoded the whole file
+  // into a string and then parsed it again, seconds of the one thread per upload. It is parsed once, and only its text
+  // fields (never a file part) are scanned, and only up to FORM_TEXT_MAX_CHARS of them.
+  if (isForm && !route.startsWith("/workbench/contract/")) {
+    if (c.req.raw.body === null) return out; // no body at all
+    // a big upload on an upload route (the size is the body cap's, which runs first): Deno parses a form on the one
+    // thread, ~20 ms per MiB, and the route parses it once itself - a second parse here doubled every upload's hold on
+    // everyone else. Those routes check what they name themselves (intake add: ownedPath / refineriesOf; import and
+    // replace-from-upload name no vault path). A small form, or any form elsewhere, is scanned as before.
+    const size = c.get(BODY_BYTES_KEY as never) as number | undefined;
+    if (media === "multipart/form-data" && isUploadRoute(route) && size !== undefined && size > FORM_SCAN_MAX_BYTES) return out;
+    let form: FormData;
+    try { form = await c.req.raw.clone().formData(); } catch { throw new BodyRefused(400, "the form body cannot be read"); }
+    let chars = 0;
+    const skip = textFieldsFor(route);
+    for (const [k, v] of form.entries()) {
+      if (typeof v !== "string" || skip.has(k)) continue;
+      chars += k.length + v.length;
+      if (chars > FORM_TEXT_MAX_CHARS) throw new BodyRefused(413, `the form's text fields are too large (at most ${FORM_TEXT_MAX_CHARS} characters)`);
+      out.push(v);
+    }
+    return out;
+  }
   const raw = await c.req.raw.clone().text();
   if (!raw.length) return out;
   const isJson = media === "application/json" || media.endsWith("+json");
@@ -78,10 +103,6 @@ async function requestStrings(c: Context): Promise<string[]> {
     let parsed: unknown;
     try { parsed = JSON.parse(raw); } catch { throw new BodyRefused(400, "the body is not valid JSON"); }
     stringsOf(parsed, out, "", textFieldsFor(route));
-  } else if (media === "multipart/form-data" || media === "application/x-www-form-urlencoded") {
-    try {
-      for (const [k, v] of (await c.req.raw.clone().formData()).entries()) if (typeof v === "string" && !textFieldsFor(route).has(k)) out.push(v);
-    } catch { throw new BodyRefused(400, "the form body cannot be read"); }
   }
   // any other type outside the contract API is a document's or note's text (a note save): not a path
   return out;

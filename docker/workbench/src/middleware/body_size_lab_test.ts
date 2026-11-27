@@ -1,9 +1,14 @@
 // deno test src/middleware/body_size_lab_test.ts - rw-body-size-stall, the lab case: on a REAL workbench, a signed-in non-admin
-// sending a large write body is refused 413 within a second through BOTH doors (the workbench itself, and the viewer's
-// /workbench forwarder, the edge's one port) on EVERY write route the router registers (enumerated from src/app.ts, no hand
-// list), and the workbench answers other people meanwhile; a body under the cap is checked in under a second at 40 KB,
-// 160 KB, 1 MB and the cap itself; the refusals that worked before still work on a big body; a settings version over the
-// database's INT is a 400 (not a 500).
+// sending a large write body is refused 413 quickly through BOTH doors on EVERY write route the router registers (enumerated
+// from src/app.ts, no hand list), and the workbench answers other people meanwhile.
+//
+// The two doors have their own limits (tester attempt 1 D4; wiki-viewer/lib/workbench-proxy.mjs bodyCap):
+//   - the workbench itself: 4 MiB for any write body (WORKBENCH_MAX_BODY_BYTES), 32 MiB for a multipart file upload on the
+//     three upload routes; the answer is `{"error":"the request is too large (at most N bytes)"}`;
+//   - the viewer (the edge's one port, the browser's door): 1 MB for any body, 100 MB on its upload paths; it answers its own
+//     `{"error":"request body over 1 MB"}` from the Content-Length, or counting a streamed body, and never reaches the workbench.
+// So: an over-the-workbench-cap body is tried on the workbench door; an over-1-MB body is tried on the viewer; a body between
+// 1 MB and 4 MiB passes the workbench and is refused by the viewer.
 //
 // SKIPPED unless BODY_BASE and BODY_VIEWER are set. contract-test/run-workspace-tests.ps1 [5d0] runs it in its DISPOSABLE lab
 // (before the isolation sweep). Never point it at a live stack.
@@ -18,27 +23,29 @@ const SUB_HEADER = Deno.env.get("DOCS_TEST_SUB_HEADER") ?? "X-Test-Sub";
 const ignore = !BASE || !VIEWER;
 const t = (name: string, fn: () => Promise<void>) => Deno.test({ name, ignore, fn, sanitizeOps: false, sanitizeResources: false });
 
-const CAP = 4 * 1024 * 1024; // the default WORKBENCH_MAX_BODY_BYTES; the lab sets none
-const doors: [string, string][] = [["workbench", BASE], ["viewer", VIEWER]];
+const MiB = 1024 * 1024;
+const CAP = 4 * MiB; // the workbench's default WORKBENCH_MAX_BODY_BYTES; the lab sets none
+const VIEWER_CAP = 1 * MiB; // the viewer's non-upload cap (workbench-proxy.mjs bodyCap)
 const rnd = () => crypto.randomUUID().slice(0, 8);
 const person = () => ({ [SUB_HEADER]: `bodysize-${rnd()}` }); // a non-admin: not the default subject
 
-function req(door: string, method: string, path: string, body: string | undefined, who: Record<string, string>, ct = "application/json") {
+function req(door: string, method: string, path: string, body: string | Uint8Array | FormData | undefined, who: Record<string, string>, ct: string | null = "application/json") {
   return fetch(door + path, {
     method, redirect: "manual",
-    headers: { "content-type": ct, "x-brain-key": KEY, ...(door === VIEWER ? { origin: VIEWER } : {}), ...who },
-    body,
+    headers: { ...(ct ? { "content-type": ct } : {}), "x-brain-key": KEY, ...(door === VIEWER ? { origin: VIEWER } : {}), ...who },
+    body: body as BodyInit | undefined,
   });
 }
 const timed = async (f: () => Promise<Response>) => {
   const t0 = performance.now();
   const r = await f();
-  await r.arrayBuffer();
-  return { status: r.status, ms: performance.now() - t0 };
+  const text = await r.text();
+  return { status: r.status, ms: performance.now() - t0, text };
 };
-const big = (bytes: number) => JSON.stringify({ label: "a".repeat(bytes - 14) });
+// a JSON body of EXACTLY `bytes` bytes: the wrapper {"label":""} is 12 characters
+const big = (bytes: number) => `{"label":"${"a".repeat(bytes - 12)}"}`;
 
-t("every write route refuses an over-the-cap body with 413 within 1 s, through both doors, and the workbench answers meanwhile", async () => {
+t("every write route refuses an over-the-limit body with 413 within 1 s, through both doors, and the workbench answers meanwhile", async () => {
   const { app } = await import(new URL("../app.ts", import.meta.url).href);
   const seen = new Set<string>();
   const routes = (app.routes as { method: string; path: string }[])
@@ -46,49 +53,54 @@ t("every write route refuses an over-the-cap body with 413 within 1 s, through b
     .filter((r) => { const k = `${r.method} ${r.path}`; if (seen.has(k)) return false; seen.add(k); return true; });
   assert(routes.length > 40, `the router lists ${routes.length} write routes`);
   const fill = (p: string) => p.replace(/:([A-Za-z_]+)(\{[^}]*\})?/g, (_m, _n, re) => (re && re.includes(".")) ? "x/y.md" : "x");
-  const body = big(CAP + 1);
   const bad: string[] = [];
   let calls = 0;
-  for (const [name, door] of doors) {
+  // the workbench is sent one byte over ITS cap; the viewer one byte over ITS cap
+  for (const [name, door, size] of [["workbench", BASE, CAP + 1], ["viewer", VIEWER, VIEWER_CAP + 1]] as [string, string, number][]) {
     const who = person();
+    const body = big(size);
+    assertEquals(new TextEncoder().encode(body).length, size);
     for (const r of routes) {
       calls++;
       // a bystander reads while the big one is in flight: it must not wait on it
       const [big1, other] = await Promise.all([
         timed(() => req(door, r.method, fill(r.path), body, who)),
-        timed(() => req(door, "GET", "/workbench/workspace/whoami", undefined, person())),
+        timed(() => req(BASE, "GET", "/workbench/workspace/whoami", undefined, person())),
       ]);
       if (big1.status !== 413 || big1.ms > 1000) bad.push(`${name} ${r.method} ${r.path} -> ${big1.status} in ${big1.ms.toFixed(0)} ms`);
-      if (other.status !== 200 || other.ms > 1000) bad.push(`${name} bystander during ${r.method} ${r.path} -> ${other.status} in ${other.ms.toFixed(0)} ms`);
+      if (other.status !== 200 || other.ms > 1000) bad.push(`${name}: a bystander during ${r.method} ${r.path} -> ${other.status} in ${other.ms.toFixed(0)} ms`);
     }
   }
   console.log(`body-size: ${routes.length} write routes x 2 doors = ${calls} oversized calls, ${bad.length} failures`);
   assertEquals(bad, [], bad.slice(0, 20).join("\n"));
 });
 
-t("the 413 answer is the plain message, as JSON", async () => {
-  for (const [, door] of doors) {
-    const r = await req(door, "PUT", "/workbench/settings/ui.x", big(CAP + 1), person());
-    assertEquals(r.status, 413);
-    assertEquals((await r.json()).error, `the request is too large (at most ${CAP} bytes)`);
-  }
+t("the 413 answers: the workbench's plain message, the viewer's own", async () => {
+  const w = await req(BASE, "PUT", "/workbench/settings/ui.x", big(CAP + 1), person());
+  assertEquals(w.status, 413);
+  assertEquals((await w.json()).error, `the request is too large (at most ${CAP} bytes)`);
+  const v = await req(VIEWER, "PUT", "/workbench/settings/ui.x", big(VIEWER_CAP + 1), person());
+  assertEquals(v.status, 413);
+  assertEquals((await v.json()).error, "request body over 1 MB");
 });
 
-t("a body under the cap is checked in under 1 s at 40 KB, 160 KB, 1 MB and the cap itself, through both doors", async () => {
+t("a body under the limit is checked in under 1 s: 40 KB, 160 KB, 1 MB and the cap on the workbench; up to 1 MB on the viewer; a body between them passes the workbench and is the viewer's 413", async () => {
   const rows: string[] = [];
-  for (const [name, door] of doors) {
-    for (const n of [40_000, 160_000, 1_000_000, CAP]) {
-      const r = await timed(() => req(door, "POST", "/workbench/documents/trash", big(n), person()));
-      rows.push(`${name} ${n} bytes -> ${r.status} in ${r.ms.toFixed(0)} ms`);
-      assert(r.status !== 413 && r.status < 500, rows.at(-1)!);
-      assert(r.ms < 1000, rows.at(-1)!);
-    }
-  }
+  const one = async (name: string, door: string, n: number, want413: boolean) => {
+    const r = await timed(() => req(door, "POST", "/workbench/documents/trash", big(n), person()));
+    rows.push(`${name} ${n} bytes -> ${r.status} in ${r.ms.toFixed(0)} ms`);
+    if (want413) assertEquals(r.status, 413, rows.at(-1)!);
+    else assert(r.status !== 413 && r.status < 500, rows.at(-1)!);
+    assert(r.ms < 1000, rows.at(-1)!);
+  };
+  for (const n of [40_000, 160_000, 1_000_000, CAP]) await one("workbench", BASE, n, false);
+  for (const n of [40_000, 160_000, 1_000_000]) await one("viewer", VIEWER, n, false);
+  await one("viewer", VIEWER, 2 * MiB, true);
   console.log("body-size timing:\n  " + rows.join("\n  "));
 });
 
-t("a long string of ../ units and a hidden foreign path in a big body: still refused, and fast", async () => {
-  for (const [, door] of doors) {
+t("a long string of ../ units and a hidden foreign path in a big body: still refused, and fast, through both doors", async () => {
+  for (const door of [BASE, VIEWER]) {
     for (const hidden of ["documents/someone-else/x.md", "../".repeat(40_000) + "documents/someone-else/x.md"]) {
       const r = await timed(() => req(door, "POST", "/workbench/documents/trash", JSON.stringify({ path: hidden, label: "a".repeat(150_000) }), person()));
       assertEquals(r.status, 404);
@@ -97,8 +109,91 @@ t("a long string of ../ units and a hidden foreign path in a big body: still ref
   }
 });
 
+// a raw HTTP/1.1 request to the workbench: the header pair a client library will not send (tester attempt 1 D1)
+async function rawChunked(door: string, path: string, headers: string[], totalBytes: number): Promise<{ status: number; ms: number }> {
+  const u = new URL(door);
+  const t0 = performance.now();
+  const conn = await Deno.connect({ hostname: u.hostname, port: Number(u.port || 80) });
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  let text = "";
+  const reading = (async () => {
+    const buf = new Uint8Array(65536);
+    for (;;) {
+      let n: number | null = null;
+      try { n = await conn.read(buf); } catch { return; }
+      if (n === null) return;
+      text += dec.decode(buf.subarray(0, n));
+      if (/\r\n\r\n[\s\S]*\}/.test(text)) return;
+    }
+  })();
+  try {
+    await conn.write(enc.encode([`PUT ${path} HTTP/1.1`, `Host: ${u.host}`, "Content-Type: text/plain", `x-brain-key: ${KEY}`, ...headers, "Connection: close"].join("\r\n") + "\r\n\r\n"));
+    const piece = new Uint8Array(64 * 1024).fill(97);
+    for (let left = totalBytes; left > 0; left -= piece.length) {
+      const n = Math.min(left, piece.length);
+      await conn.write(enc.encode(n.toString(16) + "\r\n"));
+      await conn.write(n === piece.length ? piece : piece.subarray(0, n));
+      await conn.write(enc.encode("\r\n"));
+    }
+    await conn.write(enc.encode("0\r\n\r\n"));
+  } catch { /* refused and closed early */ }
+  await Promise.race([reading, new Promise((r) => setTimeout(r, 15000))]);
+  try { conn.close(); } catch { /* closed */ }
+  return { status: Number(/^HTTP\/1\.1 (\d+)/.exec(text)?.[1] ?? 0), ms: performance.now() - t0 };
+}
+
+t("D1: Content-Length plus Transfer-Encoding: chunked does not get a body past the cap on the workbench (and the other people are served)", async () => {
+  const who = `${SUB_HEADER}: bodysize-${rnd()}`;
+  for (const total of [CAP + 64 * 1024, 16 * MiB]) {
+    const [r, other] = await Promise.all([
+      rawChunked(BASE, "/workbench/notes/framing-probe.md", [who, "Content-Length: 10", "Transfer-Encoding: chunked"], total),
+      timed(() => req(BASE, "GET", "/workbench/workspace/whoami", undefined, person())),
+    ]);
+    console.log(`body-size D1: ${total} bytes behind Content-Length: 10 + chunked -> ${r.status} in ${r.ms.toFixed(0)} ms; bystander ${other.status} in ${other.ms.toFixed(0)} ms`);
+    assertEquals(r.status, 413);
+    assert(r.ms < 2000, `${r.ms} ms`);
+    assert(other.status === 200 && other.ms < 1000, `bystander ${other.status} in ${other.ms} ms`);
+  }
+  // and with no length at all (the viewer forwards a streamed body this way)
+  const plain = await rawChunked(BASE, "/workbench/notes/framing-probe.md", [`${SUB_HEADER}: bodysize-${rnd()}`, "Transfer-Encoding: chunked"], CAP + 64 * 1024);
+  assertEquals(plain.status, 413);
+});
+
+t("D2: a big upload does not hold the workbench for seconds: a bystander is served within 1.5 s while 25 MiB goes up", async () => {
+  const form = new FormData();
+  form.append("file", new Blob([new Uint8Array(25 * MiB).fill(97)]), "big-upload.pdf");
+  // encode once, outside the clock
+  const pre = new Request("http://x/", { method: "POST", body: form });
+  const ct = pre.headers.get("content-type")!;
+  const bytes = new Uint8Array(await pre.arrayBuffer());
+  let worst = 0;
+  let up = true;
+  const poll = (async () => {
+    while (up) {
+      const r = await timed(() => req(BASE, "GET", "/workbench/workspace/whoami", undefined, person()));
+      worst = Math.max(worst, r.ms);
+      await new Promise((res) => setTimeout(res, 20));
+    }
+  })();
+  const r = await timed(() => req(BASE, "POST", "/workbench/import", bytes, person(), ct));
+  up = false;
+  await poll;
+  console.log(`body-size D2: a 25 MiB upload -> ${r.status} in ${r.ms.toFixed(0)} ms; a bystander's worst wait ${worst.toFixed(0)} ms`);
+  assert(r.status < 500, `the upload answered ${r.status}`);
+  assert(worst < 1500, `a bystander waited ${worst.toFixed(0)} ms`);
+  // over the upload cap: 413 (the multipart body of a file just over 32 MiB), refused from its length
+  const form2 = new FormData();
+  form2.append("file", new Blob([new Uint8Array(33 * MiB)]), "too-big.pdf");
+  const pre2 = new Request("http://x/", { method: "POST", body: form2 });
+  const ct2 = pre2.headers.get("content-type")!;
+  const bytes2 = new Uint8Array(await pre2.arrayBuffer());
+  const over = await timed(() => req(BASE, "POST", "/workbench/import", bytes2, person(), ct2)).catch(() => ({ status: 413, ms: 0, text: "reset" }));
+  assertEquals(over.status, 413);
+});
+
 t("a settings version over the database's INT is a 400, not a 500", async () => {
-  for (const [, door] of doors) {
+  for (const door of [BASE, VIEWER]) {
     for (const v of [2147483648, 9007199254740991]) {
       const r = await req(door, "PUT", "/workbench/settings/refinery.dormancy_days", JSON.stringify({ value: 9, version: v }), person());
       assertEquals(r.status, 400, `version ${v}`);

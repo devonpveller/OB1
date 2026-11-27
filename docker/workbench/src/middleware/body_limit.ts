@@ -10,18 +10,28 @@
 //   - MAX_BODY_BYTES (4 MiB): every JSON, text or form body. The largest real one is a document or note save, whose text
 //     is bounded in practice by the export's own note ceiling (1,000,000 bytes: a bigger note cannot be exported). Four
 //     times that leaves room for JSON escaping and the envelope. (The old portal edge allowed 2 MB here.)
-//   - MAX_UPLOAD_BYTES (100 MiB): ONLY a multipart file upload on the three routes that take one (import, intake add,
-//     source replace-from-upload). The file is the body; the intake add refuses a file over 25 MiB itself, import and
-//     replace never had a limit but the edge's 100 MB. (The old portal edge allowed 100 MB on those routes.)
+//   - MAX_UPLOAD_BYTES (32 MiB): ONLY a multipart file upload on the three routes that take one (import, intake add,
+//     source replace-from-upload). The file is the body; the intake add refuses a file over 25 MiB itself. The route parses
+//     the form on the one thread (Deno's formData: about 20 ms per MiB, measured 1.2 s for 64 MiB), so this cap is also the
+//     longest an upload can hold everyone else: about 0.6 s. (The old portal edge and the viewer allow 100 MB; raise it with
+//     WORKBENCH_MAX_UPLOAD_BYTES knowing each MiB is ~20 ms of everyone's wait; tester attempt 1 D2.)
 // Env: WORKBENCH_MAX_BODY_BYTES, WORKBENCH_MAX_UPLOAD_BYTES (a positive integer; anything else keeps the default).
 // The cap is on the BODY bytes of a write (POST, PUT, PATCH, DELETE, anything but GET/HEAD/OPTIONS); a read has none.
 import type { Context, Next } from "hono";
 import { seamPath } from "./identity.ts";
 
 export const DEFAULT_MAX_BODY_BYTES = 4 * 1024 * 1024;
-export const DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+export const DEFAULT_MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
 // the intake add's own file ceiling (src/intake/routes.ts reads it from here), and what a file-bearing multipart body
 // adds around the file (boundaries, the text fields): a test shows the largest file plus this fits under the upload cap
+// the most text a form body may carry in the fields the owner scope scans (a path, a url, an id: a few hundred characters);
+// the file parts are not text and are not counted. Over it the owner scope answers 413 (src/middleware/owner-scope.ts).
+// a multipart body over this on an upload route is not parsed by the owner scope (the route parses it, once, and checks
+// the ownership of what it names itself); under it the owner scope scans its text fields as it always did
+export const FORM_SCAN_MAX_BYTES = 1024 * 1024;
+export const BODY_BYTES_KEY = "body-bytes";
+export const isUploadRoute = (route: string) => UPLOAD_ROUTES.some((r) => r.test(route));
+export const FORM_TEXT_MAX_CHARS = 64 * 1024;
 export const INTAKE_MAX_FILE_BYTES = 25 * 1024 * 1024;
 
 // the routes whose body may be a multipart file upload (matched on the path the seam judged, as the router routes it)
@@ -42,7 +52,7 @@ export const maxUploadBytes = () => envBytes("WORKBENCH_MAX_UPLOAD_BYTES", DEFAU
 
 export function capFor(route: string, contentType: string): number {
   const media = contentType.split(";")[0].trim().toLowerCase();
-  return media === "multipart/form-data" && UPLOAD_ROUTES.some((r) => r.test(route)) ? maxUploadBytes() : maxBodyBytes();
+  return media === "multipart/form-data" && isUploadRoute(route) ? maxUploadBytes() : maxBodyBytes();
 }
 
 const tooLarge = (c: Context, cap: number) =>
@@ -53,11 +63,17 @@ export function bodyLimit() {
     if (!MUTATING(c.req.method)) return await next();
     const cap = capFor(seamPath(c), c.req.header("content-type") ?? "");
     const declared = c.req.header("content-length");
-    if (declared !== undefined && /^\s*\d+\s*$/.test(declared)) {
+    // A length is trusted ONLY when the body is framed by it. With a Transfer-Encoding header the server frames the body by
+    // the encoding and still hands the app a Content-Length (`Content-Length: 10` + `Transfer-Encoding: chunked` let 64 MiB
+    // through, tester attempt 1 D1), so then the header means nothing: the stream is counted.
+    if (declared !== undefined && /^\s*\d+\s*$/.test(declared) && c.req.header("transfer-encoding") === undefined) {
       // the server frames the body by this length, so it cannot carry more than it says
-      return Number(declared) > cap ? tooLarge(c, cap) : await next();
+      if (Number(declared) > cap) return tooLarge(c, cap);
+      c.set(BODY_BYTES_KEY as never, Number(declared) as never);
+      return await next();
     }
-    // no usable length (chunked): count as it arrives, stop at the cap, and hand the rest of the chain the bytes read
+    // no usable length (chunked, or a length that does not frame it): count as it arrives, stop at the cap, and hand the
+    // rest of the chain the bytes read
     const stream = c.req.raw.body;
     if (!stream) return await next();
     const reader = stream.getReader();
@@ -73,10 +89,15 @@ export function bodyLimit() {
       }
       chunks.push(value);
     }
+    c.set(BODY_BYTES_KEY as never, n as never);
     const bytes = new Uint8Array(n);
     let at = 0;
     for (const ch of chunks) { bytes.set(ch, at); at += ch.byteLength; }
-    c.req.raw = new Request(c.req.raw, { body: bytes });
+    // the rebuilt request is framed by its bytes: the two framing headers it arrived with are dropped
+    const headers = new Headers(c.req.raw.headers);
+    headers.delete("content-length");
+    headers.delete("transfer-encoding");
+    c.req.raw = new Request(c.req.raw, { body: bytes, headers });
     return await next();
   };
 }

@@ -156,8 +156,9 @@ Deno.test("the largest legitimate body of every write route fits under the cap",
   assertEquals(r.status, 200, "the intake add's largest file is under the upload cap");
   assert((await r.json()).bytes > INTAKE_MAX_FILE_BYTES);
   assertEquals(maxUploadBytes(), DEFAULT_MAX_UPLOAD_BYTES);
-  // the import and replace-from-upload have no limit of their own; the edge in front of them allowed 100 MB, so the cap does too
-  assert(DEFAULT_MAX_UPLOAD_BYTES >= 100 * 1000 * 1000);
+  // the import and replace-from-upload have no limit of their own; the upload cap is 32 MiB (the thread's hold: ~20 ms per MiB of
+  // form parse, tester attempt 1 D2), above the intake's 25 MiB file and below the edge's 100 MB, which is lowered here on purpose
+  assertEquals(DEFAULT_MAX_UPLOAD_BYTES, 32 * 1024 * 1024);
   assert(DEFAULT_MAX_UPLOAD_BYTES >= INTAKE_MAX_FILE_BYTES + 1024 * 1024);
 });
 

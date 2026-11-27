@@ -150,7 +150,11 @@ export async function ownsDocumentPaths(db: Db, paths: string[], who: Viewer): P
   return !others.some((o) => prefixes.some((pre) => o.path.startsWith(pre) && CUT_AFTER.test(o.path.slice(pre.length))));
 }
 
+// a path with no empty, `.` or `..` segment (and no backslash) is its own normal form: most are, and a body that names
+// hundreds of thousands of them (rw-body-size-stall, D3) then costs a regex test each, not a split and a join
+const NEEDS_NORMALIZING = /(^|\/)\.{0,2}(\/|$)|\\/;
 function normalize(p: string): string {
+  if (!NEEDS_NORMALIZING.test(p)) return p;
   const out: string[] = [];
   for (const seg of p.replace(/\\/g, "/").split("/")) {
     if (seg === "" || seg === ".") continue;
