@@ -307,7 +307,7 @@ export async function loadAccountState(): Promise<void> {
     };
     serverRecent = clone(s.recent.value ?? []);
     if (fresh(UI_KEYS.startScreen)) startScreen = s.startScreen.value;
-    if (fresh(UI_KEYS.recent)) recent = clone(s.recent.value ?? []);
+    if (fresh(UI_KEYS.recent)) recent = frozen(s.recent.value ?? []);
     const lk = s.lockedDocument.value ? await resolveDocument(s.lockedDocument.value) : null;
     const ls = s.lastDocument.value ? await resolveDocument(s.lastDocument.value) : null;
     if (epoch !== my) return;
@@ -368,17 +368,12 @@ export function setStartScreenSaved(s: StartScreen | null): Promise<boolean> {
 export function setStartScreen(s: StartScreen | null): void {
   void setStartScreenSaved(s);
 }
-// Replace the WHOLE Recently viewed list (null: back to the default). For a change a person made to the list they SEE, use
-// updateRecentSaved below instead: a whole list is computed from this page's copy and carries it over whatever another browser wrote.
-// On success this keeps serverRecent in step, so a later updateRecentSaved starts from what this write stored.
+// Replace the WHOLE Recently viewed list (null: back to the default). It is the same queue as updateRecentSaved (a whole-list write is
+// a change that ignores the list it is applied to), so the two can be mixed in any order and the page ends showing what the server holds.
+// For a change a person made to the list they SEE, use updateRecentSaved: it is applied to the server's latest list, not a stale copy.
 export function setRecentSaved(items: RecentItem[] | null): Promise<boolean> {
-  const my = epoch;
-  recent = clone(items ?? []); touched[UI_KEYS.recent]++; emit();
-  return push<RecentItem[]>(UI_KEYS.recent, async (v) => {
-    const saved = await saveRecent(items, v);
-    if (epoch === my) serverRecent = clone(items ?? []);
-    return saved;
-  });
+  const whole = items === null ? null : clone(items);
+  return runRecent(() => whole).then((r) => r !== "failed");
 }
 export function setRecent(items: RecentItem[] | null): void {
   void setRecentSaved(items);
@@ -394,21 +389,29 @@ export type RecentWrite = "saved" | "merged" | "merged-unchanged" | "unchanged" 
 // a list is copied item by item before a change touches it: a change that edits in place must not edit the page's copy and the server's at once
 const clone = (l: readonly RecentItem[]): RecentItem[] => l.map((x) => ({ ...x }));
 const sameList = (a: RecentItem[], b: RecentItem[]) => JSON.stringify(a) === JSON.stringify(b);
+// the list the page hands out is frozen (and is never the array the server's list lives in): a screen that edits it in place fails
+// loudly instead of changing what the next write is computed from
+const frozen = (l: readonly RecentItem[]): RecentItem[] => Object.freeze(l.map((x) => Object.freeze({ ...x }))) as RecentItem[];
 export function updateRecentSaved(fn: (list: RecentItem[]) => RecentItem[]): Promise<RecentWrite> {
+  return runRecent(fn);
+}
+// a change may answer null: put the key back to its default (a versioned DELETE)
+function runRecent(fn: (list: RecentItem[]) => RecentItem[] | null): Promise<RecentWrite> {
   const my = epoch;
-  recent = clone(fn(clone(recent))); touched[UI_KEYS.recent]++; recentPending++; emit();
+  recent = frozen(fn(clone(recent)) ?? []); touched[UI_KEYS.recent]++; recentPending++; emit();
   let merged = false;
   let wrote = false;
   const run = push<RecentItem[]>(UI_KEYS.recent, async (version) => {
     let v = version;
     for (let attempt = 0; ; attempt++) {
       const base = serverRecent;
-      const next = clone(fn(clone(base)));
-      if (sameList(next, base)) return { value: base, version: v }; // nothing to send
+      const made = fn(clone(base));
+      const next = made === null ? null : clone(made);
+      if (next !== null && sameList(next, base)) return { value: base, version: v }; // nothing to send
       try {
         const saved = await saveRecent(next, v);
         wrote = true;
-        if (epoch === my) serverRecent = clone(next);
+        if (epoch === my) serverRecent = clone(next ?? []);
         return saved;
       } catch (e) {
         if (!(e instanceof StaleVersion) || attempt > 0) throw e;
@@ -422,7 +425,7 @@ export function updateRecentSaved(fn: (list: RecentItem[]) => RecentItem[]): Pro
   return run.then((ok) => {
     if (epoch === my) recentPending--;
     // the last queued change is done: the page shows what the server holds (a change that was not saved is not shown as kept)
-    if (epoch === my && recentPending === 0) { recent = clone(serverRecent); emit(); }
+    if (epoch === my && recentPending === 0) { recent = frozen(serverRecent); emit(); }
     if (!ok) return "failed";
     return merged ? (wrote ? "merged" : "merged-unchanged") : wrote ? "saved" : "unchanged";
   });

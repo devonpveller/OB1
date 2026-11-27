@@ -372,3 +372,38 @@ describe("review 1: the two recent primitives (F2, R3)", () => {
     expect(stored().map((x) => x.id)).toEqual([SRC(5)]);
   });
 });
+
+describe("review 2: the two primitives mixed in any order, and what getRecent hands out", () => {
+  it("a whole-list write queued behind a change: the page ends showing what the server holds", async () => {
+    await boot("/library", () => lib.plantAccount("alice", "library.recent", [{ kind: "source", id: SRC(1) }]));
+    await waitFor(() => expect(keys()).toEqual([k(1)]));
+    const p1 = updateRecentSaved((l) => [{ kind: "source", id: SRC(2) }, ...l]);
+    const p2 = setRecentSaved([{ kind: "source", id: SRC(7) }]);
+    expect(await p1).toBe("saved");
+    expect(await p2).toBe(true);
+    expect(stored().map((x) => x.id)).toEqual([SRC(7)]);
+    await waitFor(() => expect(keys()).toEqual([k(7)]));
+    expect(getRecent().map((x) => x.id)).toEqual([SRC(7)]);
+  });
+  it("a whole-list write with null puts the key back to its default, in the same queue", async () => {
+    await boot("/library", () => lib.plantAccount("alice", "library.recent", [{ kind: "source", id: SRC(1) }]));
+    await waitFor(() => expect(keys()).toEqual([k(1)]));
+    const p1 = updateRecentSaved((l) => [{ kind: "source", id: SRC(2) }, ...l]);
+    const p2 = setRecentSaved(null);
+    await p1; expect(await p2).toBe(true);
+    expect(lib.account("alice")["library.recent"]).toBeUndefined();
+    await waitFor(() => expect(keys()).toEqual([]));
+  });
+  it("what getRecent hands out is frozen after a load and after a queue end: a caller that edits it fails loudly and changes nothing", async () => {
+    await boot("/library", () => lib.plantAccount("alice", "library.recent", [{ kind: "source", id: SRC(1) }]));
+    await waitFor(() => expect(keys()).toEqual([k(1)]));
+    expect(() => (getRecent() as any[]).push({ kind: "source", id: SRC(3) })).toThrow();
+    expect(() => { (getRecent()[0] as any).locked = true; }).toThrow();
+    expect(await updateRecentSaved((l) => [{ kind: "source", id: SRC(2) }, ...l])).toBe("saved");
+    expect(() => (getRecent() as any[]).push({ kind: "source", id: SRC(3) })).toThrow();
+    expect(() => { (getRecent()[0] as any).locked = true; }).toThrow();
+    expect(await updateRecentSaved((l) => [{ kind: "source", id: SRC(4) }, ...l])).toBe("saved");
+    expect(stored().map((x) => x.id)).toEqual([SRC(4), SRC(2), SRC(1)]);
+    expect(stored().some((x) => x.locked)).toBe(false);
+  });
+});
