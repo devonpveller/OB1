@@ -618,3 +618,135 @@ describe("attempt 2 (mutation round 2): ticks, whitespace selections, wrapping, 
     h.release();
   });
 });
+
+// ---- attempt 3 (reviewer R1 and the tester's G1/G2): the remembered place follows the edits ----
+describe("attempt 3: Show in the text follows edits (R1), found-list ordering (G1/G2), the 500 cap, run labels", () => {
+  const P3 = "twin words here";
+  const sleep3 = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const addSecondOfThree = async () => {
+    await openDoc();
+    await waitFor(() => expect(screen.getByTestId("cov-box")).toBeTruthy());
+    act(() => { const v = view(); v.dispatch({ changes: { from: v.state.doc.length, insert: `\n\n${P3} / a\n${P3} / b\n${P3} / c` } }); });
+    const d = view().state.doc.toString();
+    const first = d.indexOf(P3), second = d.indexOf(P3, first + 1);
+    select(second, second + P3.length);
+    await waitFor(() => expect((screen.getByTestId("cov-add-sel") as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTestId("cov-add-sel"));
+    await waitFor(() => expect(items("cov-mine").length).toBe(1));
+    return { first, second };
+  };
+  const press = () => {
+    act(() => (document.activeElement as HTMLElement | null)?.blur()); // happy-dom reports the DOM selection while CodeMirror updates
+    fireEvent.click(within(rowByText(P3)).getByRole("button", { name: /show in the text/i }));
+    return view().state.selection.main.from;
+  };
+  const note = () => within(rowByText(P3)).queryByRole("status")?.textContent ?? null;
+  it("R1: after an EARLIER identical copy is deleted, Show in the text still goes to the passage the gap was taken from, with no note", async () => {
+    const { first, second } = await addSecondOfThree();
+    act(() => { const v = view(); v.dispatch({ changes: { from: first, to: first + (`${P3} / a\n`).length } }); }); // the first copy goes
+    const d = view().state.doc.toString();
+    const wanted = d.indexOf(`${P3} / b`);
+    expect(wanted).toBe(second - (`${P3} / a\n`).length);
+    expect(press()).toBe(wanted);
+    expect(note()).toBeNull();
+  });
+  it("R1: after an identical copy is INSERTED above, the same", async () => {
+    await addSecondOfThree();
+    act(() => { const v = view(); v.dispatch({ changes: { from: 0, insert: `${P3} / new copy at the top\n` } }); });
+    const wanted = view().state.doc.toString().indexOf(`${P3} / b`);
+    expect(press()).toBe(wanted);
+    expect(note()).toBeNull();
+  });
+  it("R1: when the remembered passage itself was edited (no copy starts there any more) it is honest: the first copy and the N-times note", async () => {
+    await addSecondOfThree();
+    const d = view().state.doc.toString();
+    const at = d.indexOf(`${P3} / b`);
+    act(() => { const v = view(); v.dispatch({ changes: { from: at, to: at + 4, insert: "TWAIN" } }); }); // "twin" -> "TWAIN" at the remembered place
+    const first = view().state.doc.toString().indexOf(P3);
+    expect(press()).toBe(first);
+    expect(note()).toMatch(/2 times in the text.*1 of 2/);
+  });
+  it("G1: an older, slower research-found read never overwrites a newer one", async () => {
+    await openDoc();
+    await waitFor(() => expect(screen.getByTestId("cov-found-none")).toBeTruthy());
+    const h = hold(); let n = 0;
+    override = async (m, u) => {
+      if (u.includes("/documents/coverage")) { n++; if (n === 1) { const old = gaps.handle(A, m, u, {}); await h.p; return old; } }
+      return null;
+    };
+    fireEvent.click(screen.getByTestId("cov-recheck")); await waitFor(() => expect(n).toBe(1));
+    gaps.plantSession({ owner_sub: A.sub, path: CPU, id: S1, needs: [{ need: "ALPHA fresh need", status: "open" }] });
+    fireEvent.click(screen.getByTestId("cov-recheck")); await waitFor(() => expect(n).toBe(2));
+    await waitFor(() => expect(screen.getByTestId("cov-found")).toBeTruthy());
+    h.release(); await sleep3(200);
+    expect(screen.queryByTestId("cov-found")).toBeTruthy(); expect(panel().textContent).toMatch(/ALPHA fresh need/);
+  });
+  it("G2: an older, slower FAILED found read never turns a newer good list into an error", async () => {
+    gaps.plantSession({ owner_sub: A.sub, path: CPU, id: S1, needs: [{ need: "ALPHA fresh need", status: "open" }] });
+    await openDoc();
+    await waitFor(() => expect(screen.getByTestId("cov-found")).toBeTruthy());
+    const h = hold(); let n = 0;
+    override = async (_m, u) => { if (u.includes("/documents/coverage")) { n++; if (n === 1) { await h.p; return { status: 500, body: { error: "x" } }; } } return null; };
+    fireEvent.click(screen.getByTestId("cov-recheck")); await waitFor(() => expect(n).toBe(1));
+    fireEvent.click(screen.getByTestId("cov-recheck")); await waitFor(() => expect(n).toBe(2));
+    await sleep3(100); h.release(); await sleep3(200);
+    expect(screen.queryByTestId("cov-found-err")).toBeNull(); expect(panel().textContent).toMatch(/ALPHA fresh need/);
+  });
+  it("more gaps than the 500 read: a notice says so, using the server's total, and the tab number stays the server's open count", async () => {
+    gaps.plantGap(A, { path: CPU, text: "ALPHA one" });
+    override = (m, u) => {
+      if (m === "GET" && u.startsWith("/workbench/contract/gaps?")) {
+        const r = gaps.handle(A, m, u, {})!;
+        return { status: 200, body: { ...r.body, total: 612, counts: { ...r.body.counts, open: 600 } } };
+      }
+      return null;
+    };
+    await openDoc();
+    await waitFor(() => expect(screen.getByTestId("cov-gaps-capped").textContent).toMatch(/newest 1 of your 612 gaps/));
+    expect(tabText()).toBe("Coverage 600");
+    override = null;
+    fireEvent.click(screen.getByTestId("cov-recheck"));
+    await waitFor(() => expect(screen.queryByTestId("cov-gaps-capped")).toBeNull());
+  });
+  it("two research runs on one day read differently: the time and a short run id are in the label", async () => {
+    gaps.plantSession({ owner_sub: A.sub, path: CPU, id: S1, created_at: "2026-11-22T09:05:00.000Z", needs: [{ need: "ALPHA morning need", status: "open" }] });
+    gaps.plantSession({ owner_sub: A.sub, path: CPU, id: S2, created_at: "2026-11-22T16:40:00.000Z", needs: [{ need: "ALPHA evening need", status: "open" }] });
+    await openDoc();
+    const found = await waitFor(() => screen.getByTestId("cov-found"));
+    await waitFor(() => expect(within(found).getAllByTestId("need-run").length).toBe(2));
+    const labels = within(found).getAllByTestId("need-run").map((e) => e.textContent);
+    expect(new Set(labels).size).toBe(2);
+    expect(labels.join("|")).toMatch(/Run of 22 Nov 2026 16:40 UTC \(run 5e550000\)/);
+    expect(labels.join("|")).toMatch(/Run of 22 Nov 2026 09:05 UTC \(run 5e550000\)/);
+  });
+});
+
+describe("attempt 3 (mutation round): where a remembered start sits", () => {
+  const P4 = "twin words here";
+  const setup = async (leading: string) => {
+    await openDoc();
+    await waitFor(() => expect(screen.getByTestId("cov-box")).toBeTruthy());
+    act(() => { const v = view(); v.dispatch({ changes: { from: v.state.doc.length, insert: `\n\n${P4} / a\n${P4} / b\n${P4} / c` } }); });
+    const d = view().state.doc.toString();
+    const second = d.indexOf(P4, d.indexOf(P4) + 1);
+    select(second - leading.length, second + P4.length);
+    await waitFor(() => expect((screen.getByTestId("cov-add-sel") as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByTestId("cov-add-sel"));
+    await waitFor(() => expect(items("cov-mine").length).toBe(1));
+    return second;
+  };
+  const show = () => { act(() => (document.activeElement as HTMLElement | null)?.blur()); fireEvent.click(within(rowByText(P4)).getByRole("button", { name: /show in the text/i })); };
+  it("text typed right at the start of the remembered passage goes before it: the passage is still the one shown, with no note", async () => {
+    const second = await setup("");
+    act(() => { const v = view(); v.dispatch({ changes: { from: second, insert: "NEW " } }); });
+    show();
+    expect(view().state.selection.main.from).toBe(second + 4);
+    expect(within(rowByText(P4)).queryByRole("status")).toBeNull();
+  });
+  it("a selection that starts with white space remembers where the WORDS start", async () => {
+    const second = await setup("\n");
+    show();
+    expect(view().state.selection.main.from).toBe(second);
+    expect(within(rowByText(P4)).queryByRole("status")).toBeNull();
+  });
+});

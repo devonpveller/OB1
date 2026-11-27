@@ -10,6 +10,7 @@
 //   GET    contract/sessions/<id>/coverage       { needs: [{ need, status }], gaps: [text] } what that run says is still needed
 // A gap has no field for the passage it came from (the store is another item); a gap added from selected text therefore IS
 // the passage: its text is the selected words and its origin is "selection", and "Show in the text" finds those words again.
+import { StateEffect, StateField } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import { api, ApiError } from "../../lib/api";
 
@@ -19,7 +20,7 @@ export const POLL_MS = 20_000;         // while a run is out, the list is read a
 
 export type GapState = "open" | "researching" | "covered" | "dismissed";
 export type Gap = { id: string; path: string; text: string; origin: string; state: GapState; job_id: string | null; covered_at: string | null; created_at: string; updated_at: string };
-export type GapList = { gaps: Gap[]; counts: Record<GapState, number> };
+export type GapList = { gaps: Gap[]; total: number; counts: Record<GapState, number> };
 export type Found = { key: string; text: string; kind: "need" | "gap"; status: string; run: string; at: string };
 
 const STATES: GapState[] = ["open", "researching", "covered", "dismissed"];
@@ -40,7 +41,7 @@ export async function readGaps(path: string): Promise<GapList> {
   const { data } = await api<any>("GET", `/workbench/contract/gaps?path=${encodeURIComponent(path)}&limit=500`);
   if (!data || !Array.isArray(data.gaps) || !data.gaps.every(isGap) || !data.counts) throw new Error("unexpected answer");
   const c = data.counts;
-  return { gaps: data.gaps, counts: { open: +c.open || 0, researching: +c.researching || 0, covered: +c.covered || 0, dismissed: +c.dismissed || 0 } };
+  return { gaps: data.gaps, total: Number.isFinite(+data.total) ? +data.total : data.gaps.length, counts: { open: +c.open || 0, researching: +c.researching || 0, covered: +c.covered || 0, dismissed: +c.dismissed || 0 } };
 }
 
 export async function addGap(path: string, text: string, origin: "user" | "selection" | "research"): Promise<Gap> {
@@ -106,6 +107,13 @@ export function gapProblem(e: unknown, what: "add" | "research" | "change" | "re
   return `Could not ${did}. Nothing was changed.`;
 }
 
+// "22 Nov 2026 10:00 UTC (run 5e550000)": two runs on one day read differently
+export function runLabel(iso: string, id: string): string {
+  const d = new Date(iso);
+  const t = Number.isNaN(d.getTime()) ? "" : ` ${d.toISOString().slice(11, 16)} UTC`;
+  return `${runDate(iso)}${t} (run ${id.slice(0, 8)})`;
+}
+
 // "22 Nov 2026" in UTC (a run's date does not move with the browser's zone)
 export function runDate(iso: string): string {
   const d = new Date(iso);
@@ -113,9 +121,13 @@ export function runDate(iso: string): string {
 }
 
 // "Show in the text". The store keeps no position, so the words are searched for (any run of white space matches any other:
-// the text may have been re-wrapped since). Where the words stand more than once the tab cannot know which one the gap was
-// taken from after a reload: locatePassage says how many there are and which one it showed, and the caller says so.
-export type Shown = { n: number; at: number };
+// the text may have been re-wrapped since). A gap added from the selection on THIS page also remembers where its words STARTED:
+// the position (the first character of the words, so mapPos with association +1: text typed right at it goes before it) is carried
+// through every edit by the editor's own change mapping, so a copy deleted or typed above it does
+// not move it. Press: if a copy starts at the carried position that is the one shown, with no note; if none does (the passage
+// was edited, or the page was reloaded and nothing is remembered) and the words stand more than once, the first is shown and the
+// caller says "N times, press again". The store has no field for any of this: a reload forgets it.
+export type Shown = { n: number; at: number; exact: boolean };
 const esc = (w: string) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 function places(view: EditorView, passage: string): { from: number; to: number }[] {
   const words = passage.trim().split(/\s+/).filter(Boolean);
@@ -123,24 +135,41 @@ function places(view: EditorView, passage: string): { from: number; to: number }
   const re = new RegExp(words.map(esc).join("\\s+"), "g");
   return [...view.state.doc.toString().matchAll(re)].map((m) => ({ from: m.index!, to: m.index! + m[0].length }));
 }
-// Select the nth place (counted from 0, wrapping round) where these words stand and scroll to it. null = not in the text any more.
-export function locatePassage(view: EditorView | null, passage: string, nth = 0): Shown | null {
+const place = StateEffect.define<{ id: string; pos: number }>();
+const placed = StateField.define<Map<string, number>>({
+  create: () => new Map(),
+  update(m, tr) {
+    let n = m;
+    if (tr.docChanged) { n = new Map(); for (const [id, pos] of m) n.set(id, tr.changes.mapPos(pos, 1)); }
+    for (const e of tr.effects) if (e.is(place)) { if (n === m) n = new Map(m); n.set(e.value.id, e.value.pos); }
+    return n;
+  },
+});
+const ready = (view: EditorView) => { if (view.state.field(placed, false) === undefined) view.dispatch({ effects: StateEffect.appendConfig.of(placed) }); };
+// Where the selected words start (the trimmed words), or null with nothing selected.
+export function startOfSelection(view: EditorView | null): number | null {
+  if (!view) return null;
+  const r = view.state.selection.main;
+  if (r.empty) return null;
+  const text = view.state.sliceDoc(r.from, r.to);
+  return r.from + (text.length - text.trimStart().length);
+}
+// Remember (for this page) where gap `id` words start; carried through edits by the editor's own change mapping.
+export function rememberPlace(view: EditorView | null, id: string, pos: number): void {
+  if (!view) return;
+  ready(view);
+  view.dispatch({ effects: place.of({ id, pos: Math.min(pos, view.state.doc.length) }) });
+}
+// Select the place where these words stand and scroll to it: the one that starts where gap `id` was remembered (exact), else the
+// first; `nth` moves on from there (wrapping round). null = not in the text any more.
+export function locatePassage(view: EditorView | null, passage: string, nth = 0, id?: string): Shown | null {
   if (!view) return null;
   const all = places(view, passage);
   if (!all.length) return null;
-  const at = ((nth % all.length) + all.length) % all.length;
+  const mapped = id ? view.state.field(placed, false)?.get(id) : undefined;
+  const hit = mapped === undefined ? -1 : all.findIndex((p) => p.from === mapped);
+  const at = ((Math.max(hit, 0) + nth) % all.length + all.length) % all.length;
   view.dispatch({ selection: { anchor: all[at].from, head: all[at].to }, scrollIntoView: true });
   view.focus();
-  return { n: all.length, at };
-}
-// Which place (from 0) the selected words are, among the places where those same words stand: remembered with a gap added from
-// the selection, for this page only (the store has no field for it).
-export function occurrenceOfSelection(view: EditorView | null): number {
-  if (!view) return 0;
-  const r = view.state.selection.main;
-  const text = view.state.sliceDoc(r.from, r.to);
-  const all = places(view, text);
-  const lead = text.length - text.trimStart().length;
-  const i = all.findIndex((p) => p.from === r.from + lead);
-  return i < 0 ? 0 : i;
+  return { n: all.length, at, exact: hit >= 0 && nth === 0 };
 }

@@ -28,7 +28,7 @@ import {
   versionText, type Loaded, type Version,
 } from "./editor-data";
 import { InThisDoc } from "./InThisDoc";
-import { locatePassage, occurrenceOfSelection } from "./coverage-data";
+import { locatePassage, rememberPlace, startOfSelection } from "./coverage-data";
 import { CoverageTab, useCoverage } from "./CoverageTab";
 import { SourceDrawer, type DrawerTarget } from "./SourceDrawer";
 
@@ -109,7 +109,7 @@ function Writing({ path, docRef, subject, first }: { path: string; docRef: strin
   const [drawer, setDrawer] = useState<DrawerTarget | null>(null);
   const selRef = useRef("");
   // rwr-doc-coverage: the Coverage tab's state lives here so its number shows on the tab while another tab is open
-  const covCtx = { path, subject, selection, locate: (t: string, nth?: number) => locatePassage(view.current, t, nth), occurrence: () => occurrenceOfSelection(view.current) };
+  const covCtx = { path, subject, selection, locate: (t: string, nth?: number, id?: string) => locatePassage(view.current, t, nth, id), startOfSelection: () => startOfSelection(view.current), remember: (id: string, pos: number) => rememberPlace(view.current, id, pos) };
   const cov = useCoverage(covCtx);
 
   // ── the saving machine ──

@@ -13,7 +13,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useToast } from "../../shell/Toast";
 import { isSamePerson } from "./editor-data";
 import {
-  addGap, chars, SESSIONS_READ, cleanText, gapProblem, GAP_MAX, markGap, normalizeGapText, POLL_MS, readFound, readGaps, removeGap, researchGaps, runDate,
+  addGap, chars, SESSIONS_READ, cleanText, gapProblem, GAP_MAX, markGap, normalizeGapText, POLL_MS, readFound, readGaps, removeGap, researchGaps, runLabel,
   type Found, type Gap, type GapList, type Shown,
 } from "./coverage-data";
 import "./coverage.css";
@@ -22,8 +22,9 @@ export type CoverageCtx = {
   path: string;
   subject: string;
   selection: string;                 // the text selected in the writing surface ("" = none)
-  locate: (passage: string, nth?: number) => Shown | null; // select the nth place the passage stands in the writing surface; null = not in the text any more
-  occurrence: () => number;          // which place (from 0) the selected words are, among the places those words stand
+  locate: (passage: string, nth?: number, id?: string) => Shown | null; // select the place gap `id` was taken from (else the first), `nth` places on; null = not in the text any more
+  startOfSelection: () => number | null; // where the selected words start in the text
+  remember: (id: string, pos: number) => void; // keep that start for gap `id`, carried through edits by the editor
 };
 
 const NOT_SAME = "Not sent: this page could not confirm that you are still the person who opened this document. Nothing was sent.";
@@ -43,7 +44,6 @@ export function useCoverage(ctx: CoverageCtx | null) {
   const alive = useRef(true);
   const gen = useRef(0);
   const working = useRef(false);
-  const where = useRef(new Map<string, number>()); // gap id -> which place of its words it was taken from (this page only)
   const [foundTick, setFoundTick] = useState(0);
   const path = ctx?.path ?? "", subject = ctx?.subject ?? "";
 
@@ -64,7 +64,7 @@ export function useCoverage(ctx: CoverageCtx | null) {
 
   useEffect(() => {
     alive.current = true;
-    setRead({ s: "loading" }); setTicked([]); setErr(""); setRemoving(null); where.current.clear();
+    setRead({ s: "loading" }); setTicked([]); setErr(""); setRemoving(null);
     void load();
     return () => { alive.current = false; gen.current++; };
   }, [load, subject]);
@@ -95,13 +95,13 @@ export function useCoverage(ctx: CoverageCtx | null) {
   }, [subject, load]);
 
   const add = (text: string, origin: "user" | "selection" | "research") => {
-    const at = origin === "selection" ? ctx?.occurrence() : undefined; // read now: the selection may move while the request is out
+    const at = origin === "selection" ? ctx?.startOfSelection() : null; // read now: the selection may move while the request is out
     return run("add", async () => {
       const t = cleanText(text);
       if (!t) return false;
       if (chars(t) > GAP_MAX) { setErr(`That is longer than ${GAP_MAX} characters. Use a shorter text.`); return false; }
       const g = await addGap(path, t, origin);
-      if (at !== undefined) where.current.set(g.id, at);
+      if (at != null) ctx?.remember(g.id, at);
     });
   };
   const mark = (id: string, state: "open" | "covered") => run("change", () => markGap(id, state));
@@ -118,7 +118,7 @@ export function useCoverage(ctx: CoverageCtx | null) {
   // a number only while it is known: a failed re-read leaves the list on screen but no number on the tab
   const open = read.s === "ready" && !read.stale ? read.list.counts.open : null;
   const recheck = () => { setFoundTick((n) => n + 1); return load(); };
-  return { read, load, recheck, foundTick, where: (id: string) => where.current.get(id), ticked, tick, err, setErr, busy, removing, setRemoving, add, mark, remove, research, open };
+  return { read, load, recheck, foundTick, ticked, tick, err, setErr, busy, removing, setRemoving, add, mark, remove, research, open };
 }
 export type CoverageState = ReturnType<typeof useCoverage>;
 
@@ -147,6 +147,9 @@ export function CoverageTab({ cov, ctx }: { cov: CoverageState; ctx: CoverageCtx
         <p className="docs-err" role="alert" data-testid="cov-gaps-err">
           Could not read your gaps again, so the list below may be out of date and the tab shows no number. <button type="button" onClick={() => void cov.load()}>Try again</button>
         </p>
+      )}
+      {list && list.total > list.gaps.length && (
+        <p className="meta" role="status" data-testid="cov-gaps-capped">Only the newest {list.gaps.length} of your {list.total} gaps on this document are read, so the lists below are incomplete; the number on the tab counts all of the open ones.</p>
       )}
       {list && (
         <>
@@ -207,11 +210,10 @@ function GapRow({ g, cov, ctx }: { g: Gap; cov: CoverageState; ctx: CoverageCtx 
   const [tries, setTries] = useState(0);
   // the first press goes to the place this page remembers (a gap added here); otherwise, or when pressed again, to the next place
   const show = () => {
-    const known = cov.where(g.id);
-    const r = ctx.locate(g.text, (known ?? 0) + tries);
+    const r = ctx.locate(g.text, tries, g.id);
     if (!r) { setNote("That passage is no longer in the text."); return; }
     setTries(tries + 1);
-    setNote(r.n > 1 && !(known !== undefined && tries === 0)
+    setNote(r.n > 1 && !r.exact
       ? `These words stand ${r.n} times in the text. This is ${r.at + 1} of ${r.n}; press again for the next one, as the list cannot tell which one this gap was taken from.` : "");
   };
   return (
@@ -282,7 +284,7 @@ function FoundByResearch({ cov, ctx, open }: { cov: CoverageState; ctx: Coverage
                 <div className="cov-line"><span className="cov-text">{n.text}</span></div>
                 <div className="cov-sub">
                   <span className="pill">{n.kind === "gap" ? "a gap the run listed" : n.status === "partial" ? "partly answered" : n.status === "search_failed" ? "the search failed" : "not answered"}</span>
-                  <span className="meta" data-testid="need-run" data-run={n.run}>Run of {runDate(n.at)}</span>
+                  <span className="meta" data-testid="need-run" data-run={n.run}>Run of {runLabel(n.at, n.run)}</span>
                   {there ? <span className="meta">On your list</span> : (
                     <button type="button" className="btn sm" disabled={cov.busy} onClick={() => void cov.add(n.text, "research")}>Add to my gaps</button>
                   )}
