@@ -178,7 +178,8 @@ describe("acceptance 3: the strip is kept with the account, not the browser", ()
     lib.plantAccount("alice", "library.recent", [{ kind: "source", id: SRC(7) }, { kind: "source", id: SRC(8) }]); // the other browser
     act(() => navigate(`/library?source=${SRC(2)}`));
     await waitFor(() => expect(screen.getByTestId("strip-note").textContent).toMatch(/another browser/));
-    await waitFor(() => expect(keys()).toEqual([`source:${SRC(7)}`, `source:${SRC(8)}`]));
+    // the change is applied on top of what the other browser wrote, never over it
+    await waitFor(() => expect(keys()).toEqual([`source:${SRC(2)}`, `source:${SRC(7)}`, `source:${SRC(8)}`]));
   });
   it("when the list cannot be read nothing is written over it, and the strip says so with a way to retry", async () => {
     failSettings = 1;
@@ -239,13 +240,14 @@ describe("acceptance 5: a chip shows its state, never stale text, when the item 
     expect(posts.length).toBeGreaterThanOrEqual(1);
     expect(posts[0].body.ids).toHaveLength(5);
   });
-  it("when the state check fails the chip says the state is unknown (it does not pretend)", async () => {
+  it("when the state check fails the chip keeps the last answer it had: a hidden source stays hidden", async () => {
     await boot("/library", plant);
     await waitFor(() => expect(chip(`source:${SRC(1)}`).getAttribute("data-state")).toBe("active"));
     setFetcher(async (url) => (url.startsWith("/workbench/contract/source-states") ? new Response("{}", { status: 500 }) : new Response("{}", { status: 404 })));
     act(() => { window.dispatchEvent(new Event("focus")); }); // the page regains focus: the states are checked again
-    await waitFor(() => expect(chip(`source:${SRC(1)}`).getAttribute("data-state")).toBe("unknown"));
-    expect(chip(`source:${SRC_HIDDEN}`).getAttribute("data-state")).toBe("unknown");
+    await waitFor(() => expect(requestLog().filter((r) => r.url.includes("source-states")).length).toBeGreaterThanOrEqual(2));
+    await new Promise((r) => setTimeout(r, 150));
+    expect(chip(`source:${SRC_HIDDEN}`).getAttribute("data-state")).toBe("suppressed");
     expect(chip(`source:${SRC_HIDDEN}`).textContent).not.toMatch(/SRC-SHARED/);
   });
 });

@@ -10,13 +10,14 @@
 //
 // Titles are NOT part of the list. A title is read from a search hit when the person opens the item and lives in
 // titleMemory() for as long as the same person is on the page; it is never stored, logged or put in the page title.
-import { RECENT_CAP, stateEpoch, type RecentItem } from "./state";
+import { RECENT_CAP, sameItem, stateEpoch, type RecentItem } from "./state";
 
 export const STRIP_N = 8;
 export const LOCKED_MAX = RECENT_CAP - STRIP_N;
 
 export type ChipRef = { kind: string; id: string };
-export const keyOf = (x: ChipRef) => `${x.kind}:${x.id}`;
+// ids are compared lower-cased (a uuid typed in upper case is the same item); a document id is a path and stays as it is
+export const keyOf = (x: ChipRef) => `${x.kind}:${x.kind === "document" ? x.id : x.id.toLowerCase()}`;
 
 const plain = (x: RecentItem): RecentItem => (x.locked ? { kind: x.kind, id: x.id, locked: true } : { kind: x.kind, id: x.id });
 
@@ -27,7 +28,7 @@ function dropOldestUnlocked(l: RecentItem[]): boolean {
 }
 
 export function openIn(list: readonly RecentItem[], item: ChipRef): RecentItem[] {
-  if (list.some((x) => keyOf(x) === keyOf(item))) return list.map(plain);
+  if (list.some((x) => sameItem(x, item))) return list.map(plain);
   const out = [{ kind: item.kind, id: item.id } as RecentItem, ...list.map(plain)];
   while (out.filter((x) => !x.locked).length > STRIP_N) dropOldestUnlocked(out);
   // a stored list that already holds more than the registry allows (all locked): the new chip is the one that does not fit
@@ -61,6 +62,12 @@ export function closeSet(list: readonly RecentItem[], scope: CloseScope, key?: s
     case "others": return pick((i) => i !== at);
     case "all": return pick(() => true);
   }
+}
+
+// Close exactly these chips (the ones a confirmation named), if they are still unlocked: whatever else is in the list now stays.
+export function closeKeys(list: readonly RecentItem[], keys: readonly string[]): RecentItem[] {
+  const gone = new Set(keys);
+  return list.filter((x) => x.locked === true || !gone.has(keyOf(x))).map(plain);
 }
 
 export function closeIn(list: readonly RecentItem[], scope: CloseScope, key?: string): RecentItem[] {

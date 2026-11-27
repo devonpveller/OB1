@@ -49,9 +49,10 @@ export async function readSourceStates(ids: string[]): Promise<Map<string, ChipS
 
 export function stateOf(item: { kind: string; id: string }, states: Map<string, ChipState> | null, failed: boolean): ChipState {
   if (item.kind === "source") {
-    if (failed) return "unknown";
-    if (!states) return "checking";
-    return states.get(item.id.toLowerCase()) ?? "checking";
+    // the last answer stands when a re-check fails (a hidden source stays hidden); an id never answered is "unknown" after a failure
+    const known = states?.get(item.id.toLowerCase());
+    if (known) return known;
+    return failed ? "unknown" : "checking";
   }
   if (item.kind === "claim") return titles.get("claim", item.id) ? "active" : "unverified";
   return "active";
@@ -69,6 +70,7 @@ export function chipLabel(item: { kind: string; id: string }, state: ChipState):
       case "erased": return `Erased source (${s})`;
       case "unavailable": return `Source ${s} is no longer available`;
       case "checking": return `${name} ${s}`;
+      case "unknown": return `${name} ${s} (state unknown)`; // never the remembered title: the state is not known
       default: return titles.get("source", item.id) ?? `${name} ${s}`;
     }
   }

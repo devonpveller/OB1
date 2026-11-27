@@ -124,10 +124,14 @@ export function jsonbTextLength(v: unknown): number {
 }
 
 // What was read, made safe: keep the well-formed items, at most the cap.
+// An opaque id is compared lower-cased (the library's ids are uuids: the same item typed in upper case is the same item); a document id is a path and is compared as it is.
+export const sameItem = (a: { kind: string; id: string }, b: { kind: string; id: string }) =>
+  a.kind === b.kind && (a.kind === "document" ? a.id === b.id : a.id.toLowerCase() === b.id.toLowerCase());
 export function normalizeRecent(v: unknown): RecentItem[] | null {
   if (!Array.isArray(v)) return null;
   const out: RecentItem[] = [];
   for (const x of v) {
+    if (isRecentItem(x) && out.some((o) => sameItem(o, x))) continue; // one chip per item, whoever wrote the list
     if (isRecentItem(x)) out.push(x.locked === undefined ? { kind: x.kind, id: x.id } : { kind: x.kind, id: x.id, locked: x.locked });
     if (out.length === RECENT_CAP) break;
   }
@@ -248,6 +252,8 @@ let chains: Record<string, Promise<unknown>> = {};
 let touched: Record<UiKey, number> = { [UI_KEYS.lockedDocument]: 0, [UI_KEYS.lastDocument]: 0, [UI_KEYS.startScreen]: 0, [UI_KEYS.recent]: 0 };
 let loading = false;
 let accountError: string | null = null;
+let serverRecent: RecentItem[] = []; // the last library.recent this page knows the SERVER holds (what a queued write is computed from)
+let recentPending = 0; // library.recent writes queued or running
 let loadedOnce = false; // the account has been read for the person on this page (a failed read leaves it false)
 let snap = 0; // bumped on every change: what useSyncExternalStore watches
 const subs = new Set<() => void>();
@@ -276,6 +282,8 @@ export function resetState() {
   touched = { [UI_KEYS.lockedDocument]: 0, [UI_KEYS.lastDocument]: 0, [UI_KEYS.startScreen]: 0, [UI_KEYS.recent]: 0 };
   loading = false;
   loadedOnce = false;
+  serverRecent = [];
+  recentPending = 0;
   accountError = null;
   emit();
 }
@@ -297,6 +305,7 @@ export async function loadAccountState(): Promise<void> {
       [UI_KEYS.lockedDocument]: s.lockedDocument.version, [UI_KEYS.lastDocument]: s.lastDocument.version,
       [UI_KEYS.startScreen]: s.startScreen.version, [UI_KEYS.recent]: s.recent.version,
     };
+    serverRecent = s.recent.value ?? [];
     if (fresh(UI_KEYS.startScreen)) startScreen = s.startScreen.value;
     if (fresh(UI_KEYS.recent)) recent = s.recent.value ?? [];
     const lk = s.lockedDocument.value ? await resolveDocument(s.lockedDocument.value) : null;
@@ -365,6 +374,42 @@ export function setRecentSaved(items: RecentItem[] | null): Promise<boolean> {
 }
 export function setRecent(items: RecentItem[] | null): void {
   void setRecentSaved(items);
+}
+
+// A CHANGE to the Recently viewed list, not a list: `fn` is applied to the page's copy at once (so the strip answers), and AGAIN, when the
+// write runs, to the list the server holds - so a change never carries a stale copy over what another browser wrote. A write refused as
+// stale reads the server's list and applies `fn` to it once more ("merged"); a change that leaves the list as it is sends nothing.
+export type RecentWrite = "saved" | "merged" | "failed";
+const sameList = (a: RecentItem[], b: RecentItem[]) => JSON.stringify(a) === JSON.stringify(b);
+export function updateRecentSaved(fn: (list: RecentItem[]) => RecentItem[]): Promise<RecentWrite> {
+  const my = epoch;
+  recent = fn(recent); touched[UI_KEYS.recent]++; recentPending++; emit();
+  let merged = false;
+  const run = push<RecentItem[]>(UI_KEYS.recent, async (version) => {
+    let v = version;
+    for (let attempt = 0; ; attempt++) {
+      const base = serverRecent;
+      const next = fn(base);
+      if (sameList(next, base)) return { value: base, version: v }; // nothing to send
+      try {
+        const saved = await saveRecent(next, v);
+        if (epoch === my) serverRecent = next;
+        return saved;
+      } catch (e) {
+        if (!(e instanceof StaleVersion) || attempt > 0) throw e;
+        const s = await loadUiState(); // another browser wrote first: read its list and apply this change on top of it
+        if (epoch !== my) throw e;
+        serverRecent = s.recent.value ?? [];
+        v = s.recent.version; ver[UI_KEYS.recent] = v; merged = true;
+      }
+    }
+  });
+  return run.then((ok) => {
+    if (epoch === my) recentPending--;
+    // the last queued change is done: the page shows what the server holds (a change that was not saved is not shown as kept)
+    if (epoch === my && recentPending === 0) { recent = serverRecent; emit(); }
+    return ok ? (merged ? "merged" : "saved") : "failed";
+  });
 }
 
 // The setters above return nothing (the shell's signature: a click handler fires and forgets). The *Saved variants

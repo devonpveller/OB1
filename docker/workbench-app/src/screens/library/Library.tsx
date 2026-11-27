@@ -16,10 +16,10 @@ import { Link } from "../../shell/Link";
 import { navigate } from "../../lib/router";
 import { ItemPicker, type PickerItem } from "../../components/picker";
 import {
-  getAccountError, getLockedDocument, getRecent, isAccountLoaded, isLoadingState, loadAccountState, recentItemProblem, setRecentSaved,
+  getAccountError, getLockedDocument, getRecent, isAccountLoaded, isLoadingState, loadAccountState, recentItemProblem, updateRecentSaved,
   stateEpoch, subscribeState, type RecentItem,
 } from "../../lib/state";
-import { STRIP_N, closeIn, closeSet, keyOf, lockIn, openIn, type CloseScope } from "../../lib/recent";
+import { STRIP_N, closeKeys, closeSet, keyOf, lockIn, openIn, type CloseScope } from "../../lib/recent";
 import {
   OUTCOME_WHY, STATE_TEXT, addToPlace, chipLabel, isOpenable, itemUrl, readSourceStates, searchMyDocuments, stateOf, whyNotCitable,
   type AddOutcome, type ChipState,
@@ -61,7 +61,7 @@ function useSourceStates(ids: string[], enabled: boolean) {
     const epoch = stateEpoch();
     readSourceStates(ids).then(
       (map) => { if (live && epoch === stateEpoch()) setGot({ key, map, failed: false }); },
-      () => { if (live && epoch === stateEpoch()) setGot({ key, map: null, failed: true }); },
+      () => { if (live && epoch === stateEpoch()) setGot((g) => ({ key, map: g.map, failed: true })); }, // the last answer stands
     );
     return () => { live = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -77,7 +77,8 @@ export function Library(props: ScreenProps) {
 
 type Skipped = { label: string; why: string }[];
 type Result = { title: string; added: number; already: number; notAdded: Skipped; stopped: string | null };
-type Confirm = { scope: CloseScope; target: string; n: number };
+// the exact chips a confirmation named, frozen when it was asked: "yes" closes these and nothing else
+type Confirm = { scope: CloseScope; target: string; keys: string[]; n: number };
 
 function LibraryFor({ route }: ScreenProps) {
   const recent = useSyncExternalStore(subscribeState, getRecent);
@@ -105,15 +106,20 @@ function LibraryFor({ route }: ScreenProps) {
   const [adding, setAdding] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
   const [lockNote, setLockNote] = useState<string | null>(null);
+  const inflight = useRef(0);
   const head = useRef<HTMLHeadingElement>(null);
   const cancelBtn = useRef<HTMLButtonElement>(null);
 
   // the account's list is changed only through here: a refusal (another browser wrote first, or the write failed) is said, not hidden
-  const commit = async (next: RecentItem[]) => {
-    const ok = await setRecentSaved(next);
-    if (ok) setNote(null);
-    else setNote(getAccountError() ? "That change was not saved. Try again." : "Your Recently viewed list changed in another browser, so it was reloaded. Do that again if you still want it.");
-    return ok;
+  // `fn` is a CHANGE, applied to the latest list the server holds when the write runs (never to this page's old copy)
+  const commit = async (fn: (list: RecentItem[]) => RecentItem[]) => {
+    if (inflight.current === 0) setNote(null); // a new burst of changes starts clean; what a change in it says is kept until the next burst
+    inflight.current++;
+    const r = await updateRecentSaved(fn);
+    inflight.current--;
+    if (r === "merged") setNote("Your Recently viewed list had been changed in another browser. Your change was applied on top of that.");
+    else if (r === "failed") setNote(getAccountError() ? "That change was not saved. Try again." : "Your Recently viewed list changed in another browser, so it was reloaded. Do that again if you still want it.");
+    return r !== "failed";
   };
 
   // opening an item (its address is the tab): recorded once the list is known, and only for an item this page can vouch for. A source
@@ -127,7 +133,9 @@ function LibraryFor({ route }: ScreenProps) {
     recorded.current = itemKey;
     const now = getRecent();
     if (now.some((x) => keyOf(x) === itemKey)) return;
-    void commit(openIn(now, openItem));
+    void commit((l) => openIn(l, openItem)).then(() => {
+      if (!getRecent().some((x) => keyOf(x) === itemKey)) setNote(`It was not kept in Recently viewed: ${getRecent().length} chips are held and the list is full. Unlock one.`);
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [itemKey, loaded, itemSettled]);
 
@@ -151,8 +159,9 @@ function LibraryFor({ route }: ScreenProps) {
     setAdding(true); setPicking(null);
     const out: Result = { title, added: 0, already: 0, notAdded: [...skipped], stopped: null };
     for (const it of items) {
+      if (epoch !== stateEpoch()) return; // another person is on the page: nothing more goes out under them
       const o: AddOutcome = await addToPlace(path, it);
-      if (epoch !== stateEpoch()) return; // another person is on the page: this result is not theirs
+      if (epoch !== stateEpoch()) return; // and this result is not theirs
       if (o === "added") out.added++;
       else if (o === "already") out.already++;
       else if (o === "no-document") { out.stopped = OUTCOME_WHY["no-document"]; break; }
@@ -175,22 +184,21 @@ function LibraryFor({ route }: ScreenProps) {
   // ── closes ──
   const ask = (scope: CloseScope, target: string) => {
     setMenu(null);
-    const n = closeSet(recent, scope, scope === "all" ? undefined : target).length;
-    if (n === 0) return;
-    setConfirm({ scope, target, n });
+    const keys = closeSet(recent, scope, scope === "all" ? undefined : target).map(keyOf);
+    if (keys.length === 0) return;
+    setConfirm({ scope, target, keys, n: keys.length });
     setTimeout(() => cancelBtn.current?.focus(), 0);
   };
-  const doClose = async (scope: CloseScope, target: string) => {
-    const next = closeIn(recent, scope, scope === "all" ? undefined : target);
+  const doClose = async (keys: string[]) => {
     const viewed = openItem ? keyOf(openItem) : "";
-    const ok = await commit(next);
-    if (ok && viewed && !next.some((x) => keyOf(x) === viewed) && recent.some((x) => keyOf(x) === viewed)) navigate("/library");
+    const ok = await commit((l) => closeKeys(l, keys));
+    if (ok && viewed && keys.includes(viewed) && !getRecent().some((x) => keyOf(x) === viewed)) navigate("/library");
   };
   const confirmYes = async () => {
     if (!confirm) return;
     const c = confirm;
     setConfirm(null);
-    await doClose(c.scope, c.target);
+    await doClose(c.keys);
     head.current?.focus();
   };
 
@@ -200,7 +208,7 @@ function LibraryFor({ route }: ScreenProps) {
     const r = lockIn(recent, key, !was?.locked);
     if (r.refused) { setLockNote(r.refused); return; }
     setLockNote(null);
-    void commit(r.list);
+    void commit((l) => lockIn(l, key, !was?.locked).list);
   };
 
   const label = (x: RecentItem) => chipLabel(x, stateFor(x));
@@ -270,7 +278,7 @@ function LibraryFor({ route }: ScreenProps) {
                   <div className="rv-actions" role="group" aria-label={`Actions for ${text}`} data-testid="chip-actions">
                     <button type="button" data-testid="act-lock" disabled={busy} onClick={() => toggleLock(key)}>{isLocked ? "Unlock this chip" : "Lock this chip"}</button>
                     <button type="button" data-testid="act-close" disabled={busy || cannotClose} title={cannotClose ? "Unlock it to close it" : undefined}
-                      onClick={() => { setMenu(null); void doClose("one", key); }}>Close</button>
+                      onClick={() => { setMenu(null); void doClose([key]); }}>Close</button>
                     {cannotClose && <span className="meta">Locked: unlock it to close it.</span>}
                     {act("left", "Close left", "Nothing to close to the left")}
                     {act("right", "Close right", "Nothing to close to the right")}
@@ -329,7 +337,7 @@ function LibraryFor({ route }: ScreenProps) {
               aria-describedby={whyNotCitable(openItem, itemState) ? "why-item" : undefined}
               onClick={() => startAdd([openItem])}>{lockedTitle ? `Add to ${lockedTitle}` : "Add to a document"}</button>
             <button type="button" data-testid="item-close" disabled={busy || recent.find((x) => keyOf(x) === itemKey)?.locked === true}
-              onClick={() => { void doClose("one", itemKey); navigate("/library"); }}>Close this tab</button>
+              onClick={() => { void doClose([itemKey]); navigate("/library"); }}>Close this tab</button>
           </div>
           {whyNotCitable(openItem, itemState) && <p className="meta" id="why-item" data-testid="item-add-why">It cannot be added because {whyNotCitable(openItem, itemState)}.</p>}
         </section>

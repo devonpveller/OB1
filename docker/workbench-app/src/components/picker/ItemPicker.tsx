@@ -293,7 +293,7 @@ export function ItemPicker(props: ItemPickerProps) {
           {!tooShort && !found.loading && !found.error && shown.length === 0 && <p className="ip-note" data-testid="picker-empty">Nothing matches. Loosen a filter or change the search.</p>}
         </div>
 
-        <aside className="ip-tray" aria-label="Selected">
+        <div className="ip-tray" role="group" aria-label="Selected">
           <div className="ip-trayh">
             <strong data-testid="picker-nsel" ref={trayHeadRef} tabIndex={-1}>Selected ({n})</strong>
             {n > 0 && <button type="button" className="ip-btn" onClick={clearSel}>Clear</button>}
@@ -311,7 +311,7 @@ export function ItemPicker(props: ItemPickerProps) {
             ))}
           </ul>
           {privCount > 0 && <p className="ip-note"><span className="ip-tag priv">private</span> {privCount} private item{privCount === 1 ? "" : "s"}: they work for you, but anything built from them is not shareable until they are removed.</p>}
-        </aside>
+        </div>
       </div>
 
       <footer className="ip-foot">
