@@ -540,7 +540,7 @@ t("V11b: A (4 versions) has a staged removal and B's create of BYTE-IDENTICAL te
 // V14 (fix round 3): LEGACY files have no owner key, so every legacy document, legacy .trash/.archive file, note and wiki file
 // shares one scope. A whole-tree commit holding A's removed legacy file (or a note) and B's restored legacy document, near-identical
 // or byte-identical text, must not hand B A's versions or A's text through restore-version.
-t("V14: a sweep commit holds A's removed legacy document (or a note) and B's restored legacy document: B's versions stay B's, a restore never writes A's text", async () => {
+t("V14a: a sweep commit holds A's removed legacy document (or a note) and B's restored legacy document: B's versions stay B's, a restore never writes A's text", async () => {
   const bSub = B[SUB_HEADER];
   const SHARED = Array.from({ length: 10 }, (_, k) => `shared paragraph ${k} of a plan two people wrote word for word`).join("\n") + "\n";
   const fm = (title: string, b: string) => `---\ntitle: ${JSON.stringify(title)}\n---\n\n${b}`;
@@ -795,3 +795,67 @@ t("V14: keyed document with unsaved text (small edit / full rewrite), then move 
     }
   }
 });
+
+// V18 (attempt 6, the tester's H20 adapted): the CAS window over HTTP. A's keyed document with unsaved text is trashed / moved (under
+// the documents lock) while B moves its own notes (POST /workbench/notes/move -> moveNote -> gitMv, NOT under the vault lock): a
+// note-move commit can land inside A's window and make A's `update-ref HEAD <new> <old>` refuse. The move is then retried on the new
+// HEAD; it never falls back to a path commit of the on-disk text. Checked: no commit lost, none mixed, A keeps v1..v3, A gains no
+// version, the unsaved text stays unsaved; and if A's move ever answers 5xx it was undone (the document is where it was).
+for (const kind of ["rewrite", "small"] as const) {
+  t(`V18 CAS window: A's keyed trash/move with an unsaved ${kind} edit racing B's unlocked note moves`, async () => {
+    const bigT = (tag: string) => Array.from({ length: 14 }, (_, i) => `line ${i} of a document long enough for git to pair it ${tag}`).join("\n") + "\n";
+    const rewriteT = (tag: string) => Array.from({ length: 14 }, (_, i) => `completely new sentence ${i * 7} written over the old one ${tag} zz`).join("\n") + "\n";
+    const fm = (t: string, text: string) => `---\ntitle: ${JSON.stringify(t)}\n---\n\n${text}`;
+    const key = (l: Awaited<ReturnType<typeof versions>>) => l.versions.map((x) => x.commit);
+    let a5 = 0;
+    for (let i = 0; i < 6; i++) {
+      const verb = i % 2 ? "move" : "trash";
+      const p = await newDoc(A, `v18 ${run} ${kind} ${i}`, bigT("v1"));
+      await edit(p, fm("v18", bigT(`v2-${i}`)));
+      await edit(p, fm("v18", bigT(`v3-${i}`)));
+      const before = key(await versions(p));
+      const bNotes: string[] = [];
+      for (let k = 0; k < 4; k++) {
+        const from = `v18in${run}/n-${kind}-${i}-${k}.md`;
+        const w = await call("PUT", `/workbench/notes/${from}?commit=1`, { content: `---\ntitle: v18\n---\n\nB note ${i} ${k}\n` }, B);
+        assertEquals(w.status, 200, w.text);
+        bNotes.push(from);
+      }
+      const unsaved = fm("v18", kind === "small" ? bigT(`v3-${i}`) + "one unsaved line\n" : rewriteT(`v18-${i}`));
+      const pu = await call("PUT", `${D}/file?path=${q(p)}`, { content: unsaved }); // an autosave
+      assertEquals(pu.status, 200, pu.text);
+      const h0 = (await git("rev-parse", "HEAD")).trim();
+      const aCall = verb === "move" ? call("POST", `${D}/move`, { from: p, to_folder: `v18-${kind}-${i}` }) : call("POST", `${D}/trash`, { path: p });
+      const bCalls = bNotes.map((from, k) => new Promise((r) => setTimeout(r, k * 4 + (i % 3) * 2)).then(() => call("POST", "/workbench/notes/move", { from, to_folder: `v18out${run}` }, B)));
+      const [ra, ...rb] = await Promise.all([aCall, ...bCalls]);
+      const subjects = (await git("log", "--format=%H\t%s", `${h0}..HEAD`)).trim().split("\n").filter(Boolean).map((l) => l.split("\t"));
+      for (let k = 0; k < bNotes.length; k++) {
+        if (rb[k].status === 200) assert(subjects.some(([, s]) => s.startsWith(`notes: move notes/${bNotes[k]} `)), `round ${i}: B's note move ${k} answered 200 but its commit is not on the branch (lost)`);
+      }
+      const aC = subjects.filter(([, s]) => /^documents: (trash|move) /.test(s)).map(([h]) => h);
+      if (ra.status === 200) {
+        assertEquals(aC.length, 1, `round ${i}: A's ${verb} answered 200: exactly one move commit`);
+        const at = String(verb === "move" ? ra.json.to : ra.json.trashed);
+        const names = (await git("diff-tree", "--root", "-r", "-z", "--no-renames", "--name-only", "--no-commit-id", aC[0])).split("\0").filter(Boolean);
+        assertEquals(names.sort(), [p, at].sort(), `round ${i}: A's commit holds only A's two paths`);
+        assertEquals((await git("diff-tree", "-r", "-M", "--name-status", "--no-commit-id", aC[0])).trim().split("\t")[0], "R100", `round ${i}: a pure rename`);
+        const after = await versions(at);
+        assertEquals(key(after), before, `round ${i}: v1..v3 kept, no version added`);
+        assertEquals(after.unsaved_changes, true);
+        assertEquals(await textOf(at), unsaved);
+      } else {
+        a5++;
+        assertEquals(aC.length, 0, `round ${i}: A's move failed (${ra.status}): it committed nothing`);
+        assertEquals(await textOf(p), unsaved, "and was undone: the document is where it was, with its unsaved text");
+        assertEquals(key(await versions(p)), before);
+      }
+      for (const [h, s] of subjects.filter(([, s]) => s.startsWith("notes: move "))) {
+        const names = (await git("diff-tree", "--root", "-r", "-z", "--no-renames", "--name-only", "--no-commit-id", h)).split("\0").filter(Boolean);
+        assert(names.length === 2 && names.every((n) => n.startsWith("notes/")), `round ${i}: B's "${s}" holds only B's note paths`);
+      }
+      await git("add", "-A");
+      await git("-c", "user.name=t", "-c", "user.email=t@l", "commit", "-q", "--allow-empty", "-m", "v18: clear");
+    }
+    console.log(`V18 ${kind}: A answered 5xx (undone) in ${a5} of 6 rounds`);
+  });
+}
