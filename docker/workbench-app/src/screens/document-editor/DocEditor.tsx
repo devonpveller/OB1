@@ -29,6 +29,7 @@ import {
 } from "./editor-data";
 import { InThisDoc } from "./InThisDoc";
 import { locatePassage } from "./coverage-data";
+import { CoverageTab, useCoverage } from "./CoverageTab";
 import { SourceDrawer, type DrawerTarget } from "./SourceDrawer";
 
 type Load = { s: "loading" } | { s: "gone" } | { s: "failed" } | { s: "ready"; doc: Loaded };
@@ -107,6 +108,9 @@ function Writing({ path, docRef, subject, first }: { path: string; docRef: strin
   const [lockErr, setLockErr] = useState("");
   const [drawer, setDrawer] = useState<DrawerTarget | null>(null);
   const selRef = useRef("");
+  // rwr-doc-coverage: the Coverage tab's state lives here so its number shows on the tab while another tab is open
+  const covCtx = { path, subject, selection, locate: (t: string) => locatePassage(view.current, t) };
+  const cov = useCoverage(covCtx);
 
   // ── the saving machine ──
   const doSave = useCallback(async (commit: boolean): Promise<boolean> => {
@@ -374,7 +378,7 @@ function Writing({ path, docRef, subject, first }: { path: string; docRef: strin
           <div className="card doc-edit"><div className="doc-editor" ref={host} data-testid="doc-editor" /></div>
           <p className="meta doc-keys" data-testid="doc-keys">Tab or Esc leaves the text box · Ctrl+] indents · Ctrl+S saves a version · Alt+Enter beside a citation opens its source · Ctrl+Alt+R researches the selection</p>
         </div>
-        <InThisDoc ctx={{ path, subject, selection, locate: (t) => locatePassage(view.current, t) }} />
+        <InThisDoc panels={{ coverage: <CoverageTab cov={cov} ctx={covCtx} /> }} badges={{ coverage: cov.open }} />
       </div>
       {drawer && <SourceDrawer key={drawer.kind + drawer.id} target={drawer} docPath={path} subject={subject} onClose={() => { setDrawer(null); view.current?.focus(); }} />}
     </section>

@@ -342,9 +342,7 @@ describe("the In this doc tab strip", () => {
     const strip = screen.getByTestId("in-this-doc");
     expect(within(strip).getAllByRole("tab").map((t) => t.textContent)).toEqual(["References", "Coverage", "Topics", "Refine", "History", "Details", "Export"]);
     expect(DOC_TABS.length).toBe(7);
-    // a tab whose own item has landed is built (rwr-doc-coverage: Coverage, tested in coverage.test.tsx); each built tab joins this set
-    const BUILT = new Set(["coverage"]);
-    for (const t of DOC_TABS.filter((x) => !BUILT.has(x.id))) {
+    for (const t of DOC_TABS.filter((x) => x.id !== "coverage")) { // Coverage is built (rwr-doc-coverage, test/coverage.test.tsx)
       fireEvent.click(within(strip).getByRole("tab", { name: t.label }));
       const panel = within(strip).getByRole("tabpanel");
       expect(panel.textContent).toMatch(new RegExp(`${t.label} is not built yet`));

@@ -89,7 +89,7 @@ describe("the tab reads your gaps and the count equals the open ones", () => {
     gaps.plantGap(A, { path: "documents/k-a/Stack/gateway.md", text: "ALPHA another document's gap" });
     await openDoc(CPU, false);
     await waitFor(() => expect(screen.getByTestId("dtab-coverage").textContent).toBe("Coverage 2"));
-    expect(screen.getByTestId("cov-count").textContent).toBe("2");
+    expect(screen.getByTestId("dbadge-coverage").textContent).toBe("2");
     fireEvent.click(screen.getByTestId("dtab-coverage"));
     await waitFor(() => expect(within(screen.getByTestId("cov-mine")).getAllByRole("listitem").length).toBe(2));
     expect(within(screen.getByTestId("cov-researching")).getAllByRole("listitem").length).toBe(1);
