@@ -4,3 +4,6 @@ init-ui-state.sql text eol=lf
 revert-ui-state.sql text eol=lf
 init-settings-tags.sql text eol=lf
 revert-settings-tags.sql text eol=lf
+init-notify-prefs.sql text eol=lf
+revert-notify-prefs.sql text eol=lf
+check-notify-prefs.sql text eol=lf

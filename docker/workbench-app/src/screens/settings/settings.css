@@ -36,3 +36,11 @@
 .settings .seg-o.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
 .settings .seg-o input { position: absolute; opacity: 0; width: 1px; height: 1px; }
 .settings .seg-o:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* Notifications (rwr-notify-prefs): two columns that wrap, so nothing overflows inside main at 400 px. */
+.settings .np-cols { gap: 8px 16px; }
+.settings .np-col { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px; min-width: 0; }
+.settings .np-h { font-size: 12px; color: var(--muted); min-width: 7.5em; }
+.settings .np-on, .settings .np-mail { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-width: 0; }
+.settings .np-mail input[type="checkbox"], .settings .np-on input[type="checkbox"] { width: 18px; height: 18px; }
+.settings .np-mail { color: var(--muted); }

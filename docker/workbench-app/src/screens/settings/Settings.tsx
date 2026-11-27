@@ -6,8 +6,9 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import "./settings.css";
 import { Link } from "../../shell/Link";
+import { Notifications } from "./Notifications";
 import {
-  LEGEND, TAG_LABEL, loadSettings, resetSetting, saveSetting, sectionsOf, show,
+  LEGEND, NOTIFY_SECTION, TAG_LABEL, loadSettings, resetSetting, saveSetting, sectionsOf, show,
   type Loaded, type Section, type Setting,
 } from "./settings-data";
 
@@ -229,7 +230,9 @@ export function Settings({ subject = null, whoAnswered = true }: { subject?: str
               <>
                 <h2 id="h-section" data-testid="section-title">{current.title}</h2>
                 {current.tier === "admin" && <p className="meta">These settings are one value for everybody.</p>}
-                {current.keys.map((k) => (
+                {current.tier === "user" && current.section === NOTIFY_SECTION ? (
+                  <Notifications rows={current.keys} onRow={onRow} onStale={load} epoch={epoch} />
+                ) : current.keys.map((k) => (
                   <Field key={k.key} row={k} onRow={onRow} onStale={load} epoch={epoch} />
                 ))}
               </>
