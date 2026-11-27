@@ -21,7 +21,7 @@
 #      this item, versions_test.ts, run there) and its test stage (and the viewer, for the sweep)
 #   4. the lab: database (chain + fixtures.sql; the workbench as ob_app_memory, non-superuser), stub embedder, stub
 #      research service, PostgREST + the OB1 rest Caddy, the workbench (vault = a temp dir, a real git repo)
-#   5. src/documents/versions_integration_test.ts (V1-V13) against the workbench; the migration case (check-document-
+#   5. src/documents/versions_integration_test.ts (V1-V14) against the workbench; the migration case (check-document-
 #      versions.sql; revert, init, revert: a schema-only pg_dump byte-compared before and after; init again); the
 #      planted markers searched in the workbench log; then the isolation sweep, response walk on and off
 #   6. the evidence gate, then teardown and the leftover checks
@@ -267,8 +267,8 @@ try {
   Check (Wait-Http "http://$P-wb:8000/health" 90) 'the workbench is up'
   if (-not $Red -and -not $NoSweep) { Check (Wait-Http "http://$P-viewer:8080/workspace/" 90) 'the front door (the viewer) answers' }
 
-  Write-Host '[5a] the versions integration test (V1-V13): restore v11 at v14, stable numbers across moves, compare = git diff, two users, planted markers, edge cases, concurrency, the table'
-  $o = Lab-Docker 1500 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
+  Write-Host '[5a] the versions integration test (V1-V14): restore v11 at v14, stable numbers across moves, compare = git diff, two users, planted markers, edge cases, concurrency, the table'
+  $o = Lab-Docker 3600 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
     '-e', "DOCS_TEST_BASE=http://$P-wb:8000", '-e', "DOCS_TEST_KEY=$key", '-e', 'DOCS_TEST_VAULT=/vault', '-e', 'WIKI_GIT_DIR=/vault',
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '--allow-run', 'src/documents/versions_integration_test.ts')
@@ -279,7 +279,7 @@ try {
   if ($Red) {
     # the base has no routes: every HTTP case fails; V10 reads this tree's table (the chain is this tree's) and may pass
     Check ($sum.Success -and [int]$sum.Groups[3].Value -ge 11) "RED: the versions cases fail on the base $BaseSha ($($sum.Value))"
-  } else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 15) "the versions integration test ($($sum.Value))" }
+  } else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 23) "the versions integration test ($($sum.Value))" }
   if (-not $sum.Success -or $sum.Groups[1].Value -ne 'ok') { Save 'versions-integration-tail.log' (($clean -split "`n" | Select-Object -Last 60) -join "`n") }
 
   if (-not $Red) {

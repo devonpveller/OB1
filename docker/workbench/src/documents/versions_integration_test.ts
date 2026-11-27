@@ -760,3 +760,38 @@ t("V17: a hand-made commit with the app's `trash` subject that holds A's trash A
   await call("POST", `${D}/restore-version`, { path: lbA, version: 1 }, B);
   assert(!hasOld((await textOf(lbA)), older), "a restore never writes A's older text");
 });
+
+// V14 (attempt 5, the tester's H16 adopted): a keyed document with UNSAVED autosave text - a small edit and a full rewrite -
+// moved, trashed and archived through the API keeps v1..v3 (numbers and commits), gains no version, and the unsaved text stays
+// unsaved (the app's move commits the staged rename only); restore and unarchive keep the numbers too.
+t("V14: keyed document with unsaved text (small edit / full rewrite), then move / trash / archive and back: v1..v3 keep their numbers, the text stays unsaved", async () => {
+  const bigT = (tag: string) => Array.from({ length: 14 }, (_, i) => `line ${i} of a document long enough for git to pair it ${tag}`).join("\n") + "\n";
+  const rewriteT = (tag: string) => Array.from({ length: 14 }, (_, i) => `completely new sentence ${i * 7} written over the old one ${tag} zz`).join("\n") + "\n";
+  const fm = (t: string, text: string) => `---\ntitle: ${JSON.stringify(t)}\n---\n\n${text}`;
+  const key = (l: Awaited<ReturnType<typeof versions>>) => JSON.stringify(l.versions.map((x) => [x.version, x.commit]));
+  for (const verb of ["move", "trash", "archive"] as const) {
+    for (const kind of ["small", "rewrite"] as const) {
+      const p = await newDoc(A, `v14-${verb}-${kind}-${run}`, bigT("v1"));
+      await edit(p, fm("v14", bigT("v2")));
+      await edit(p, fm("v14", bigT("v3")));
+      const before = key(await versions(p));
+      const unsaved = fm("v14", kind === "small" ? bigT("v3") + "one unsaved line\n" : rewriteT(verb));
+      const pu = await call("PUT", `${D}/file?path=${q(p)}`, { content: unsaved }); // an autosave: no commit
+      assertEquals(pu.status, 200, pu.text);
+      const r = verb === "move" ? await call("POST", `${D}/move`, { from: p, to_folder: `v14-${run}-${verb}-${kind}` }) : await call("POST", `${D}/${verb}`, { path: p });
+      assertEquals(r.status, 200, r.text);
+      const at = String(verb === "move" ? r.json.to : verb === "trash" ? r.json.trashed : r.json.archived);
+      const after = await versions(at);
+      assertEquals(key(after), before, `${verb}/${kind}: v1..v3 keep their numbers and commits, no version was added`);
+      assertEquals(after.unsaved_changes, true, "the unsaved text is still unsaved");
+      assertEquals(await textOf(at), unsaved, "and still on disk");
+      if (verb !== "move") {
+        const back = await call("POST", `${D}/${verb === "trash" ? "restore" : "unarchive"}`, { path: at });
+        assertEquals(back.status, 200, back.text);
+        const bp = String(back.json.restored ?? back.json.unarchived);
+        assertEquals(key(await versions(bp)), before, `${verb}/${kind}: and back`);
+        assertEquals(await textOf(bp), unsaved);
+      }
+    }
+  }
+});
