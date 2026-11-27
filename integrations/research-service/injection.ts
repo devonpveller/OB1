@@ -76,8 +76,13 @@ export interface ScreenResult {
   quarantined: Array<{ url: string; title: string; reason: string }>;
 }
 
-/** Screen fetched sources for prompt injection; quarantine the attackers. */
-export async function screenSources(deps: Deps, pages: Page[], concurrency = 4): Promise<ScreenResult> {
+/** Screen fetched sources for prompt injection; quarantine the attackers.
+ *  rwr-research-sources: `failClosed(page)` true (a community-class page) turns a detector ERROR into a quarantine
+ *  (reason `detect-error-fail-closed`): a forum post the screen could not judge is not read. Every other page keeps
+ *  the fail-open above (INJECTION_GUARD still hardens the synthesis). */
+export async function screenSources(
+  deps: Deps, pages: Page[], concurrency = 4, failClosed: (p: Page) => boolean = () => false,
+): Promise<ScreenResult> {
   const verdicts = new Array<InjectionVerdict>(pages.length);
   let i = 0;
   await Promise.all(
@@ -89,6 +94,7 @@ export async function screenSources(deps: Deps, pages: Page[], concurrency = 4):
   const quarantined: Array<{ url: string; title: string; reason: string }> = [];
   pages.forEach((p, idx) => {
     if (verdicts[idx].injected) quarantined.push({ url: p.url, title: p.title, reason: verdicts[idx].reason });
+    else if (verdicts[idx].reason === "detect-error" && failClosed(p)) quarantined.push({ url: p.url, title: p.title, reason: "detect-error-fail-closed" });
     else clean.push(p);
   });
   return { clean, quarantined };

@@ -178,7 +178,7 @@ export function narrowContract(parent: ResolvedContract | null, requested: unkno
 /** What a branch inherits from its parent's options: the run shape, never the parent's inlet. */
 export function inheritOptions(parent: Record<string, unknown>, contract: ResearchContract | null, extra: Record<string, unknown> = {}): Record<string, unknown> {
   const keep = ["mode", "disable_web_search", "sources_only", "gap_research", "dry_run", "seed_sources",
-                "confidence_floor", "deadline_at", "depth", "freshness"];
+                "confidence_floor", "deadline_at", "depth", "freshness", "sources"];
   const o: Record<string, unknown> = {};
   for (const k of keep) if (parent[k] !== undefined) o[k] = parent[k];
   if (contract) o.contract = contract;

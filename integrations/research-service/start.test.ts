@@ -96,7 +96,7 @@ Deno.test("previewBody is exactly what would leave: topic, question, public link
   const v = await formForDoor(PARSED(), mk([]));
   assert(v.ok);
   const body = previewBody(v, { depth: "deep" }, CEIL);
-  assertEquals(Object.keys(body).sort(), ["depth", "links", "ok", "question", "topic"]);
+  assertEquals(Object.keys(body).sort(), ["depth", "links", "ok", "question", "sources", "topic"]); // rwr-research-sources: + the run's source mode (a fixed word)
   const s = JSON.stringify(body);
   for (const m of Object.values(MK)) assertFalse(s.includes(m), `a personal marker reached the preview: ${m}`);
   assertFalse(s.includes(OWNER.sub));
@@ -109,7 +109,7 @@ Deno.test("a refusal's preview carries the refusal code only", async () => {
   assertFalse(v.ok);
   const b = previewBody(v, {}, CEIL);
   assertEquals(b.ok, false);
-  assertEquals(Object.keys(b).sort(), ["ok", "refusal"]);
+  assertEquals(Object.keys(b).sort(), ["ok", "refusal", "sources"]); // rwr-research-sources: + the run's source mode
 });
 
 Deno.test("approved_question: the model is not asked again, the gate still decides, a changed question is reported", async () => {

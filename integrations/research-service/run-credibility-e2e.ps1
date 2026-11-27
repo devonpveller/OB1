@@ -231,7 +231,7 @@ try {
   if (-not (Start-Db $dbA $false)) { throw 'db A' }
   $o = Dk run --rm --label $label --network $net -e "CRED_E2E_DB_HOST=$dbA" -e "CRED_E2E_DB_PASSWORD=$pw" `
     --mount "type=bind,src=$curatorDir,dst=/curator,readonly" -e CURATOR_DIR=/curator `
-    $rsTestTag deno test --allow-net --allow-env --allow-read credibility.e2e.test.ts credibility-twins.e2e.test.ts credibility-attempt4.e2e.test.ts credibility-attempt5.e2e.test.ts credibility-attempt6.e2e.test.ts credibility-figure-filed.e2e.test.ts
+    $rsTestTag deno test --allow-net --allow-env --allow-read credibility.e2e.test.ts credibility-twins.e2e.test.ts credibility-attempt4.e2e.test.ts credibility-attempt5.e2e.test.ts credibility-attempt6.e2e.test.ts credibility-figure-filed.e2e.test.ts research-sources.e2e.test.ts
   Save 'credibility-e2e.log' $o
   $sum = Summary $o
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0' -and [int]$sum.Groups[2].Value -ge 6) "credibility e2e: $($sum.Value)"

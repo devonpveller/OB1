@@ -178,7 +178,7 @@ describe("the preview and what Start sends (acceptance 2)", () => {
     expect(jobs[0].question).toBe(shown);
     expect(starts[0].depth).toBe("deep");
     expect(starts[0].attach).toEqual({ kind: "document", path: "documents/alice/alpha-new.md" });
-    expect(Object.keys(starts[0]).sort()).toEqual(["approved_question", "attach", "depth", "question"]); // no owner, no user
+    expect(Object.keys(starts[0]).sort()).toEqual(["approved_question", "attach", "depth", "question", "sources"]); // no owner, no user (rwr-research-sources: + the Sources choice)
   });
   it("shows the topic, the public pages and the limits of the chosen depth, and the depth's estimate", async () => {
     await openAt(startResearchHref(NEW));

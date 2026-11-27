@@ -10,6 +10,7 @@ import {
   LEGEND, TAG_LABEL, loadSettings, resetSetting, saveSetting, sectionsOf, show,
   type Loaded, type Section, type Setting,
 } from "./settings-data";
+import { readSourcesOptions } from "../research-start/start-data";
 
 type Mode = { state: "loading" } | { state: "failed" } | { state: "ok"; data: Loaded };
 
@@ -28,7 +29,9 @@ type Status = { kind: "idle" } | { kind: "saving" } | { kind: "saved" } | { kind
 // at once. A value the server refuses is shown with the server's own words and the field goes back to what is stored.
 // `epoch` reads which person this screen is for right now: a save answer that lands after the person changed is dropped
 // (the earlier person's value is never shown to the next one).
-function Field({ row, onRow, onStale, epoch }: { row: Setting; onRow: (r: Setting) => void; onStale: () => void; epoch: () => number }) {
+// rwr-research-sources: `lock` is the plain reason a setting cannot be changed right now (research.sources_default while an
+// admin has community sources switched off); the control is disabled and the reason is shown.
+function Field({ row, onRow, onStale, epoch, lock = null }: { row: Setting; onRow: (r: Setting) => void; onStale: () => void; epoch: () => number; lock?: string | null }) {
   const id = useId();
   const effective = row.is_default ? row.default : row.value;
   const [draft, setDraft] = useState(effective === null || effective === undefined ? "" : String(effective));
@@ -91,7 +94,7 @@ function Field({ row, onRow, onStale, epoch }: { row: Setting; onRow: (r: Settin
       <div role="radiogroup" aria-labelledby={id + "-l"} className="seg" data-testid="control">
         {choices.map(([v, text]) => (
           <label key={v || "default"} className={"seg-o" + (chosen === v ? " on" : "")}>
-            <input type="radio" name={id} value={v} checked={chosen === v} disabled={busy}
+            <input type="radio" name={id} value={v} checked={chosen === v} disabled={busy || !!lock}
               onChange={() => (v === "" ? reset() : save(v))} />
             <span>{text}</span>
           </label>
@@ -116,6 +119,7 @@ function Field({ row, onRow, onStale, epoch }: { row: Setting; onRow: (r: Settin
       <div className="s-main">
         <label className="s-label" id={id + "-l"} htmlFor={editable && row.type !== "enum" ? id : undefined}>{row.label}</label>
         {row.help && <p className="meta">{row.help}</p>}
+        {lock && <p className="meta" data-testid={"locked-" + row.key}>{lock}</p>}
         <p className="meta">{row.is_default ? `Using the default: ${show(row.default)}` : (row.tier === "admin" ? "Set by an admin" : "Set by you")}</p>
       </div>
       <div className="s-side">
@@ -167,6 +171,15 @@ export function Settings({ subject = null, whoAnswered = true }: { subject?: str
       },
     });
   }, []);
+
+  // rwr-research-sources: whether community sources may be chosen (the admin switch), read with the page
+  const [srcLock, setSrcLock] = useState<string | null>(null);
+  useEffect(() => {
+    let on = true;
+    if (mode.state !== "ok" || !mode.data.user.some((r) => r.key === "research.sources_default")) return;
+    readSourcesOptions().then((o) => { if (on) setSrcLock(o.community_allowed ? null : o.reason); });
+    return () => { on = false; };
+  }, [mode.state]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const data = mode.state === "ok" ? mode.data : null;
   const yours: Section[] = data ? sectionsOf("user", data.user) : [];
@@ -230,7 +243,8 @@ export function Settings({ subject = null, whoAnswered = true }: { subject?: str
                 <h2 id="h-section" data-testid="section-title">{current.title}</h2>
                 {current.tier === "admin" && <p className="meta">These settings are one value for everybody.</p>}
                 {current.keys.map((k) => (
-                  <Field key={k.key} row={k} onRow={onRow} onStale={load} epoch={epoch} />
+                  <Field key={k.key} row={k} onRow={onRow} onStale={load} epoch={epoch}
+                    lock={k.key === "research.sources_default" && current.tier === "user" ? srcLock : null} />
                 ))}
               </>
             ) : <p className="empty" data-testid="settings-empty">There are no settings to show yet. <Link to="/">Back to Home</Link></p>}

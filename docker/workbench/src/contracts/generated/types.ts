@@ -363,6 +363,8 @@ export type Claim = {
   verdict: string | null;
   corroborations: number;
   contradicted_by_newer: boolean;
+  community_only?: boolean | null;
+  community_consensus?: boolean | null;
 };
 
 export type ClaimSourceEdge = {
@@ -1518,12 +1520,19 @@ export type ResearchStartDepth = {
   wall_ms: number;
 } | null;
 
+export type ResearchStartOptions = {
+  sources_default: string;
+  community_allowed: boolean;
+  reason: string | null;
+};
+
 export type ResearchStartPreview = {
   question: string | null;
   topic: string | null;
   links: Array<string>;
   depth: ResearchStartDepth;
   refusal: string | null;
+  sources: string | null;
   ok: boolean;
 };
 
@@ -1533,6 +1542,7 @@ export type ResearchStartRequest = {
   depth?: string;
   passages?: Array<string>;
   approved_question?: string;
+  sources?: string;
 };
 
 export type ResearchStarted = {
@@ -1541,6 +1551,7 @@ export type ResearchStarted = {
   links: Array<string>;
   depth: ResearchStartDepth;
   refusal: string | null;
+  sources: string | null;
   started: boolean;
   job_id: string | null;
 };

@@ -72,6 +72,15 @@ export const Claim = z.object({
   contradicted_by_newer: z.boolean().openapi({
     description: "a claim or source created after this claim contradicts it",
   }),
+  // rwr-research-sources (slot 750)
+  community_only: z.boolean().nullable().optional().openapi({
+    description: "grounded only in community sources (forums, Q&A sites, social posts): shown with the label 'Community " +
+      "only - not a credible rating'; its confidence is capped under the floor. null under a metadata filter",
+  }),
+  community_consensus: z.boolean().nullable().optional().openapi({
+    description: "two or more independent communities state it - a separate marker, never part of the confidence. " +
+      "null under a metadata filter",
+  }),
 }).openapi("Claim");
 
 export const Claims = z.object({

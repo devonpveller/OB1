@@ -19,7 +19,8 @@ import { ForDocumentBar } from "../../shell/ForDocumentBar";
 import { useToast } from "../../shell/Toast";
 import { Link } from "../../shell/Link";
 import {
-  DEPTHS, MAX_QUESTION, bodyOf, documentFromSearch, limitsText, previewResearch, readMyDocuments, refusalText, sameBody, startResearch,
+  DEPTHS, MAX_QUESTION, SOURCES, bodyOf, documentFromSearch, limitsText, previewResearch, readMyDocuments, readSourcesOptions, refusalText, sameBody,
+  sourcesText, startResearch, type Sources, type SourcesOptions,
   type DocChoice, type Depth, type PreviewOut, type StartBody,
 } from "./start-data";
 import "./start.css";
@@ -61,6 +62,10 @@ function Dialog({ search, debounceMs }: { search: string; debounceMs: number }) 
   const [docState, setDocState] = useState<DocState>(fromRef ? "checking" : "none");
   const [question, setQuestion] = useState("");
   const [depth, setDepth] = useState<Depth>("standard");
+  // rwr-research-sources: preset from the person's own default, per mount (never kept in the browser)
+  const [sources, setSources] = useState<Sources>("credible");
+  const [srcOpts, setSrcOpts] = useState<SourcesOptions | null>(null);
+  const srcTouched = useRef(false);
   const [prev, setPrev] = useState<Prev>(null);
   const [starting, setStarting] = useState(false);
   const [note, setNote] = useState<string | null>(null); // the last start's outcome, in words
@@ -69,6 +74,11 @@ function Dialog({ search, debounceMs }: { search: string; debounceMs: number }) 
 
   useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
   useEffect(() => { qRef.current?.focus(); }, []);
+  useEffect(() => {
+    let on = true;
+    readSourcesOptions().then((o) => { if (!on) return; setSrcOpts(o); if (!srcTouched.current || !o.community_allowed) setSources(o.sources_default); });
+    return () => { on = false; };
+  }, []);
 
   // the prefilled document: read through the owner-scoped state and file routes. Not the person's own, trashed
   // and missing are one answer; the title is shown only when it is theirs and live.
@@ -89,9 +99,9 @@ function Dialog({ search, debounceMs }: { search: string; debounceMs: number }) 
 
   const body = useMemo<StartBody | null>(() => {
     if (question.trim() === "") return null;
-    if (attach === "doc") return doc ? bodyOf({ kind: "document", path: doc.path }, question, depth) : null;
-    return bodyOf({ kind: "none" }, question, depth);
-  }, [question, attach, doc, depth]);
+    if (attach === "doc") return doc ? bodyOf({ kind: "document", path: doc.path }, question, depth, sources) : null;
+    return bodyOf({ kind: "none" }, question, depth, sources);
+  }, [question, attach, doc, depth, sources]);
   const bodyKey = body ? JSON.stringify(body) : "";
 
   // the preview: after the person stops changing things (any change restarts the wait), one read; a late answer to
@@ -137,6 +147,7 @@ function Dialog({ search, debounceMs }: { search: string; debounceMs: number }) 
       void refresh(body);
     } else if (out.kind === "gone") setNote("That document is not available.");
     else if (out.kind === "unavailable") setNote("Research is not available right now. Nothing was started.");
+    else if (out.kind === "community_off") { setSources("credible"); setSrcOpts((o) => (o ? { ...o, community_allowed: false, reason: out.reason } : o)); setNote(out.reason + " Nothing was started."); }
     else setNote("Could not start the research. Nothing was started. Try again.");
   };
 
@@ -183,6 +194,21 @@ function Dialog({ search, debounceMs }: { search: string; debounceMs: number }) 
                 onClick={() => setDepth(d.id)}><span>{d.label}</span><span className="meta">{d.blurb}</span></button>
             ))}
           </div>
+        </div>
+
+        <div className="fld" role="group" aria-labelledby={uid + "s"}>
+          <span className="lab" id={uid + "s"}>Sources</span>
+          <div className="seg">
+            {SOURCES.map((s) => {
+              const off = s.id === "community" && !(srcOpts?.community_allowed ?? false);
+              return (
+                <button key={s.id} type="button" className={"opt" + (sources === s.id ? " sel" : "")} aria-pressed={sources === s.id}
+                  disabled={off} aria-describedby={off ? uid + "sr" : undefined} data-testid={"sources-" + s.id}
+                  onClick={() => { srcTouched.current = true; setSources(s.id); }}><span>{s.label}</span><span className="meta">{s.blurb}</span></button>
+              );
+            })}
+          </div>
+          {srcOpts && !srcOpts.community_allowed && <p className="meta" id={uid + "sr"} data-testid="sources-off-reason">{srcOpts.reason}</p>}
         </div>
 
         <div className="leaves" data-testid="leaves" aria-live="polite">
@@ -232,6 +258,7 @@ function Leaves({ body, current, onRetry }: { body: StartBody | null; current: P
         <span className="meta" data-testid="leaves-links">Public pages it will read: {r.links.map((l, i) => <code key={i} className="leaves-link">{l}</code>)}</span>
       )}
       {r.depth && <span className="meta" data-testid="leaves-limits">{limitsText(r.depth)}</span>}
+      {r.sources && <span className="meta" data-testid="leaves-sources">{sourcesText(r.sources)}</span>}
     </span>
   );
 }

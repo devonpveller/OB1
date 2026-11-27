@@ -12,10 +12,10 @@ import { createRoute } from "../deps.ts";
 import { identityOf } from "../../middleware/identity.ts";
 import { BadRequest } from "../logic/scope.ts";
 import { parseStart } from "../logic/research_start.ts";
-import { doorClient, type DoorClient, previewStart, startResearch, type StartDeps, Unavailable } from "../repo/research_start.ts";
+import { CommunityOff, doorClient, type DoorClient, previewStart, sourcesOptions, startResearch, type StartDeps, Unavailable } from "../repo/research_start.ts";
 import { NotFound } from "../repo/lifecycle.ts";
 import { ErrorBody } from "../schemas/common.ts";
-import { RSX, StartPreview, StartRequestBody, StartStarted } from "../schemas/research_start.ts";
+import { ResearchOptions, RSX, StartPreview, StartRequestBody, StartStarted } from "../schemas/research_start.ts";
 import { body, type ContractApp, type ContractDeps, errors, fail, json, op, send } from "./http.ts";
 
 const T = ["research start"];
@@ -39,6 +39,7 @@ export function registerResearchStart(app: ContractApp, deps: ContractDeps, seam
     newId: seams.newId,
   };
   const unavailable = (c: Parameters<typeof fail>[0], e: unknown) => {
+    if (e instanceof CommunityOff) return c.json({ error: e.message, code: "community_off" }, 403);
     if (e instanceof Unavailable) return c.json({ error: e.message }, 503);
     return fail(c, e);
   };
@@ -54,6 +55,21 @@ export function registerResearchStart(app: ContractApp, deps: ContractDeps, seam
   };
   app.use(START_PATH, jsonBody);
   app.use(`${START_PATH}/preview`, jsonBody);
+
+  // rwr-research-sources: what the Start dialog opens with - the caller's own default, and whether community may be chosen
+  op(app, createRoute({
+    method: "get", path: `${START_PATH}/options`, operationId: "researchStartOptions", tags: T,
+    summary: "the Sources choice the Start research dialog opens with, and whether community sources may be chosen",
+    description: "The caller's own research.sources_default (never anyone else's) and the admin switch research.community_allowed, " +
+      "with the plain reason when it is off. Reads only; writes nothing.",
+    responses: { 200: json(ResearchOptions, RSX.options, "the dialog's Sources choice"), ...errors },
+  }), async (c) => {
+    try {
+      return send(c, ResearchOptions, await sourcesOptions(deps.db, await who(c)));
+    } catch (e) {
+      return fail(c, e);
+    }
+  });
 
   op(app, createRoute({
     method: "post", path: `${START_PATH}/preview`, operationId: "researchStartPreview", tags: T,
@@ -94,5 +110,6 @@ export function registerResearchStart(app: ContractApp, deps: ContractDeps, seam
       if (e instanceof BadRequest || e instanceof NotFound) return fail(c, e);
       return unavailable(c, e);
     }
+    // (403 community_off: unavailable() above answers it with the plain reason)
   });
 }
