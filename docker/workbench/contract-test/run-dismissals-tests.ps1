@@ -258,8 +258,8 @@ try {
   Save 'dismissals-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)|^(ok|FAILED) \||^F\d:|error:|Assertion|=> ' }) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
-  if ($Red) { Check ($sum.Success -and [int]$sum.Groups[3].Value -ge 7 -and $clean -notmatch 'F[1-7]: [^
-]*\.\.\. ok') "RED: every route case F1-F7 fails on the base $BaseSha ($($sum.Value); F8 reads only the database, which is this tree's chain, and the pool close pass)" }
+  if ($Red) { Check ($sum.Success -and [int]$sum.Groups[3].Value -ge 6 -and $clean -notmatch 'D[1-6]: [^
+]*\.\.\. ok') "RED: every route case D1-D6 fails on the base $BaseSha ($($sum.Value); D7 holds vacuously with no route and D8 reads only the database, which is this tree's chain)" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0 -and [int]$sum.Groups[2].Value -ge 8) "the dismissals integration test ($($sum.Value))" }
 
   if (-not $Red) {
