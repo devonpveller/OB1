@@ -127,6 +127,8 @@ function fold(n: ts.Node, env: Env = new Map()): string | null {
   return null;
 }
 
+const PARSED = new Map<string, ts.SourceFile>();
+
 export function check(files: Files, opts: { paths?: Paths; baseUrl?: string } = {}): string[] {
   const paths = opts.paths ?? {};
   const baseUrl = opts.baseUrl ?? "";
@@ -134,7 +136,11 @@ export function check(files: Files, opts: { paths?: Paths; baseUrl?: string } = 
   for (const [file, text] of files) {
     const inPicker = file.startsWith(PICKER_DIR);
     const kind = file.endsWith("x") ? ts.ScriptKind.TSX : /\.(js|mjs|cjs)$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
-    const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, file.endsWith(".jsx") ? ts.ScriptKind.JSX : kind);
+    // a file's tree is parsed once per (name, text): every case re-checks the whole real tree plus one planted file, and the tree has grown
+    // with each screen (the image build's vitest worker timed out on this file's ~30 cases once Cast and voices was added)
+    const key = file + "|" + text;
+    let sf = PARSED.get(key);
+    if (!sf) { sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, file.endsWith(".jsx") ? ts.ScriptKind.JSX : kind); PARSED.set(key, sf); }
     const pieces: string[] = [];
     // `const NAME = <foldable>` anywhere in the file (two passes so a const may build on an earlier one)
     const env: Env = new Map();
