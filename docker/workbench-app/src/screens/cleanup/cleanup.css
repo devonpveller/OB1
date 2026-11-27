@@ -1,0 +1,22 @@
+/* Cleanup (rwr-cleanup). Colours come from the shared tokens only (light and dark); the row, tab and confirmation styles are
+   the Removals screen's (styles.css .rm-*). Nothing here may widen the page at 400 px. */
+.cleanup { max-width: 1100px; }
+.cleanup h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.cleanup h3 { margin: 0 0 4px; font-size: 13px; font-weight: 600; }
+.cl-review h2 { font-size: 15px; }
+.cleanup .rm-tabs { flex-wrap: wrap; }
+.cl-bulk { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.cl-bulk p { margin: 0; }
+.cl-review { display: flex; flex-direction: column; gap: 12px; padding: 12px; border: 1px solid var(--line-strong); border-radius: 10px; min-width: 0; }
+.cl-review ul { margin: 0; padding-left: 18px; overflow-wrap: anywhere; }
+.cl-result { padding: 8px 12px; border-radius: 8px; background: var(--accent-soft); color: var(--accent-strong); border: 1px solid var(--accent); overflow-wrap: anywhere; }
+.cl-evidence { margin: 0; padding-left: 18px; overflow-wrap: anywhere; }
+.cleanup .rm-list > li { min-width: 0; }
+.cleanup .rm-head { flex-wrap: wrap; min-width: 0; }
+.cleanup .rm-row, .cleanup .typed, .cleanup .rm-erase, .cleanup .lost-stays { min-width: 0; max-width: 100%; }
+.cleanup .rm-facts dd { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 520px) {
+  .cleanup .rm-facts { grid-template-columns: 1fr; }
+  .cleanup .rm-facts dt { margin-top: 4px; }
+  .cleanup .typed input { max-width: 100%; }
+}

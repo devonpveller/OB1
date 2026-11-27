@@ -25,6 +25,9 @@ const CLEANUP_WRITE = /\/cleanup\/(sources\/\{id\}\/(sever|erase)|process-all|to
 // 7. rwr-flags-api: a flag by id is a per-user row the fixture does not seed (the caller's own or 404); GET/PATCH /flags/{id}
 //    are exercised by src/contracts/flags_integration_test.ts (run-flags-tests.ps1). Create and list are checked here.
 const FLAG_BY_ID = /\/flags\/\{id\}/;
+// 8. rwr-cleanup: a dismissal by id is a per-user row the fixture does not seed (the caller's own or 404); DELETE
+//    /cleanup/dismissals/{id} is exercised by src/contracts/dismissals_integration_test.ts. List and create are checked here.
+const DISMISSAL_BY_ID = /\/cleanup\/dismissals\/\{id\}/;
 
 // 9. rwr-doc-toplace-api (slot 630): DELETE /documents/pending-refs/{id} and POST .../{id}/place act on a queue row by id - a
 //    per-user row the fixture does not seed (the caller's own or 404). The integration test (src/contracts/toplace_integration_test.ts,
@@ -95,7 +98,7 @@ hooks.beforeEach((transaction, done) => {
     transaction.request.headers['X-Test-Sub'] = 'lab-caster-0001';
   }
   const code = String(transaction.expected && transaction.expected.statusCode);
-  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || FLAG_BY_ID.test(String(transaction.name || '')) || PENDING_BY_ID.test(String(transaction.name || '')) || PRIVATE_BY_ID.test(String(transaction.name || '')) || isResearchStart(transaction) || isGapSkipped(transaction);
+  transaction.skip = !(/^2\d\d$/.test(code) || code === '501') || NEEDS_RESEARCH.test(String(transaction.name || '')) || CLEANUP_WRITE.test(String(transaction.name || '')) || FLAG_BY_ID.test(String(transaction.name || '')) || PENDING_BY_ID.test(String(transaction.name || '')) || DISMISSAL_BY_ID.test(String(transaction.name || '')) || PRIVATE_BY_ID.test(String(transaction.name || '')) || isResearchStart(transaction) || isGapSkipped(transaction);
   done();
 });
 

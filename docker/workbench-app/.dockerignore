@@ -16,3 +16,6 @@ e2e
 # the shared fake settings back end is used by the vitest suite too (test/appearance.test.tsx)
 !e2e/appearance-fake.mjs
 !e2e/appearance-fake.d.mts
+# the shared fake Cleanup back end is used by the vitest suite too (test/cleanup.test.tsx)
+!e2e/cleanup-fake.mjs
+!e2e/cleanup-fake.d.mts
