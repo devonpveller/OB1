@@ -1329,6 +1329,7 @@ try {
     '-e', "DB_HOST=$db", '-e', 'DB_USER=postgres', '-e', "DB_PASSWORD=$pw", '-e', 'WIKI_GIT_DIR=/vault', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', "OPEN_BRAIN_REST_TOKEN=$(& $tok 'WIKI')",
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '--allow-run', 'src/middleware/body_size_lab_test.ts')
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+  Save 'body-size-lab-full.log' $clean
   Save 'body-size-lab.log' ((($clean -split "`n") | Where-Object { $_ -match '^body-size|^\s+(workbench|viewer) |\.\.\. (ok|FAILED)|^(ok|FAILED) \||error:|AssertionError' }) -join "`n")
   foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '^body-size|^\s+(workbench|viewer) |\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
