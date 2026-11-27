@@ -71,12 +71,12 @@ test("a CREATE is written at once and the next maybeFlushWikiPages flushes it (n
   assert.ok(posted.some((p) => p.slug === "content/person/person-b"));
 });
 
-test("an unchanged page is not written (stable keys honoured) and its row is still queued", async () => {
+test("an unchanged page is not written (stable keys honoured); its row is queued only if the database row differs (rw-wiki-unchanged-rows)", async () => {
   const before = statSync(A).mtimeMs;
   const same = readFileSync(A, "utf8");
   assert.equal(m.writeWikiPage(A, same), false);
   assert.equal(statSync(A).mtimeMs, before);
-  assert.equal(m.queuedWikiPageCount(), 1);
+  assert.equal(m.queuedWikiPageCount(), 0, "not queued outright: checked against the database at the flush");
   await m.flushWikiPages();
 });
 

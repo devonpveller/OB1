@@ -390,6 +390,10 @@ export const EXIT_COMPLETED_WITH_FAILURES = 3;
 const _queue = new Map();     // slug -> row (last write wins)
 const _unsynced = new Map();  // slug -> error (the page's file exists; its row did not land)
 const _pathOf = new Map();    // slug -> the absolute path it was queued from (round 2: staged files)
+const _unchanged = new Map(); // slug -> { row, absPath }: file unchanged; queued only if the DB row is missing or differs
+let _skippedRun = 0;   // unchanged pages whose row was already current this run (not sent)
+let _repairedRun = 0;  // unchanged pages whose row was missing/different (queued)
+let _unverifiedRun = 0; // unchanged pages the row check could not read (not sent; the next cycle checks again)
 let _synced = 0;
 let _hiddenRun = 0; // rows neither returned nor reported withheld this run (unsynced, nothing written)
 let _heldRun = 0; // rows a database guard withheld this run (not synced, not unsynced)
@@ -425,6 +429,83 @@ export function queueWikiPage(absPath, markdown) {
   }
 }
 
+/**
+ * An UNCHANGED page (rw-wiki-unchanged-rows): its row is not queued outright. It is checked against the database at the next
+ * flush (resolveUnchangedWikiPages) and queued only when the row is missing or its content differs from the file. Before
+ * this every compile re-sent every unchanged page (~3.9k rows, each through the privacy guards), every cycle.
+ */
+export function queueWikiPageIfRowDiffers(absPath, markdown) {
+  const rel = vaultRel(absPath);
+  if (!rel) return null;
+  let row;
+  try { row = parseWikiPage(rel, markdown); } catch { return queueWikiPage(absPath, markdown); } // reports the build failure as before
+  if (_queue.has(row.slug)) return row; // this run already queued the newer content
+  _unchanged.set(row.slug, { row, absPath });
+  return row;
+}
+
+const IN_CHUNK = () => Math.max(1, Number(process.env.WIKI_PAGES_VERIFY_CHUNK || "40"));
+const inList = (slugs) => slugs.map((s) => `"${String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`).join(",");
+
+/**
+ * Of these rows (parseWikiPage output), the slugs whose database row is MISSING or whose title/body differ. One READ per
+ * chunk (slug, title, body: no write, no guard trigger). THROWS when the database cannot be read. A body that is not a JSON
+ * array tells nothing (a stub, an old proxy): every row then counts as differing, the behaviour before this check.
+ */
+export async function wikiRowsNeedingWrite(rows) {
+  const need = new Set();
+  const list = rows.filter((r) => r && r.slug);
+  for (let i = 0; i < list.length; i += IN_CHUNK()) {
+    const part = list.slice(i, i + IN_CHUNK());
+    const url = `${OB_URL()}/rest/v1/wiki_pages?select=slug,title,body&slug=in.(${encodeURIComponent(inList(part.map((x) => x.slug)))})`;
+    const get = () => fetch(url, { headers: { ...restAuth() }, signal: AbortSignal.timeout(TIMEOUT_MS()) });
+    let r;
+    try { r = await get(); } catch (e) {
+      if (/timed? ?out|aborted/i.test(String(e?.message))) throw e; // a slow database: not retried here
+      r = await get(); // a stale pooled connection (ECONNRESET): one more try, a read is safe to repeat
+    }
+    const text = await r.text();
+    if (!r.ok) throw new Error(`GET wiki_pages: ${r.status} ${text.slice(0, 200)}`);
+    let back = null;
+    try { const j = JSON.parse(text); if (Array.isArray(j)) back = new Map(j.map((x) => [x && x.slug, x])); } catch { /* tells nothing */ }
+    for (const x of part) {
+      const have = back && back.get(x.slug);
+      if (!have || have.body !== (x.body || "") || have.title !== (x.title || "")) need.add(x.slug);
+    }
+  }
+  return need;
+}
+
+// Pages a guard withheld are recorded (hashes only) and have no row by design: never re-sent every cycle.
+function recordedWithheldTest() {
+  const rec = readWithheldRecord(); // once per check, not once per page
+  return (slug) => _withheld.has(slug) || !!rec[slugHash(slug)];
+}
+
+/** Queue the unchanged pages whose row needs writing; drop the rest. A database that cannot be read queues nothing (changed pages still go). */
+export async function resolveUnchangedWikiPages() {
+  if (!_unchanged.size) return { checked: 0, queued: 0 };
+  const isHeld = recordedWithheldTest();
+  const items = [..._unchanged.values()].filter((x) => !_queue.has(x.row.slug) && !isHeld(x.row.slug));
+  _unchanged.clear();
+  if (!items.length) return { checked: 0, queued: 0 };
+  let need;
+  try {
+    need = await wikiRowsNeedingWrite(items.map((x) => x.row));
+  } catch (e) {
+    _unverifiedRun += items.length;
+    warnOnce("unchanged-row check", e);
+    return { checked: items.length, queued: 0, unverified: items.length };
+  }
+  let queued = 0;
+  for (const x of items) {
+    if (!need.has(x.row.slug)) { _skippedRun += 1; continue; }
+    _queue.set(x.row.slug, x.row); _pathOf.set(x.row.slug, x.absPath); _unsynced.delete(x.row.slug);
+    queued++;
+  }
+  _repairedRun += queued;
+  return { checked: items.length, queued };
+}
 
 // ── ROW FIRST, THEN THE FILE (rw-p1b-ready round 2) ────────────────────────
 // Tester attempt 2's 24 h soak: two reconcile samples named
@@ -448,7 +529,7 @@ export function queueWikiPage(absPath, markdown) {
 //     file-before-row gap of a new page is one upsert, not a batch. (A row
 //     first would leave a row without a file for the reconcile's whole walk.)
 //   - an unchanged page (exactly, or but for volatileKeys) is not written;
-//     its row is queued as before.
+//     its row is queued only if the database row is missing or differs (rw-wiki-unchanged-rows).
 // The callers' reads see staged content through readWikiPageFile /
 // wikiPageExists (generate-wiki's collision check), so a staged page is not
 // invisible to its own compile.
@@ -496,7 +577,8 @@ export function writeWikiPage(absPath, content, { volatileKeys = null } = {}) {
       _staged.set(absPath, tmp);
     }
   }
-  queueWikiPage(absPath, content);
+  if (same) queueWikiPageIfRowDiffers(absPath, content);
+  else queueWikiPage(absPath, content);
   return !same;
 }
 
@@ -529,6 +611,7 @@ export function queuedWikiPageCount() {
  * { sent, failed }; failed slugs land in the unsynced ledger with the error.
  */
 export async function flushWikiPages() {
+  await resolveUnchangedWikiPages();
   if (!_queue.size) return { sent: 0, failed: 0 };
   const rows = [..._queue.values()];
   _queue.clear();
@@ -591,6 +674,7 @@ export async function flushWikiPages() {
 // Per-batch flush: call after each page write. Flushes when the queue holds a
 // batch (WIKI_PAGES_BATCH, default 25), so rows land during the run.
 export async function maybeFlushWikiPages() {
+  if (_unchanged.size >= Math.max(BATCH(), 500)) await resolveUnchangedWikiPages();
   if (_createPending) { _createPending = false; return flushWikiPages(); }
   if (_queue.size >= BATCH()) return flushWikiPages();
   return { sent: 0, failed: 0 };
@@ -616,6 +700,11 @@ export async function finishWikiPages(tag = "compile", { outDir } = {}) {
   _heldRun = 0;
   const hiddenRun = _hiddenRun;
   _hiddenRun = 0;
+  if (_skippedRun || _repairedRun || _unverifiedRun) {
+    console.log(`[wiki-pages] ${tag}: ${_skippedRun} unchanged page(s) already current in the database (not sent), ${_repairedRun} repaired` +
+      (_unverifiedRun ? `, ${_unverifiedRun} not checked (database unreadable; next cycle)` : ""));
+  }
+  _skippedRun = 0; _repairedRun = 0; _unverifiedRun = 0;
   if (!u.length) {
     console.log(`[wiki-pages] ${tag}: all ${synced} written page row(s) landed` + (heldRun ? ` (${heldRun} withheld by the database, files left out)` : ""));
     return 0;
@@ -720,10 +809,22 @@ export function isVaultSlug(slug) {
   if (!s || s.includes("\\") || s.includes("\0") || s.startsWith("/") || /^[A-Za-z]:/.test(s)) return false;
   return s.split("/").every((seg) => seg !== "" && seg !== "." && seg !== "..");
 }
+// Retry back-off (rw-wiki-unchanged-rows): a row that keeps failing is not re-sent before base * 2^(attempts-1), capped.
+// An abandoned statement keeps running server-side, so a re-send inside this window would stack on it.
+export const backoffMs = (attempts) => {
+  const base = Number(process.env.WIKI_UNSYNCED_BACKOFF_BASE_MS ?? "120000");
+  const cap = Number(process.env.WIKI_UNSYNCED_BACKOFF_MAX_MS ?? "1800000");
+  return Math.min(cap, base * 2 ** Math.max(0, attempts - 1));
+};
+const _inflight = new Set(); // slugs this process has a send outstanding for
 export function rememberUnsyncedRows(outDir, list, tag) {
   const at = new Date().toISOString();
   return updateUnsynced(unsyncedFile(outDir), (rows) => {
-    for (const x of list) rows[x.slug] = { error: String(x.error).slice(0, 300), tag, at };
+    for (const x of list) {
+      // The send may still be running on the server (the abort only closes the connection): count it as outstanding and back off.
+      const attempts = (rows[x.slug]?.attempts || 0) + 1;
+      rows[x.slug] = { error: String(x.error).slice(0, 300), tag, at, attempts, nextAt: Date.now() + backoffMs(attempts) };
+    }
     return Object.keys(rows).length;
   });
 }
@@ -739,8 +840,16 @@ export function rememberUnsyncedRows(outDir, list, tag) {
 export async function retryUnsyncedRows({ outDir, vaultDir = process.env.WIKI_GIT_DIR || "/wiki", log = console.log } = {}) {
   const file = unsyncedFile(outDir);
   const seen = readUnsynced(file); // a snapshot; the outcome is applied under the lock below
-  const slugs = Object.keys(seen);
-  if (!slugs.length) return { retried: 0, landed: 0, failed: 0, dropped: 0, rejected: 0 };
+  const all = Object.keys(seen);
+  if (!all.length) return { retried: 0, landed: 0, failed: 0, dropped: 0, rejected: 0 };
+  // Back off and dedupe: a slug whose backoff window is open, or that this process is still sending, waits for a later cycle.
+  const nowMs = Date.now();
+  const slugs = all.filter((sl) => !_inflight.has(sl) && !(Number(seen[sl]?.nextAt) > nowMs));
+  const waiting = all.length - slugs.length;
+  if (!slugs.length) {
+    log(`[wiki-pages] ${waiting} unsynced row(s) waiting out their retry back-off (none due)`);
+    return { retried: 0, landed: 0, failed: 0, dropped: 0, rejected: 0, waiting };
+  }
   const root = nodePath.resolve(vaultDir);
   const batch = [];
   const gone = [];
@@ -769,7 +878,29 @@ export async function retryUnsyncedRows({ outDir, vaultDir = process.env.WIKI_GI
   const landedSlugs = [];
   const failedAgain = new Map();
   const heldSlugs = [];
-  const rep = await upsertWikiPagesIsolated(batch);
+  // Claim the batch under the lock BEFORE sending: until it settles, a concurrent or later retry sees it as outstanding.
+  const claimedAt = Date.now();
+  for (const x of batch) _inflight.add(x.slug);
+  const alreadyThere = [];
+  let rep;
+  try {
+    updateUnsynced(file, (rows) => {
+      for (const x of batch) if (rows[x.slug]) rows[x.slug] = { ...rows[x.slug], sentAt: new Date(claimedAt).toISOString(), nextAt: claimedAt + backoffMs((rows[x.slug].attempts || 0) + 1) };
+    });
+    // A row that DID land after the client gave up (the statement ran on) is current: it is removed, not re-sent.
+    try {
+      const need = await wikiRowsNeedingWrite(batch);
+      const isHeld = recordedWithheldTest();
+      const todo = batch.filter((x) => need.has(x.slug) && !isHeld(x.slug));
+      for (const x of batch) if (!need.has(x.slug)) alreadyThere.push(x.slug);
+      rep = await upsertWikiPagesIsolated(todo);
+    } catch (e) {
+      rep = { written: [], withheld: [], hidden: [], refused: [], failed: batch.map((x) => ({ slug: x.slug, error: String(e?.message || e) })) };
+    }
+  } finally {
+    for (const x of batch) _inflight.delete(x.slug);
+  }
+  landedSlugs.push(...alreadyThere);
   landedSlugs.push(...rep.written);
   heldSlugs.push(...rep.withheld, ...rep.refused);
   for (const f of rep.failed) failedAgain.set(f.slug, f.error.slice(0, 300));
@@ -794,12 +925,17 @@ export async function retryUnsyncedRows({ outDir, vaultDir = process.env.WIKI_GI
   updateUnsynced(file, (rows) => {
     const same = (slug) => rows[slug] && seen[slug] && rows[slug].at === seen[slug].at;
     for (const slug of [...landedSlugs, ...gone, ...rejected, ...heldSlugs]) if (same(slug)) delete rows[slug];
-    for (const [slug, error] of failedAgain) if (rows[slug]) rows[slug] = { ...rows[slug], error, at: new Date().toISOString() };
+    for (const [slug, error] of failedAgain) {
+      if (!rows[slug]) continue;
+      const attempts = (rows[slug].attempts || 0) + 1;
+      rows[slug] = { ...rows[slug], error, at: new Date().toISOString(), attempts, nextAt: Date.now() + backoffMs(attempts) };
+    }
   });
   log(`[wiki-pages] retried ${slugs.length} row(s) left unsynced by a database outage: ${landedSlugs.length} landed, ` +
     `${failedAgain.size} failed again, ${gone.length} dropped (file gone), ${rejected.length} rejected (not a vault slug)` +
+    (alreadyThere.length ? `, ${alreadyThere.length} already current in the database (not re-sent)` : "") + (waiting ? `, ${waiting} waiting out their back-off` : "") +
     (heldSlugs.length ? `, ${heldSlugs.length} withheld by a privacy guard (not retried, files left out)` : ""));
-  const res = { retried: slugs.length, landed: landedSlugs.length, failed: failedAgain.size, dropped: gone.length, rejected: rejected.length };
+  const res = { retried: slugs.length, landed: landedSlugs.length, failed: failedAgain.size, dropped: gone.length, rejected: rejected.length, ...(waiting ? { waiting } : {}) };
   return heldSlugs.length ? { ...res, withheld: heldSlugs.length } : res;
 }
 
@@ -807,8 +943,9 @@ export async function retryUnsyncedRows({ outDir, vaultDir = process.env.WIKI_GI
 export function _resetWikiPagesForTests() {
   _queue.clear();
   _unsynced.clear();
+  _unchanged.clear();
   _withheld.clear();
-  _synced = 0;
+  _synced = 0; _skippedRun = 0; _repairedRun = 0; _unverifiedRun = 0;
   warnedKinds.clear();
 }
 
