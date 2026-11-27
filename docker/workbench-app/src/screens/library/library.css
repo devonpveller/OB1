@@ -1,0 +1,48 @@
+/* The Library shell (rwr-lib-shell). Every rule is under .library (test/library-css-scope.test.ts); colour only through the tokens
+   whose AA contrast pairs the app already tests. Nothing here may be wider than main at 400 px: the tabs and the chips wrap, and a
+   chip's text breaks and shrinks inside it. */
+.library .tabs { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--line); }
+.library .tabs li { min-width: 0; max-width: 100%; }
+.library .tabs a { display: block; padding: 8px 12px; border: 1px solid transparent; border-bottom: 0; border-radius: 8px 8px 0 0; color: var(--fg-2); text-decoration: none; overflow-wrap: anywhere; }
+.library .tabs a:hover { background: var(--sunken); }
+.library .tabs a[aria-current="page"] { background: var(--panel); border-color: var(--line); color: var(--accent-strong); font-weight: 600; }
+.library .tab-item { max-width: 260px; }
+
+.library .strip { gap: 8px; }
+.library .strip-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.library .strip-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.library .strip-chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.library .rv-chip { position: relative; display: inline-flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; padding: 2px 4px 2px 10px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--panel-2); }
+.library .rv-chip.cur { border-color: var(--accent); background: var(--accent-soft); }
+.library .rv-chip[data-locked="true"] { border-color: var(--amber-line); background: var(--amber-soft); }
+.library .rv-chip[data-state="suppressed"], .library .rv-chip[data-state="unlinked"], .library .rv-chip[data-state="erased"], .library .rv-chip[data-state="unavailable"] { border-style: dashed; color: var(--fg-2); }
+.library .rv-open { min-width: 0; max-width: 100%; overflow-wrap: anywhere; color: var(--fg); text-decoration: none; padding: 2px 0; }
+.library a.rv-open:hover { text-decoration: underline; }
+.library .rv-lock { flex: none; font-size: 11px; color: var(--amber-text); }
+.library .rv-menu { flex: none; border: 0; background: transparent; padding: 2px 8px; border-radius: 999px; }
+.library .rv-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; flex-basis: 100%; padding: 6px 0 4px; min-width: 0; }
+.library .rv-actions button { font-size: 12px; }
+
+.library .strip-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.library .strip-actions button { min-width: 0; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+.library .danger-line { border-color: var(--danger); color: var(--danger); }
+.library .note { margin: 0; color: var(--amber-text); background: var(--amber-soft); border: 1px solid var(--amber-line); border-radius: 6px; padding: 6px 10px; overflow-wrap: anywhere; }
+.library .err { margin: 0; color: var(--danger); overflow-wrap: anywhere; }
+.library .empty { margin: 0; color: var(--fg-2); }
+
+.library .confirm { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--danger); border-radius: 8px; background: var(--danger-soft); min-width: 0; }
+.library .confirm p { margin: 0; overflow-wrap: anywhere; }
+.library .confirm-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.library .result { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--sunken); overflow-wrap: anywhere; }
+.library .result p { margin: 0; }
+.library .result ul { margin: 0; padding-left: 18px; }
+
+.library .item { gap: 8px; }
+.library .item h2 { margin: 0; font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
+.library .item-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.library .item-actions button { min-width: 0; max-width: 100%; overflow-wrap: anywhere; text-align: left; }
+.library .soon-line { font-weight: 600; }
+@media (max-width: 520px) {
+  .library .tab-item { max-width: 100%; }
+}

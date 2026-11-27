@@ -26,6 +26,9 @@ export type ItemPickerProps = {
   scopes?: PickerScope[];
   onScopeChange?: (s: PickerScope) => void;
   initialQuery?: string;
+  /** offer only items of these kinds (e.g. ["document"] when the screen is choosing a document): the same search, the same
+   *  filters, the same tray - the rows of any other kind are dropped before anything is counted or shown */
+  onlyKinds?: string[];
   defaultSelected?: PickerItem[];
   /** keys ("kind:id") the caller already holds; offered as "hide what is already linked" and marked on rows */
   alreadyLinked?: ReadonlySet<string>;
@@ -94,7 +97,8 @@ export function ItemPicker(props: ItemPickerProps) {
 
   const found = useLibrarySearch(query, scope, { mineSearch, debounceMs: props.debounceMs });
   const ctx = useMemo(() => ({ now: props.now ?? Date.now(), linked: alreadyLinked }), [props.now, alreadyLinked]);
-  const pool = useMemo(() => found.items.filter((i) => inScope(i, scope)), [found.items, scope]);
+  const onlyKinds = props.onlyKinds;
+  const pool = useMemo(() => found.items.filter((i) => inScope(i, scope) && (!onlyKinds || onlyKinds.includes(i.kind))), [found.items, scope, onlyKinds]);
   const shown = useMemo(() => sortItems(applyFilters(pool, filters, ctx), sort), [pool, filters, ctx, sort]);
   const missing = useMemo(() => missingFacets(pool), [pool]);
 

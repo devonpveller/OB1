@@ -13,3 +13,6 @@ e2e
 # the shared fake flags back end is used by the vitest suite too (test/flag-buttons.test.tsx)
 !e2e/flags-fake.mjs
 !e2e/flags-fake.d.mts
+# the shared fake Library back end is used by the vitest suite too (test/library.test.tsx)
+!e2e/library-fake.mjs
+!e2e/library-fake.d.mts

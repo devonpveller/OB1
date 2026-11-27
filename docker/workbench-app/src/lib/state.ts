@@ -248,6 +248,7 @@ let chains: Record<string, Promise<unknown>> = {};
 let touched: Record<UiKey, number> = { [UI_KEYS.lockedDocument]: 0, [UI_KEYS.lastDocument]: 0, [UI_KEYS.startScreen]: 0, [UI_KEYS.recent]: 0 };
 let loading = false;
 let accountError: string | null = null;
+let loadedOnce = false; // the account has been read for the person on this page (a failed read leaves it false)
 let snap = 0; // bumped on every change: what useSyncExternalStore watches
 const subs = new Set<() => void>();
 const emit = () => { snap++; subs.forEach((f) => f()); };
@@ -258,6 +259,7 @@ export const getStartScreen = (): StartScreen | null => startScreen;
 export const getRecent = (): RecentItem[] => recent;
 export const getAccountError = (): string | null => accountError;
 export const isLoadingState = (): boolean => loading;
+export const isAccountLoaded = (): boolean => loadedOnce;
 export const stateEpoch = (): number => epoch;
 export const stateVersions = (): Readonly<Record<UiKey, number>> => ({ ...ver });
 export function subscribeState(f: () => void): () => void {
@@ -273,6 +275,7 @@ export function resetState() {
   chains = {};
   touched = { [UI_KEYS.lockedDocument]: 0, [UI_KEYS.lastDocument]: 0, [UI_KEYS.startScreen]: 0, [UI_KEYS.recent]: 0 };
   loading = false;
+  loadedOnce = false;
   accountError = null;
   emit();
 }
@@ -301,6 +304,7 @@ export async function loadAccountState(): Promise<void> {
     if (epoch !== my) return;
     if (fresh(UI_KEYS.lockedDocument)) locked = lk;
     if (fresh(UI_KEYS.lastDocument)) last = ls;
+    loadedOnce = true;
     accountError = null;
   } catch (e) {
     if (epoch === my) accountError = msg(e, "the saved state could not be read");

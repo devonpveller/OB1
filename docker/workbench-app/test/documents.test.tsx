@@ -79,7 +79,7 @@ afterEach(() => { vi.restoreAllMocks(); });
 
 describe("the route table's screen field (the shared seam later screens plug into)", () => {
   it("App renders a route's `screen` when it has one, else its placeholder", () => {
-    for (const r of ROUTES) expect(r.path === "/" || r.path.startsWith("/documents") || r.path === "/research/start" || r.path === "/imports" || r.path === "/ideas" || r.path === "/removals" || r.path === "/settings" ? !!r.screen : !r.screen, r.path).toBe(true);
+    for (const r of ROUTES) expect(r.path === "/" || r.path.startsWith("/documents") || r.path === "/library" || r.path.startsWith("/library/") || r.path === "/research/start" || r.path === "/imports" || r.path === "/ideas" || r.path === "/removals" || r.path === "/settings" ? !!r.screen : !r.screen, r.path).toBe(true);
   });
   it("giving an entry a `screen` is the whole change: App renders it with the route's params", () => {
     const def = ROUTES.find((r) => r.path === "/podcasts")!; // a route with no screen yet

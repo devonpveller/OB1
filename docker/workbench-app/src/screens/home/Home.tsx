@@ -4,6 +4,8 @@
 import { useRef, useState, type ReactNode } from "react";
 import { Link } from "../../shell/Link";
 import { PickerResults } from "../../components/picker";
+import { titles } from "../../lib/recent";
+import { itemUrl } from "../library/library-data";
 import {
   ago, ASK_LIMIT, readClaimsWaiting, readDocuments, readIdeas, readNewInLibrary, readPodcasts, readSessions, SESSIONS_LIMIT, SHOW, useCard,
   type CardState,
@@ -72,7 +74,14 @@ function AskBox() {
       <div role="status" aria-live="polite" data-testid="ask-results">
         {asked && (
           <PickerResults key={n} query={asked} limit={ASK_LIMIT} label={"Results for " + asked} testId="ask"
-            open={(_item, content) => <Link to="/library" className="row" data-testid="hit">{content}</Link>} />
+            open={(item, content) => (
+              // a SOURCE opens as its own Library tab, carrying the title this search returned (memory only). A claim opens the Library
+              // as before: the shared search does not yet keep a claim drawn from someone's private report back, so a claim hit is not
+              // vouched for here (rwr-lib-shell findings).
+              item.kind === "source"
+                ? <Link to={itemUrl("source", item.id)} className="row" data-testid="hit" onClick={() => titles.remember("source", item.id, item.title)}>{content}</Link>
+                : <Link to="/library" className="row" data-testid="hit">{content}</Link>
+            )} />
         )}
       </div>
     </section>
