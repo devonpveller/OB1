@@ -209,7 +209,7 @@ export function createRefsFake(opts = {}) {
         for (const [sid, s] of state.sources) {
           if (s.held && s.owner !== who.sub) continue;
           if (s.title.toLowerCase().includes(query.toLowerCase()) || head(s).content.toLowerCase().includes(query.toLowerCase())) {
-            out.push({ kind: "source", id: sid, title: s.title, snippet: head(s).content.slice(0, 80), state: "active", lifecycle: "active", insert: `[[source:${sid}|${s.title}]]`, tags: [] });
+            out.push({ kind: "source", id: sid, title: s.title, snippet: head(s).content.slice(0, 80), state: "active", lifecycle: "active", insert: `[[source:${sid}|${s.title}]]`, tags: s.hidden ? ["hidden in this session"] : [] });
           }
         }
         for (const [cid, c] of state.claims) if (c.text.toLowerCase().includes(query.toLowerCase())) out.push({ kind: "claim", id: cid, title: c.text, snippet: "", state: "active", lifecycle: null, insert: `[[claim:${cid}|${c.text}]]`, tags: [] });

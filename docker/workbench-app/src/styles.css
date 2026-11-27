@@ -285,7 +285,7 @@ a.row:hover { background: var(--bg); }
 .refs-row { min-width: 0; display: flex; flex-direction: column; gap: 4px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); overflow-wrap: anywhere; }
 .refs-inner { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .refs-title { min-width: 0; font-weight: 600; text-align: left; overflow-wrap: anywhere; white-space: normal; }
-.refs-title.linkish { background: none; border: 0; padding: 0; color: var(--accent-strong); text-decoration: underline; cursor: pointer; }
+.refs-title.linkish { min-height: 24px; background: none; border: 0; padding: 0; color: var(--accent-strong); text-decoration: underline; cursor: pointer; }
 .refs-note, .refs-newer, .refs-msg { min-width: 0; overflow-wrap: anywhere; }
 .refs-newer { color: var(--amber-text); }
 .refs-acts { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }

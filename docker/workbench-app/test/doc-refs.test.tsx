@@ -23,6 +23,7 @@ let who: "alice" | "bob" = "alice";
 let bodies: { method: string; url: string; body: any; who: string }[] = [];
 let failPendingGet = false;
 let diffGate: Promise<void> | null = null;
+let afterDiff: (() => void) | null = null;
 const settings = new Map<string, { value: unknown; version: number }>();
 const href = (p: string) => "/documents/d/" + uid(p);
 
@@ -53,6 +54,7 @@ function stub() {
       return j(r.body, r.status);
     }
     const r = fake.handle(who, method, u, body ?? {});
+    if (afterDiff && method === "POST" && path === "/workbench/contract/diff-check") { const f = afterDiff; afterDiff = null; f(); }
     if (r) return j(r.body, r.status);
     if (path === "/workbench/contract/sessions") return j({ sessions: [] });
     if (path === "/workbench/intake/jobs") return j({ jobs: [] });
@@ -84,7 +86,7 @@ const pendingIds = (person: "alice" | "bob" = "alice") => [...fake.state().pendi
 const queueRow = (pred: (r: { source_id: string | null; claim_id: string | null }) => boolean) => pendingIds().find(pred)!;
 
 beforeEach(() => {
-  cleanup(); clearRequestLog(); resetState(); fake.reset(); settings.clear(); who = "alice"; failPendingGet = false; diffGate = null;
+  cleanup(); clearRequestLog(); resetState(); fake.reset(); settings.clear(); who = "alice"; failPendingGet = false; diffGate = null; afterDiff = null;
   window.localStorage.clear(); window.sessionStorage.clear();
   window.history.pushState({}, "", "/");
   stub();
@@ -336,11 +338,24 @@ describe("acceptance 3 (re-pin): it shows what changed before it moves the pin",
     expect(screen.queryByTestId(`repin-view-${REF_POWER}`)).toBeNull();
     expect(sent(/\/repin/).length).toBe(0);
   });
-  it("a refusal on the move (the words left the source in between) changes nothing and is said", async () => {
+  it("when the words leave the source between the view and the click, nothing moves and the view says they are gone", async () => {
     await openRefs();
     fireEvent.click(screen.getByTestId(`repin-${REF_SOCKET}`));
     const move = await screen.findByTestId(`repin-move-${REF_SOCKET}`);
     fake.addRevision(S_SOCKET, "Totally different text.");
+    fireEvent.click(move);
+    await waitFor(() => expect(screen.getByTestId("refs-msg").textContent).toMatch(/changed since you looked/));
+    expect(sent(/\/repin/).length).toBe(0);
+    expect(screen.getByTestId("repin-lost")).toBeTruthy();
+    expect(screen.queryByTestId(`repin-move-${REF_SOCKET}`)).toBeNull();
+    expect(text()).toContain(REF_SOCKET);
+  });
+  it("a refusal from the server on the move itself (the check passed, then the words went) changes nothing and is said", async () => {
+    await openRefs();
+    fireEvent.click(screen.getByTestId(`repin-${REF_SOCKET}`));
+    const move = await screen.findByTestId(`repin-move-${REF_SOCKET}`);
+    // the source changes in the instant between the re-check and the repin: the re-check answers as before, the repin finds no quote
+    afterDiff = () => fake.addRevision(S_SOCKET, "Totally different text.");
     fireEvent.click(move);
     await waitFor(() => expect(screen.getByTestId("refs-msg").textContent).toMatch(/not in revision 4/));
     expect(text()).toContain(REF_SOCKET);

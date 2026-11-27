@@ -16,7 +16,7 @@ import { api, ApiError } from "../../lib/api";
 
 export type PendingRow = { id: string; source_id: string | null; claim_id: string | null; section: string; quote: string; added_from: string; created_at: string };
 export type HolderRow = { origin: string; seq: number; reference_id: string; source_id: string; pinned_revision: number; scope: string; title: string };
-export type Candidate = { kind: string; id: string; title: string; snippet: string };
+export type Candidate = { kind: string; id: string; title: string; snippet: string; tags: string[] };
 export type Diff = { reference_id: string; pinned_revision: number; current_revision: number | null; out_of_date: boolean; equivalent_current_chunk_id: string | null; anchor: string };
 export type RepinResult = { replaces: string; record: { id: string }; insert: string };
 
@@ -34,8 +34,12 @@ export async function readHolders(path: string): Promise<HolderRow[]> {
   if (!data || !Array.isArray(data.references)) throw bad();
   return data.references as HolderRow[];
 }
-export async function addPending(path: string, sourceId: string, from: string): Promise<void> {
-  await api("POST", cq, { path, source_id: sourceId, added_from: from });
+// a cite goes into the queue: a source or a claim, with the section and quote it carried (a re-queue keeps them)
+export async function addPendingRow(path: string, row: { source_id: string | null; claim_id: string | null; section: string; quote: string }, from: string): Promise<void> {
+  await api("POST", cq, {
+    path, ...(row.source_id ? { source_id: row.source_id } : { claim_id: row.claim_id }),
+    ...(row.section ? { section: row.section } : {}), ...(row.quote ? { quote: row.quote } : {}), added_from: from,
+  });
 }
 export async function removePending(id: string): Promise<void> {
   await api("DELETE", `${cq}/${enc(id)}`);
@@ -56,7 +60,7 @@ export async function repin(path: string, referenceId: string): Promise<RepinRes
 export async function findCandidates(path: string, q: string): Promise<Candidate[]> {
   const { data } = await api<any>("GET", `/workbench/documents/candidates?path=${enc(path)}&q=${enc(q)}`);
   if (!data || !Array.isArray(data.candidates)) throw bad();
-  return (data.candidates as any[]).map((c) => ({ kind: String(c.kind), id: String(c.id), title: String(c.title ?? ""), snippet: String(c.snippet ?? "") }));
+  return (data.candidates as any[]).map((c) => ({ kind: String(c.kind), id: String(c.id), title: String(c.title ?? ""), snippet: String(c.snippet ?? ""), tags: Array.isArray(c.tags) ? c.tags.map(String) : [] }));
 }
 export async function diffCheck(referenceIds: string[]): Promise<Map<string, Diff>> {
   const out = new Map<string, Diff>();

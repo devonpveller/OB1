@@ -11,11 +11,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import type { EditorView } from "@codemirror/view";
 import { ApiError } from "../../lib/api";
-import { insertAtCursor } from "../../editor";
+import { EditorSelection } from "@codemirror/state";
 import { protectedSpans } from "../../editor/protected";
 import type { DrawerTarget } from "./SourceDrawer";
 import {
-  addPending, diffCheck, findCandidates, placePending, readChunk, readHolders, readPending, readPinnedWords, readQuality, readSourceTitle,
+  addPendingRow, diffCheck, findCandidates, placePending, readChunk, readHolders, readPending, readPinnedWords, readQuality, readSourceTitle,
   removeAttached, removePending, repin, sectionOf, why, type Candidate, type Diff, type HolderRow, type PendingRow,
 } from "./refs-data";
 
@@ -30,7 +30,8 @@ type Confirm = { kind: "queue" | "attached"; id: string } | null;
 
 export type ReferencesTabProps = {
   path: string;
-  body: string;                                // the text now: where each citation sits is read from it
+  body: string;                                // the text as of the last render: what the lists show
+  getBody: () => string;                       // the text RIGHT NOW: every action reads this, never `body`
   view: MutableRefObject<EditorView | null>;
   save: (commit: boolean) => Promise<boolean>; // the writing surface's own save: the server's holders follow the saved text
   ifSamePerson: <T>(write: () => Promise<T> | T) => Promise<{ ran: true; value: T } | { ran: false }>;
@@ -40,7 +41,7 @@ export type ReferencesTabProps = {
 const NOT_SAME = "Not sent: this page could not confirm that you are still the person who opened this document. Nothing was changed.";
 const QUALITY_LANES = 4;
 
-export function ReferencesTab({ path, body, view, save, ifSamePerson, openSource }: ReferencesTabProps) {
+export function ReferencesTab({ path, body, getBody, view, save, ifSamePerson, openSource }: ReferencesTabProps) {
   const live = useRef(true);
   useEffect(() => { live.current = true; return () => { live.current = false; }; }, []);
   const [pending, setPending] = useState<Load<PendingRow[]>>({ s: "loading" });
@@ -59,8 +60,15 @@ export function ReferencesTab({ path, body, view, save, ifSamePerson, openSource
   const asked = useRef<Set<string>>(new Set());
 
   const loadPending = useCallback(async () => {
-    try { const r = await readPending(path); if (live.current) setPending({ s: "ready", v: r.rows }); }
-    catch { if (live.current) setPending({ s: "failed" }); }
+    try {
+      const r = await readPending(path);
+      if (!live.current) return;
+      setPending({ s: "ready", v: r.rows });
+      // titles are read again on EVERY read of the queue: a source that has become unreadable since must not keep its old title
+      for (const sid of new Set(r.rows.flatMap((x) => (x.source_id ? [x.source_id] : [])))) {
+        readSourceTitle(sid).then((t) => { if (live.current) setTitles((m) => ({ ...m, [sid]: t })); }, () => {});
+      }
+    } catch { if (live.current) setPending({ s: "failed" }); }
   }, [path]);
   const loadHolders = useCallback(async () => {
     try {
@@ -74,16 +82,7 @@ export function ReferencesTab({ path, body, view, save, ifSamePerson, openSource
   const reload = useCallback(() => Promise.all([loadPending(), loadHolders()]).then(() => undefined), [loadPending, loadHolders]);
   useEffect(() => { void loadPending(); void loadHolders(); }, [loadPending, loadHolders]);
 
-  // titles of the waiting cites, and the quality note of every cited source, each read once
-  useEffect(() => {
-    if (pending.s !== "ready") return;
-    for (const r of pending.v) {
-      const sid = r.source_id;
-      if (!sid || asked.current.has("t" + sid)) continue;
-      asked.current.add("t" + sid);
-      readSourceTitle(sid).then((t) => { if (live.current) setTitles((m) => ({ ...m, [sid]: t })); }, () => { asked.current.delete("t" + sid); });
-    }
-  }, [pending]);
+  // the quality note of every cited source, read once each
   useEffect(() => {
     if (holders.s !== "ready") return;
     const todo = [...new Set(holders.v.map((h) => h.source_id))].filter((s) => !asked.current.has("q" + s));
@@ -104,6 +103,15 @@ export function ReferencesTab({ path, body, view, save, ifSamePerson, openSource
   const order = useMemo(() => [...new Set(protectedSpans(body).map((s) => s.reference_id))], [body]);
   const open = (kind: DrawerTarget["kind"], id: string) => openSource({ kind, id, n: kind === "reference" ? order.indexOf(id.toLowerCase()) + 1 : 0 });
   const locked = confirm !== null || busy;
+  // a confirmation belongs to its target: when the target is no longer in its list (placed or removed elsewhere) it is dropped, or
+  // it would keep every destructive button disabled with nothing on screen to answer
+  useEffect(() => {
+    if (!confirm) return;
+    const known = confirm.kind === "queue" ? pending.s === "ready" : holders.s === "ready";
+    const here = confirm.kind === "queue" ? pending.s === "ready" && pending.v.some((r) => r.id === confirm.id)
+      : holders.s === "ready" && holders.v.some((h) => h.reference_id === confirm.id && h.origin === "added");
+    if (known && !here) setConfirm(null);
+  }, [confirm, pending, holders]);
 
   // ── writes: each re-reads who is signed in; a refusal or a failure says so and changes nothing ──
   const write = async <T,>(what: () => Promise<T>, failed: string): Promise<{ ok: true; v: T } | { ok: false }> => {
@@ -123,16 +131,38 @@ export function ReferencesTab({ path, body, view, save, ifSamePerson, openSource
   const place = async (row: PendingRow) => {
     const v = view.current;
     if (!v) { setMsg("The text box is not ready yet."); return; }
-    if (v.state.selection.main.head === 0 && v.state.doc.length > 0) { setMsg("Click in the text where the citation should go, then place it."); return; }
+    // the cursor is read NOW, at the click: where the person pointed is where the citation goes, whatever they do while the
+    // answer is on its way (the text may move meanwhile, so the words around the cursor are kept to find the place again)
+    const head = v.state.selection.main.head;
+    if (head === 0 && v.state.doc.length > 0) { setMsg("Click in the text where the citation should go, then place it."); return; }
+    const text0 = v.state.doc.toString();
+    const around = text0.slice(Math.max(0, head - 40), head);
     setBusy(true);
     const r = await write(() => placePending(row.id), "Not placed: the citation could not be made. It is still waiting.");
     if (r.ok) {
       const now = view.current;
-      if (now) {
-        insertAtCursor(now, r.v.insert);
-        setMsg("Placed. The citation is in the text at the cursor.");
-        await afterTextChange();
-      } else { setMsg("The citation was made but the text box had closed; it was not put in the text."); await reload(); }
+      if (!now) { setMsg("The citation was made but the text box had closed; it was not put in the text. It will drop out of the references."); await reload(); }
+      else {
+        const t = now.state.doc.toString();
+        let at = t.slice(0, head) === text0.slice(0, head) ? head : (around && t.indexOf(around) >= 0 ? t.indexOf(around) + around.length : now.state.selection.main.head);
+        at = Math.min(at, t.length);
+        const insert = r.v.insert;
+        now.dispatch({ changes: { from: at, insert }, selection: EditorSelection.cursor(at + insert.length), userEvent: "input.inject" });
+        // the file is written so the server's holders follow the text; when it cannot be written (changed elsewhere, a failed
+        // write) nothing was placed: the citation comes back out of the text and the cite goes back in the queue
+        const saved = await save(false);
+        if (!live.current) return;
+        if (saved) { view.current?.focus(); setMsg("Placed. The citation is in the text at the cursor."); await reload(); }
+        else {
+          const cur = view.current;
+          if (cur && cur.state.sliceDoc(at, at + insert.length) === insert) cur.dispatch({ changes: { from: at, to: at + insert.length, insert: "" } });
+          const back = await ifSamePerson(() => addPendingRow(path, row, "requeue")).catch(() => ({ ran: true as const, error: true }));
+          if (!live.current) return;
+          setMsg("Not placed: the document could not be saved (see the message above), so the citation was taken back out of the text. " +
+            (back.ran && !("error" in back) ? "The cite is back in To place." : "The cite could not be put back in To place; add it again from its source."));
+          await reload();
+        }
+      }
     }
     if (live.current) setBusy(false);
   };
@@ -152,6 +182,7 @@ export function ReferencesTab({ path, body, view, save, ifSamePerson, openSource
 
   const showPin = async (ref: string) => {
     setMsg("");
+    if (sectionOf(getBody(), ref) === null) { setPin(null); setMsg("That citation is not in the text any more, so there is nothing to re-pin."); return; }
     setPin({ ref, s: "loading" });
     try {
       const diff = (await diffCheck([ref])).get(ref);
@@ -163,8 +194,23 @@ export function ReferencesTab({ path, body, view, save, ifSamePerson, openSource
       if (live.current) setPin((cur) => (cur && cur.ref === ref ? { ref, s: "ready", diff, before, after } : cur));
     } catch { if (live.current) setPin((cur) => (cur && cur.ref === ref ? { ref, s: "failed" } : cur)); }
   };
-  const movePin = async (ref: string) => {
+  const movePin = async (ref: string, shown: number | null) => {
     setBusy(true);
+    setMsg("");
+    // nothing at all is sent for a person who is not the one who opened the document (not even the re-check below)
+    if (!(await ifSamePerson(() => true)).ran) { if (live.current) { setMsg(NOT_SAME); setBusy(false); } return; }
+    // the server pins the NEWEST revision at the moment of the click, so the check is run again now: if the source has moved on
+    // since the view was drawn, nothing moves and the view is drawn again for what is there now
+    let d: Diff | undefined;
+    try { d = (await diffCheck([ref])).get(ref); } catch { d = undefined; }
+    if (!live.current) return;
+    if (!d || !d.out_of_date || d.anchor !== "requoted" || d.current_revision !== shown) {
+      setBusy(false);
+      await showPin(ref);
+      if (live.current) setMsg(d ? "The source changed since you looked, so nothing was moved. This is what it says now." : "What changed could not be re-checked, so nothing was moved.");
+      return;
+    }
+    if (sectionOf(getBody(), ref) === null) { setPin(null); setBusy(false); setMsg("That citation is not in the text any more, so nothing was moved."); return; }
     const r = await write(() => repin(path, ref), "The pin was not moved. Nothing changed.");
     if (r.ok) {
       const v = view.current;
@@ -184,12 +230,25 @@ export function ReferencesTab({ path, body, view, save, ifSamePerson, openSource
     const term = q.trim();
     if (term.length < 2) { setHint("Type at least two letters to look for sources."); return; }
     setHint(""); setFind({ s: "busy" });
-    try { const found = await findCandidates(path, term); if (live.current) setFind({ s: "ready", q: term, found }); }
-    catch { if (live.current) setFind({ s: "failed" }); }
+    try {
+      // what the document cites is read again NOW (another browser may have attached a source since this tab loaded); when it
+      // cannot be read no result is shown, because it could include a source already cited
+      const rows = await readHolders(path);
+      if (!live.current) return;
+      setHolders({ s: "ready", v: rows });
+      const found = await findCandidates(path, term);
+      if (live.current) setFind({ s: "ready", q: term, found });
+    } catch { if (live.current) setFind({ s: "failed" }); }
   };
   const add = async (sid: string) => {
     setAdding(sid);
-    const r = await ifSamePerson(() => addPending(path, sid, "find")).catch((e) => ({ ran: true as const, error: e }));
+    try {
+      const rows = await readHolders(path);
+      if (!live.current) return;
+      setHolders({ s: "ready", v: rows });
+      if (rows.some((h) => h.source_id.toLowerCase() === sid.toLowerCase())) { setMsg("Not added: this document already cites that source."); setAdding(null); return; }
+    } catch { if (live.current) { setMsg("Not added: what the document already cites could not be checked."); setAdding(null); } return; }
+    const r = await ifSamePerson(() => addPendingRow(path, { source_id: sid, claim_id: null, section: "", quote: "" }, "find")).catch((e) => ({ ran: true as const, error: e }));
     if (!live.current) return;
     if (!r.ran) setMsg(NOT_SAME);
     else if ("error" in r && !(r.error instanceof ApiError && r.error.status === 409)) setMsg(why(r.error, "Not added. Try again."));
@@ -287,7 +346,7 @@ export function ReferencesTab({ path, body, view, save, ifSamePerson, openSource
                       </span>
                     </div>
                   )}
-                  {pin?.ref === h.reference_id && <PinPanel pin={pin} locked={locked} onMove={() => void movePin(h.reference_id)} onCancel={() => setPin(null)} />}
+                  {pin?.ref === h.reference_id && <PinPanel pin={pin} locked={locked} onMove={() => void movePin(h.reference_id, pin.s === "ready" ? pin.diff.current_revision : null)} onCancel={() => setPin(null)} />}
                 </li>
               );
             })}
@@ -314,6 +373,7 @@ export function ReferencesTab({ path, body, view, save, ifSamePerson, openSource
                 <span data-testid={`find-row-${c.id}`} className="refs-inner">
                   <button type="button" className="refs-title linkish" data-testid={`find-title-${c.id}`} onClick={() => open("source", c.id)}>{c.title || "Untitled source"}</button>
                   {c.snippet && <span className="meta refs-note">{c.snippet}</span>}
+                  {c.tags.length > 0 && <span className="meta refs-note" data-testid={`find-tags-${c.id}`}>{c.tags.join(" · ")}</span>}
                   {queuedSources.has(c.id.toLowerCase())
                     ? <span className="meta">Waiting in To place</span>
                     : <span className="refs-acts"><button type="button" className="btn sm" data-testid={`find-add-${c.id}`} disabled={adding !== null} onClick={() => void add(c.id)}>Add to references</button></span>}

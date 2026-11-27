@@ -374,7 +374,7 @@ function Writing({ path, docRef, subject, first }: { path: string; docRef: strin
           <div className="card doc-edit"><div className="doc-editor" ref={host} data-testid="doc-editor" /></div>
           <p className="meta doc-keys" data-testid="doc-keys">Tab or Esc leaves the text box · Ctrl+] indents · Ctrl+S saves a version · Alt+Enter beside a citation opens its source · Ctrl+Alt+R researches the selection</p>
         </div>
-        <InThisDoc panels={{ references: <ReferencesTab path={path} body={body.current} view={view} save={save} ifSamePerson={ifSamePerson} openSource={setDrawer} /> }} />
+        <InThisDoc panels={{ references: <ReferencesTab path={path} body={body.current} getBody={() => body.current} view={view} save={save} ifSamePerson={ifSamePerson} openSource={setDrawer} /> }} />
       </div>
       {drawer && <SourceDrawer key={drawer.kind + drawer.id} target={drawer} docPath={path} subject={subject} onClose={() => { setDrawer(null); view.current?.focus(); }} />}
     </section>
