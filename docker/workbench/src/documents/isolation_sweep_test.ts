@@ -352,6 +352,25 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     await sql(`SELECT public.link_claim_to_source($1::uuid, $2::uuid, 'states', 1.0)`, [bReportClaim, FX_ACTIVE]);
     await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2)`, [bReport, bReportClaim]);
   }
+  // rw-private-claim-reads: why the sweep above did not see this. (1) On a base WITH slot 570 the claim planted above
+  // lives in B's private store, NOT in public.claims, so no shared read can reach it - the sweep proved nothing about
+  // the shared claim reads. The shape that stays in public.claims is the 390 link (and 570's "mixed" claim): a shared
+  // claim row that research_private_report_claims marks. (2) Every bare pass asks q=fixture, which no planted claim text
+  // contains, and the templated pass sends no claim text, so search / claims could not match a claim whatever was planted.
+  // Planted here as the superuser (the link guard lets a superuser session through): a shared claim with edges on two
+  // shared sources (so quality() co-grounds it), linked to B's private report. A must read neither its text nor its id
+  // from any route, through both doors; B, the owner, still reads it where the owner's idea report shows it.
+  const linkMk = `PrivLinkedClaim${rnd()}`;
+  const linkText = `The sweep marked claim ${linkMk} held in 12 trials.`;
+  const bLinked = (await sql<{ id: string }>(
+    `SELECT f.id::text AS id FROM public.find_or_create_claim($1, NULL, NULL, 'sourced', NULL, NULL, NULL, '{"claim_kind":"descriptive"}'::jsonb) f`,
+    [linkText]))[0].id;
+  const otherSrc = (await sql<{ id: string }>(`SELECT id::text AS id FROM public.sources WHERE id <> $1::uuid AND retraction_committed_at IS NULL ORDER BY id LIMIT 1`, [FX_ACTIVE]))[0]?.id ?? "";
+  assert(otherSrc, "a second shared source exists to co-ground the marked claim");
+  await sql(`SELECT public.link_claim_to_source($1::uuid, $2::uuid, 'states', 1.0)`, [bLinked, FX_ACTIVE]);
+  await sql(`SELECT public.link_claim_to_source($1::uuid, $2::uuid, 'states', 1.0)`, [bLinked, otherSrc]);
+  await sql(`INSERT INTO public.research_private_report_claims (report_id, claim_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [bReport, bLinked]);
+  assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.claims WHERE id = $1::uuid`, [bLinked]))[0].n, 1, "the marked claim is a row of public.claims (the shape a shared read can leak)");
   // rw-boundary-core (plan 09 PD0a; slot 420): B's private hand-back (the inlet id, the delivery target and the owner's
   // review of a refused question, each a marker) - no route may read it; a service:shared-key prompt on an unclassified
   // job (the 88 live ones' shape: hidden from every non-admin, D5) - A must not read it; and a DERIVED job, whose
@@ -470,7 +489,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     ...(steerPlanted ? { step: "sweepstep" } : {}), ...(adminSteer && !aIsAdmin ? { adminSteer, adminStep: "sweepsvc" } : {}),
     heldId: bHeld,
     exportSecret, leadSecret, ...Object.fromEntries(bExports.map((id, i) => [`export${i}`, id])),
-    privReport: privMk.text, privTitle: privMk.title, privKey: privMk.key, privReportId: bReport, privClaim: privMk.claim, privClaimId: bReportClaim,
+    privReport: privMk.text, privTitle: privMk.title, privKey: privMk.key, privReportId: bReport, privClaim: privMk.claim, privClaimId: bReportClaim, privLinked: linkMk, privLinkedId: bLinked,
     ...(bHandback ? { handbackInlet: bnd.inlet, handbackIdeaTitle: bnd.ideaTitle, handbackDeliver: bnd.deliver, handbackView: bnd.view, handbackId: bHandback } : {}),
     ...(!aIsAdmin ? { svcPrompt: bnd.svc } : {}),
     roomEntry: room.entry, roomDraft: room.draft, roomId: bRoom, ideaEdit: ideaMk.edit, ideaDossier: ideaMk.dossier, ideaDraft: ideaMk.draft, sessionRoomId: bSessRoom, ...(bChat.status === 201 ? { roomChat: room.chat } : {}) };
@@ -513,7 +532,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   // 1. TEMPLATED: B's ids and paths in every parameter, query and body field (the request gate)
   const LIFECYCLE_IRREVERSIBLE = ["/workbench/documents/delete-forever", "/workbench/documents/empty-trash"];
   let lifecycleTrashCalls = 0;
-  const ids = [bPath, bTrashed, bRefinery, bJob, bHeld, bRefId, bHeldRef, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), pv.pvSource, pv.pvClaim, pv.pvJob, ...Object.values(bCast)].filter(Boolean);
+  const ids = [bPath, bTrashed, bRefinery, bJob, bHeld, bRefId, bHeldRef, ...bExports, bRoom, bSessRoom, ...bCleanup, ...Object.values(bIntake), bLinked, pv.pvSource, pv.pvClaim, pv.pvJob, ...Object.values(bCast)].filter(Boolean);
   const query = (v: string) => new URLSearchParams({
     path: bPath, ref: bPath, from: bPath, id: v, idea_id: bRefinery, refinery_id: bRefinery, job_id: bJob,
     source_id: bHeld || v, kind: "user_document", holder_kind: "user_document", format: "md", limit: "500", q: "fixture",
@@ -575,7 +594,7 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
   const named = (v: string) =>
     v === bJob ? "<B job>" : v === bHeld ? "<B held>" : v === bRefId ? "<B ref>" : v === bHeldRef ? "<B held ref>" : v === bRefinery ? "<B refinery>" : bExports.includes(v) ? "<B export>"
       : v === bRoom ? "<B room>" : v === bSessRoom ? "<B session room>" : bCleanup.includes(v) ? "<B cleanup action>" : v;
-  const realIds = [...new Set([bJob, bHeld, bRefId, bHeldRef, bRefinery, ...bExports, bRoom, bSessRoom, ...bCleanup, ...(bHandback ? [bnd.inlet] : []), pv.pvClaim, pv.pvJob, pv.pvSource, FX_ACTIVE, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
+  const realIds = [...new Set([bJob, bHeld, bRefId, bHeldRef, bRefinery, ...bExports, bRoom, bSessRoom, ...bCleanup, ...(bHandback ? [bnd.inlet] : []), pv.pvClaim, pv.pvJob, pv.pvSource, FX_ACTIVE, bLinked, ...harvested].filter(Boolean).map((x) => x.toLowerCase()))]
     .slice(0, 40);
   for (const r of reads.filter((x) => x.path.includes(":"))) {
     for (const v of realIds) {
@@ -669,6 +688,49 @@ Deno.test({ name: "isolation sweep: as user A, every route the app registers sho
     if (real.status !== none.status || real.text.split(bHeldRef).join("<ID>") !== none.text.split(miss).join("<ID>")) {
       hits.push(`HIT flag-oracle POST /workbench/contract/flags <B held ref> -> ${real.status} vs a missing record ${none.status}`);
     }
+  }
+  // rw-private-claim-reads: the shared claim reads, as A, through both doors, over the marked claim (planted above), asked
+  // for BY ITS TEXT so a claim ILIKE can match it; and as B (the owner) the reads that carry claim text still show it
+  {
+    // a phrase of the planted text that is not the marker: a search echoes its own query, which must not read as a hit
+    const q = encodeURIComponent("sweep marked claim");
+    const reads2 = [
+      `/workbench/contract/search?q=${q}`, `/workbench/contract/search?q=${q}&kinds=claim&limit=50`,
+      `/workbench/contract/claims?q=${q}&limit=200`, `/workbench/contract/claims?limit=200`,
+      `/workbench/contract/timeline?limit=500`, `/workbench/contract/sources/${FX_ACTIVE}/quality`, `/workbench/contract/sources/${otherSrc}/quality`,
+    ];
+    for (const p of reads2) {
+      for (const door of [BASE, VIEWER]) {
+        calls++;
+        const res = await call(door, "GET", p);
+        judge(`GET ${p.split("?")[0]} marked-claim probe (${doorName(door)})`, p, res);
+        // the query carries a phrase, not the marker: the marker or the id in the answer is the claim itself
+        if (res.status === 200 && (res.text.includes(linkMk) || res.text.includes(bLinked))) hits.push(`HIT marked-claim ${p.split("?")[0]} (${doorName(door)}) -> A reads B's marked claim`);
+      }
+    }
+    // the owner still reads it: the control that the zero above is the owner rule, not the claim missing
+    for (const p of [`/workbench/contract/search?q=${q}&kinds=claim&limit=50`, `/workbench/contract/claims?q=${q}&limit=200`]) {
+      const own = await wb("GET", p, undefined, B);
+      assert(own.status === 200 && own.text.includes(bLinked), `B (the owner) still reads the marked claim at ${p.split("?")[0]}: ${own.status} ${own.text.slice(0, 200)}`);
+    }
+    // the to-place add and the flag: A's answer on B's marked claim is the answer on a missing id (nothing stored)
+    const aDoc = await wb("POST", "/workbench/documents", { title: `ASweepDoc${rnd()}`, body: "a" });
+    assertEquals(aDoc.status, 201, aDoc.text);
+    const addRef = (id: string) => call(VIEWER, "POST", "/workbench/contract/documents/pending-refs", { path: aDoc.json.path, claim_id: id, added_from: "search" });
+    const control = await addRef("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1");
+    assertEquals(control.status, 201, `a shared claim is accepted into A's queue (the positive control): ${control.text}`);
+    const realAdd = await addRef(bLinked), noneAdd = await addRef(crypto.randomUUID());
+    calls += 3;
+    judge("POST contract/documents/pending-refs claim_id=<B marked claim> (viewer)", "", realAdd);
+    if (realAdd.status !== noneAdd.status || realAdd.text.split(bLinked).join("<ID>") !== noneAdd.text.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/, "<ID>")) {
+      hits.push(`HIT pending-refs-oracle <B marked claim> -> ${realAdd.status} ${realAdd.text} vs a missing claim ${noneAdd.status} ${noneAdd.text}`);
+    }
+    assertEquals(await sql(`SELECT 1 FROM public.document_pending_refs WHERE claim_id = $1::uuid`, [bLinked]), [], "nothing was stored for the marked claim");
+    const flagClaim = (id: string) => call(VIEWER, "POST", "/workbench/contract/flags",
+      { item_kind: "claim", item_id: id, reason: "wrong_claim", from: { kind: "source", ref: FX_ACTIVE } });
+    const realFlag = await flagClaim(bLinked), noneFlag = await flagClaim(crypto.randomUUID());
+    calls += 2;
+    if (realFlag.status !== noneFlag.status) hits.push(`HIT flag-oracle POST contract/flags item_kind=claim <B marked claim> -> ${realFlag.status} vs a missing claim ${noneFlag.status}`);
   }
   console.log(`sweep: ${routes.length} routes, ${calls} calls, ${harvested.size} ids harvested, ${streamed} streams read, ${hits.length} hits`);
   for (const h of [...new Set(hits)]) console.log(`  ${h}`);

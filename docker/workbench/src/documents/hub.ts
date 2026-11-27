@@ -16,6 +16,7 @@
 import type { Db } from "../contracts/db.ts";
 import type { OutboundLink } from "./listing.ts";
 import { LEAF_LIFECYCLE } from "../contracts/repo/knowledge.ts";
+import { claimNotPrivate } from "../contracts/repo/private_claims.ts";
 
 export const THIN_SOURCES = 3;
 export const SOURCE_PREFIX = "content/source/";
@@ -115,6 +116,7 @@ async function markers(db: Db, centre: string, hubSources: string[]) {
       `SELECT DISTINCT c.id::text AS claim_id, left(c.text, 160) AS text
          FROM public.claim_sources cs JOIN public.claims c ON c.id = cs.claim_id
         WHERE cs.source_id::text = ANY($1::text[]) AND (c.contradicted OR cs.edge_type = 'contradicts')
+          AND ${claimNotPrivate("c")}
         ORDER BY 1 LIMIT 20`,
       [ids],
     )

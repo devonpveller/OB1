@@ -8,6 +8,7 @@ import { refineryScopedScore, termDef } from "../logic/credibility.ts";
 import { safeReasonText, safeSignals } from "../logic/scholarly_reason.ts";
 import type { RegistryReader } from "../registry.ts";
 import { FOREIGN_IDEA, type Viewer } from "../../documents/ownership.ts";
+import { claimVisibleTo } from "./private_claims.ts";
 
 export interface SourceRow {
   id: string;
@@ -336,7 +337,7 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
             CASE WHEN $2::jsonb IS NULL THEN sc.claim_text
                  WHEN EXISTS (SELECT 1 FROM public.claims lc
                                WHERE btrim(lc.text) = btrim(sc.claim_text) AND lc.status = 'active'
-                                 AND lc.metadata @> $2::jsonb) THEN sc.claim_text
+                                 AND lc.metadata @> $2::jsonb AND ${claimVisibleTo("lc", "$3")}) THEN sc.claim_text
                  ELSE NULL END AS claim
        FROM public.source_corroborations sc
        JOIN public.sources g ON g.id = sc.from_source_id AND g.retraction_committed_at IS NULL
@@ -351,17 +352,17 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
        JOIN public.sources o ON o.id = other.source_id AND o.retraction_committed_at IS NULL
             AND ($2::jsonb IS NULL OR o.metadata @> $2::jsonb)
        JOIN public.claims cl ON cl.id = mine.claim_id AND cl.status = 'active'
-            AND ($2::jsonb IS NULL OR cl.metadata @> $2::jsonb)
+            AND ($2::jsonb IS NULL OR cl.metadata @> $2::jsonb) AND ${claimVisibleTo("cl", "$3")}
        LEFT JOIN LATERAL public.source_credibility(o.id) oc ON TRUE
       WHERE mine.source_id = $1::uuid AND mine.edge_type IN ('states', 'corroborates')`,
-    [id, mf],
+    [id, mf, who.sub],
   );
   const contradicted = await db.query<QSourceRow>(
     `SELECT DISTINCT ON (o.id) o.id AS source_id, o.title, o.url, oc.family,
             'contradicts a claim this source grounds' AS relation, NULL::float AS amount, cl.text AS claim
        FROM public.claim_sources mine
        JOIN public.claims cl ON cl.id = mine.claim_id AND cl.status = 'active'
-            AND ($2::jsonb IS NULL OR cl.metadata @> $2::jsonb)
+            AND ($2::jsonb IS NULL OR cl.metadata @> $2::jsonb) AND ${claimVisibleTo("cl", "$3")}
        JOIN public.claim_sources against ON against.claim_id = mine.claim_id AND against.edge_type = 'contradicts'
             AND against.source_id IS NOT NULL AND against.source_id <> mine.source_id
        JOIN public.sources o ON o.id = against.source_id AND o.retraction_committed_at IS NULL
@@ -372,16 +373,16 @@ export async function quality(db: Db, reg: RegistryReader, id: string, f: Metada
      SELECT DISTINCT ON (o.id) o.id, o.title, o.url, oc.family,
             'grounds a claim that contradicts one this source grounds', NULL::float, other.text
        FROM public.claim_sources mine
-       JOIN public.claims mc ON mc.id = mine.claim_id AND ($2::jsonb IS NULL OR mc.metadata @> $2::jsonb)
+       JOIN public.claims mc ON mc.id = mine.claim_id AND ($2::jsonb IS NULL OR mc.metadata @> $2::jsonb) AND ${claimVisibleTo("mc", "$3")}
        JOIN public.claim_sources cc ON cc.claim_id = mine.claim_id AND cc.edge_type = 'contradicts' AND cc.parent_claim_id IS NOT NULL
        JOIN public.claims other ON other.id = cc.parent_claim_id AND other.status = 'active'
-            AND ($2::jsonb IS NULL OR other.metadata @> $2::jsonb)
+            AND ($2::jsonb IS NULL OR other.metadata @> $2::jsonb) AND ${claimVisibleTo("other", "$3")}
        JOIN public.claim_sources theirs ON theirs.claim_id = other.id AND theirs.edge_type <> 'contradicts' AND theirs.source_id IS NOT NULL
        JOIN public.sources o ON o.id = theirs.source_id AND o.retraction_committed_at IS NULL AND o.id <> $1::uuid
             AND ($2::jsonb IS NULL OR o.metadata @> $2::jsonb)
        LEFT JOIN LATERAL public.source_credibility(o.id) oc ON TRUE
       WHERE mine.source_id = $1::uuid AND mine.edge_type <> 'contradicts'`,
-    [id, mf],
+    [id, mf, who.sub],
   );
   // attempt 4 (tester near-miss: a history row's labels were served verbatim, so a writer could put any
   // text there): claim_kind is served only when it is a claim_kinds registry key, model_version only

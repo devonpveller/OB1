@@ -31,7 +31,7 @@ function recorder(o: { listed?: boolean; target?: boolean; claim?: boolean; coun
       const s = sql.replace(/\s+/g, " ").trim();
       log.push({ sql: s, args });
       if (/FROM public\.user_document_listings WHERE path = \$1 AND owner_sub = \$2/.test(s)) return Promise.resolve([{ ok: o.listed ?? true }] as T[]);
-      if (/FROM public\.claims WHERE id/.test(s)) return Promise.resolve([{ ok: o.claim ?? true }] as T[]);
+      if (/FROM public\.claims c? ?WHERE (c\.)?id/.test(s)) return Promise.resolve([{ ok: o.claim ?? true }] as T[]);
       if (/count\(\*\)::int AS n FROM public\.document_pending_refs/.test(s)) return Promise.resolve([{ n: o.count ?? 0 }] as T[]);
       if (/^INSERT INTO public\.document_pending_refs/.test(s)) return Promise.resolve([row] as T[]);
       if (/^DELETE FROM public\.document_pending_refs/.test(s)) return Promise.resolve([row] as T[]);

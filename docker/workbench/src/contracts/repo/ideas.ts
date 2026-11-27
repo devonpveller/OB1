@@ -12,6 +12,7 @@ import { Conflict, NotFound } from "./lifecycle.ts";
 import { tombstoneForUrl, tombstoneOut } from "./sources.ts";
 import { adminSeesOwnerless, FOREIGN_HELD_TARGET, FOREIGN_IDEA, FOREIGN_JOB } from "../../documents/ownership.ts";
 import type { Who } from "../../sessions/repo.ts";
+import { claimVisibleTo } from "./private_claims.ts";
 
 // review RV1 (rw-p8a4-ideas): who is reading. A bare owner subject is a viewer with no documents key - stricter, never
 // looser (FOREIGN_JOB then treats a document-inlet job as foreign).
@@ -213,7 +214,7 @@ const RESOLVED_LINKS = (alias: string) => `COALESCE((
 // The context graph: a subgraph over the knowledge graph - the sources and claims of the
 // refinery's sessions, its user sources, and every link picked up from its document. A link
 // carries a pin only where the document pinned it; hidden is read from refinery_hidden only.
-async function contextGraph(db: Db, refineryId: string, sessionIds: string[], docLinks: Link[]) {
+async function contextGraph(db: Db, refineryId: string, sessionIds: string[], docLinks: Link[], owner: string) {
   const hidden = new Set((await db.query<{ k: string }>(
     `SELECT node_kind || ':' || node_ref AS k FROM public.refinery_hidden WHERE refinery_id = $1`, [refineryId],
   )).map((r) => r.k));
@@ -234,8 +235,8 @@ async function contextGraph(db: Db, refineryId: string, sessionIds: string[], do
   const grounds = await db.query<{ claim_id: string; text: string; source_id: string }>(
     `SELECT c.id::text AS claim_id, left(c.text, 200) AS text, cs.source_id::text AS source_id
        FROM public.claim_sources cs JOIN public.claims c ON c.id = cs.claim_id
-      WHERE cs.source_id::text = ANY($1::text[]) LIMIT 500`,
-    [ids],
+      WHERE cs.source_id::text = ANY($1::text[]) AND ${claimVisibleTo("c", "$2")} LIMIT 500`,
+    [ids, owner],
   );
   const nodes = [
     ...src.map((s) => ({ kind: "source", id: s.id, title: s.title, state: s.state })),
@@ -344,7 +345,7 @@ export async function idea(db: Db, id: string, viewerIn: IdeaViewer) {
         room: roomRow?.id ?? members.find((m) => m.member_kind === "room")?.member_ref ?? null,
         chats: chats.map((c) => c.id),
       },
-      context_graph: await contextGraph(db, id, sessionPoolIds, await pickedLinks(db, id, owner)),
+      context_graph: await contextGraph(db, id, sessionPoolIds, await pickedLinks(db, id, owner), owner),
       hidden: await db.query<{ node_kind: string; node_ref: string; hidden_at: string }>(
         `SELECT node_kind, node_ref, hidden_at FROM public.refinery_hidden WHERE refinery_id = $1 ORDER BY hidden_at`, [id],
       ),

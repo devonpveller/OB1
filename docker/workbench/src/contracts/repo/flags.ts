@@ -10,6 +10,7 @@ import type { Db } from "../db.ts";
 import { type RegistryReader, requireRegistered, REGISTRY } from "../registry.ts";
 import { BadRequest } from "../logic/scope.ts";
 import { NotFound } from "./lifecycle.ts";
+import { claimVisibleTo } from "./private_claims.ts";
 import type { Identity } from "../../middleware/identity.ts";
 import { FOREIGN_HELD_TARGET, ownsDocumentPaths, singleDocumentPath } from "../../documents/ownership.ts";
 
@@ -82,7 +83,10 @@ export async function createFlag(db: Db, reg: RegistryReader, who: Identity, b: 
       `SELECT EXISTS (SELECT 1 FROM ${table} r WHERE r.id = $1 AND NOT ${FOREIGN_HELD_TARGET("r.source_id", "$2")}) AS ok`,
       [b.item_id, who.sub],
     )
-    : await db.query<{ ok: boolean }>(`SELECT EXISTS (SELECT 1 FROM ${table} WHERE id = $1) AS ok`, [b.item_id]);
+    : b.item_kind === "claim"
+      // rw-private-claim-reads: a private-report claim that is not the flagger's is a MISSING claim (the same 404), no oracle
+      ? await db.query<{ ok: boolean }>(`SELECT EXISTS (SELECT 1 FROM ${table} c WHERE c.id = $1 AND ${claimVisibleTo("c", "$2")}) AS ok`, [b.item_id, who.sub])
+      : await db.query<{ ok: boolean }>(`SELECT EXISTS (SELECT 1 FROM ${table} WHERE id = $1) AS ok`, [b.item_id]);
   if (!found[0]?.ok) throw new NotFound(`no such ${b.item_kind}`);
   const r = await db.query<Raw>(
     `INSERT INTO public.user_flags (owner_sub, actor_sub, item_kind, item_id, reason, note, from_kind, from_ref)

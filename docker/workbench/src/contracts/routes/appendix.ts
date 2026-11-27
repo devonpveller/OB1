@@ -178,6 +178,7 @@ function registerKnowledgeReads(app: ContractApp, deps: ContractDeps) {
         thread_id: q.thread_id || null, source_id: q.source_id || null, synthesis_id: q.synthesis_id || null,
         status: q.status || null, q: q.q || null, limit: parseLimit(q.limit, 50, 200),
         evidenceOnly: parseFlag(q.evidence_only), filter: parseMetadataFilter(q.metadata_filter),
+        owner: (await identityOf(c)).sub,
       }));
     } catch (e) {
       return fail(c, e);

@@ -38,7 +38,7 @@ export async function candidates(db: Db, q: string, path: string | null, who: Id
   const refineryId = row?.refinery_id ?? null;
   const out: Candidate[] = [];
   if (query.length >= 2) {
-    const r = await search(db, { q: query, kinds: [], refinery_id: refineryId, limit, evidenceOnly: false, filter: null });
+    const r = await search(db, { q: query, kinds: [], refinery_id: refineryId, limit, evidenceOnly: false, filter: null, viewer: who.sub });
     const reports = new Set((await db.query<{ id: string }>(
       `SELECT id::text FROM public.sources WHERE id::text = ANY($1::text[]) AND content_type = 'research_synthesis'`,
       [r.results.filter((h) => h.kind === "source").map((h) => h.id)],

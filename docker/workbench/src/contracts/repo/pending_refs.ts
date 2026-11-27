@@ -21,6 +21,7 @@ import { placeReference, SelectorRefused, targetHead } from "./references.ts";
 import type { Identity } from "../../middleware/identity.ts";
 import { docRel, HOLDER_KIND } from "../../documents/paths.ts";
 import { chipText, transclusionText } from "../../documents/grammar.ts";
+import { claimVisibleTo } from "./private_claims.ts";
 
 export interface PendingRefRow {
   id: string;
@@ -78,8 +79,8 @@ export async function addPendingRef(db: Db, who: Identity, b: AddInput): Promise
     // a source or a held source the caller may read: another user's held source is a missing one (no oracle)
     if (!(await targetHead(db, b.source_id, who))) throw new NotFound("no such source");
   } else {
-    const c = await db.query<{ ok: boolean }>(`SELECT EXISTS (SELECT 1 FROM public.claims WHERE id = $1) AS ok`, [b.claim_id]);
-    if (!c[0]?.ok) throw new NotFound("no such claim");
+    const c = await db.query<{ ok: boolean }>(`SELECT EXISTS (SELECT 1 FROM public.claims c WHERE c.id = $1 AND ${claimVisibleTo("c", "$2")}) AS ok`, [b.claim_id, who.sub]);
+    if (!c[0]?.ok) throw new NotFound("no such claim"); // a private-report claim that is not the caller's answers as a missing one (no oracle)
   }
   try {
     // The bound and the insert are ONE step (attempt 1, D2): an advisory lock on (owner, document) serialises the adds of one

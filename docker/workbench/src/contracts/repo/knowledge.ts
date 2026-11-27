@@ -8,6 +8,7 @@ import type { MetadataFilter } from "../logic/scope.ts";
 import { OWN_QUERY } from "./sessions.ts";
 import type { Who } from "../../sessions/repo.ts";
 import { adminSeesOwnerless, FOREIGN_JOB } from "../../documents/ownership.ts";
+import { claimNotPrivate, claimVisibleTo } from "./private_claims.ts";
 
 // research-workbench P8a-1 (D5): a source's lifecycle state NOW, from its row - or 'erased' when only its
 // tombstone is left; NULL when the id names neither. `id` is a uuid expression.
@@ -54,7 +55,7 @@ export async function neighbours(db: Db, slug: string, depth: number, limit: num
               CASE WHEN w.slug ~ ${LEAF_RX} THEN ${LIFECYCLE_OF(LEAF_ID("w.slug"))} END AS lifecycle,
               CASE WHEN w.slug ~ ${LEAF_RX} THEN EXISTS (
                 SELECT 1 FROM public.claim_sources cs JOIN public.claims c ON c.id = cs.claim_id
-                 WHERE cs.source_id = ${LEAF_ID("w.slug")} AND (c.contradicted OR cs.edge_type = 'contradicts'))
+                 WHERE cs.source_id = ${LEAF_ID("w.slug")} AND (c.contradicted OR cs.edge_type = 'contradicts') AND ${claimNotPrivate("c")})
                    ELSE false END AS contested
          FROM public.wiki_pages w
          JOIN (SELECT slug, min(d) AS d FROM nbr GROUP BY slug) k ON k.slug = w.slug
@@ -93,6 +94,8 @@ export interface ClaimsQuery {
   limit: number;
   evidenceOnly: boolean;
   filter: MetadataFilter;
+  /** the caller's subject: a claim of the caller's own private idea report is theirs to read; absent = none is */
+  owner?: string | null;
 }
 
 interface ClaimRow {
@@ -157,7 +160,8 @@ export async function claims(db: Db, q: ClaimsQuery) {
                       LEFT JOIN public.claims n ON n.id = x.parent_claim_id
                       LEFT JOIN public.sources xs ON xs.id = x.source_id
                      WHERE x.claim_id = c.id AND x.edge_type = 'contradicts'
-                       AND ((n.id IS NOT NULL AND n.status = 'active' AND n.created_at > c.created_at AND ($6::jsonb IS NULL OR n.metadata @> $6::jsonb))
+                       AND ((n.id IS NOT NULL AND n.status = 'active' AND n.created_at > c.created_at AND ($6::jsonb IS NULL OR n.metadata @> $6::jsonb)
+                            AND ${claimVisibleTo("n", "$8")})
                          OR (xs.id IS NOT NULL AND xs.retraction_committed_at IS NULL AND xs.created_at > c.created_at
                              AND ($6::jsonb IS NULL OR xs.metadata @> $6::jsonb)))) AS contradicted_by_newer
        FROM public.claims c
@@ -170,9 +174,10 @@ export async function claims(db: Db, q: ClaimsQuery) {
         AND ($4::text IS NULL OR c.status = $4)
         AND ($5::text IS NULL OR c.text ILIKE '%' || $5 || '%')
         AND ($6::jsonb IS NULL OR c.metadata @> $6::jsonb)
+        AND ${claimVisibleTo("c", "$8")}
       ORDER BY c.confidence DESC, c.created_at DESC
       LIMIT $7`,
-    [q.thread_id, q.source_id, q.synthesis_id, q.status, q.q, mf, q.limit],
+    [q.thread_id, q.source_id, q.synthesis_id, q.status, q.q, mf, q.limit, q.owner ?? null],
   );
   // rw-p3b-trust2 (review B1): research_jobs carry no metadata, so under a filter the verdict is null - no
   // research_jobs read (the verdict rests on the cited text, which may lie outside the scope)
@@ -263,6 +268,8 @@ export interface SearchQuery {
   filter: MetadataFilter;
   /** the caller's subject, for cited_by (the caller's own documents only); absent = cited_by is null */
   owner?: string | null;
+  /** who reads claims as their own when `owner` is absent (cited_by stays off): link candidates pass the caller */
+  viewer?: string | null;
 }
 
 type BaseHit = { kind: string; id: string; title: string; snippet: string; state: string; lifecycle: string | null; page_class: string | null };
@@ -367,8 +374,9 @@ export async function search(db: Db, s: SearchQuery) {
       `SELECT 'claim' AS kind, c.id::text AS id, left(c.text, 120) AS title, left(c.text, 300) AS snippet,
               'current' AS state, NULL::text AS lifecycle, NULL::text AS page_class
          FROM public.claims c WHERE c.text ILIKE '%' || $1 || '%' AND ($3::jsonb IS NULL OR c.metadata @> $3::jsonb)
+          AND ${claimVisibleTo("c", "$4")}
         ORDER BY c.confidence DESC LIMIT $2`,
-      [s.q, s.limit, mf],
+      [s.q, s.limit, mf, s.owner ?? s.viewer ?? null],
     ));
   }
   if (want("source")) {
@@ -438,6 +446,7 @@ export async function timeline(db: Db, from: string | null, to: string | null, s
          FROM public.research_jobs j WHERE j.finished_at IS NOT NULL
        UNION ALL
        SELECT c.created_at, 'claim_created', c.id::text, left(c.text, 120), NULL FROM public.claims c
+        WHERE ${claimVisibleTo("c", "$5")}
        UNION ALL
        SELECT te.created_at, 'trail', te.source_id::text, te.kind, te.source_id FROM public.source_trail_events te
      ) e
