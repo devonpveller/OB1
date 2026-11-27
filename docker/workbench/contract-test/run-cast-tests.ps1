@@ -258,6 +258,7 @@ try {
     '-e', 'CAST_TEST_RECIPES=/recipes', '-e', 'CAST_TEST_PODCAST=http://stub-podcast:8080', '-e', 'CAST_TEST_MARKER_OUT=/out/markers.txt',
     '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
     '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro", '-v', "${outDir}:/out",
+    '-v', "$(Join-Path $wb 'src/contracts/cast_integration_test.ts'):/app/src/contracts/cast_integration_test.ts:ro", # this tree's test file over the image's copy (a warm-cache run after a test-only edit)
     $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write=/out', 'src/contracts/cast_integration_test.ts')
   $clean = ($o -replace '\x1b\[[0-9;]*m', '')
   Save 'cast-integration.log' ((($clean -split "`n") | Where-Object { $_ -match '\.\.\. (ok|FAILED|ignored)|^(ok|FAILED) \||^C\d+:|error:|Assertion|=> |^\s+at ' } | Select-Object -First 200) -join "`n")

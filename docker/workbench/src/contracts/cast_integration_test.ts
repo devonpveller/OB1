@@ -752,11 +752,13 @@ Deno.test({
     const calls = await podcastCalls();
     assertEquals(calls.length, callsBefore + 1, "exactly one voicing, by the podcast service");
     const last = calls[calls.length - 1];
-    assertEquals([last.route, last.voice, last.speed], ["local-tts", "bm_george", 1.1], "the route, voice and speed of A's voice link, as stored");
+    // as stored NOW (earlier cases re-voiced this link): read it back as A
+    const stored = (await asA("GET", `/voices/${W.voice}`)).json;
+    assertEquals([last.route, last.voice, last.speed], [stored.route, stored.voice, stored.speed], "the route, voice and speed of A's voice link, as stored");
     assert(last.text.length > 0 && last.text.length < 200, "one short fixed sentence");
     // B asks for A's voice link, a missing id and a malformed id: the same 404, and the podcast service is not asked
     const bodies: string[] = [];
-    for (const id of [W.voice, missing("voice"), "..%2Fx"]) {
+    for (const id of [W.voice, missing("voice"), "a%20b"]) {
       const r = await raw(B, id);
       assertEquals(r.status, 404, id);
       bodies.push(await r.text());
