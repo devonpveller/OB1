@@ -148,7 +148,7 @@ export function ReferencesTab({ path, body, getBody, view, save, ifSamePerson, o
     if (!v) { setMsg("The text box is not ready yet."); return; }
     // the cursor is read NOW, at the click: where the person pointed is where the citation goes. It is carried through every change
     // made to the text while the answer is on its way (CodeMirror's own position mapping), so an edit above it, or a repeated
-    // passage, cannot move the citation to another place. A change that REPLACES the text the cursor is inside has no place to carry
+    // passage, cannot move the citation to another place. A change that REPLACES the text the cursor is in (or after) has no place to carry
     // it to: then nothing is put in the text.
     let pos = v.state.selection.main.head;
     if (pos === 0 && v.state.doc.length > 0) { setMsg("Click in the text where the citation should go, then place it."); return; }
@@ -156,7 +156,15 @@ export function ReferencesTab({ path, body, getBody, view, save, ifSamePerson, o
     let lost = false;
     v.dispatch({ effects: StateEffect.appendConfig.of(EditorView.updateListener.of((u) => {
       if (!tracking || !u.docChanged) return;
-      u.changes.iterChanges((fromA, toA) => { if (fromA < pos && pos < toA) lost = true; });
+      // lost: text the cursor is inside was replaced or removed; or a REPLACEMENT (it deleted text and put other text there, as "Load the
+      // other version" does for the whole document) ends exactly at the cursor, because what the person pointed after is not there any more.
+      // Typing at the cursor (nothing deleted) and a plain deletion that ends at the cursor are not: the cursor is still where it was.
+      const oldLen = u.startState.doc.length;
+      u.changes.iterChanges((fromA, toA, fromB, toB) => {
+        const replaced = toA > fromA && toB > fromB;
+        const whole = fromA === 0 && toA === oldLen && toA > 0;
+        if ((fromA < pos && pos < toA) || (pos === toA && toA > fromA && (replaced || whole))) lost = true;
+      });
       pos = u.changes.mapPos(pos, -1);
     })) });
     setBusy(true);
