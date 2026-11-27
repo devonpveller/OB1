@@ -5,6 +5,7 @@
 // chunks/links. Durable job state in import_jobs (survives restart; drives the
 // P6 badge via staged/committed).
 import { query, withTransaction } from "../db/pool.ts";
+import { insertJobWithPayload } from "../util/upload_store.ts";
 import { embed, toVector } from "../util/embed.ts";
 import { chunkText } from "../util/chunk.ts";
 import { vaultWriteBinary } from "../util/vault.ts";
@@ -16,13 +17,15 @@ export async function createJob(
   staged: boolean,
   // rw-p5a-intake: the identity seam's subject (owner) and actor, and what the import fetches or reads
   who: { owner: string; actor: string; url?: string | null; filename?: string | null } | null = null,
+  // rw-upload-store-offthread: a file's bytes are saved WITH the job row, from the upload store's worker
+  // (one transaction: the row never exists without its bytes, and a failed save leaves no row)
+  payload: { filename: string; bytes: Uint8Array } | null = null,
 ): Promise<ImportJob> {
-  const rows = await query<ImportJob>(
-    `INSERT INTO public.import_jobs (status, target_entity_ids, target_notebook, staged, owner_sub, actor_sub, url, filename)
-     VALUES ('queued', $1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-    [targetEntityIds, targetNotebook, staged, who?.owner ?? null, who?.actor ?? null, who?.url ?? null, who?.filename ?? null],
-  );
-  return rows[0];
+  const sql = `INSERT INTO public.import_jobs (status, target_entity_ids, target_notebook, staged, owner_sub, actor_sub, url, filename)
+     VALUES ('queued', $1, $2, $3, $4, $5, $6, $7) RETURNING *`;
+  const args = [targetEntityIds, targetNotebook, staged, who?.owner ?? null, who?.actor ?? null, who?.url ?? null, who?.filename ?? null];
+  if (payload) return await insertJobWithPayload<ImportJob>(sql, args, payload.filename, payload.bytes);
+  return (await query<ImportJob>(sql, args))[0];
 }
 
 // rw-p5a-intake: a status move made only while the job is still wanted - a job cancelled from the intake
@@ -33,9 +36,6 @@ export async function advanceJob(id: string, to: string, from: string[]): Promis
 }
 export async function failJob(id: string, error: string): Promise<void> {
   await query(`UPDATE public.import_jobs SET status = 'failed', error = $2 WHERE id = $1 AND status <> 'cancelled'`, [id, error]);
-}
-export async function storePayload(id: string, filename: string, bytes: Uint8Array): Promise<void> {
-  await query(`INSERT INTO public.import_job_payloads (job_id, filename, bytes) VALUES ($1, $2, $3) ON CONFLICT (job_id) DO NOTHING`, [id, filename, bytes]);
 }
 export async function getPayload(id: string): Promise<{ filename: string; bytes: Uint8Array } | null> {
   return (await query<{ filename: string; bytes: Uint8Array }>(`SELECT filename, bytes FROM public.import_job_payloads WHERE job_id = $1`, [id]))[0] ?? null;

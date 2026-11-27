@@ -1318,6 +1318,19 @@ try {
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
   if ($Red) { Check ($sum.Success -and [int]$sum.Groups[2].Value -eq 0) "RED: the intake integration test fails on the base ($($sum.Value))" }
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the intake integration test ($($sum.Value))" }
+  # rw-upload-store-offthread [5u]: saving a 32 MiB upload does not hold the workbench (a bystander within 1 s), the stored bytes
+  # are the uploaded bytes (import, intake add; replace-from-upload stores none), the 25 MiB intake cap is unchanged
+  Write-Host '[5u] the upload store: a bystander during a 32 MiB save, byte identity, the intake cap'
+  $o = Lab-Docker 900 @('run', '--rm', '--label', $label, '--network', $net,
+    '-e', "INTAKE_TEST_BASE=http://$P-wb:8000", '-e', "INTAKE_TEST_KEY=$key",
+    '-e', "CONTRACT_TEST_DB_HOST=$db", '-e', 'CONTRACT_TEST_DB_USER=postgres', '-e', "CONTRACT_TEST_DB_PASSWORD=$pw",
+    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', 'src/util/upload_store_lab_test.ts')
+  $clean = ($o -replace '\[[0-9;]*m', '')
+  Save 'upload-store-lab.log' ((($clean -split "`n") | Where-Object { $_ -match 'upload-store U|\.\.\. (ok|FAILED)|^(ok|FAILED) \||passed|failed|error:|AssertionError|Values are not equal|\[Diff\]|^\s+[-+]' }) -join "`n")
+  foreach ($l in ($clean -split "`n") | Where-Object { $_ -match 'upload-store U|\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+  if ($Red) { Check ($sum.Success -and [int]$sum.Groups[3].Value -gt 0) "RED: the upload store lab case fails on the base ($($sum.Value))" }
+  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the upload store lab case ($($sum.Value))" }
   }
 
   # round 2 (tester attempt 1 F1-F6): the route-wide isolation sweep, LAST (it calls mutating routes

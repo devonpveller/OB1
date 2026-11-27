@@ -20,6 +20,7 @@ import { type Identity, identityOf } from "../middleware/identity.ts";
 import { CONTENT_TYPE_LABELS, fileContentType, INTAKE_CONTENT_TYPES, isIntakeContentType } from "./content_types.ts";
 import { type Extract, runAdd } from "./pipeline.ts";
 import type { IntakeFetch } from "./research_fetch.ts";
+import { insertJobWithPayload } from "../util/upload_store.ts";
 import * as repo from "./repo.ts";
 
 export interface IntakeDeps {
@@ -176,15 +177,14 @@ export function intakeRouter(deps: IntakeDeps) {
     if (url && !deps.fetch) {
       return c.json({ error: "the research service is not configured for the workspace (RESEARCH_URL, RESEARCH_WORKSPACE_KEY)" }, 503);
     }
-    const job = await db.tx(async (t) => {
-      const row = (await t.query<{ id: string; status: string }>(
-        `INSERT INTO public.import_jobs (status, mode, origin, owner_sub, actor_sub, actor_name, url, filename, refinery_id, doc_path, content_type)
-         VALUES ('queued', 'add', $1, $2, $3, $4, $5, $6, $7::uuid, $8, $9) RETURNING id::text AS id, status`,
-        [originOf(who), who.sub, who.actor, who.name, url || null, file?.name ?? null, refineryId ? refineryId.toLowerCase() : null, docPath, declared || null],
-      ))[0];
-      if (file && bytes) await t.query(`INSERT INTO public.import_job_payloads (job_id, filename, bytes) VALUES ($1, $2, $3)`, [row.id, file.name, bytes]);
-      return row;
-    });
+    const jobSql = `INSERT INTO public.import_jobs (status, mode, origin, owner_sub, actor_sub, actor_name, url, filename, refinery_id, doc_path, content_type)
+         VALUES ('queued', 'add', $1, $2, $3, $4, $5, $6, $7::uuid, $8, $9) RETURNING id::text AS id, status`;
+    const jobArgs = [originOf(who), who.sub, who.actor, who.name, url || null, file?.name ?? null, refineryId ? refineryId.toLowerCase() : null, docPath, declared || null];
+    // a file: the row and its bytes are saved together from the upload store's worker (rw-upload-store-offthread):
+    // encoding 25 MiB here would hold every other request for seconds
+    const job = file && bytes
+      ? await insertJobWithPayload<{ id: string; status: string }>(jobSql, jobArgs, file.name, bytes)
+      : (await db.query<{ id: string; status: string }>(jobSql, jobArgs))[0];
     runAdd({ db, rdeps: deps.rdeps, fetch: deps.fetch, extract: deps.extract }, job.id).catch((e) =>
       console.error(`[intake] add ${job.id}:`, (e as Error).message));
     return c.json({ job_id: job.id, kind: "add", status: job.status, origin: originOf(who) }, 202);

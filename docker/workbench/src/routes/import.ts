@@ -148,13 +148,12 @@ imports.post("/", async (c) => {
   // rw-p5a-intake: the job is the identity seam's subject's (its intake panel lists, retries and cancels it);
   // a file's bytes are kept until the import ends well, so a failed one can be retried from the panel
   const who = await identityOf(c);
+  const bytes = file instanceof File ? new Uint8Array(await file.arrayBuffer()) : null;
   const job = await repo.createJob(targetEntityIds, targetNotebook, targetEntityIds.length > 0, {
     owner: who.sub, actor: who.actor, url: file instanceof File ? null : url, filename: file instanceof File ? file.name : null,
-  });
+  }, file instanceof File && bytes ? { filename: file.name, bytes } : null);
   // Fire-and-forget; state is durable in import_jobs.
-  if (file instanceof File) {
-    const bytes = new Uint8Array(await file.arrayBuffer());
-    await repo.storePayload(job.id, file.name, bytes);
+  if (file instanceof File && bytes) {
     runPipeline(job.id, bytes, file.name, targetNotebook, targetEntityIds);
   } else {
     runUrlPipeline(job.id, url, page!, targetNotebook, targetEntityIds);
