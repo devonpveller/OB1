@@ -17,13 +17,15 @@ const REGISTRY = [
   N("notify.informational", "boolean", 100, "Events about your work", "A new idea of yours, a dossier delivered. Off: these no longer show in your bell. Other people's bells are not changed.", true),
   N("notify.structural", "boolean", 110, "Problems that need a fix", "Something failed that is not the model (for example a document that could not be updated). Off: these no longer show in your bell.", true),
   N("notify.transient", "boolean", 120, "The model did not perform", "A model call that kept failing. Off: these no longer show in your bell.", true),
-  N("notify.sign_in_new_device", "enum", 130, "Sign-in from a new device", "Always on: a sign-in from a device you have not used before always shows in your bell, and this cannot be switched off.", "on", { enum: ["on"] }),
+  N("notify.sign_in_new_device", "enum", 130, "Sign-in from a new device", "Not detected yet: this server does not track sign-in devices, so no alert is sent today. The row is reserved and always on, and cannot be switched off.", "on", { enum: ["on"] }),
 ];
 const EVENTS = [
   { id: "e1", class: "informational", subject: "dossier delivered" },
   { id: "e2", class: "structural", subject: "a listing could not be updated" },
   { id: "e3", class: "transient", subject: "LLM call failing for this task" },
-  { id: "e4", class: "sign_in_new_device", subject: "a sign-in from a new device" },
+  // GUARD for a future producer, not proof the row works: no producer can post this class today (post_research_notification refuses
+  // an unregistered class and nothing detects a new device). It checks that IF such an event ever exists the filter cannot hide it.
+  { id: "e4", class: "sign_in_new_device", subject: "a sign-in from a new device (future producer)" },
 ];
 const SUB = { alice: "u-alice", bob: "u-bob" };
 const NAME = { alice: "Alice Lab", bob: "Bob Builder" };

@@ -17,5 +17,7 @@ UNION ALL SELECT 'setting_problem refuses switching the sign-in key off',
 UNION ALL SELECT 'setting_problem accepts on for the sign-in key and false for a class',
        public.setting_problem('check', 'notify.sign_in_new_device', '"on"'::jsonb) IS NULL
        AND public.setting_problem('check', 'notify.transient', 'false'::jsonb) IS NULL
+UNION ALL SELECT 'the sign-in row says Not detected yet and does not claim delivery',
+       (SELECT help LIKE 'Not detected yet%' AND help NOT ILIKE '%always shows%' FROM public.settings_keys WHERE key = 'notify.sign_in_new_device')
 UNION ALL SELECT 'there is no email key',
        (SELECT count(*) = 0 FROM public.settings_keys WHERE key ~* '^notify\..*(mail|smtp)');

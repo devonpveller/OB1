@@ -84,6 +84,9 @@ t("N1: the catalog - four keys, user tier, section ui, tag only_you; three boole
     assertEquals([r.type, r.default_value], ["boolean", true], k);
   }
   const s = rows.find((x) => x.key === "notify.sign_in_new_device")!;
+  // the row is honest: it does not promise a delivered alert (nothing detects a new device or can post that class yet)
+  const h = (await sql<{ help: string }>(`SELECT help FROM public.settings_keys WHERE key = 'notify.sign_in_new_device'`))[0].help;
+  assert(/^Not detected yet/.test(h) && !/always shows/i.test(h), `the sign-in row's help must not claim delivery: ${h}`);
   assertEquals([s.type, s.default_value, s.validation], ["enum", "on", { enum: ["on"] }]);
   const cls = await sql<{ key: string }>(`SELECT key FROM public.contract_registry_entries WHERE registry = 'notification_classes' ORDER BY key`);
   assertEquals(cls.map((c) => c.key), ["informational", "structural", "transient"], "no new notification class was created");
@@ -166,7 +169,7 @@ t("N4: 'Sign-in from a new device' cannot be switched off - the server refuses e
   }
 });
 
-t("N5: a sign-in notification always shows, even if a forged stored value says off (the read hides boolean keys only)", async () => {
+t("N5: GUARD for a future producer (no producer can post this class today): a sign-in event cannot be hidden, even by a forged stored off (the read hides boolean keys only)", async () => {
   const k = "notify.sign_in_new_device";
   try {
     await seed("sign_in_new_device");

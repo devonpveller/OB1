@@ -19,7 +19,7 @@ const REGISTRY: Row[] = [
   N("notify.informational", "boolean", 100, "Events about your work", true),
   N("notify.structural", "boolean", 110, "Problems that need a fix", true),
   N("notify.transient", "boolean", 120, "The model did not perform", true),
-  N("notify.sign_in_new_device", "enum", 130, "Sign-in from a new device", "on", { enum: ["on"] }),
+  { ...N("notify.sign_in_new_device", "enum", 130, "Sign-in from a new device", "on", { enum: ["on"] }), help: "Not detected yet: this server does not track sign-in devices, so no alert is sent today. The row is reserved and always on, and cannot be switched off." },
 ];
 
 function makeServer() {
@@ -122,6 +122,19 @@ describe("the Notifications section", () => {
     await waitFor(() => expect(screen.getByTestId("saved-notify.transient").textContent).toBe("Saved"));
     expect(cb("notify.sign_in_new_device").checked).toBe(true);
     expect(SRV.puts.every((p) => p.key !== "notify.sign_in_new_device")).toBe(true);
+  });
+
+  it("the sign-in row says it is not detected yet (reserved, always on) and nothing on the screen claims the alert is delivered", async () => {
+    await open("u-alice");
+    const r = screen.getByTestId("setting-notify.sign_in_new_device");
+    expect(within(r).getByTestId("not-detected").textContent).toMatch(/^Not detected yet/);
+    expect(within(r).getByTestId("not-detected").textContent).toMatch(/sign-in tracking/);
+    expect(within(r).getByTestId("always-on").textContent).toBe("Always on");
+    const panel = screen.getByTestId("notifications").textContent ?? "";
+    expect(panel).toMatch(/not detected yet/i);
+    expect(panel).not.toMatch(/always shows|will show|you will be told|alerts you/i);
+    // the other three rows do not carry the note
+    expect(screen.getAllByTestId("not-detected")).toHaveLength(1);
   });
 
   it("no native select or datalist, and no text or number field: a switch per kind", async () => {

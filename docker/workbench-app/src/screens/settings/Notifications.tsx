@@ -1,6 +1,7 @@
 // Settings > Notifications (rwr-notify-prefs): which kinds of notification show in your bell. One row per kind: an on / off
 // switch for "In the workbench", and an "Email" column that is shown DISABLED ("needs a mail service": no mail is sent, there is
-// no email setting to store). "Sign-in from a new device" is always on: its switch is shown on and disabled, and the SERVER
+// no email setting to store). "Sign-in from a new device" is reserved and always on, and says so honestly ("Not detected yet": nothing on this server detects a new device
+// or can post that event today): its switch is shown on and disabled, and the SERVER
 // refuses an off anyway (its registry row is an enum of "on" only). Every value is the account's, read from the registry list
 // the frame already holds and written through the frame's own versioned save (saveSetting): nothing is kept in the browser.
 // `epoch` reads which person this screen is for right now: an answer that lands after the person changed is dropped, so an
@@ -48,6 +49,7 @@ function Row({ row, onRow, onStale, epoch }: { row: Setting; onRow: (r: Setting)
       <span className="np-on">
         <input type="checkbox" checked disabled aria-label={`${row.label}: in the workbench, always on`} data-testid="control" data-locked="true" readOnly />
         <span className="meta" data-testid="always-on">Always on</span>
+        <span className="meta" data-testid="not-detected">Not detected yet: needs sign-in tracking</span>
       </span>
     );
   } else if (editable) {
@@ -94,7 +96,7 @@ export function Notifications({ rows, onRow, onStale, epoch }: { rows: Setting[]
     <div data-testid="notifications">
       <p className="meta">
         Choose which kinds of notification show in your bell. Only you see these choices; other people's bells are not changed.
-        A sign-in from a new device always shows. Email is not available yet: no mail is sent.
+        Sign-in from a new device is reserved and always on, but it is not detected yet: this server does not track sign-in devices, so no such alert is sent today. Email is not available yet: no mail is sent.
       </p>
       {rows.map((r) => (
         <Row key={r.key} row={r} onRow={onRow} onStale={onStale} epoch={epoch} />

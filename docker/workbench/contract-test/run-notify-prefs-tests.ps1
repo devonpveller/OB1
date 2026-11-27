@@ -284,7 +284,7 @@ try {
     Check ($rOrig -ne $rPre) 'slot 720 changes the registry rows (they differ from the chain without 720)'
     $co = @((Dk exec $db psql -U postgres -d openbrain -X -tA -F '|' -v ON_ERROR_STOP=1 -f /tmp/check-notify-prefs.sql) -split "`n" | Where-Object { $_ -ne '' })
     Save 'check-notify-prefs.log' ($co -join "`n")
-    Check ($script:rc -eq 0 -and @($co | Where-Object { $_ -match '\|t$' }).Count -eq 6 -and @($co | Where-Object { $_ -match '\|f$' }).Count -eq 0) '[5b] check-notify-prefs.sql (read-only) reports six checks, all true'
+    Check ($script:rc -eq 0 -and @($co | Where-Object { $_ -match '\|t$' }).Count -eq 7 -and @($co | Where-Object { $_ -match '\|f$' }).Count -eq 0) '[5b] check-notify-prefs.sql (read-only) reports seven checks, all true'
     $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/init-notify-prefs.sql
     Check ($script:rc -eq 0) 'init-notify-prefs.sql re-run on a migrated database: no error'
     Check ((& $rowsOf $db) -eq $rOrig -and (& $dumpF (Dk exec $db sh -c "$dump")) -eq $dOrig) 'forward twice changes nothing (rows and schema identical)'

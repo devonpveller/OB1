@@ -71,11 +71,12 @@ ok(await A.ev(`(()=>{document.querySelectorAll('[data-testid=email-control]').fo
 ok(!(await A.ev(`!!document.querySelector('[data-testid=notifications] select, [data-testid=notifications] datalist, [data-testid=notifications] input[type=text]')`)), "no native select, datalist or text field");
 ok(await checked(A, "notify.sign_in_new_device") && await disabled(A, "notify.sign_in_new_device"), "the sign-in row is on and disabled");
 ok((await text(A, `${row("notify.sign_in_new_device")} [data-testid=always-on]`)) === "Always on", "and says 'Always on'");
+ok(/^Not detected yet/.test((await text(A, `${row("notify.sign_in_new_device")} [data-testid=not-detected]`)) || "") && !/always shows|alerts you/i.test(await A.ev(`document.querySelector('[data-testid=notifications]').textContent`)), "and says 'Not detected yet' (reserved): nothing on the screen claims the alert is delivered");
 await click(A, "notify.sign_in_new_device");
 await sleep(300);
 const lg0 = await stub("/__log");
 ok(!lg0.some((r) => r.method === "PUT"), "clicking the sign-in switch sent no request");
-ok((await bell()).join() === "informational,structural,transient,sign_in_new_device", "alice's bell shows every kind before any choice");
+ok((await bell()).join() === "informational,structural,transient,sign_in_new_device", "alice's bell shows every kind before any choice (the e4 sign-in event is a guard for a future producer, not proof the row works)");
 await axe(A, "Notifications (alice, light)");
 await A.scheme("dark");
 await axe(A, "Notifications (alice, dark)");
@@ -85,10 +86,10 @@ await A.scheme("light");
 await click(A, "notify.informational");
 ok(await A.waitFor(`document.querySelector('[data-testid="saved-notify.informational"]')?.textContent==='Saved'`), "switching 'Events about your work' off says Saved");
 ok(!(await checked(A, "notify.informational")), "and the switch shows off");
-ok((await bell()).join() === "structural,transient,sign_in_new_device", "alice's bell no longer shows informational events, the rest stay (sign-in included)");
+ok((await bell()).join() === "structural,transient,sign_in_new_device", "alice's bell no longer shows informational events, the rest stay (the future-producer guard event stays)");
 await click(A, "notify.transient");
 await A.waitFor(`document.querySelector('[data-testid="saved-notify.transient"]')?.textContent==='Saved'`);
-ok((await bell()).join() === "structural,sign_in_new_device", "two kinds off: only structural and sign-in remain");
+ok((await bell()).join() === "structural,sign_in_new_device", "two kinds off: only structural and the future-producer guard remain");
 const store1 = await stub("/__store");
 ok(store1["u-alice|notify.informational"]?.value === false && store1["u-alice|notify.informational"]?.version === 1 && !("u-alice|notify.sign_in_new_device" in store1), "the account holds false for the two kinds, and nothing for the sign-in key");
 

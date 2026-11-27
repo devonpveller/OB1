@@ -12,7 +12,8 @@
 -- The key of a class is 'notify.' || the class. The bell's read (GET /workbench/contract/notifications) leaves out an event
 -- of a class whose BOOLEAN key this person has stored as false, for that person only; a key of any other type (the sign-in
 -- key) can never hide anything. There is no email key: the email column is shown disabled ("needs a mail service") and no mail
--- is sent by anything here. No new notification class is created (the sign-in key is the preference, not a producer).
+-- is sent by anything here. No new notification class is created (the sign-in key is the preference, not a producer): nothing
+-- in this server detects a new device or can post such an event yet, so the row says "Not detected yet" and is reserved and always on.
 -- Rights: nothing new is created, so nothing is granted or revoked; user_settings keeps slot 400's rights (service_role).
 -- Slot 720 sits ON slots 400 + 550 (it needs the tag column) and changes neither the section nor the type CHECK, nor any
 -- function, so it is independent of slots 490 and 700. Additive and idempotent: a re-run restores exactly what is written
@@ -35,7 +36,7 @@ INSERT INTO public.settings_keys (key, tier, type, section, position, label, hel
         'A model call that kept failing. Off: these no longer show in your bell.',
         'true', NULL, 'openbrain-workbench, on every read of your bell', '{}', true, 'settings', 'only_you'),
     ('notify.sign_in_new_device', 'user', 'enum', 'ui', 130, 'Sign-in from a new device',
-        'Always on: a sign-in from a device you have not used before always shows in your bell, and this cannot be switched off.',
+        'Not detected yet: this server does not track sign-in devices, so no alert is sent today. The row is reserved and always on, and cannot be switched off.',
         '"on"', NULL, 'openbrain-workbench, on every read of your bell', '{"enum":["on"]}', true, 'settings', 'only_you')
 ON CONFLICT (key) DO UPDATE SET
     tier = EXCLUDED.tier, type = EXCLUDED.type, section = EXCLUDED.section, position = EXCLUDED.position,
