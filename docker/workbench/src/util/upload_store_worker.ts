@@ -18,7 +18,13 @@ const ASCII = new TextDecoder("latin1");
 
 // Lower-case hex of `b`. deno-postgres' own bytea encoder does about 0.5 s per MiB; this table walk is a
 // small fraction of that, and it runs on this thread, not the server's.
+// Counted INSIDE the work functions, per module instance: a Worker has its own instance, so the request thread's counts
+// stay at zero while the work really runs in the worker. A caller cannot fake this by setting a flag: the count is made
+// by the costly code itself, and the tests assert the request thread's count did not move.
+export const work = { hexOf: 0, storeOne: 0 };
+
 export function hexOf(b: Uint8Array): string {
+  work.hexOf++;
   const out = new Uint8Array(b.length * 2);
   for (let i = 0, j = 0; i < b.length; i++) {
     const v = b[i];
@@ -32,6 +38,7 @@ export type Conn = { hostname: string; port: number; database: string; user: str
 let pool: Pool | null = null;
 
 export async function storeOne(conn: Conn, r: StoreRequest): Promise<Record<string, unknown>> {
+  work.storeOne++;
   pool ??= new Pool(conn, 2);
   const hex = hexOf(r.bytes);
   const c = await pool.connect();

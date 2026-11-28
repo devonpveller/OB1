@@ -14,7 +14,12 @@ export type ParseReply = {
 const WGS = (globalThis as { WorkerGlobalScope?: new () => unknown }).WorkerGlobalScope;
 const inWorker = !!WGS && self instanceof (WGS as unknown as { new (): unknown });
 
+// Counted inside the parse itself, per module instance (see upload_store_worker.ts `work`): the request thread's count
+// stays at zero while the parse runs in the worker.
+export const work = { parseMultipart: 0 };
+
 export async function parseMultipart(ct: string, buf: ArrayBuffer): Promise<Omit<ParseReply, "id">> {
+  work.parseMultipart++;
   const fd = await new Request("http://upload.invalid/", { method: "POST", headers: { "content-type": ct }, body: buf }).formData();
   const entries: [string, string][] = [];
   let file: { name: string; type: string; buf: ArrayBuffer } | null = null;

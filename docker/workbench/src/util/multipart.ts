@@ -20,7 +20,19 @@ export type Form = {
 // What the tests read to know the parse really ran in a worker, and how many bodies were parsed there.
 export const parseStats = { workerParses: 0, lastInWorker: false };
 
-const NONE: Form = { entries: [], fields: {}, file: null, empty: true };
+// ONE shared empty form for every empty / non-form request: frozen, so no route can write into it and leak into another request
+const NONE: Form = Object.freeze({
+  entries: Object.freeze([]) as unknown as [string, string][],
+  fields: Object.freeze(Object.create(null)) as Record<string, string>,
+  file: null,
+  empty: true,
+});
+
+// The routes whose body is an upload: the seam reads these once and parses them in the worker, and the route reuses
+// that parse. Any OTHER multipart request keeps the seam's old behaviour (it reads a clone, the body stays whole for the
+// route), so a route that reads the raw body itself (a note save) is not broken by it.
+const UPLOAD_ROUTE = /^\/workbench\/(?:import|intake\/add|sources\/[^/]+\/replace-from-upload)\/?$/;
+export const isUploadRoute = (path: string) => UPLOAD_ROUTE.test(path);
 const mediaOf = (req: Request) => (req.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
 
 let worker: Worker | null = null;

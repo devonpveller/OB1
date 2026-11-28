@@ -2,6 +2,7 @@
 // Hermetic: no database, no network.
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { closeMultipart, formOf, multipartSizeOf, parseStats } from "./multipart.ts";
+import { work } from "./multipart_worker.ts";
 
 const MiB = 1024 * 1024;
 const opts = { sanitizeOps: false, sanitizeResources: false };
@@ -21,12 +22,12 @@ async function post(parts: [string, string | { name: string; type?: string; byte
   const probe = new Request("http://x/", { method: "POST", body: f });
   return new Request("http://x/", { method: "POST", headers: { "content-type": probe.headers.get("content-type")! }, body: new Uint8Array(await probe.arrayBuffer()) });
 }
-async function worstStall<T>(work: () => Promise<T>) {
+async function worstStall<T>(job: () => T | Promise<T>): Promise<{ out: Awaited<T>; worst: number }> {
   let worst = 0, stop = false;
   const tick = (async () => { while (!stop) { const t = performance.now(); await new Promise((r) => setTimeout(r, 10)); worst = Math.max(worst, performance.now() - t - 10); } })();
   await new Promise((r) => setTimeout(r, 40));
   worst = 0;
-  const out = await work();
+  const out = await job();
   await new Promise((r) => setTimeout(r, 30)); // the tick that ends a stall fires after it
   stop = true;
   await tick;
@@ -80,8 +81,12 @@ Deno.test({ name: "formOf: a 32 MiB upload does not hold the event loop (parsed 
   const want = await sha(bytes);
   const req = await post([["refinery_id", "r1"], ["file", { name: "big.pdf", type: "application/pdf", bytes }]]);
   const before = parseStats.workerParses;
+  const mainParses = work.parseMultipart;
   const r = await worstStall(async () => { await multipartSizeOf(req); return await formOf(req); });
   console.log(`multipart 32 MiB: worst event-loop stall ${r.worst.toFixed(0)} ms`);
+  // unfakeable: the parse function counts itself, per thread. The worker has its own copy of the module, so the request
+  // thread's count did not move because the parse really ran elsewhere (a flag set by a caller cannot do that)
+  assertEquals(work.parseMultipart, mainParses, "parseMultipart ran on the request thread");
   // the marker proves the worker; the bound is the user-visible bar (a bystander within 1 s) with the worker path's own margin
   assertEquals(parseStats.workerParses, before + 1);
   assert(parseStats.lastInWorker, "the 32 MiB parse ran inside a Worker");
@@ -100,7 +105,9 @@ function seamApp() {
   const db = { query: (_sql: string, _args?: unknown[]) => { hits.push("db"); return Promise.resolve([] as unknown[]); } } as never;
   const app = new Hono();
   app.use("/workbench/*", ownerScope(db));
-  app.post("/workbench/up", async (c) => {
+  // a route that reads the RAW body itself (a note save): a multipart type must not break it (the seam leaves its body whole)
+  app.put("/workbench/notes/x.md", async (c) => c.json({ text: await c.req.text() }));
+  app.post("/workbench/import", async (c) => {
     const f = await formOf(c.req.raw);
     return c.json({ size: f.file?.size ?? null, fields: f.fields });
   });
@@ -111,26 +118,36 @@ Deno.test({ name: "owner-scope + route: one parse in a worker; a document path i
   const { app } = seamApp();
   // the request thread must never parse or decode an upload body itself: count formData() / text() calls made on THIS thread
   // (the worker has its own realm, so its parse is not counted); a seam that clones and parses again would show here
-  const proto = Request.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
-  const called = { formData: 0, text: 0 };
-  const orig = { formData: proto.formData, text: proto.text };
-  proto.formData = function (this: Request, ...a) { called.formData++; return orig.formData.apply(this, a); };
-  proto.text = function (this: Request, ...a) { called.text++; return orig.text.apply(this, a); };
-  try { await seamBody(app); } finally { proto.formData = orig.formData; proto.text = orig.text; }
-  assertEquals(called, { formData: 0, text: 0 }, "no formData()/text() on the request thread for a multipart upload");
+  const rq = Request.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const rs = Response.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
+  const called = { reqFormData: 0, reqText: 0, resFormData: 0 };
+  const orig = { rf: rq.formData, rt: rq.text, sf: rs.formData };
+  rq.formData = function (this: Request, ...a) { called.reqFormData++; return orig.rf.apply(this, a); };
+  rq.text = function (this: Request, ...a) { called.reqText++; return orig.rt.apply(this, a); };
+  rs.formData = function (this: Response, ...a) { called.resFormData++; return orig.sf.apply(this, a); };
+  const mainParses = work.parseMultipart;
+  try { await seamBody(app); } finally { rq.formData = orig.rf; rq.text = orig.rt; rs.formData = orig.sf; }
+  assertEquals(called, { reqFormData: 0, reqText: 0, resFormData: 0 }, "no formData()/text() on the request thread for a multipart upload");
+  assertEquals(work.parseMultipart, mainParses, "parseMultipart ran on the request thread");
+  // (outside the spy: the note route legitimately reads text())
+  // a multipart PUT to a non-upload route keeps its body: the route reads it, as before (it did 500 once the seam consumed it)
+  const put = await post([["a", "1"]]);
+  const putRes = await app.fetch(new Request("http://x/workbench/notes/x.md", { method: "PUT", headers: put.headers, body: new Uint8Array(await put.arrayBuffer()) }));
+  assertEquals(putRes.status, 200);
+  assert((await putRes.json()).text.includes('name="a"'));
 }});
 async function seamBody(app: Hono) {
-  const refused = await app.fetch(await postTo("/workbench/up", [["path", "documents/someone-else/x.md"], ["file", { name: "a.pdf", bytes: pattern(1000) }]]));
+  const refused = await app.fetch(await postTo("/workbench/import", [["path", "documents/someone-else/x.md"], ["file", { name: "a.pdf", bytes: pattern(1000) }]]));
   assertEquals(refused.status, 404);
   const before = parseStats.workerParses;
-  const ok = await app.fetch(await postTo("/workbench/up", [["refinery_id", "r1"], ["file", { name: "a.pdf", bytes: pattern(5000) }]]));
+  const ok = await app.fetch(await postTo("/workbench/import", [["refinery_id", "r1"], ["file", { name: "a.pdf", bytes: pattern(5000) }]]));
   assertEquals(ok.status, 200);
   assertEquals(await ok.json(), { size: 5000, fields: { refinery_id: "r1" } });
   assertEquals(parseStats.workerParses, before + 1, "the seam and the route parsed the body ONCE between them");
   assert(parseStats.lastInWorker);
 
   const bytes = pattern(32 * MiB, 21);
-  const req = await postTo("/workbench/up", [["refinery_id", "r1"], ["file", { name: "big.pdf", bytes }]]);
+  const req = await postTo("/workbench/import", [["refinery_id", "r1"], ["file", { name: "big.pdf", bytes }]]);
   const r = await worstStall(() => app.fetch(req));
   console.log(`seam + route, 32 MiB upload: worst event-loop stall ${r.worst.toFixed(0)} ms`);
   assertEquals((await r.out.json()).size, 32 * MiB);
