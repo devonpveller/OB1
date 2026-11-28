@@ -20,7 +20,7 @@ import { classifySource } from "./source-class.ts";
 const HOST = Deno.env.get("CRED_E2E_DB_HOST");
 const pool = HOST
   ? new Pool({ hostname: HOST, port: Number(Deno.env.get("CRED_E2E_DB_PORT") ?? 5432), database: "openbrain", user: Deno.env.get("CRED_E2E_DB_USER") ?? "postgres",
-    password: Deno.env.get("CRED_E2E_DB_PASSWORD") ?? "" }, 2, true)
+    password: Deno.env.get("CRED_E2E_DB_PASSWORD") ?? "" }, 4, true)
   : null;
 const t = (name: string, fn: () => Promise<void>) => Deno.test({ name, ignore: !HOST, fn, sanitizeOps: false, sanitizeResources: false });
 async function q<T = Record<string, unknown>>(sql: string, args: unknown[] = []): Promise<T[]> {
@@ -189,5 +189,81 @@ t("stored class: a source_classes insert, update and delete re-classify every so
     c.release();
   }
   assertEquals(await drift(), 0);
+});
+
+// ── attempt 2 (tester attempt 1, Case 13): two sessions. A registry change and a source write that overlap must leave
+// community_key == source_class_of for every row (the tester's interleavings R1-R3, scratch/race.sh). ──────────────
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+async function raceRow(key: string, host: string, order: number) {
+  return [`race-${key}-${tag}`, JSON.stringify({ order, kind: "forum", host_patterns: [`^${host.replace(/\./g, "\.")}$`] })];
+}
+async function stored(sid: string) {
+  return (await q<{ k: string | null; d: string | null }>(
+    `SELECT community_key AS k, public.source_class_of(url, domain) ->> 'key' AS d FROM public.sources WHERE id = $1`, [sid]))[0];
+}
+
+t("race R1: a source INSERT open while a source_classes INSERT commits leaves no stale row", async () => {
+  const host = `rb1-${tag}.example.com`;
+  const a = await pool!.connect(), b = await pool!.connect();
+  const sid = id();
+  try {
+    await a.queryObject("BEGIN");
+    await a.queryObject(`INSERT INTO public.sources (id, url, title, content, domain) VALUES ($1, $2, 't', 'c', $3)`, [sid, `https://${host}/t/1`, host]);
+    const [k, def] = await raceRow("r1", host, 66);
+    const reg = (async () => { await b.queryObject(`INSERT INTO public.contract_registry_entries (registry, key, label, definition) VALUES ('source_classes', $1, 'race', $2::jsonb)`, [k, def]); })();
+    await sleep(1500);
+    await a.queryObject("COMMIT");
+    await reg;
+  } finally { await a.queryObject("ROLLBACK").catch(() => {}); a.release(); b.release(); }
+  const r = await stored(sid);
+  assertEquals(r.k, r.d, `stored ${r.k} vs definition ${r.d}`);
+  assertEquals(r.d, host);
+  assertEquals(await drift(), 0);
+});
+
+t("race R2: a source_classes INSERT open while a source INSERT commits leaves no stale row", async () => {
+  const host = `rb2-${tag}.example.com`;
+  const a = await pool!.connect(), b = await pool!.connect();
+  const sid = id();
+  try {
+    const [k, def] = await raceRow("r2", host, 67);
+    await b.queryObject("BEGIN");
+    await b.queryObject(`INSERT INTO public.contract_registry_entries (registry, key, label, definition) VALUES ('source_classes', $1, 'race', $2::jsonb)`, [k, def]);
+    const src = (async () => { await a.queryObject(`INSERT INTO public.sources (id, url, title, content, domain) VALUES ($1, $2, 't', 'c', $3)`, [sid, `https://${host}/t/1`, host]); })();
+    await sleep(1500);
+    await b.queryObject("COMMIT");
+    await src;
+  } finally { await b.queryObject("ROLLBACK").catch(() => {}); a.release(); b.release(); }
+  const r = await stored(sid);
+  assertEquals(r.k, r.d, `stored ${r.k} vs definition ${r.d}`);
+  assertEquals(r.d, host);
+  assertEquals(await drift(), 0);
+});
+
+t("race R3: a source_classes DELETE open while a source url UPDATE commits leaves no stale row", async () => {
+  const host = `rb3-${tag}.example.com`;
+  const [k, def] = await raceRow("r3", host, 68);
+  await q(`INSERT INTO public.contract_registry_entries (registry, key, label, definition) VALUES ('source_classes', $1, 'race', $2::jsonb)`, [k, def]);
+  const sid = await source(`https://plain-{t}.example.net/a`);
+  const a = await pool!.connect(), b = await pool!.connect();
+  try {
+    await b.queryObject("BEGIN");
+    await b.queryObject(`DELETE FROM public.contract_registry_entries WHERE registry = 'source_classes' AND key = $1`, [k]);
+    const upd = (async () => { await a.queryObject(`UPDATE public.sources SET url = $2 WHERE id = $1`, [sid, `https://${host}/t/2`]); })();
+    await sleep(1500);
+    await b.queryObject("COMMIT");
+    await upd;
+  } finally { await b.queryObject("ROLLBACK").catch(() => {}); a.release(); b.release(); }
+  const r = await stored(sid);
+  assertEquals(r.k, r.d, `stored ${r.k} vs definition ${r.d}`);
+  assertEquals(r.d, null);
+  assertEquals(await drift(), 0);
+});
+
+t("grants: the full-scan helpers are owner-only (service_role cannot run them)", async () => {
+  for (const fn of ["public.source_classes_reclassify()", "public.source_community_drift()"]) {
+    const ok = (await q<{ v: boolean }>(`SELECT has_function_privilege('service_role', $1, 'EXECUTE') AS v`, [fn]))[0].v;
+    assertEquals(ok, false, fn);
+  }
 });
 

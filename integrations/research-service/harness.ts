@@ -480,7 +480,20 @@ ABSOLUTE RULES: these are PRELIMINARY, lower-confidence findings from OUTSIDE th
 
 // ── Public types ─────────────────────────────────────────────────────────────
 /** A pre-fetched source the caller supplies to be staged directly (not searched/fetched). */
-export interface SeedSource { url: string; title: string; content: string; }
+export interface SeedSource {
+  url: string; title: string; content: string;
+  /** rwr-research-sources attempt 2: where the link really led (after redirects); classified with the url */
+  final_url?: string;
+}
+
+/**
+ * rwr-research-sources attempt 2 - THE URL A PAGE IS FILED UNDER. A link that redirected INTO a community host (a
+ * short link to a Reddit thread) is filed under its final URL, so every classifier - this run's, the SQL formulas',
+ * the stored community_key - sees the community class. Any other page keeps the url it was asked for (unchanged).
+ */
+export function filedUrl(url: string, finalUrl: string | null | undefined, isCommunity: (u: string) => boolean): string {
+  return finalUrl && finalUrl !== url && isCommunity(finalUrl) && !isCommunity(url) ? finalUrl : url;
+}
 export interface RunOptions {
   threadId?: string | null;
   origin?: string;
@@ -724,6 +737,18 @@ export async function runResearch(
   const contractDrops: ContractDrops | null = contract ? newContractDrops() : null;
   if (contract) deps = withContract(deps, contract, contractDrops!);
   if (communityDrops) deps = withCredibleOnly(deps, (u) => isCommunity(u), communityDrops);
+  // attempt 2: in every mode a page that redirected into a community host is filed under its final URL
+  {
+    const inner = deps;
+    deps = {
+      ...inner,
+      fetchPage: async (url: string): Promise<FetchResult> => {
+        const fr = await inner.fetchPage(url);
+        const to = fr.page ? filedUrl(url, fr.finalUrl, (u) => isCommunity(u)) : url;
+        return to === url || !fr.page ? fr : { ...fr, page: { ...fr.page, url: to, domain: domainOf(to) } };
+      },
+    };
+  }
   /** Spread into every RunResult: the key exists only when a contract was set (communityDrops: credible mode). */
   const dropsField = () => ({
     sourcesMode,
@@ -738,8 +763,8 @@ export async function runResearch(
       if (!deniedUrl(contract, s.url)) return true;
       recordDrop(contractDrops, "seed", s.url);
       return false;
-    }).filter((s) => credibleOnly("seed", s.url))
-    : seeds.filter((s) => credibleOnly("seed", s.url));
+    }).filter((s) => credibleOnly("seed", s.url) && credibleOnly("seed", s.final_url))
+    : seeds.filter((s) => credibleOnly("seed", s.url) && credibleOnly("seed", s.final_url));
 
   // 1. Reuse pass — recall relevant grounded claims (cheap). In article mode the
   //    recall is against the ARTICLE itself (its points are what we want to
@@ -801,9 +826,10 @@ export async function runResearch(
   // relevance gate below; everything after this index came from the open web.
   let protectedCount = 0;
   const staged: Page[] = keptSeeds
-    .map((s) => ({
-      url: s.url, title: s.title, content: s.content, domain: domainOf(s.url),
-    }));
+    .map((s) => {
+      const url = filedUrl(s.url, s.final_url, (u) => isCommunity(u));
+      return { url, title: s.title, content: s.content, domain: domainOf(url) };
+    });
   // P3a - the fold (ingestion model item 2). On a refinery session the refinery's held sources
   // (minus its hidden set) join the citable pool as context. They are NEVER staged (staging
   // writes a sources row): only the fold, after entailment, can move one into `sources`.

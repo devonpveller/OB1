@@ -8,7 +8,8 @@
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { parseRun, runOptions } from "./boundary.ts";
 import { inheritOptions } from "./tree.ts";
-import { COMMUNITY_LINK_REFUSAL, COMMUNITY_OFF, communityLinks, previewBody, sourcesRefusal } from "./start.ts";
+import { COMMUNITY_LINK_REFUSAL, COMMUNITY_OFF, communityLinks, doorLinks, previewBody, sourcesRefusal } from "./start.ts";
+import { type BoundaryDeps, formDerivedRequest } from "./boundary.ts";
 
 const ceilings = { rounds: 3, max_fetch: 24, wall_ms: 180_000 };
 
@@ -50,3 +51,24 @@ Deno.test("a credible-only start refuses community public links; a community sta
   assertEquals(communityLinks({}, ["https://www.reddit.com/r/a/"], isC), []);
   assert(COMMUNITY_LINK_REFUSAL.length > 0);
 });
+
+// attempt 2 (tester attempt 1, Case 3): the door judges where a public link LED, not only the link itself
+Deno.test("the door sees a public link's final URL: a short link to a forum is refused in a credible start", async () => {
+  const SHORT = "https://news.example.org/solar-roofs";
+  const THREAD = "https://www.reddit.com/r/solar/comments/1/winter_bills/";
+  const deps: BoundaryDeps = {
+    propose: () => Promise.resolve(["What is known about community solar roofs and winter bills?"]),
+    fetchPublic: (u) => Promise.resolve(u === SHORT ? { title: "Community solar roofs cut winter bills", text: "Community solar roofs cut winter bills by 18 percent in 2024, a survey found.", finalUrl: THREAD } : null),
+    identity: () => Promise.resolve([]),
+    resolve: () => Promise.resolve(["93.184.216.34"]),
+  };
+  const v = await formDerivedRequest({ kind: "chat", id: "start:1", owner_sub: "sub-a", links: [SHORT], fields: { question: "solar roofs and winter bills?" } }, "user-start", deps);
+  assert(v.ok, JSON.stringify(v));
+  if (!v.ok) return;
+  assertEquals(v.request.links, [SHORT]);
+  assertEquals(v.request.final_links, [THREAD]);
+  const isC = (u: string) => u.includes("reddit.com");
+  assertEquals(communityLinks({ sources: "credible" }, doorLinks(v.request), isC), [THREAD]);
+  assertEquals(communityLinks({ sources: "credible" }, v.request.links, isC), [], "the link alone looks credible (the attempt-1 hole)");
+});
+

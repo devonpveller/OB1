@@ -47,6 +47,12 @@ SELECT f, pg_get_functiondef(to_regprocedure(f))
                     'public.trg_credibility_owner_only()']) f
  WHERE to_regprocedure(f) IS NOT NULL
 ON CONFLICT (fn) DO NOTHING;
+-- attempt 2: the allow-list's COMMENT too, so the revert restores it (stored as a 'comment:' row)
+INSERT INTO public.research_sources_saved (fn, def)
+SELECT 'comment:public.request_boundary_options_ok(jsonb,boolean)',
+       COALESCE(obj_description(to_regprocedure('public.request_boundary_options_ok(jsonb,boolean)'), 'pg_proc'), '')
+ WHERE to_regprocedure('public.request_boundary_options_ok(jsonb,boolean)') IS NOT NULL
+ON CONFLICT (fn) DO NOTHING;
 
 -- ── the registry and its guards ────────────────────────────────────────────────────────────────
 INSERT INTO public.contract_registries (name, version, owner, description) VALUES
@@ -195,6 +201,12 @@ END;
 $$;
 
 -- ── the classifier (SQL twin of source-class.ts classifySource) ───────────────────────────────
+-- attempt 2: ASCII-only lower case (source-class.ts asciiLower; lower() and JS disagree on final sigma and dotted I)
+CREATE OR REPLACE FUNCTION public.source_ascii_lower(p TEXT)
+RETURNS TEXT
+LANGUAGE sql IMMUTABLE
+AS $$ SELECT translate(p, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz') $$;
+
 -- Unwrap: web.archive.org/web/<stamp>/<url>, <host>.translate.goog, <x>.cdn.ampproject.org/c/[s/]<host>/... (up to
 -- three levels). Then host = lower case, no `www.`, no trailing dot, no port; path = the path (no query, fragment).
 CREATE OR REPLACE FUNCTION public.source_url_unwrap(p_url TEXT)
@@ -204,8 +216,8 @@ AS $$
 DECLARE u TEXT := btrim(COALESCE(p_url, '')); h TEXT; rest TEXT; i INT;
 BEGIN
     FOR i IN 1..3 LOOP
-        h := lower(substring(u from '^[A-Za-z][A-Za-z0-9+.-]*://([^/?#]+)'));
-        h := regexp_replace(COALESCE(h, ''), '^[^@]*@', '');
+        h := public.source_ascii_lower(substring(u from '^[A-Za-z][A-Za-z0-9+.-]*://([^/?#]+)'));
+        h := regexp_replace(COALESCE(h, ''), '^.*@', '');   -- the host follows the LAST @
         h := regexp_replace(h, ':[0-9]+$', '');
         rest := substring(u from '^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]+(.*)$');
         IF h IN ('web.archive.org', 'archive.org') AND rest ~ '^/web/[0-9a-z_*]+/.+' THEN
@@ -230,10 +242,10 @@ LANGUAGE plpgsql STABLE
 AS $$
 DECLARE u TEXT := public.source_url_unwrap(p_url); h TEXT; path TEXT; e RECORD; segs TEXT[]; n INT; k TEXT;
 BEGIN
-    h := lower(substring(u from '^[A-Za-z][A-Za-z0-9+.-]*://([^/?#]+)'));
-    IF h IS NULL THEN h := lower(NULLIF(btrim(COALESCE(p_domain, '')), '')); END IF;
+    h := public.source_ascii_lower(substring(u from '^[A-Za-z][A-Za-z0-9+.-]*://([^/?#]+)'));
+    IF h IS NULL THEN h := public.source_ascii_lower(NULLIF(btrim(COALESCE(p_domain, '')), '')); END IF;
     IF h IS NULL THEN RETURN NULL; END IF;
-    h := regexp_replace(regexp_replace(regexp_replace(h, '^[^@]*@', ''), ':[0-9]+$', ''), '\.$', '');
+    h := regexp_replace(regexp_replace(regexp_replace(h, '^.*@', ''), ':[0-9]+$', ''), '\.$', '');
     h := regexp_replace(h, '^www\.', '');
     path := COALESCE(substring(u from '^[A-Za-z][A-Za-z0-9+.-]*://[^/?#]+(/[^?#]*)'), '/');
     FOR e IN SELECT key, definition d FROM public.contract_registry_entries
@@ -243,7 +255,7 @@ BEGIN
         CONTINUE WHEN e.d ? 'path_patterns'
                   AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(e.d -> 'path_patterns') p WHERE path ~* p);
         n := COALESCE((e.d ->> 'key_segments')::int, 0);
-        segs := ARRAY(SELECT lower(s) FROM unnest(string_to_array(btrim(path, '/'), '/')) WITH ORDINALITY t(s, o)
+        segs := ARRAY(SELECT public.source_ascii_lower(s) FROM unnest(string_to_array(btrim(path, '/'), '/')) WITH ORDINALITY t(s, o)
                        WHERE s <> '' ORDER BY o LIMIT n);
         k := COALESCE(e.d ->> 'key_host', h) || CASE WHEN array_length(segs, 1) > 0 THEN '/' || array_to_string(segs, '/') ELSE '' END;
         RETURN jsonb_build_object('kind', e.d ->> 'kind', 'entry', e.key, 'key', k);
@@ -261,6 +273,12 @@ $$;
 --   * statement triggers on contract_registry_entries re-classify every source when a source_classes row is
 --     inserted, updated or deleted (owner-only rows: the P3a guard above);
 --   * source_community_drift() counts rows whose stored value differs from the definition (0 = never stale).
+--   * attempt 2 (tester attempt 1, Case 13 - two sessions left a stale row): the two writers are SERIALISED by one
+--     advisory lock. A source write that classifies takes it SHARED (source writes never wait for each other); a
+--     re-classification takes it EXCLUSIVE. So a re-classification waits for every open source write to commit (and
+--     then sees it), and a source write waits for an open registry change to commit (and then classifies with it).
+--     Both sides are plpgsql in READ COMMITTED, so the statement after the lock reads a fresh snapshot. Residual: a
+--     source writer in REPEATABLE READ or SERIALIZABLE keeps its older snapshot; every writer here is READ COMMITTED.
 ALTER TABLE public.sources ADD COLUMN IF NOT EXISTS community_key TEXT;
 
 CREATE OR REPLACE FUNCTION public.trg_sources_community_key()
@@ -272,6 +290,7 @@ AS $$
 BEGIN
     IF TG_OP = 'INSERT' OR NEW.url IS DISTINCT FROM OLD.url OR NEW.domain IS DISTINCT FROM OLD.domain
        OR NEW.community_key IS DISTINCT FROM OLD.community_key THEN
+        PERFORM pg_advisory_xact_lock_shared(750750);   -- attempt 2: wait for an open registry change to commit
         NEW.community_key := public.source_class_of(NEW.url, NEW.domain) ->> 'key';
     END IF;
     RETURN NEW;
@@ -290,6 +309,7 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE n INT;
 BEGIN
+    PERFORM pg_advisory_xact_lock(750750);   -- attempt 2: wait for every open source write to commit
     UPDATE public.sources s SET community_key = public.source_class_of(s.url, s.domain) ->> 'key'
      WHERE s.community_key IS DISTINCT FROM (public.source_class_of(s.url, s.domain) ->> 'key');
     GET DIAGNOSTICS n = ROW_COUNT;
@@ -338,8 +358,10 @@ CREATE TRIGGER trg_source_classes_changed_upd AFTER UPDATE ON public.contract_re
 DROP TRIGGER IF EXISTS trg_source_classes_changed_del ON public.contract_registry_entries;
 CREATE TRIGGER trg_source_classes_changed_del AFTER DELETE ON public.contract_registry_entries
     REFERENCING OLD TABLE AS was FOR EACH STATEMENT EXECUTE FUNCTION public.trg_source_classes_changed();
+-- attempt 2: owner-only. The default privileges grant service_role EXECUTE on every new function, so REVOKE FROM PUBLIC
+-- is not enough: each helper is a full scan (about 24 s at live size, the tester measured).
 REVOKE ALL ON FUNCTION public.trg_sources_community_key(), public.source_classes_reclassify(),
-    public.trg_source_classes_changed() FROM PUBLIC;
+    public.trg_source_classes_changed(), public.source_community_drift() FROM PUBLIC, service_role;
 
 -- the backfill (every existing source; the re-score below reads the column)
 SELECT public.source_classes_reclassify();
@@ -630,7 +652,7 @@ ON CONFLICT (key) DO UPDATE SET tier = EXCLUDED.tier, type = EXCLUDED.type, sect
 -- ── grants: the readers the services call ─────────────────────────────────────────────────────
 GRANT EXECUTE ON FUNCTION public.source_class_of(TEXT, TEXT), public.source_url_unwrap(TEXT),
     public.source_is_community(UUID), public.claim_has_credible_support(UUID), public.claim_community_only(UUID),
-    public.claim_community_consensus(UUID), public.credibility_community_terms(), public.source_community_drift() TO service_role;
+    public.claim_community_consensus(UUID), public.credibility_community_terms() TO service_role;
 
 -- ── the deploy re-score (operator 2026-11-27): every claim with a community grounding source ─
 DO $$

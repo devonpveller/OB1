@@ -53,6 +53,10 @@ export function sourcesRefusal(run: DerivedRun, communityAllowed: boolean): stri
 /** rwr-research-sources (operator Q7): a credible-only start whose public links include community pages is refused
  *  with this reason (a refusal code, like the boundary's own), rather than dropping the links silently. */
 export const COMMUNITY_LINK_REFUSAL = "community_link_in_credible_run";
+/** attempt 2: the links the door judges - each public link AND where it led after redirects. */
+export function doorLinks(req: { links: readonly string[]; final_links?: readonly string[] }): string[] {
+  return [...req.links, ...(req.final_links ?? [])];
+}
 export function communityLinks(run: DerivedRun, links: readonly string[], isCommunity: (url: string) => boolean): string[] {
   return run.sources === "credible" ? links.filter((l) => isCommunity(l)) : [];
 }

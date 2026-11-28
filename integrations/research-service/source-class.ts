@@ -70,11 +70,15 @@ export function buildSourceClasses(rows: Array<{ registry: string; key: string; 
 }
 
 const SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:\/\//;
+/** attempt 2: ASCII-only lower case - the SQL twin's source_ascii_lower (JS toLowerCase and PG lower() disagree on
+ *  final sigma and dotted capital I, so neither is used for a host or a key). */
+export const asciiLower = (s: string) => s.replace(/[A-Z]/g, (c) => c.toLowerCase());
 
 function rawHost(u: string): string | null {
   const m = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]+)/.exec(u);
   if (!m) return null;
-  return m[1].toLowerCase().replace(/^[^@]*@/, "").replace(/:[0-9]+$/, "");
+  // attempt 2: the host is what follows the LAST @ (as WHATWG and fetch resolve it), in both twins
+  return asciiLower(m[1]).replace(/^.*@/, "").replace(/:[0-9]+$/, "");
 }
 
 /** The URL a wrapper stands for (web.archive.org, *.translate.goog, *.cdn.ampproject.org), up to three levels. */
@@ -103,14 +107,14 @@ export function unwrapUrl(url: string): string {
 export function classifySource(entries: ReadonlyArray<SourceClassEntry>, url: string | null | undefined, domain?: string | null): SourceClass | null {
   const u = unwrapUrl(String(url ?? ""));
   let h = SCHEME.test(u) ? rawHost(u) : null;
-  if (h === null) h = (domain ?? "").trim().toLowerCase() || null;
+  if (h === null) h = asciiLower((domain ?? "").trim()) || null;
   if (!h) return null;
-  h = h.replace(/^[^@]*@/, "").replace(/:[0-9]+$/, "").replace(/\.$/, "").replace(/^www\./, "");
+  h = h.replace(/^.*@/, "").replace(/:[0-9]+$/, "").replace(/\.$/, "").replace(/^www\./, "");
   const path = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]+(\/[^?#]*)/.exec(u)?.[1] ?? "/";
   for (const e of entries) {
     if (!e.hosts.some((re) => re.test(h!))) continue;
     if (e.paths && !e.paths.some((re) => re.test(path))) continue;
-    const segs = path.replace(/^\/+|\/+$/g, "").split("/").filter((s) => s !== "").slice(0, e.keySegments).map((s) => s.toLowerCase());
+    const segs = path.replace(/^\/+|\/+$/g, "").split("/").filter((s) => s !== "").slice(0, e.keySegments).map(asciiLower);
     return { kind: e.kind, entry: e.key, key: (e.keyHost ?? h) + (segs.length ? "/" + segs.join("/") : "") };
   }
   return null;

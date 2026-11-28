@@ -41,6 +41,9 @@ export interface DerivedRequest {
   question: string;                 // <= 300 chars
   topic: string;                    // <= 80 chars
   links: string[];                  // canonical, anonymously fetched, public
+  /** rwr-research-sources attempt 2: where those links led after redirects (only when different); checked by the
+   *  start door, never stored */
+  final_links?: string[];
   purpose: Purpose;
   // round 2 (TF4): the evidence snapshot rides on the stamp - the run-time fetch uses a page only if its hash matches
   boundary: { version: string; lexicon: string; verdict_id: string; evidence: Array<{ url: string; sha256: string }> };
@@ -72,7 +75,8 @@ export interface OwnerView { candidate: string; failing: string[]; code: GateCod
 
 export interface BoundaryDeps {
   propose: (item: PersonalItem, evidence: Evidence) => Promise<string[]>;
-  fetchPublic: (url: string) => Promise<{ title: string; text: string } | null>;
+  /** finalUrl (rwr-research-sources attempt 2): where the link led after redirects, when it differs */
+  fetchPublic: (url: string) => Promise<{ title: string; text: string; finalUrl?: string } | null>;
   identity: (owner_sub: string) => Promise<string[]>;
   /** round 2 (TF6): the host's addresses (A + AAAA); a link whose host resolves to any private, loopback, link-local or
    *  reserved address (or does not resolve) is refused before its fetch (intake-fetch.ts judgeAddresses). */
@@ -131,6 +135,7 @@ export async function formDerivedRequest(item: PersonalItem, purpose: Purpose, d
   // the public links: canonical, not on the private-host list, a public address, no id or identity in the path,
   // fetched anonymously with success (a snapshot)
   const pages: PublicPage[] = [];
+  const finalOf = new Map<string, string>();   // rwr-research-sources attempt 2: link -> where it led
   const seen = new Set<string>();
   for (const l of rawLinks) {
     const c = canonicalLink(l);
@@ -142,6 +147,7 @@ export async function formDerivedRequest(item: PersonalItem, purpose: Purpose, d
     if (!got || !String(got.text ?? "").trim()) { record.links_dropped++; continue; }
     const title = String(got.title ?? ""), text = String(got.text ?? "");
     pages.push({ url: c.url, title, text, sha256: await sha256Hex(`${title}\n${text}`) });
+    if (got.finalUrl && got.finalUrl !== c.url) finalOf.set(c.url, String(got.finalUrl));
   }
   record.evidence = pages.map((p) => ({ url: p.url, sha256: p.sha256 }));
   if (purpose === "digest-article" && !pages.length) return refuse(rawLinks.length ? "link_not_public" : "no_public_evidence");
@@ -183,7 +189,7 @@ export async function formDerivedRequest(item: PersonalItem, purpose: Purpose, d
     const verdict_id = await sha256Hex(canonicalJson(record));
     return {
       ok: true, record, verdict_id,
-      request: { question, topic, links: pages.map((p) => p.url), purpose, boundary: { version: BOUNDARY_VERSION, lexicon: lex.version, verdict_id, evidence: record.evidence } },
+      request: { question, topic, links: pages.map((p) => p.url), final_links: pages.flatMap((p) => finalOf.has(p.url) ? [finalOf.get(p.url)!] : []), purpose, boundary: { version: BOUNDARY_VERSION, lexicon: lex.version, verdict_id, evidence: record.evidence } },
     };
   }
   return refuse("no_candidate_passed", purpose === "idea-research" ? best : null);

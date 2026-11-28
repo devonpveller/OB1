@@ -28,7 +28,9 @@ const SO = "https://diy.stackexchange.com/questions/1/heat-pump-night-noise";
 const COMMUNITY = new Set(["www.reddit.com", "diy.stackexchange.com"]);
 const host = (u: string) => new URL(u).hostname;
 
-function db(kb: Array<{ url: string }> = []) {
+interface Reuse { claim: string; sources: Array<Array<{ url: string }>> }
+function db(kb: Array<{ url: string }> = [], reuse?: Reuse) {
+  let reuseReads = 0;
   const client: QueryClient = {
     queryObject<T>(sql: string, args: unknown[] = []): Promise<{ rows: T[] }> {
       const rows = (r: unknown[]) => Promise.resolve({ rows: r as T[] });
@@ -36,6 +38,14 @@ function db(kb: Array<{ url: string }> = []) {
       if (cred) return rows(cred);
       if (/INSERT INTO public\.sessions/i.test(sql)) return rows([{ id: "00000000-0000-4000-8000-0000000000a1" }]);
       if (/find_or_create_source/i.test(sql)) return rows([{ id: `src:${args[0]}`, was_duplicate: false }]);
+      if (reuse && /claim_is_grounded/i.test(sql)) {
+        return rows([{ id: reuse.claim, text: `Night mode halves ${TOPIC} (reused).`, confidence: 0.9, contradicted: false, grounded: true,
+          has_strong: true, researched_on: new Date().toISOString().slice(0, 10), volatility: "slow", revalidate_days: null, distance: "0.1" }]);
+      }
+      if (reuse && /DISTINCT ON \(cs\.claim_id\)/i.test(sql)) {
+        const read = reuse.sources[Math.min(reuseReads++, reuse.sources.length - 1)];
+        return rows(read.map((x, i) => ({ claim_id: reuse.claim, id: `rs-${i}-${x.url}`, url: x.url, title: TOPIC, content: `${TOPIC} reused source text. `.repeat(20), domain: host(x.url) })));
+      }
       if (/FROM public\.sources s/i.test(sql) && /embedding/i.test(sql) && kb.length) {
         return rows(kb.map((k, i) => ({ id: `kb-${i}`, url: k.url, title: TOPIC, content: `${TOPIC} stored notes `.repeat(30), domain: host(k.url), distance: 0.1 })));
       }
@@ -205,3 +215,59 @@ Deno.test("scoring: a community-only claim is labelled and below the floor, with
   assertEquals(padC.below_floor, padK.below_floor);
   assertEquals(byText(credible, "firmware"), undefined, "a credible run never had the community claim");
 });
+
+// ── attempt 2 (tester attempt 1): seeds, redirects and reused claims ─────────────────────────────────────────────────
+const BITLY = "https://bit.ly/heat-pump-thread";
+const seed = (url: string, final_url?: string) => ({ url, title: `${TOPIC} thread`, content: `Owners say ${TOPIC} drops with night mode. `.repeat(20), ...(final_url ? { final_url } : {}) });
+
+Deno.test("credible: a community seed is dropped and recorded (M6)", async () => {
+  const { d, pkgs } = deps({ hits: [ENERGY] });
+  const res = await runResearch(d, db(), PRACTICAL, { sources: "credible", seedSources: [seed(REDDIT)] });
+  assertEquals(pooled(pkgs).filter(isCommunity), []);
+  assert((res.communityDrops?.counts.seed ?? 0) >= 1);
+});
+
+Deno.test("credible: a seed whose link REDIRECTED to a forum is dropped on its final URL", async () => {
+  const { d, pkgs } = deps({ hits: [ENERGY] });
+  const res = await runResearch(d, db(), PRACTICAL, { sources: "credible", seedSources: [seed(BITLY, REDDIT)] });
+  assertEquals(pooled(pkgs).filter((u) => u === BITLY || isCommunity(u)), []);
+  assert((res.communityDrops?.counts.seed ?? 0) >= 1);
+});
+
+Deno.test("community: a redirected seed is pooled under its final (community) URL, so its claim is community only", async () => {
+  const lines = (n: (h: string) => number) => [`[SOURCED] Night mode firmware cuts ${TOPIC} by half. ${cite(n, "www.reddit.com", "reddit.com")}`];
+  const { d, pkgs } = deps({ hits: [], lines });
+  const res = await runResearch(d, db(), PRACTICAL, { sources: "community", seedSources: [seed(BITLY, REDDIT)] });
+  assert(pooled(pkgs).includes(REDDIT) && !pooled(pkgs).includes(BITLY), JSON.stringify(pooled(pkgs)));
+  assertEquals(res.lineCredibility.find((c) => c.text.includes("firmware"))?.community_only, true);
+});
+
+Deno.test("community: a web page that redirected to a forum is pooled under its final URL and labelled", async () => {
+  const lines = (n: (h: string) => number) => [`[SOURCED] Night mode firmware cuts ${TOPIC} by half. ${cite(n, "www.reddit.com", "reddit.com")}`];
+  const { d, pkgs } = deps({ hits: [BITLY], finalUrl: { [BITLY]: REDDIT }, lines });
+  const res = await runResearch(d, db(), PRACTICAL, { sources: "community" });
+  assert(pooled(pkgs).includes(REDDIT) && !pooled(pkgs).includes(BITLY), JSON.stringify(pooled(pkgs)));
+  assertEquals(res.lineCredibility.find((c) => c.text.includes("firmware"))?.community_only, true);
+});
+
+Deno.test("credible: a reused claim grounded in a community source is not reused (M8)", async () => {
+  const { d, pkgs } = deps({ hits: [ENERGY] });
+  const res = await runResearch(d, db([], { claim: "c-reuse-1", sources: [[{ url: REDDIT }]] }), PRACTICAL, { sources: "credible" });
+  assertEquals(res.reuseClaims.map((c) => c.id), []);
+  assertEquals(pooled(pkgs).filter(isCommunity), []);
+  assert((res.communityDrops?.counts.reuse ?? 0) >= 1);
+});
+
+Deno.test("credible: a reused source that turned community between the two reads is dropped by the backstop (M8b)", async () => {
+  const { d, pkgs } = deps({ hits: [ENERGY] });
+  const res = await runResearch(d, db([], { claim: "c-reuse-2", sources: [[{ url: NEWS }], [{ url: REDDIT }]] }), PRACTICAL, { sources: "credible" });
+  assertEquals(pooled(pkgs).filter(isCommunity), []);
+  assert((res.communityDrops?.counts.reuse ?? 0) >= 1);
+});
+
+Deno.test("community: a reused claim's community source is kept (the filter is credible-mode only)", async () => {
+  const { d } = deps({ hits: [ENERGY] });
+  const res = await runResearch(d, db([], { claim: "c-reuse-3", sources: [[{ url: REDDIT }]] }), PRACTICAL, { sources: "community" });
+  assertEquals(res.reuseClaims.map((c) => c.id), ["c-reuse-3"]);
+});
+

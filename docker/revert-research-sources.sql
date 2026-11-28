@@ -28,8 +28,12 @@ SELECT DISTINCT cs.claim_id FROM public.claim_sources cs JOIN public.sources s O
 DO $$
 DECLARE r RECORD;
 BEGIN
-    FOR r IN SELECT fn, def FROM public.research_sources_saved LOOP
+    FOR r IN SELECT fn, def FROM public.research_sources_saved WHERE fn NOT LIKE 'comment:%' LOOP
         EXECUTE r.def;
+    END LOOP;
+    -- attempt 2: the allow-list's COMMENT as it was before slot 750
+    FOR r IN SELECT fn, def FROM public.research_sources_saved WHERE fn = 'comment:public.request_boundary_options_ok(jsonb,boolean)' LOOP
+        EXECUTE format('COMMENT ON FUNCTION public.request_boundary_options_ok(jsonb, boolean) IS %L', r.def);
     END LOOP;
 END $$;
 
@@ -57,6 +61,7 @@ DROP FUNCTION IF EXISTS public.claim_community_only(UUID);
 DROP FUNCTION IF EXISTS public.claim_has_credible_support(UUID);
 DROP FUNCTION IF EXISTS public.source_is_community(UUID);
 DROP FUNCTION IF EXISTS public.source_class_of(TEXT, TEXT);
+DROP FUNCTION IF EXISTS public.source_ascii_lower(TEXT);
 DROP FUNCTION IF EXISTS public.source_url_unwrap(TEXT);
 DROP FUNCTION IF EXISTS public.credibility_community_terms();
 DROP FUNCTION IF EXISTS public.source_class_def_ok(JSONB);

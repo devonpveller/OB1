@@ -38,7 +38,7 @@ import { approveIdeaQuestion, drainIdeaHandbacks } from "./boundary-ideas.ts";
 import { runCeilings } from "./depth.ts";
 import { storedCeilings } from "./limits.ts";
 import {
-  COMMUNITY_LINK_REFUSAL, communityLinks, doorRefusesIdea, formForDoor, IDEA_DOOR_REFUSAL, previewBody, sourcesRefusal, startChanged,
+  COMMUNITY_LINK_REFUSAL, communityLinks, doorLinks, doorRefusesIdea, formForDoor, IDEA_DOOR_REFUSAL, previewBody, sourcesRefusal, startChanged,
 } from "./start.ts";
 import { sourcesModeOf } from "./source-class.ts";
 import { actorOf, FOREIGN_PROMPTS_SQL, HIDDEN_STEER_TEXTS_SQL, nonActorView, LISTED_FOR, MAY_ACT_SQL, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
@@ -441,7 +441,7 @@ async function communityAllowed(): Promise<boolean> {
   try {
     const c = await pool.connect();
     try {
-      const r = await c.queryObject<{ v: unknown }>(`SELECT public.setting_get(NULL, 'research.community_allowed') AS v`);
+      const r = await c.queryObject<{ v: unknown }>(`SELECT public.setting_get(NULL, 'research.community_allowed') AS v`);   // the admin tier
       return r.rows[0]?.v !== false;
     } finally { c.release(); }
   } catch {
@@ -896,7 +896,7 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal, gate: SlotGate =
       // round 2 (TF4): the run uses a page only if it is still the page the gate judged - the final URL is public again
       // (canonical, not a private host or token path, a public address) and its hash equals the gate-time snapshot's
       const snap = new Map(((kindRow?.boundary?.evidence ?? []) as Array<{ url?: string; sha256?: string }>).map((e) => [String(e.url), String(e.sha256)]));
-      const fetched: Array<{ url: string; title: string; content: string }> = [];
+      const fetched: Array<{ url: string; title: string; content: string; final_url?: string }> = [];
       for (const u of (options.public_links as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 5)) {
         const r = await realDeps.fetchPage(u).catch(() => null);
         if (!r?.page) continue;
@@ -904,7 +904,8 @@ async function executeJob(job: ClaimedJob, signal: AbortSignal, gate: SlotGate =
         if (!("url" in fin) || !(await publicAddress(fin.url, { resolve: intakeResolve }))) { console.warn(`[job ${jobId}] a public link left the public web at run time - not used`); continue; }
         if (snap.get(u) !== await sha256Hex(`${r.page.title}
 ${r.page.content}`)) { console.warn(`[job ${jobId}] a public link changed since the gate judged it - not used`); continue; }
-        fetched.push({ url: u, title: r.page.title, content: r.page.content });
+        // rwr-research-sources attempt 2: the final URL rides with the seed - the run classifies (and files) it
+        fetched.push({ url: u, title: r.page.title, content: r.page.content, final_url: fin.url });
       }
       if (fetched.length) seedSources = fetched;
     }
@@ -1193,7 +1194,8 @@ const boundaryDeps: BoundaryDeps = {
     if (!r.page) return null;
     // a redirect onto a private host or a token path is not a public page
     if (r.finalUrl && !("url" in canonicalLink(r.finalUrl))) return null;
-    return { title: r.page.title, text: r.page.content };
+    // rwr-research-sources attempt 2: where it really led - the door classifies the final URL too
+    return { title: r.page.title, text: r.page.content, ...(r.finalUrl ? { finalUrl: r.finalUrl } : {}) };
   },
   identity: async (sub) => {
     const c = await pool.connect();
@@ -1443,7 +1445,7 @@ Deno.serve({ port: PORT }, async (req) => {
     if (offP) return Response.json({ error: offP, code: "community_off" }, { status: 403 });
     try {
       const pv = await formForDoor(parsed, boundaryDeps);
-      if (pv.ok && (await communityLinksOf(parsed.run, pv.request.links)).length) {
+      if (pv.ok && (await communityLinksOf(parsed.run, doorLinks(pv.request))).length) {
         return Response.json({ ok: false, refusal: COMMUNITY_LINK_REFUSAL, sources: parsed.run.sources ?? null }, { status: 200 });
       }
       return Response.json(previewBody(pv, parsed.run, await currentCeilings()), { status: 200 });
@@ -1492,7 +1494,7 @@ Deno.serve({ port: PORT }, async (req) => {
     }
     if (!verdict.ok && verdict.refusal === "no_owner") return Response.json({ refused: "no_owner", handback_id: null }, { status: 200 });
     // rwr-research-sources (Q7): a credible-only start does not take community public links - refused, nothing created
-    if (verdict.ok && (await communityLinksOf(run, verdict.request.links)).length) {
+    if (verdict.ok && (await communityLinksOf(run, doorLinks(verdict.request))).length) {
       return Response.json({ refused: COMMUNITY_LINK_REFUSAL, handback_id: null }, { status: 200 });
     }
     const c = await pool.connect();
