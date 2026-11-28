@@ -50,7 +50,9 @@ async function raw(port: number, head: string[], chunks: Uint8Array[]): Promise<
     }
     await conn.write(enc.encode("0\r\n\r\n"));
   } catch { /* the server answered and closed early: fine */ }
-  await Promise.race([reading, new Promise((r) => setTimeout(r, 5000))]);
+  let tm: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([reading, new Promise((r) => { tm = setTimeout(r, 5000); })]);
+  clearTimeout(tm); // a timer left pending fails deno's leak check (2.3.3)
   try { conn.close(); } catch { /* closed */ }
   return { status: Number(/^HTTP\/1\.1 (\d+)/.exec(text)?.[1] ?? 0), text };
 }

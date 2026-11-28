@@ -58,6 +58,14 @@ export function capFor(route: string, contentType: string): number {
 const tooLarge = (c: Context, cap: number) =>
   c.json({ error: `the request is too large (at most ${cap} bytes)` }, 413);
 
+let lastWarn = 0;
+function warnUnreadable(route: string, bytes: number, e: unknown) {
+  const now = Date.now();
+  if (now - lastWarn < 10_000) return;
+  lastWarn = now;
+  console.warn(`[workbench] body-limit: a request body could not be read (${route}, ${bytes} bytes counted): ${(e as Error)?.message ?? e}`);
+}
+
 export function bodyLimit() {
   return async (c: Context, next: Next) => {
     if (!MUTATING(c.req.method)) return await next();
@@ -83,9 +91,11 @@ export function bodyLimit() {
       let part: ReadableStreamReadResult<Uint8Array>;
       try {
         part = await reader.read();
-      } catch {
-        // the runtime failed the body part-way (a dropped connection, or deno 2.3.3's "error reading a body from connection" on
-        // a fast chunked body of about 3 MiB or more): the client's transport, not a fault here, so not the app's 500
+      } catch (e) {
+        // the body stream failed part-way: deno's own body reader (deno 2.3.3: "error reading a body from connection" on a fast
+        // chunked body of about 3 MiB or more) or a dropped connection. Not a fault in this app, so not its 500; but it is logged
+        // (once per 10 s: route and bytes counted so far, never the body), as the 500 was, so the signal is not lost
+        warnUnreadable(seamPath(c), n, e);
         return c.json({ error: "the request body could not be read" }, 400);
       }
       const { done, value } = part;

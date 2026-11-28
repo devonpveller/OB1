@@ -16,6 +16,7 @@
 // WIKI_GIT_DIR / OPEN_BRAIN_* so src/app.ts can be imported to read its route table (it is never served here).
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { DEFAULT_MAX_BODY_BYTES, isUploadRoute } from "./body_limit.ts";
+import { VIEWER_CAP, VIEWER_UPLOAD_CAP } from "./viewer_caps.ts";
 
 const BASE = (Deno.env.get("BODY_BASE") ?? "").replace(/\/+$/, "");
 const VIEWER = (Deno.env.get("BODY_VIEWER") ?? "").replace(/\/+$/, "");
@@ -26,8 +27,6 @@ const t = (name: string, fn: () => Promise<void>) => Deno.test({ name, ignore, f
 
 const MiB = 1024 * 1024;
 const CAP = DEFAULT_MAX_BODY_BYTES; // the workbench's WORKBENCH_MAX_BODY_BYTES default (imported from the product); the lab sets none
-const VIEWER_CAP = 1 * MiB; // the viewer's non-upload cap (workbench-proxy.mjs bodyCap)
-const VIEWER_UPLOAD_CAP = 100 * MiB; // the viewer's cap on its three upload paths (bodyCap); mirrored: the lab image has no wiki-viewer
 // The limit that applies to a JSON body on `route` at a door: the first of the door's own cap and the workbench's non-multipart
 // cap. The viewer lets a JSON body to an upload route through up to 100 MB, so there the workbench's 4 MiB is the limit (and the
 // route is never reached: 413 from the body cap, not the route's own 400). The upload routes come from the product's own list.

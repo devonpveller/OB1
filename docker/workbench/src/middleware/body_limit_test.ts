@@ -5,6 +5,7 @@
 import { assert, assertEquals } from "jsr:@std/assert@1";
 import { Hono } from "hono";
 import { bodyLimit, DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_UPLOAD_BYTES, INTAKE_MAX_FILE_BYTES, maxBodyBytes, maxUploadBytes, UPLOAD_ROUTES } from "./body_limit.ts";
+import { VIEWER_CAP, VIEWER_UPLOAD_CAP } from "./viewer_caps.ts";
 import { ownerScope } from "./owner-scope.ts";
 import type { Identity } from "./identity.ts";
 import { DEFAULT_LIMITS } from "../export/markdown.ts";
@@ -95,6 +96,31 @@ Deno.test("a body stream that fails mid-read is a 400 with a plain message, neve
     assertEquals(r.status, after > maxBodyBytes() ? 413 : 400, `fails after ${after} bytes`);
     if (r.status === 400) assertEquals((await r.json()).error, "the request body could not be read");
     assertEquals(reached, 0, "no route ran");
+  }
+});
+
+Deno.test("F3 parity: the viewer's own upload list and caps (workbench-proxy.mjs, read as text) match UPLOAD_ROUTES and the mirrored constants", async () => {
+  let src: string;
+  try { src = await Deno.readTextFile(new URL("../../../wiki-viewer/lib/workbench-proxy.mjs", import.meta.url)); } catch { return; } // no wiki-viewer beside the workbench (an image stage)
+  const MB = 1024 * 1024;
+  assertEquals(src.match(/^const MB = (.*);$/m)?.[1], "1024 * 1024");
+  const cap = /export function bodyCap\(path\) \{\s*return UPLOAD\.test\(path\) \? (\d+) \* MB : (\d+) \* MB;/.exec(src);
+  assert(cap, "bodyCap has the expected shape");
+  assertEquals(Number(cap![1]) * MB, VIEWER_UPLOAD_CAP);
+  assertEquals(Number(cap![2]) * MB, VIEWER_CAP);
+  const up = /^const UPLOAD = (\/.*\/);$/m.exec(src);
+  assert(up, "the viewer's UPLOAD regex is there");
+  const viewerRe = new RegExp(up![1].slice(1, -1));
+  // every workbench upload route is an upload path at the viewer (a route missing there is unreachable from a browser)
+  const samples = ["/workbench/import", "/workbench/intake/add", "/workbench/sources/abc/replace-from-upload"];
+  assertEquals(UPLOAD_ROUTES.length, samples.length);
+  for (const p of samples) {
+    assert(UPLOAD_ROUTES.some((r) => r.test(p)), `${p} is a workbench upload route`);
+    assert(viewerRe.test(p), `${p} is a viewer upload path`);
+  }
+  // and the viewer lists no upload path the workbench does not
+  for (const p of ["/workbench/documents/file", "/workbench/notes/a.md", "/workbench/settings/user/k", "/workbench/sources/abc/replace", "/workbench/intake/queue"]) {
+    assert(!viewerRe.test(p), `${p} is not a viewer upload path`);
   }
 });
 
