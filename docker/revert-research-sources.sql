@@ -43,6 +43,15 @@ DELETE FROM public.contract_registry_entries WHERE registry = 'credibility_terms
 DELETE FROM public.contract_registries WHERE name = 'source_classes';
 ALTER TABLE public.contract_registry_entries DROP CONSTRAINT IF EXISTS contract_registry_entries_source_class_ok;
 
+DROP TRIGGER IF EXISTS trg_source_classes_changed_ins ON public.contract_registry_entries;
+DROP TRIGGER IF EXISTS trg_source_classes_changed_upd ON public.contract_registry_entries;
+DROP TRIGGER IF EXISTS trg_source_classes_changed_del ON public.contract_registry_entries;
+DROP TRIGGER IF EXISTS trg_zz_sources_community_key ON public.sources;
+DROP FUNCTION IF EXISTS public.trg_source_classes_changed();
+DROP FUNCTION IF EXISTS public.trg_sources_community_key();
+DROP FUNCTION IF EXISTS public.source_classes_reclassify();
+DROP FUNCTION IF EXISTS public.source_community_drift();
+ALTER TABLE public.sources DROP COLUMN IF EXISTS community_key;
 DROP FUNCTION IF EXISTS public.claim_community_consensus(UUID);
 DROP FUNCTION IF EXISTS public.claim_community_only(UUID);
 DROP FUNCTION IF EXISTS public.claim_has_credible_support(UUID);

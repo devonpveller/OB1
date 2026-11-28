@@ -141,3 +141,53 @@ t("the two settings keys exist, with their tiers, defaults and tags", async () =
     ["research.sources_default", "user", "credible", "only_you"],
   ]);
 });
+
+// lab 1 fix: the class is STORED (sources.community_key) and must never go stale. After every kind of write the stored
+// value equals source_class_of() for every row (source_community_drift() = 0).
+const drift = async () => Number((await q<{ v: number }>(`SELECT public.source_community_drift() AS v`))[0].v);
+const keyOf = async (s: string) => (await q<{ k: string | null }>(`SELECT community_key AS k FROM public.sources WHERE id = $1`, [s]))[0].k;
+
+t("stored class: insert, url update, domain update and a planted value all keep community_key == source_class_of", async () => {
+  assertEquals(await drift(), 0, "after the migration's backfill and every test above");
+  const r = await source("https://www.reddit.com/r/d{t}/comments/1/");
+  assertEquals(await keyOf(r), `reddit.com/r/d${tag}`);
+  await q(`UPDATE public.sources SET url = 'https://www.energy.gov/x${tag}' WHERE id = $1`, [r]);
+  assertEquals(await keyOf(r), null, "a url change re-classifies");
+  const noUrl = id();
+  await q(`INSERT INTO public.sources (id, url, title, content, domain) VALUES ($1, NULL, 't', 'c', 'energy.gov')`, [noUrl]);
+  assertEquals(await keyOf(noUrl), null);
+  await q(`UPDATE public.sources SET domain = 'stackoverflow.com' WHERE id = $1`, [noUrl]);
+  assertEquals(await keyOf(noUrl), "stackoverflow.com", "a domain change re-classifies");
+  await q(`UPDATE public.sources SET community_key = 'planted.example' WHERE id = $1`, [r]);
+  assertEquals(await keyOf(r), null, "a direct write is recomputed from the definition");
+  await q(`UPDATE public.sources SET title = 'other' WHERE id = $1`, [noUrl]);
+  assertEquals(await keyOf(noUrl), "stackoverflow.com", "an unrelated update keeps it");
+  assertEquals(await drift(), 0);
+});
+
+t("stored class: a source_classes insert, update and delete re-classify every source (statement triggers)", async () => {
+  const gov = await source("https://www.energy.gov/cls{t}");
+  const c = await pool!.connect();
+  const one = async <T>(sql: string, args: unknown[] = []) => (await c.queryObject<T>(sql, args)).rows;
+  const k = async () => (await one<{ k: string | null }>(`SELECT community_key AS k FROM public.sources WHERE id = $1`, [gov]))[0].k;
+  const d = async () => Number((await one<{ v: number }>(`SELECT public.source_community_drift() AS v`))[0].v);
+  try {
+    await one("BEGIN");
+    await one(`INSERT INTO public.contract_registry_entries (registry, key, label, definition)
+               VALUES ('source_classes', $1, 'probe', $2::jsonb)`, [`probe-${tag}`, JSON.stringify({ order: 5, kind: "forum", host_patterns: ["(^|\.)energy\.gov$"] })]);
+    assertEquals(await k(), "energy.gov", "insert: the new class applies to existing rows");
+    assertEquals(await d(), 0);
+    await one(`UPDATE public.contract_registry_entries SET definition = $2::jsonb WHERE registry = 'source_classes' AND key = $1`,
+      [`probe-${tag}`, JSON.stringify({ order: 5, kind: "forum", host_patterns: ["(^|\.)energy\.gov$"], key_host: "gov.example" })]);
+    assertEquals(await k(), "gov.example", "update: re-classified with the new definition");
+    assertEquals(await d(), 0);
+    await one(`DELETE FROM public.contract_registry_entries WHERE registry = 'source_classes' AND key = $1`, [`probe-${tag}`]);
+    assertEquals(await k(), null, "delete: back to not community");
+    assertEquals(await d(), 0);
+  } finally {
+    await one("ROLLBACK").catch(() => {});
+    c.release();
+  }
+  assertEquals(await drift(), 0);
+});
+

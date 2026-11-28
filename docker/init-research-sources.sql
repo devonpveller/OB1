@@ -14,6 +14,8 @@
 --     scores weight x its total, capped `floor_margin` under the floor. Applied to all three formula versions:
 --     the live legacy claim_confidence (init-claims.sql), claim_confidence_d15 and credibility.ts. Community
 --     sources neither give nor receive corroboration (source_rolling_total_core).
+--   * sources.community_key: the class STORED per source (source_class_of stays the one definition; triggers keep
+--     it current on every write path; source_community_drift() = 0 proves it). The formulas read the column.
 --   * claim_community_consensus(claim): two or more INDEPENDENT community sources (different communities: a
 --     different site, or a different subreddit / Stack Exchange site / repository) state or corroborate the claim.
 --     A separate marker; it never enters a confidence.
@@ -250,11 +252,103 @@ BEGIN
 END;
 $$;
 
+
+-- ── the stored class (lab 1, 2026-11-27: the lookup in the hot path stalled the twins grid) ───
+-- sources.community_key is source_class_of(url, domain) ->> 'key', stored (NULL = not community). source_class_of
+-- stays the ONE definition: every writer of the column calls it.
+--   * a row trigger sets it on INSERT and on any UPDATE that changes url, domain or the column itself (so a direct
+--     write cannot plant a value: it is recomputed from the definition);
+--   * statement triggers on contract_registry_entries re-classify every source when a source_classes row is
+--     inserted, updated or deleted (owner-only rows: the P3a guard above);
+--   * source_community_drift() counts rows whose stored value differs from the definition (0 = never stale).
+ALTER TABLE public.sources ADD COLUMN IF NOT EXISTS community_key TEXT;
+
+CREATE OR REPLACE FUNCTION public.trg_sources_community_key()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    IF TG_OP = 'INSERT' OR NEW.url IS DISTINCT FROM OLD.url OR NEW.domain IS DISTINCT FROM OLD.domain
+       OR NEW.community_key IS DISTINCT FROM OLD.community_key THEN
+        NEW.community_key := public.source_class_of(NEW.url, NEW.domain) ->> 'key';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+-- `zz`: after every other BEFORE row trigger on sources, so it classifies the url and domain that are written
+DROP TRIGGER IF EXISTS trg_zz_sources_community_key ON public.sources;
+CREATE TRIGGER trg_zz_sources_community_key BEFORE INSERT OR UPDATE ON public.sources
+    FOR EACH ROW EXECUTE FUNCTION public.trg_sources_community_key();
+
+CREATE OR REPLACE FUNCTION public.source_classes_reclassify()
+RETURNS INT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE n INT;
+BEGIN
+    UPDATE public.sources s SET community_key = public.source_class_of(s.url, s.domain) ->> 'key'
+     WHERE s.community_key IS DISTINCT FROM (public.source_class_of(s.url, s.domain) ->> 'key');
+    GET DIAGNOSTICS n = ROW_COUNT;
+    RETURN n;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.source_community_drift()
+RETURNS BIGINT
+LANGUAGE sql STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+    SELECT count(*) FROM public.sources s WHERE s.community_key IS DISTINCT FROM (public.source_class_of(s.url, s.domain) ->> 'key');
+$$;
+
+CREATE OR REPLACE FUNCTION public.trg_source_classes_changed()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE hit BOOLEAN;
+BEGIN
+    -- one statement per operation: a statement naming a transition table this trigger does not have is never planned
+    -- (lab 2: one OR-expression over `changed` and `was` failed on INSERT with 'relation "was" does not exist')
+    IF TG_OP = 'INSERT' THEN
+        hit := EXISTS (SELECT 1 FROM changed WHERE registry = 'source_classes');
+    ELSIF TG_OP = 'UPDATE' THEN
+        hit := EXISTS (SELECT 1 FROM changed WHERE registry = 'source_classes') OR EXISTS (SELECT 1 FROM was WHERE registry = 'source_classes');
+    ELSE
+        hit := EXISTS (SELECT 1 FROM was WHERE registry = 'source_classes');
+    END IF;
+    IF hit THEN
+        PERFORM public.source_classes_reclassify();
+    END IF;
+    RETURN NULL;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_source_classes_changed_ins ON public.contract_registry_entries;
+CREATE TRIGGER trg_source_classes_changed_ins AFTER INSERT ON public.contract_registry_entries
+    REFERENCING NEW TABLE AS changed FOR EACH STATEMENT EXECUTE FUNCTION public.trg_source_classes_changed();
+DROP TRIGGER IF EXISTS trg_source_classes_changed_upd ON public.contract_registry_entries;
+CREATE TRIGGER trg_source_classes_changed_upd AFTER UPDATE ON public.contract_registry_entries
+    REFERENCING NEW TABLE AS changed OLD TABLE AS was FOR EACH STATEMENT EXECUTE FUNCTION public.trg_source_classes_changed();
+DROP TRIGGER IF EXISTS trg_source_classes_changed_del ON public.contract_registry_entries;
+CREATE TRIGGER trg_source_classes_changed_del AFTER DELETE ON public.contract_registry_entries
+    REFERENCING OLD TABLE AS was FOR EACH STATEMENT EXECUTE FUNCTION public.trg_source_classes_changed();
+REVOKE ALL ON FUNCTION public.trg_sources_community_key(), public.source_classes_reclassify(),
+    public.trg_source_classes_changed() FROM PUBLIC;
+
+-- the backfill (every existing source; the re-score below reads the column)
+SELECT public.source_classes_reclassify();
+
 CREATE OR REPLACE FUNCTION public.source_is_community(p_source_id UUID)
 RETURNS BOOLEAN
 LANGUAGE sql STABLE
 AS $$
-    SELECT public.source_class_of(s.url, s.domain) IS NOT NULL FROM public.sources s WHERE s.id = p_source_id;
+    SELECT s.community_key IS NOT NULL FROM public.sources s WHERE s.id = p_source_id;
 $$;
 
 -- A claim has credible support: a non-contradicting edge to a source that is not community class.
@@ -264,7 +358,7 @@ LANGUAGE sql STABLE
 AS $$
     SELECT EXISTS (SELECT 1 FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
                     WHERE cs.claim_id = p_claim_id AND cs.edge_type <> 'contradicts'
-                      AND public.source_class_of(s.url, s.domain) IS NULL);
+                      AND s.community_key IS NULL);
 $$;
 
 -- Community only: grounded directly in sources, every one of them community class. (A claim grounded only through
@@ -282,11 +376,11 @@ CREATE OR REPLACE FUNCTION public.claim_community_consensus(p_claim_id UUID)
 RETURNS BOOLEAN
 LANGUAGE sql STABLE
 AS $$
-    SELECT count(DISTINCT public.source_class_of(s.url, s.domain) ->> 'key')
+    SELECT count(DISTINCT s.community_key)
              >= (public.credibility_community_terms() ->> 'consensus_min')::int
       FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
      WHERE cs.claim_id = p_claim_id AND cs.edge_type IN ('states', 'corroborates')
-       AND s.retraction_committed_at IS NULL AND public.source_class_of(s.url, s.domain) IS NOT NULL;
+       AND s.retraction_committed_at IS NULL AND s.community_key IS NOT NULL;
 $$;
 
 -- ── the legacy formula (init-claims.sql), with the community rule ─────────────────────────────
@@ -325,7 +419,7 @@ BEGIN
       INTO v_has_strong, v_has_inferred, v_contradicted
       FROM public.claim_sources cs LEFT JOIN public.sources s ON s.id = cs.source_id
      WHERE cs.claim_id = p_claim_id
-       AND NOT (v_credible AND cs.edge_type <> 'contradicts' AND s.id IS NOT NULL AND public.source_class_of(s.url, s.domain) IS NOT NULL);
+       AND NOT (v_credible AND cs.edge_type <> 'contradicts' AND s.id IS NOT NULL AND s.community_key IS NOT NULL);
 
     IF v_has_strong THEN v_base := 0.90;
     ELSIF v_has_inferred THEN v_base := 0.60;
@@ -335,7 +429,7 @@ BEGIN
       FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
      WHERE cs.claim_id = p_claim_id
        AND cs.edge_type IN ('states','corroborates')
-       AND NOT (v_credible AND public.source_class_of(s.url, s.domain) IS NOT NULL);
+       AND NOT (v_credible AND s.community_key IS NOT NULL);
 
     SELECT MAX(CASE
                  WHEN s.domain ~* '\.(gov|edu|mil)(:|/|$)'
@@ -347,7 +441,7 @@ BEGIN
       JOIN public.sources s ON s.id = cs.source_id
      WHERE cs.claim_id = p_claim_id
        AND cs.edge_type <> 'contradicts'
-       AND NOT (v_credible AND public.source_class_of(s.url, s.domain) IS NOT NULL);
+       AND NOT (v_credible AND s.community_key IS NOT NULL);
     v_authority := COALESCE(v_authority, 0.85);
 
     SELECT (researched_on + COALESCE(revalidate_days,
@@ -395,7 +489,7 @@ BEGIN
        AND sc.from_source_id <> p_source_id
        AND (p_exclude IS NULL OR NOT (sc.from_source_id = ANY (p_exclude)))
        AND NOT v_comm
-       AND public.source_class_of(g.url, g.domain) IS NULL;
+       AND g.community_key IS NULL;
     IF v_bad THEN
         RAISE EXCEPTION 'credibility: a corroboration into source % has an amount that is not 0 or in [1e-9, 1] - the gate stops', p_source_id
             USING ERRCODE = 'OBC04';
@@ -455,7 +549,7 @@ BEGIN
           JOIN public.claim_sources cs ON cs.id = e.edge_id
           JOIN public.sources s ON s.id = e.source_id
          WHERE e.source_id IS NOT NULL AND e.edge_type <> 'contradicts'
-           AND NOT (v_credible AND public.source_class_of(s.url, s.domain) IS NOT NULL)
+           AND NOT (v_credible AND s.community_key IS NOT NULL)
          GROUP BY e.source_id
          ORDER BY 2 DESC
     LOOP
@@ -536,14 +630,14 @@ ON CONFLICT (key) DO UPDATE SET tier = EXCLUDED.tier, type = EXCLUDED.type, sect
 -- ── grants: the readers the services call ─────────────────────────────────────────────────────
 GRANT EXECUTE ON FUNCTION public.source_class_of(TEXT, TEXT), public.source_url_unwrap(TEXT),
     public.source_is_community(UUID), public.claim_has_credible_support(UUID), public.claim_community_only(UUID),
-    public.claim_community_consensus(UUID), public.credibility_community_terms() TO service_role;
+    public.claim_community_consensus(UUID), public.credibility_community_terms(), public.source_community_drift() TO service_role;
 
 -- ── the deploy re-score (operator 2026-11-27): every claim with a community grounding source ─
 DO $$
 DECLARE r RECORD; n INT := 0;
 BEGIN
     FOR r IN SELECT DISTINCT cs.claim_id FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
-              WHERE public.source_class_of(s.url, s.domain) IS NOT NULL LOOP
+              WHERE s.community_key IS NOT NULL LOOP
         PERFORM public.recompute_claim_confidence(r.claim_id);
         n := n + 1;
     END LOOP;
