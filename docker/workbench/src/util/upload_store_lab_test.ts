@@ -14,6 +14,9 @@ const SUB = Deno.env.get("DOCS_TEST_SUB_HEADER") ?? "X-Test-Sub";
 const HOST = Deno.env.get("CONTRACT_TEST_DB_HOST");
 const ignore = !BASE || !HOST;
 const MiB = 1024 * 1024;
+// the largest file the body cap admits: the cap (rw-body-size-stall, 32 MiB) is on the whole multipart BODY, so a file of exactly
+// 32 MiB is 413 (attempt 4's lab run: U1 and U3 answered 413 in under 200 ms); the framing is a few hundred bytes
+const BIG = 32 * MiB - 16 * 1024;
 const rnd = () => crypto.randomUUID().replace(/-/g, "").slice(0, 10);
 const A = `upstore-ann-${rnd()}`;
 const B = `upstore-bystander-${rnd()}`;
@@ -71,8 +74,8 @@ async function refineryOfA(title: string): Promise<string> {
 }
 const opts = { ignore, sanitizeOps: false, sanitizeResources: false };
 
-Deno.test({ name: "U1 a 32 MiB file import: a bystander is answered within 1 s, and the stored bytes are the uploaded bytes", ...opts, fn: async () => {
-  const bytes = pattern(32 * MiB, "%PDF-1.4\n");
+Deno.test({ name: "U1 a 32 MiB-class (the largest the cap admits) file import: a bystander is answered within 1 s, and the stored bytes are the uploaded bytes", ...opts, fn: async () => {
+  const bytes = pattern(BIG, "%PDF-1.4\n");
   const want = await sha(bytes);
   const { ct, body } = await multipart({}, { name: "fail-extract-32mib.pdf", bytes });
   const r = await withBystander(() => call("POST", "/workbench/import", A, body, ct));
@@ -82,7 +85,7 @@ Deno.test({ name: "U1 a 32 MiB file import: a bystander is answered within 1 s, 
   const id = JSON.parse(r.out.text).job_id as string;
   const row = (await sql<{ len: number; h: string; filename: string; owner: string }>(
     `SELECT length(p.bytes) AS len, encode(sha256(p.bytes), 'hex') AS h, p.filename, j.owner_sub AS owner FROM public.import_job_payloads p JOIN public.import_jobs j ON j.id = p.job_id WHERE p.job_id = $1::uuid`, [id]))[0];
-  assertEquals([Number(row.len), row.h, row.filename, row.owner], [32 * MiB, want, "fail-extract-32mib.pdf", A]);
+  assertEquals([Number(row.len), row.h, row.filename, row.owner], [BIG, want, "fail-extract-32mib.pdf", A]);
 } });
 
 Deno.test({ name: "U2 a 25 MiB intake add of a file: a bystander is answered within 1 s, the bytes are identical, the job is the caller's", ...opts, fn: async () => {
@@ -101,10 +104,11 @@ Deno.test({ name: "U2 a 25 MiB intake add of a file: a bystander is answered wit
   assertEquals((await call("GET", `/workbench/intake/jobs/add/${id}`, B)).status, 404, "another user does not see it");
 } });
 
-Deno.test({ name: "U3 replace-from-upload of 32 MiB: a bystander is answered within 1 s (it stores no bytes: the file goes to the extractor)", ...opts, fn: async () => {
-  const { ct, body } = await multipart({}, { name: "replace-32mib.pdf", bytes: pattern(32 * MiB, "%PDF-1.4\n") });
+Deno.test({ name: "U3 replace-from-upload of 32 MiB-class: a bystander is answered within 1 s (it stores no bytes: the file goes to the extractor)", ...opts, fn: async () => {
+  const { ct, body } = await multipart({}, { name: "replace-32mib.pdf", bytes: pattern(BIG, "%PDF-1.4\n") });
   const r = await withBystander(() => call("POST", `/workbench/sources/${crypto.randomUUID()}/replace-from-upload`, A, body, ct));
   console.log(`upload-store U3: 32 MiB replace-from-upload -> ${r.out.status} in ${r.out.ms.toFixed(0)} ms; bystander worst ${r.worst.toFixed(0)} ms`);
+  assert(r.out.status !== 413, `the upload was refused by the body cap (${r.out.status}): the test must send the largest body the cap admits`);
   assert(r.worst < 1000, `a bystander waited ${r.worst.toFixed(0)} ms`);
 } });
 
