@@ -271,15 +271,23 @@ try {
   $made.images += $testTag
 
   # ---------------------------------------------------------------- 4. integration tests
-  Write-Host '[4] database A + src/contracts/integration_test.ts (as ob_workbench, the production login; a member of ob_app_memory)'
+  Write-Host '[4] database A: src/contracts/integration_test.ts as ob_workbench (the workbench login), src/contracts/library_integration_test.ts as ob_app_memory'
   if (-not (Start-Db $dbA)) { throw 'db A' }
-  # slot 730: contracts/repo/system.ts writes a setting through admin_setting_write, granted to ob_workbench only, so the test logs in
-  # as the workbench does in production (the role Start-Db set up through ob-workbench-role.ps1), not as ob_app_memory
+  # Each file runs as the role that does its work in production. integration_test.ts drives the workbench's routes, and
+  # contracts/repo/system.ts writes a setting through admin_setting_write, which slot 730 grants to ob_workbench only (the role Start-Db
+  # set up through ob-workbench-role.ps1). library_integration_test.ts also files a private report's claim (private_report_claim_file /
+  # _edge), a writer of the research service that slot 570's guard allows only to ob_app_memory (or a superuser): as ob_workbench it
+  # fails "private report claims: not for this caller". Neither file asserts anything about the role.
   $o = Dk run --rm --label $label --network $net -e "CONTRACT_TEST_DB_HOST=$dbA" -e "CONTRACT_TEST_DB_USER=$($script:wbRole[$dbA].role)" `
-    -e "CONTRACT_TEST_DB_PASSWORD=$($script:wbRole[$dbA].pw)" $testTag deno test --allow-net --allow-env --allow-read src/contracts/integration_test.ts src/contracts/library_integration_test.ts
+    -e "CONTRACT_TEST_DB_PASSWORD=$($script:wbRole[$dbA].pw)" $testTag deno test --allow-net --allow-env --allow-read src/contracts/integration_test.ts
   Save 'integration-test.log' $o
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
-  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0') "integration tests: $($sum.Value)"
+  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0') "integration tests (as $($script:wbRole[$dbA].role)): $($sum.Value)"
+  $o = Dk run --rm --label $label --network $net -e "CONTRACT_TEST_DB_HOST=$dbA" -e CONTRACT_TEST_DB_USER=ob_app_memory `
+    -e "CONTRACT_TEST_DB_PASSWORD=$appPw" $testTag deno test --allow-net --allow-env --allow-read src/contracts/library_integration_test.ts
+  Save 'library-integration-test.log' $o
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
+  Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0') "library integration tests (as ob_app_memory): $($sum.Value)"
   # The triage listing's SQL (openbrain-mcp suggestion-list.ts) over database A (rw-p0b-purge-door,
   # T2-3): one active and one suppressed source; the :wt image's cached deps, offline.
   $k8sDir = Join-Path $ob1 'integrations\kubernetes-deployment'
