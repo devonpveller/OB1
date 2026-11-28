@@ -127,100 +127,126 @@ function fold(n: ts.Node, env: Env = new Map()): string | null {
   return null;
 }
 
+// What one file says, independent of the rest of the tree: its imports / re-exports / dynamic imports (specifier + names), the
+// R1 and R4 findings that need only its own text, and whether it exports ItemPicker. Computed ONCE per (name, text) per run and
+// shared by every case: a case re-checks the whole real tree plus one planted file, and the tree has grown with each screen, so
+// re-walking every file's syntax tree per case ran past vitest's 60 s worker timeout in the image build (about 31 cases x the
+// whole tree). Resolution of a specifier to a target file depends on the file set and tsconfig paths, so it stays per call.
+type Facts = {
+  imports: { spec: string; names: string[] | "*"; reexportsAs: string[] }[];
+  badDynamic: boolean; // a dynamic import / require of a non-literal path
+  local: string[]; // R1 / R4 violations that depend only on this file
+  exportsItemPicker: boolean;
+};
+const FACTS = new Map<string, { text: string; facts: Facts }>();
+
+function factsOf(file: string, text: string): Facts {
+  const hit = FACTS.get(file);
+  if (hit && hit.text === text) return hit.facts;
+  const inPicker = file.startsWith(PICKER_DIR);
+  const kind = file.endsWith("x") ? ts.ScriptKind.TSX : /\.(js|mjs|cjs)$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, file.endsWith(".jsx") ? ts.ScriptKind.JSX : kind);
+  const facts: Facts = { imports: [], badDynamic: false, local: [], exportsItemPicker: /export\s*\{[^}]*\bItemPicker\b/.test(text) };
+  const v = facts.local;
+  const pieces: string[] = [];
+  // `const NAME = <foldable>` anywhere in the file (two passes so a const may build on an earlier one)
+  const env: Env = new Map();
+  for (let pass = 0; pass < 2; pass++) {
+    const collect = (n: ts.Node) => {
+      if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer && ts.isVariableDeclarationList(n.parent) && n.parent.flags & ts.NodeFlags.Const) {
+        const f = fold(n.initializer, env);
+        if (f !== null) env.set(n.name.text, f);
+      }
+      ts.forEachChild(n, collect);
+    };
+    collect(sf);
+  }
+  const folded = new Set<ts.Node>();
+  const visit = (n: ts.Node) => {
+    // imports / re-exports
+    if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier)) {
+      const c = n.importClause;
+      let names: string[] | "*" = [];
+      if (c?.namedBindings && ts.isNamespaceImport(c.namedBindings)) names = "*";
+      else {
+        if (c?.name) names.push("default");
+        if (c?.namedBindings && ts.isNamedImports(c.namedBindings)) for (const e of c.namedBindings.elements) names.push((e.propertyName ?? e.name).text);
+      }
+      facts.imports.push({ spec: n.moduleSpecifier.text, names, reexportsAs: [] });
+    }
+    if (ts.isExportDeclaration(n) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier)) {
+      const names: string[] | "*" = n.exportClause && ts.isNamedExports(n.exportClause) ? n.exportClause.elements.map((e) => (e.propertyName ?? e.name).text) : "*";
+      facts.imports.push({ spec: n.moduleSpecifier.text, names, reexportsAs: names === "*" ? ["*"] : names });
+    }
+    if (ts.isCallExpression(n) && (n.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(n.expression) && n.expression.text === "require")) && n.arguments[0]) {
+      const s = fold(n.arguments[0], env);
+      if (s !== null) facts.imports.push({ spec: s, names: "*", reexportsAs: [] });
+      else if (!inPicker) facts.badDynamic = true;
+    }
+    // R1: list UI vocabulary
+    if (file !== LIST_UI_FILE) {
+      if (ts.isJsxAttribute(n)) {
+        const name = n.name.getText(sf);
+        const init = n.initializer;
+        if (name === "aria-activedescendant") v.push(`R1 ${file}: aria-activedescendant outside ItemPicker.tsx`);
+        const rv = init && ts.isStringLiteral(init) ? init.text : init && ts.isJsxExpression(init) && init.expression ? fold(init.expression, env) : null;
+        if (name === "role" && rv !== null && LIST_ROLES.has(rv)) v.push(`R1 ${file}: role="${rv}" outside ItemPicker.tsx`);
+      }
+      if ((ts.isJsxOpeningElement(n) || ts.isJsxSelfClosingElement(n)) && LIST_TAGS.has(n.tagName.getText(sf))) v.push(`R1 ${file}: <${n.tagName.getText(sf)}> outside ItemPicker.tsx`);
+      // a role / marker word produced by folding (concatenation, template, const) rather than written whole
+      if ((ts.isBinaryExpression(n) || ts.isTemplateExpression(n) || ts.isCallExpression(n)) && !ts.isJsxAttribute(n.parent)) {
+        const f = fold(n, env);
+        if (f !== null && (LIST_ROLES.has(f) || f === "aria-activedescendant")) v.push(`R1 ${file}: the folded string "${f}" outside ItemPicker.tsx`);
+      }
+      if ((ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && !ts.isImportDeclaration(n.parent)) {
+        const asRoleValue = ts.isPropertyAssignment(n.parent) && ["role"].includes(n.parent.name.getText(sf).replace(/["']/g, "")) && LIST_ROLES.has(n.text);
+        if (n.text === "listbox" || n.text === "combobox" || n.text === "aria-activedescendant" || asRoleValue) v.push(`R1 ${file}: the string "${n.text}" outside ItemPicker.tsx`);
+      }
+    }
+    // R4: the route
+    if (file !== ROUTE_FILE) {
+      const f = (ts.isBinaryExpression(n) || ts.isTemplateExpression(n) || ts.isCallExpression(n)) && !folded.has(n) ? fold(n, env) : null;
+      if (f !== null) {
+        n.forEachChild((c) => folded.add(c));
+        if (/contract\/search/.test(f)) v.push(`R4 ${file}: builds the contract search path ("${f}")`);
+      }
+      if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) pieces.push(n.text);
+      if (ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n)) pieces.push(n.text);
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  if (file !== ROUTE_FILE) {
+    for (const p of pieces) if (/contract\/search/.test(p)) v.push(`R4 ${file}: contains the contract search path`);
+    const hasContract = pieces.some((p) => /(^|\/)contract\/?$/.test(p.replace(/^\/workbench/, "")) || /\/workbench\/contract\/?$/.test(p));
+    const hasSearch = pieces.some((p) => /^\/?search(\?|$)/.test(p));
+    if (hasContract && hasSearch) v.push(`R4 ${file}: holds split pieces of the contract search path ("contract" and "search")`);
+  }
+  FACTS.set(file, { text, facts });
+  return facts;
+}
+
 export function check(files: Files, opts: { paths?: Paths; baseUrl?: string } = {}): string[] {
   const paths = opts.paths ?? {};
   const baseUrl = opts.baseUrl ?? "";
   const v: string[] = [];
   for (const [file, text] of files) {
     const inPicker = file.startsWith(PICKER_DIR);
-    const kind = file.endsWith("x") ? ts.ScriptKind.TSX : /\.(js|mjs|cjs)$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
-    const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, file.endsWith(".jsx") ? ts.ScriptKind.JSX : kind);
-    const pieces: string[] = [];
-    // `const NAME = <foldable>` anywhere in the file (two passes so a const may build on an earlier one)
-    const env: Env = new Map();
-    for (let pass = 0; pass < 2; pass++) {
-      const collect = (n: ts.Node) => {
-        if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer && ts.isVariableDeclarationList(n.parent) && n.parent.flags & ts.NodeFlags.Const) {
-          const f = fold(n.initializer, env);
-          if (f !== null) env.set(n.name.text, f);
-        }
-        ts.forEachChild(n, collect);
-      };
-      collect(sf);
-    }
-    const folded = new Set<ts.Node>();
-    const importsOf = (spec: string, names: string[] | "*", reexportsAs: string[]) => {
+    const facts = factsOf(file, text);
+    v.push(...facts.local);
+    if (facts.badDynamic) v.push(`R3 ${file}: dynamic import/require of a non-literal path (cannot be resolved)`);
+    for (const { spec, names, reexportsAs } of facts.imports) {
       // R6: nothing under src/ reaches outside src/
       if (leavesSrc(file, spec)) v.push(`R6 ${file}: imports "${spec}", which resolves outside src/`);
       const target = resolveSpec(file, spec, files, paths, baseUrl);
-      if (!target || !target.startsWith(PICKER_DIR)) return;
+      if (!target || !target.startsWith(PICKER_DIR)) continue;
       // R2: the search exports (inside the picker too: a new file there must be on the allow-list)
       const bad = names === "*" ? SEARCH_NAMES : names.filter((n) => SEARCH_NAMES.includes(n));
       if (bad.length && !SEARCH_ALLOW.includes(file)) v.push(`R2 ${file}: imports ${bad.join(", ")} from the picker (not on the search allow-list)`);
-      if (inPicker) return;
+      if (inPicker) continue;
       // R3: outside the picker folder only the index
       if (target !== "src/components/picker/index.ts") v.push(`R3 ${file}: imports ${target} (not the picker index)`);
       if (reexportsAs.length) v.push(`R3 ${file}: re-exports from the picker (${reexportsAs.join(", ")})`);
-    };
-    const visit = (n: ts.Node) => {
-      // imports / re-exports
-      if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier)) {
-        const c = n.importClause;
-        let names: string[] | "*" = [];
-        if (c?.namedBindings && ts.isNamespaceImport(c.namedBindings)) names = "*";
-        else {
-          if (c?.name) names.push("default");
-          if (c?.namedBindings && ts.isNamedImports(c.namedBindings)) for (const e of c.namedBindings.elements) names.push((e.propertyName ?? e.name).text);
-        }
-        importsOf(n.moduleSpecifier.text, names, []);
-      }
-      if (ts.isExportDeclaration(n) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier)) {
-        const names: string[] | "*" = n.exportClause && ts.isNamedExports(n.exportClause) ? n.exportClause.elements.map((e) => (e.propertyName ?? e.name).text) : "*";
-        importsOf(n.moduleSpecifier.text, names, names === "*" ? ["*"] : names);
-      }
-      if (ts.isCallExpression(n) && (n.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(n.expression) && n.expression.text === "require")) && n.arguments[0]) {
-        const s = fold(n.arguments[0], env);
-        if (s !== null) importsOf(s, "*", []);
-        else if (!inPicker) v.push(`R3 ${file}: dynamic import/require of a non-literal path (cannot be resolved)`);
-      }
-      // R1: list UI vocabulary
-      if (file !== LIST_UI_FILE) {
-        if (ts.isJsxAttribute(n)) {
-          const name = n.name.getText(sf);
-          const init = n.initializer;
-          if (name === "aria-activedescendant") v.push(`R1 ${file}: aria-activedescendant outside ItemPicker.tsx`);
-          const rv = init && ts.isStringLiteral(init) ? init.text : init && ts.isJsxExpression(init) && init.expression ? fold(init.expression, env) : null;
-          if (name === "role" && rv !== null && LIST_ROLES.has(rv)) v.push(`R1 ${file}: role="${rv}" outside ItemPicker.tsx`);
-        }
-        if ((ts.isJsxOpeningElement(n) || ts.isJsxSelfClosingElement(n)) && LIST_TAGS.has(n.tagName.getText(sf))) v.push(`R1 ${file}: <${n.tagName.getText(sf)}> outside ItemPicker.tsx`);
-        // a role / marker word produced by folding (concatenation, template, const) rather than written whole
-        if ((ts.isBinaryExpression(n) || ts.isTemplateExpression(n) || ts.isCallExpression(n)) && !ts.isJsxAttribute(n.parent)) {
-          const f = fold(n, env);
-          if (f !== null && (LIST_ROLES.has(f) || f === "aria-activedescendant")) v.push(`R1 ${file}: the folded string "${f}" outside ItemPicker.tsx`);
-        }
-        if ((ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && !ts.isImportDeclaration(n.parent)) {
-          const asRoleValue = ts.isPropertyAssignment(n.parent) && ["role"].includes(n.parent.name.getText(sf).replace(/["']/g, "")) && LIST_ROLES.has(n.text);
-          if (n.text === "listbox" || n.text === "combobox" || n.text === "aria-activedescendant" || asRoleValue) v.push(`R1 ${file}: the string "${n.text}" outside ItemPicker.tsx`);
-        }
-      }
-      // R4: the route
-      if (file !== ROUTE_FILE) {
-        const f = (ts.isBinaryExpression(n) || ts.isTemplateExpression(n) || ts.isCallExpression(n)) && !folded.has(n) ? fold(n, env) : null;
-        if (f !== null) {
-          n.forEachChild((c) => folded.add(c));
-          if (/contract\/search/.test(f)) v.push(`R4 ${file}: builds the contract search path ("${f}")`);
-        }
-        if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) pieces.push(n.text);
-        if (ts.isTemplateHead(n) || ts.isTemplateMiddle(n) || ts.isTemplateTail(n)) pieces.push(n.text);
-      }
-      ts.forEachChild(n, visit);
-    };
-    visit(sf);
-    if (file !== ROUTE_FILE) {
-      for (const p of pieces) if (/contract\/search/.test(p)) v.push(`R4 ${file}: contains the contract search path`);
-      const hasContract = pieces.some((p) => /(^|\/)contract\/?$/.test(p.replace(/^\/workbench/, "")) || /\/workbench\/contract\/?$/.test(p));
-      const hasSearch = pieces.some((p) => /^\/?search(\?|$)/.test(p));
-      if (hasContract && hasSearch) v.push(`R4 ${file}: holds split pieces of the contract search path ("contract" and "search")`);
     }
   }
   // R4 counterpart: the path really is built in the one place
@@ -228,7 +254,7 @@ export function check(files: Files, opts: { paths?: Paths; baseUrl?: string } = 
   // R3: only index re-exports ItemPicker
   for (const [file, text] of files) {
     if (file === "src/components/picker/index.ts" || file === LIST_UI_FILE) continue;
-    if (/export\s*\{[^}]*\bItemPicker\b/.test(text) && file.startsWith(PICKER_DIR) === false) v.push(`R3 ${file}: exports ItemPicker`);
+    if (factsOf(file, text).exportsItemPicker && file.startsWith(PICKER_DIR) === false) v.push(`R3 ${file}: exports ItemPicker`);
   }
   return [...new Set(v)];
 }
