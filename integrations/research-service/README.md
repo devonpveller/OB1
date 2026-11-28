@@ -171,6 +171,10 @@ store only as a de-personalised request. Callers do not put such text into `POST
   `unclassified` (the shared key above all). A non-derived job's curator copy (synthesis, claim) carries no 5-word
   span of its prompt (R7). Lab: `run-boundary-e2e.ps1`.
 
+### Community source classes (rwr-research-sources, slot 750)
+The community classes (forums, Q&A, social, code discussion, self-published) are the `source_classes` registry, owner-only (psql). `source_class_of(url, domain)` in SQL and `source-class.ts` are twins held to `fixtures/source-class-cases.json`. A community claim never carries the credible rating, and a community contradiction does not cap a claim that has credible support (the edge stays).
+**Editing the registry stalls source writes.** Each insert, update or delete of a class re-classifies every source (about 22 s at live size) under `SHARE ROW EXCLUSIVE` on `sources`, so every source writer waits, and any writer with a short `statement_timeout` or `lock_timeout` (the workbench sets one on some transactions) fails instead of waiting. Edit the registry off-hours, or with the research, curator and workbench writers stopped. After an edit, check `SELECT public.source_community_drift()` = 0 and that a new pattern also compiles in JavaScript (the SQL check is POSIX only).
+
 ## Inlets
 
 - **OWUI** → [`smolcrawl/deep_research_thin_client.py`](../../../smolcrawl/deep_research_thin_client.py) (P5). Replaces the heavy in-tool harness once this service is deployed + reachable from OWUI.

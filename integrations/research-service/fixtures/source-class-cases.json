@@ -267,6 +267,16 @@
       "forums.foo.com"
     ],
     [
+      "https://u@v@forum.x@www.nature.com/a",
+      null,
+      null
+    ],
+    [
+      "https://u@v@forum.x@www.reddit.com/r/x/comments/1/",
+      "forum",
+      "reddit.com/r/x"
+    ],
+    [
       "https://nature.com@www.reddit.com/r/x/comments/1/",
       "forum",
       "reddit.com/r/x"

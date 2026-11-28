@@ -260,6 +260,152 @@ t("race R3: a source_classes DELETE open while a source url UPDATE commits leave
   assertEquals(await drift(), 0);
 });
 
+// ── fix round 3 (Review 1): the deadlocks, writer concurrency ─────────────────────────────────────────────────────
+// I5a / I5b (tester attempt 2): S1 row-locks a source with a title UPDATE (no advisory lock), S2's registry INSERT takes the
+// exclusive lock and waits on that row, then S1 INSERTs a source (it needs the shared lock): a cycle, 40P01. With the
+// table lock in the reclassify, S2 waits for S1 at the TABLE, before the advisory lock, and no cycle can form.
+for (const [name, delay] of [["I5a", 1500], ["I5b", 3500]] as const) {
+  t(`race ${name}: a title UPDATE, a registry INSERT and a source INSERT interleave with no deadlock`, async () => {
+    const host = `${name.toLowerCase()}-${tag}.example.com`;
+    const x = await source(`https://${host}/x`);
+    const a = await pool!.connect(), b = await pool!.connect();
+    const errs: string[] = [];
+    try {
+      await a.queryObject("BEGIN");
+      await a.queryObject(`UPDATE public.sources SET title = 'locked' WHERE id = $1`, [x]);
+      const [k, def] = await raceRow(name.toLowerCase(), host, 70);
+      const reg = b.queryObject(`INSERT INTO public.contract_registry_entries (registry, key, label, definition) VALUES ('source_classes', $1, 'race', $2::jsonb)`, [k, def])
+        .catch((e) => { errs.push(`registry: ${(e as Error).message}`); });
+      await sleep(delay);
+      try {
+        await a.queryObject(`INSERT INTO public.sources (id, url, title, content, domain) VALUES ($1, $2, 't', 'c', $3)`, [id(), `https://${name}-y-${tag}.example.net/y`, `${name}-y-${tag}.example.net`]);
+        await a.queryObject("COMMIT");
+      } catch (e) { errs.push(`source: ${(e as Error).message}`); }
+      await reg;
+    } finally { await a.queryObject("ROLLBACK").catch(() => {}); a.release(); b.release(); }
+    assertEquals(errs, [], "no deadlock, no error");
+    const r = await stored(x);
+    assertEquals(r.k, r.d);
+    assertEquals(r.d, host);
+    assertEquals(await drift(), 0);
+  });
+}
+
+t("race D-a: an autocommit domain UPDATE queued behind an open registry edit finishes, with no deadlock and no drift", async () => {
+  const host = `da-${tag}.example.com`;
+  const x = await source(`https://${host}/x`);
+  const a = await pool!.connect(), b = await pool!.connect();
+  const errs: string[] = [];
+  try {
+    const [k, def] = await raceRow("da", host, 71);
+    await b.queryObject("BEGIN");
+    await b.queryObject(`INSERT INTO public.contract_registry_entries (registry, key, label, definition) VALUES ('source_classes', $1, 'race', $2::jsonb)`, [k, def]);
+    const upd = a.queryObject(`UPDATE public.sources SET domain = $2 WHERE id = $1`, [x, `da2-${tag}.example.com`])
+      .catch((e) => { errs.push(`update: ${(e as Error).message}`); });
+    await sleep(1500);
+    await b.queryObject("COMMIT").catch((e) => { errs.push(`commit: ${(e as Error).message}`); });
+    await upd;
+  } finally { await b.queryObject("ROLLBACK").catch(() => {}); a.release(); b.release(); }
+  assertEquals(errs, []);
+  const r = await stored(x);
+  assertEquals(r.k, r.d);
+  assertEquals(await drift(), 0);
+});
+
+// FU2: two ordinary source writers do not wait for each other. The class trigger takes the advisory lock SHARED; if it
+// took it EXCLUSIVE, the second INSERT would sit behind the first writer's open transaction until that commits.
+t("two source writers: the second INSERT returns while the first writer's transaction is still open", async () => {
+  const a = await pool!.connect(), b = await pool!.connect();
+  try {
+    await a.queryObject("BEGIN");
+    await a.queryObject(`INSERT INTO public.sources (id, url, title, content, domain) VALUES ($1, $2, 't', 'c', $3)`, [id(), `https://w1-${tag}.example.org/a`, `w1-${tag}.example.org`]);
+    const t0 = performance.now();
+    const second = b.queryObject(`INSERT INTO public.sources (id, url, title, content, domain) VALUES ($1, $2, 't', 'c', $3)`, [id(), `https://w2-${tag}.example.org/a`, `w2-${tag}.example.org`]);
+    const winner = await Promise.race([second.then(() => "done"), sleep(3000).then(() => "blocked")]);
+    const ms = performance.now() - t0;
+    await a.queryObject("COMMIT");
+    await second;
+    assertEquals(winner, "done", "the second writer was blocked by the first");
+    assert(ms < 1000, `second INSERT took ${Math.round(ms)} ms`);
+  } finally { await a.queryObject("ROLLBACK").catch(() => {}); a.release(); b.release(); }
+  assertEquals(await drift(), 0);
+});
+
+// ── fix round 3 (Review 1, R1): a community contradiction does not cap a claim that has credible support ─────────────
+// The curator's conflict check (research-curator/claims.ts detectConflicts) writes reciprocal claim-to-claim `contradicts`
+// edges against the nearest claim; a page-controlled forum post could cap a credible claim at 0.30 through it.
+const confOf = async (c: string) => Number((await q<{ v: number }>(`SELECT public.recompute_claim_confidence($1) AS v`, [c]))[0].v);
+const edges = async (c: string) => Number((await q<{ n: number }>(`SELECT count(*)::int AS n FROM public.claim_sources WHERE claim_id = $1 AND edge_type = 'contradicts'`, [c]))[0].n);
+async function contradict(a: string, b: string) {
+  await q(`SELECT public.link_claim_to_claim($1, $2, 'contradicts', 1.0)`, [a, b]);
+  await q(`SELECT public.link_claim_to_claim($1, $2, 'contradicts', 1.0)`, [b, a]);
+}
+
+t("R1: a contradiction from a community-only claim does not cap a credible claim (legacy and D15); the edge stays", async () => {
+  const credible = await claim("credible claim", [await source("https://www.energy.gov/r1{t}")]);
+  const [l0, d0] = [await legacy(credible), await d15(credible)];
+  assert(l0 > 0.5 && d0 > 0.5, `baseline ${l0} ${d0}`);
+  const forum = await claim("forum claim", [await source("https://www.reddit.com/r/r1{t}/comments/1/")]);
+  await contradict(credible, forum);
+  assertEquals(await edges(credible), 1, "the edge is kept, so the contest is visible");
+  assertEquals(await edges(forum), 1);
+  assertEquals(await legacy(credible), l0, "legacy: not capped");
+  assertEquals(await d15(credible), d0, "d15: not capped");
+  assert(await confOf(credible) > 0.5, "the stored rating is not capped either");
+  assertEquals(await flag("claim_community_only", forum), true);
+  assert(await legacy(forum) < 0.5 && await d15(forum) < 0.5, "the community-only claim stays under the floor");
+});
+
+t("R1: a contradiction from a community SOURCE does not cap a credible claim", async () => {
+  const credible = await claim("credible claim two", [await source("https://www.energy.gov/r1b{t}")]);
+  const [l0, d0] = [await legacy(credible), await d15(credible)];
+  await q(`SELECT public.link_claim_to_source($1, $2, 'contradicts', 1.0)`, [credible, await source("https://stackoverflow.com/questions/r1b{t}")]);
+  assertEquals(await edges(credible), 1);
+  assertEquals(await legacy(credible), l0);
+  assertEquals(await d15(credible), d0);
+});
+
+t("R1 control: a contradiction from a CREDIBLE claim or source still caps at 0.30", async () => {
+  const a = await claim("credible a", [await source("https://www.energy.gov/r1c{t}")]);
+  const b = await claim("credible b", [await source("https://www.nature.com/articles/r1c{t}")]);
+  await contradict(a, b);
+  assert(await legacy(a) <= 0.30 && await legacy(b) <= 0.30, `legacy ${await legacy(a)} ${await legacy(b)}`);
+  assert(await d15(a) <= 0.30 && await d15(b) <= 0.30, `d15 ${await d15(a)} ${await d15(b)}`);
+  const c = await claim("credible c", [await source("https://www.energy.gov/r1d{t}")]);
+  await q(`SELECT public.link_claim_to_source($1, $2, 'contradicts', 1.0)`, [c, await source("https://www.nature.com/articles/r1d{t}")]);
+  assert(await legacy(c) <= 0.30 && await d15(c) <= 0.30, "a credible source contradicting caps");
+});
+
+t("R1: one credible and one community contradiction together still cap (the credible one counts)", async () => {
+  const a = await claim("credible mixed", [await source("https://www.energy.gov/r1e{t}")]);
+  await contradict(a, await claim("forum e", [await source("https://www.reddit.com/r/r1e{t}/comments/1/")]));
+  await contradict(a, await claim("credible e", [await source("https://www.nature.com/articles/r1e{t}")]));
+  assert(await legacy(a) <= 0.30 && await d15(a) <= 0.30);
+});
+
+t("R1: a community-only claim contradicted by a credible claim stays capped under the floor", async () => {
+  const forum = await claim("forum f", [await source("https://www.reddit.com/r/r1f{t}/comments/1/")]);
+  const cred = await claim("credible f", [await source("https://www.energy.gov/r1f{t}")]);
+  await contradict(forum, cred);
+  assert(await legacy(forum) <= 0.30 && await d15(forum) <= 0.30);
+});
+
+// FU11: a retracted source supports nothing.
+t("FU11: a retracted credible source is not credible support, and does not make a claim community-only by itself", async () => {
+  const dead = id();
+  await q(`INSERT INTO public.sources (id, url, title, content, domain, retracted_at, retraction_committed_at) VALUES ($1, $2, 't', 'c', $3, now(), now())`,
+    [dead, `https://www.nature.com/articles/fu11-${tag}`, "www.nature.com"]);
+  const forum = await source("https://www.reddit.com/r/fu11{t}/comments/1/");
+  const c = await claim("retracted credible plus forum", [dead, forum]);
+  assertEquals(await flag("claim_has_credible_support", c), false, "the only credible source is retracted");
+  assertEquals(await flag("claim_community_only", c), true);
+  assert(await legacy(c) < 0.5 && await d15(c) < 0.5, "so the forum cannot lift it");
+  const live = await claim("live credible", [await source("https://www.nature.com/articles/fu11b-{t}")]);
+  assertEquals(await flag("claim_has_credible_support", live), true);
+  const noneLeft = await claim("retracted credible only", [dead]);
+  assertEquals(await flag("claim_community_only", noneLeft), false, "a retracted credible source is not a community source either");
+});
+
 t("grants: the full-scan helpers are owner-only (service_role cannot run them)", async () => {
   for (const fn of ["public.source_classes_reclassify()", "public.source_community_drift()"]) {
     const ok = (await q<{ v: boolean }>(`SELECT has_function_privilege('service_role', $1, 'EXECUTE') AS v`, [fn]))[0].v;

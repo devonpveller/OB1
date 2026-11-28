@@ -8,9 +8,14 @@
 --     archive / translate / AMP wrappers are classified as the URL they wrap. No match = not community (scored by
 --     the D15 model exactly as before). source_class_of(url, domain) is the SQL twin of source-class.ts.
 --     The registry is changed only by the table owner (the P3a guard, re-created here with source_classes added).
+--     EDITING THIS REGISTRY STALLS SOURCE WRITES (fix round 3, FU3): every insert, update or delete of a source_classes row
+--     re-classifies every source (about 22 s at live size) while holding SHARE ROW EXCLUSIVE on `sources`, so ALL source
+--     writers wait (and any with a short statement_timeout or lock_timeout, as the workbench has on some transactions,
+--     fails instead of waiting). Edit it off-hours, or with the research, curator and workbench writers stopped.
 --   * credibility_terms.community: community evidence is weighted low and never carries the credible rating
 --     alone. A claim with at least one non-community grounding source is scored over its NON-community sources
---     only (so its rating is the same whichever mode the run used); a claim grounded only in community sources
+--     only (so its rating is the same whichever mode the run used); a `contradicts` edge that comes from a
+--     community-only claim or a community source does not cap such a claim (the edge stays; fix round 3, R1); a claim grounded only in community sources
 --     scores weight x its total, capped `floor_margin` under the floor. Applied to all three formula versions:
 --     the live legacy claim_confidence (init-claims.sql), claim_confidence_d15 and credibility.ts. Community
 --     sources neither give nor receive corroboration (source_rolling_total_core).
@@ -309,6 +314,10 @@ SET search_path = public, pg_temp
 AS $$
 DECLARE n INT;
 BEGIN
+    -- fix round 3 (FU1): drain every open writer of `sources` (they hold ROW EXCLUSIVE) BEFORE the advisory lock, and keep new
+    -- ones out until this transaction ends. Without it the tester's deadlocks formed: a registry edit holding the registry row
+    -- and waiting for a writer's row lock, while that writer waited for the shared advisory lock (40P01, I5a and D-a).
+    LOCK TABLE public.sources IN SHARE ROW EXCLUSIVE MODE;
     PERFORM pg_advisory_xact_lock(750750);   -- attempt 2: wait for every open source write to commit
     UPDATE public.sources s SET community_key = public.source_class_of(s.url, s.domain) ->> 'key'
      WHERE s.community_key IS DISTINCT FROM (public.source_class_of(s.url, s.domain) ->> 'key');
@@ -373,14 +382,27 @@ AS $$
     SELECT s.community_key IS NOT NULL FROM public.sources s WHERE s.id = p_source_id;
 $$;
 
--- A claim has credible support: a non-contradicting edge to a source that is not community class.
+-- A claim has credible support: a non-contradicting edge to a source that is not community class and is not retracted
+-- (fix round 3, FU11: a retracted source supports nothing, as in claim_edge_counts and the consensus check below).
 CREATE OR REPLACE FUNCTION public.claim_has_credible_support(p_claim_id UUID)
 RETURNS BOOLEAN
 LANGUAGE sql STABLE
 AS $$
     SELECT EXISTS (SELECT 1 FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
                     WHERE cs.claim_id = p_claim_id AND cs.edge_type <> 'contradicts'
-                      AND s.community_key IS NULL);
+                      AND s.community_key IS NULL AND s.retraction_committed_at IS NULL);
+$$;
+
+-- fix round 3 (R1): does this `contradicts` edge come from the community? A source edge: the source is community class. A
+-- claim edge (the curator's conflict check writes these, both ways): the other claim is community-only. The edge stays in
+-- claim_sources, so the contest is visible; it just does not cap a claim that has credible support.
+CREATE OR REPLACE FUNCTION public.claim_contradiction_is_community(p_source_id UUID, p_parent_claim_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql STABLE
+AS $$
+    SELECT CASE WHEN p_source_id IS NOT NULL THEN COALESCE(public.source_is_community(p_source_id), FALSE)
+                WHEN p_parent_claim_id IS NOT NULL THEN public.claim_community_only(p_parent_claim_id)
+                ELSE FALSE END;
 $$;
 
 -- Community only: grounded directly in sources, every one of them community class. (A claim grounded only through
@@ -389,8 +411,8 @@ CREATE OR REPLACE FUNCTION public.claim_community_only(p_claim_id UUID)
 RETURNS BOOLEAN
 LANGUAGE sql STABLE
 AS $$
-    SELECT EXISTS (SELECT 1 FROM public.claim_sources cs WHERE cs.claim_id = p_claim_id AND cs.source_id IS NOT NULL
-                      AND cs.edge_type <> 'contradicts')
+    SELECT EXISTS (SELECT 1 FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
+                    WHERE cs.claim_id = p_claim_id AND cs.edge_type <> 'contradicts' AND s.community_key IS NOT NULL)
        AND NOT public.claim_has_credible_support(p_claim_id);
 $$;
 
@@ -407,7 +429,7 @@ $$;
 
 -- ── the legacy formula (init-claims.sql), with the community rule ─────────────────────────────
 -- Unchanged for a claim with no community source. With credible support, the community edges are left out of every
--- term (so the claim scores as it would without them); community-only, the result is x weight and capped
+-- term, a community `contradicts` edge included (fix round 3, R1), so the claim scores as it would without them; community-only, the result is x weight and capped
 -- floor_margin under legacy_floor.
 CREATE OR REPLACE FUNCTION public.claim_confidence(p_claim_id UUID)
 RETURNS REAL
@@ -441,7 +463,10 @@ BEGIN
       INTO v_has_strong, v_has_inferred, v_contradicted
       FROM public.claim_sources cs LEFT JOIN public.sources s ON s.id = cs.source_id
      WHERE cs.claim_id = p_claim_id
-       AND NOT (v_credible AND cs.edge_type <> 'contradicts' AND s.id IS NOT NULL AND s.community_key IS NOT NULL);
+       AND (cs.source_id IS NULL OR s.retraction_committed_at IS NULL)   -- D5 stage 1, as claim_edge_counts (base 540)
+       AND NOT (v_credible AND CASE WHEN cs.edge_type = 'contradicts'
+                                    THEN public.claim_contradiction_is_community(cs.source_id, cs.parent_claim_id)
+                                    ELSE s.id IS NOT NULL AND s.community_key IS NOT NULL END);
 
     IF v_has_strong THEN v_base := 0.90;
     ELSIF v_has_inferred THEN v_base := 0.60;
@@ -451,6 +476,7 @@ BEGIN
       FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
      WHERE cs.claim_id = p_claim_id
        AND cs.edge_type IN ('states','corroborates')
+       AND s.retraction_committed_at IS NULL
        AND NOT (v_credible AND s.community_key IS NOT NULL);
 
     SELECT MAX(CASE
@@ -463,6 +489,7 @@ BEGIN
       JOIN public.sources s ON s.id = cs.source_id
      WHERE cs.claim_id = p_claim_id
        AND cs.edge_type <> 'contradicts'
+       AND s.retraction_committed_at IS NULL
        AND NOT (v_credible AND s.community_key IS NOT NULL);
     v_authority := COALESCE(v_authority, 0.85);
 
@@ -583,7 +610,10 @@ BEGIN
               CASE volatility WHEN 'fast' THEN 7 WHEN 'medium' THEN 180 WHEN 'slow' THEN 1095 ELSE 180 END) < CURRENT_DATE)
       INTO v_stale FROM public.claims WHERE id = p_claim_id;
     IF COALESCE(v_stale, FALSE) THEN v_score := v_score * 0.5::float8; END IF;
-    SELECT bool_or(e.edge_type = 'contradicts') INTO v_contra FROM public.claim_edge_counts(p_claim_id) e;
+    -- fix round 3 (R1): a community contradiction does not cap a claim that has credible support (the edge stays)
+    SELECT bool_or(e.edge_type = 'contradicts') INTO v_contra FROM public.claim_edge_counts(p_claim_id) e
+     WHERE NOT (v_credible AND e.edge_type = 'contradicts'
+                AND public.claim_contradiction_is_community(e.source_id, e.parent_claim_id));
     IF COALESCE(v_contra, FALSE) THEN v_score := LEAST(v_score, 0.30::float8); END IF;
     IF v_comm_only THEN
         v_score := LEAST(v_score * (v_comm ->> 'weight')::float8,
@@ -652,7 +682,8 @@ ON CONFLICT (key) DO UPDATE SET tier = EXCLUDED.tier, type = EXCLUDED.type, sect
 -- ── grants: the readers the services call ─────────────────────────────────────────────────────
 GRANT EXECUTE ON FUNCTION public.source_class_of(TEXT, TEXT), public.source_url_unwrap(TEXT),
     public.source_is_community(UUID), public.claim_has_credible_support(UUID), public.claim_community_only(UUID),
-    public.claim_community_consensus(UUID), public.credibility_community_terms() TO service_role;
+    public.claim_community_consensus(UUID), public.credibility_community_terms(),
+    public.claim_contradiction_is_community(UUID, UUID) TO service_role;
 
 -- ── the deploy re-score (operator 2026-11-27): every claim with a community grounding source ─
 DO $$

@@ -56,6 +56,7 @@ DROP FUNCTION IF EXISTS public.trg_sources_community_key();
 DROP FUNCTION IF EXISTS public.source_classes_reclassify();
 DROP FUNCTION IF EXISTS public.source_community_drift();
 ALTER TABLE public.sources DROP COLUMN IF EXISTS community_key;
+DROP FUNCTION IF EXISTS public.claim_contradiction_is_community(UUID, UUID);
 DROP FUNCTION IF EXISTS public.claim_community_consensus(UUID);
 DROP FUNCTION IF EXISTS public.claim_community_only(UUID);
 DROP FUNCTION IF EXISTS public.claim_has_credible_support(UUID);
