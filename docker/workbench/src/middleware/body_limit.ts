@@ -80,7 +80,15 @@ export function bodyLimit() {
     const chunks: Uint8Array[] = [];
     let n = 0;
     for (;;) {
-      const { done, value } = await reader.read();
+      let part: ReadableStreamReadResult<Uint8Array>;
+      try {
+        part = await reader.read();
+      } catch {
+        // the runtime failed the body part-way (a dropped connection, or deno 2.3.3's "error reading a body from connection" on
+        // a fast chunked body of about 3 MiB or more): the client's transport, not a fault here, so not the app's 500
+        return c.json({ error: "the request body could not be read" }, 400);
+      }
+      const { done, value } = part;
       if (done) break;
       n += value.byteLength;
       if (n > cap) {

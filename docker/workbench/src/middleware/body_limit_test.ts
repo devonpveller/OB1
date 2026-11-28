@@ -78,6 +78,26 @@ Deno.test("a DECLARED Content-Length of exactly cap+1 is refused 413, exactly ca
   assertEquals(lie.status, 413, "declared cap+1, short body");
 });
 
+Deno.test("a body stream that fails mid-read is a 400 with a plain message, never the app's 500, and no route runs", async () => {
+  // the runtime can fail a streamed body part-way (deno 2.3.3: "error reading a body from connection" on a fast chunked body of
+  // about 3 MiB or more); that is the client's transport, not a fault in the workbench, so it is not answered 500
+  const failing = (after: number) => {
+    let sent = 0;
+    return new ReadableStream<Uint8Array>({
+      pull(ctl) {
+        if (sent >= after) return ctl.error(new Error("error reading a body from connection"));
+        sent += 1024; ctl.enqueue(new Uint8Array(1024).fill(97));
+      },
+    });
+  };
+  for (const after of [0, 4096, maxBodyBytes() + 4096]) {
+    const r = await app().request("/workbench/notes/a.md", { method: "PUT", headers: { "content-type": "text/plain" }, body: failing(after), duplex: "half" } as RequestInit);
+    assertEquals(r.status, after > maxBodyBytes() ? 413 : 400, `fails after ${after} bytes`);
+    if (r.status === 400) assertEquals((await r.json()).error, "the request body could not be read");
+    assertEquals(reached, 0, "no route ran");
+  }
+});
+
 Deno.test("reads carry no cap (the cap is on a write's body)", async () => {
   const r = await app().request(`/workbench/documents/file?path=${"a".repeat(8000)}`, { method: "GET" });
   assertEquals(r.status, 200);
