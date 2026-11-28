@@ -98,7 +98,7 @@ function VoicesScreen() {
       </div>
       {loading && <p className="meta" role="status" data-testid="voices-loading">Loading your cast...</p>}
       {failed && (
-        <p className="meta" data-testid="voices-failed">Could not load all of your cast. <button type="button" onClick={() => reload()}>Try again</button></p>
+        <p className="meta" data-testid="voices-failed">Could not load all of your cast. <button type="button" onClick={() => { setConfirming(null); reload(); }}>Try again</button></p>
       )}
       {!loading && (
         <>
@@ -247,6 +247,9 @@ function PresenterEditor({ row, ctx, flash, confirming, setConfirming, onSaved, 
   };
 
   async function save() {
+    // an existing presenter's voice link is found in the voices list: without it a shared link cannot be told from its own, and nothing
+    // would be written, so refuse the voice or speed change instead of showing "Saved"
+    if (!isNew && voiceChanged && !link) { setSaved(false); setError("The voices could not be loaded, so the voice and speed cannot be changed now. Press Try again at the top, then save again."); return; }
     setSaving(true); setError(""); setSaved(false);
     const speed = Number(d.speed);
     const route = row?.voice.route ?? ctx.voices[0]?.route ?? DEFAULT_ROUTE;

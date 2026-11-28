@@ -55,8 +55,9 @@ export function sampleHandler(o: { speech: SpeechFn; key: string }): (req: Reque
     try {
       const pcm = await o.speech({ route: route as string, voice: voice as string, speed: speed as number, text: SAMPLE_TEXT });
       return new Response(pcmToWav(pcm), { status: 200, headers: { "content-type": "audio/wav", "cache-control": "no-store" } });
-    } catch (e) {
-      console.error(`[podcast] sample failed: ${String(e).slice(0, 300)}`);
+    } catch {
+      // a fixed line: the engine's error carries the route, the voice and a piece of LiteLLM's reply body, none of which belongs in a log
+      console.error("[podcast] sample failed");
       return Response.json({ error: "the voice engine did not answer" }, { status: 502 });
     }
   };

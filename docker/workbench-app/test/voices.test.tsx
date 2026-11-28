@@ -128,6 +128,66 @@ describe("the lists", () => {
   });
 });
 
+describe("when the voices list did not load", () => {
+  const failVoices = () => setFetcher(async (u, init) => {
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "GET" && /\/cast\/voices\?/.test(u) && who === "alice" && failingVoices) return new Response(JSON.stringify({ error: "internal" }), { status: 500 });
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+    const a = fake.handle(method, u, body, who);
+    return new Response(JSON.stringify(a.body), { status: a.status });
+  });
+  let failingVoices = true;
+  it("a voice or speed change is refused with a sentence and nothing is written or shown as Saved", async () => {
+    failingVoices = true; failVoices();
+    await open();
+    await pick("Morgan");
+    expect(screen.getByTestId("voices-failed")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("bf_emma"));
+    fireEvent.click(screen.getByTestId("save"));
+    await waitFor(() => expect(screen.getByTestId("form-error").textContent).toMatch(/voices could not be loaded/));
+    expect(screen.queryByTestId("saved")).toBeNull();
+    expect(writes()).toEqual([]);
+    expect(fake.t.voices.get(ids.vMorgan)).toMatchObject({ voice: "bm_george" });
+    // a speed change is refused the same way
+    fireEvent.click(screen.getByLabelText("bm_george"));
+    type("Speed", "1.5");
+    fireEvent.click(screen.getByTestId("save"));
+    await waitFor(() => expect(screen.getByTestId("form-error").textContent).toMatch(/voices could not be loaded/));
+    expect(screen.queryByTestId("saved")).toBeNull();
+    expect(writes()).toEqual([]);
+    // once the list loads, the same save goes through and edits the link
+    failingVoices = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.queryByTestId("voices-failed")).toBeNull());
+    fireEvent.click(screen.getByTestId("save"));
+    await screen.findByTestId("saved");
+    expect(writes()).toEqual([`PATCH /voices/${ids.vMorgan}`]);
+  });
+  it("Try again drops a delete confirmation whose row went away: nothing is asked about a row nobody chose, and the buttons are live", async () => {
+    failingVoices = true; failVoices();
+    await open();
+    expect(screen.getByTestId("editor-name").textContent).toBe("Alex"); // the first row is open
+    fireEvent.click(screen.getByTestId("delete"));
+    expect(screen.getByTestId("typed-confirm").getAttribute("data-target")).toBe(ids.alex);
+    fake.t.presenters.delete(ids.alex); // removed elsewhere
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.getByTestId("editor-name").textContent).toBe("Morgan"));
+    expect(screen.queryByTestId("typed-confirm")).toBeNull();
+    expect((screen.getByTestId("new") as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByTestId("delete") as HTMLButtonElement).disabled).toBe(false);
+    expect(writes()).toEqual([]);
+  });
+  it("a name-only change still saves while the list is missing", async () => {
+    failingVoices = true; failVoices();
+    await open();
+    await pick("Morgan");
+    type("Name", "Morgan B");
+    fireEvent.click(screen.getByTestId("save"));
+    await screen.findByTestId("saved");
+    expect(writes()).toEqual([`PATCH /presenters/${ids.morgan}`]);
+  });
+});
+
 describe("a presenter: the fields, the stored-or-not-shown rule", () => {
   it("shows exactly the fields the server stores, a pitch note, and the Untested marker; no model route, no pitch control", async () => {
     await open();

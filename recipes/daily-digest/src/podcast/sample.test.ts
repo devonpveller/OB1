@@ -69,10 +69,16 @@ Deno.test("no key, a wrong key, a text of the caller's, a URL as a route, a wild
 
 Deno.test("a failing gateway is a 502 with a fixed message (no upstream text)", async () => {
   const h = sampleHandler({ speech: () => Promise.reject(new Error("HTTP 500 secret-upstream-detail")), key: KEY });
-  const r = await post(h, { route: "local-tts", voice: "bm_george", speed: 1 });
+  const logged: string[] = [];
+  const real = console.error;
+  console.error = (...a: unknown[]) => { logged.push(a.map(String).join(" ")); };
+  let r: Response;
+  try { r = await post(h, { route: "local-tts", voice: "bm_george", speed: 1 }); } finally { console.error = real; }
   assertEquals(r.status, 502);
   const t = await r.text();
   assert(!t.includes("secret-upstream-detail"), t);
+  // the log line is fixed too: no route, voice or upstream text
+  assertEquals(logged, ["[podcast] sample failed"]);
 });
 
 Deno.test("POST /sample on the service is keyed like /render and absent when no sampler is given", async () => {
