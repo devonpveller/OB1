@@ -49,6 +49,8 @@ export function parseWrite(b: unknown): { value: unknown; version: number | null
   let version: number | null = null;
   if (o.version !== undefined && o.version !== null) {
     if (!Number.isInteger(o.version) || (o.version as number) < 0) return "version must be a whole number";
+    // rw-body-size-stall: the stored version is an INT; a larger one overflowed in user_setting_set (a 500)
+    if ((o.version as number) > 2147483647) return "version must be a whole number no larger than 2147483647";
     version = o.version as number;
   }
   return { value: o.value, version };

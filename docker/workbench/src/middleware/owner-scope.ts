@@ -23,7 +23,8 @@
 import type { Context, Next } from "hono";
 import type { Db } from "../contracts/db.ts";
 import { identityOf, type Identity, seamPath } from "./identity.ts";
-import { formOf, isUploadRoute, multipartSizeOf } from "../util/multipart.ts";
+import { FORM_TEXT_MAX_CHARS, isUploadRoute } from "./body_limit.ts";
+import { formOf, multipartSizeOf } from "../util/multipart.ts";
 import { documentPathsIn, ownsDocumentPaths } from "../documents/ownership.ts";
 
 const OTHER = "(another user's document)";
@@ -51,7 +52,7 @@ function stringsOf(v: unknown, out: string[], key = "", fields: Set<string> = TE
 }
 
 class BodyRefused extends Error {
-  constructor(readonly status: 400 | 415, msg: string) { super(msg); }
+  constructor(readonly status: 400 | 413 | 415, msg: string) { super(msg); }
 }
 
 const MUTATING = (m: string) => !["GET", "HEAD", "OPTIONS"].includes(m);
@@ -67,14 +68,30 @@ async function requestStrings(c: Context): Promise<string[]> {
   for (const vs of Object.values(c.req.queries())) out.push(...vs);
   if (!MUTATING(c.req.method)) return out;
   const media = (c.req.header("content-type") ?? "").split(";")[0].trim().toLowerCase();
-  if (media === "multipart/form-data" && isUploadRoute(route)) {
-    // an upload: the body is read once and parsed in a worker, and the route reuses that parse (rw-upload-store-offthread,
-    // fix round 2: cloning + decoding + parsing it here, then again in the route, held the one thread ~3 s per 32 MiB)
-    if (!(await multipartSizeOf(c.req.raw))) return out;
-    if (route.startsWith("/workbench/contract/")) throw new BodyRefused(415, "the contract API takes application/json");
-    try {
-      for (const [k, v] of (await formOf(c.req.raw)).entries) if (!textFieldsFor(route).has(k)) out.push(v);
-    } catch { throw new BodyRefused(400, "the form body cannot be read"); }
+  const isForm = media === "multipart/form-data" || media === "application/x-www-form-urlencoded";
+  // rw-body-size-stall (D2) + rw-upload-store-offthread: a form body is NEVER read as text (that decoded the whole file into
+  // a string). Only its text fields (never a file part) are scanned, and only up to FORM_TEXT_MAX_CHARS of them.
+  // On an upload route (body_limit.ts UPLOAD_ROUTES) a multipart body is read ONCE and parsed in a worker (util/multipart.ts
+  // formOf), and the route reuses that same parse: the owner scope CONSUMES the body there, so a handler on those routes
+  // must read it with formOf, never c.req.parseBody / arrayBuffer. Any other form is parsed from a clone (small: the 4 MiB
+  // general cap), the body stays whole for its route.
+  if (isForm && !route.startsWith("/workbench/contract/")) {
+    if (c.req.raw.body === null) return out; // no body at all
+    let entries: Iterable<[string, unknown]>;
+    if (media === "multipart/form-data" && isUploadRoute(route)) {
+      if (!(await multipartSizeOf(c.req.raw))) return out;
+      try { entries = (await formOf(c.req.raw)).entries; } catch { throw new BodyRefused(400, "the form body cannot be read"); }
+    } else {
+      try { entries = (await c.req.raw.clone().formData()).entries(); } catch { throw new BodyRefused(400, "the form body cannot be read"); }
+    }
+    let chars = 0;
+    const skip = textFieldsFor(route);
+    for (const [k, v] of entries) {
+      if (typeof v !== "string" || skip.has(k)) continue;
+      chars += k.length + v.length;
+      if (chars > FORM_TEXT_MAX_CHARS) throw new BodyRefused(413, `the form's text fields are too large (at most ${FORM_TEXT_MAX_CHARS} characters)`);
+      out.push(v);
+    }
     return out;
   }
   const raw = await c.req.raw.clone().text();
@@ -89,10 +106,6 @@ async function requestStrings(c: Context): Promise<string[]> {
     let parsed: unknown;
     try { parsed = JSON.parse(raw); } catch { throw new BodyRefused(400, "the body is not valid JSON"); }
     stringsOf(parsed, out, "", textFieldsFor(route));
-  } else if (media === "multipart/form-data" || media === "application/x-www-form-urlencoded") {
-    try {
-      for (const [k, v] of (await c.req.raw.clone().formData()).entries()) if (typeof v === "string" && !textFieldsFor(route).has(k)) out.push(v);
-    } catch { throw new BodyRefused(400, "the form body cannot be read"); }
   }
   // any other type outside the contract API is a document's or note's text (a note save): not a path
   return out;

@@ -28,11 +28,6 @@ const NONE: Form = Object.freeze({
   empty: true,
 });
 
-// The routes whose body is an upload: the seam reads these once and parses them in the worker, and the route reuses
-// that parse. Any OTHER multipart request keeps the seam's old behaviour (it reads a clone, the body stays whole for the
-// route), so a route that reads the raw body itself (a note save) is not broken by it.
-const UPLOAD_ROUTE = /^\/workbench\/(?:import|intake\/add|sources\/[^/]+\/replace-from-upload)\/?$/;
-export const isUploadRoute = (path: string) => UPLOAD_ROUTE.test(path);
 const mediaOf = (req: Request) => (req.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
 
 let worker: Worker | null = null;

@@ -1333,6 +1333,22 @@ try {
   else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the upload store lab case ($($sum.Value))" }
   }
 
+  # rw-body-size-stall [5d0]: a large write body is refused 413 within a second on every write route through both doors, a body
+  # under the cap is checked in under a second, the workbench answers others meanwhile (src/middleware/body_size_lab_test.ts)
+  Write-Host '[5d0] the body size cap (every write route, both doors; a 160 KB body fast; the others served meanwhile)'
+  $o = Lab-Docker 1500 @('run', '--rm', '--label', $label, '--network', $net, '-v', "${vault}:/vault",
+    '-v', "$(Join-Path $ob1 'recipes'):/recipes:ro",
+    '-e', "BODY_BASE=http://$P-wb:8000", '-e', "BODY_VIEWER=http://$P-viewer:8080", '-e', "DOCS_TEST_KEY=$key",
+    '-e', "DB_HOST=$db", '-e', 'DB_USER=postgres', '-e', "DB_PASSWORD=$pw", '-e', 'WIKI_GIT_DIR=/vault', '-e', 'OPEN_BRAIN_URL=http://openbrain-rest', '-e', "OPEN_BRAIN_REST_TOKEN=$(& $tok 'WIKI')",
+    $wbTestTag, 'deno', 'test', '--allow-net', '--allow-env', '--allow-read', '--allow-write', '--allow-run', 'src/middleware/body_size_lab_test.ts')
+  $clean = ($o -replace '\x1b\[[0-9;]*m', '')
+  Save 'body-size-lab-full.log' $clean
+  Save 'body-size-lab.log' ((($clean -split "`n") | Where-Object { $_ -match '^body-size|^\s+(workbench|viewer) |\.\.\. (ok|FAILED)|^(ok|FAILED) \||error:|AssertionError' }) -join "`n")
+  foreach ($l in ($clean -split "`n") | Where-Object { $_ -match '^body-size|^\s+(workbench|viewer) |\.\.\. (ok|FAILED)' }) { Write-Host "    $l" }
+  $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match($clean)
+  if ($Red) { Check ($sum.Success -and [int]$sum.Groups[3].Value -gt 0) "RED: the body size lab case fails on the base ($($sum.Value))" }
+  else { Check ($sum.Success -and $sum.Groups[1].Value -eq 'ok' -and [int]$sum.Groups[3].Value -eq 0) "the body size lab case ($($sum.Value))" }
+
   # round 2 (tester attempt 1 F1-F6): the route-wide isolation sweep, LAST (it calls mutating routes
   # with user B's ids as user A). Its route table is the router's own (src/app.ts, imported in the test
   # stage image with the workbench's DB_* / recipes so the import resolves; never served there).

@@ -10,6 +10,7 @@
 // WHO comes from the identity seam alone (identityOf: subject_sub; the OWUI inlet's on-behalf-of subject
 // is the seam's too, accepted only from Open WebUI's service key on the add - middleware/identity.ts).
 // A body never names a user. Every read and write is the subject's own (intake/repo.ts).
+import { INTAKE_MAX_FILE_BYTES } from "../middleware/body_limit.ts";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Db } from "../contracts/db.ts";
@@ -55,7 +56,7 @@ async function refineriesOf(db: Db, sub: string) {
 export function intakeRouter(deps: IntakeDeps) {
   const r = new Hono();
   const db = deps.db;
-  const maxFile = deps.maxFileBytes ?? 25 * 1024 * 1024;
+  const maxFile = deps.maxFileBytes ?? INTAKE_MAX_FILE_BYTES;
   const kindOf = (c: Context) => str(c.req.param("kind"));
 
   r.get("/content-types", (c) => c.json({

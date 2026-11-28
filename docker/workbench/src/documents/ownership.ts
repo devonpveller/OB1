@@ -102,6 +102,8 @@ export const FOREIGN_JOB = (j: string, sub: string, key: string, adminSees = fal
 // The characters documentPathsIn stops a path at (its `[^\s"'?&#,)]` class), one place for the legacy-prefix check: a character
 // either cuts a scanned path or it does not, in the scanner and in that check alike (tested over every code point).
 export const CUT_AFTER = /^[\s"'?&#,)]/;
+// the runs between the characters that end a `..` token (no `)`: the `..` scan has never cut at one)
+const CUT_RUN = /[\s"'?&#,]+/;
 const isDocumentsPath = (p: string) => p.slice(0, DOCUMENTS_ROOT.length + 1).toLowerCase() === `${DOCUMENTS_ROOT}/`;
 
 export async function ownsDocumentPaths(db: Db, paths: string[], who: Viewer): Promise<boolean> {
@@ -148,7 +150,11 @@ export async function ownsDocumentPaths(db: Db, paths: string[], who: Viewer): P
   return !others.some((o) => prefixes.some((pre) => o.path.startsWith(pre) && CUT_AFTER.test(o.path.slice(pre.length))));
 }
 
+// a path with no empty, `.` or `..` segment (and no backslash) is its own normal form: most are, and a body that names
+// hundreds of thousands of them (rw-body-size-stall, D3) then costs a regex test each, not a split and a join
+const NEEDS_NORMALIZING = /(^|\/)\.{0,2}(\/|$)|\\/;
 function normalize(p: string): string {
+  if (!NEEDS_NORMALIZING.test(p)) return p;
   const out: string[] = [];
   for (const seg of p.replace(/\\/g, "/").split("/")) {
     if (seg === "" || seg === ".") continue;
@@ -177,11 +183,19 @@ export function singleDocumentPath(ref: string): string | null {
 export function documentPathsIn(s: string): string[] {
   const found: string[] = [];
   const t = s.replace(/\\/g, "/");
-  const re = /(^|[\/\s"'=:(,])((?:\.{1,2}\/)*documents\/[^\s"'?&#,)]*)/gi;
+  // (rw-body-size-stall: this was `(^|[\/\s"'=:(,])((?:\.{1,2}\/)*documents\/...)`. The `(?:\.{1,2}\/)*` run is read again from every
+  // `/` of a long `../../..` string, which is again the square of the length. Each of its units ends in `/`, itself a start
+  // character, so a `documents/` after such a run is found by the plain start just before it: the same path once
+  // normalize() has dropped the leading `./` and `../` units, with the same end.)
+  const re = /(^|[\/\s"'=:(,])(documents\/[^\s"'?&#,)]*)/gi;
   for (const m of t.matchAll(re)) found.push(m[2]);
   // a path that only becomes documents/ once its `..` segments are resolved
-  for (const m of t.matchAll(/[^\s"'?&#,]*\.\.[^\s"'?&#,]*/g)) {
-    const n = normalize(m[0]);
+  // (rw-body-size-stall: the scan was `/[^\s"'?&#,]*\.\.[^\s"'?&#,]*/g`, which retries from every character of a long
+  // token with no `..` and so grew with the square of the length - 40 KB took 4.6 s, 160 KB over 30 s. A match of that
+  // pattern is exactly one whole run of non-cut characters that contains `..`, so the runs are split once, in one pass.)
+  for (const tok of t.split(CUT_RUN)) {
+    if (!tok.includes("..")) continue;
+    const n = normalize(tok);
     if (isDocumentsPath(n)) found.push(n);
   }
   return [...new Set(found.map(normalize).filter((p) => isDocumentsPath(p) && p.length > "documents/".length))];
