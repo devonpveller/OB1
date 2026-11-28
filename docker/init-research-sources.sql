@@ -393,6 +393,17 @@ AS $$
                       AND s.community_key IS NULL AND s.retraction_committed_at IS NULL);
 $$;
 
+-- Community only: grounded directly in sources, every one of them community class. (A claim grounded only through
+-- parent claims is neither; its parents carry their own rating.)
+CREATE OR REPLACE FUNCTION public.claim_community_only(p_claim_id UUID)
+RETURNS BOOLEAN
+LANGUAGE sql STABLE
+AS $$
+    SELECT EXISTS (SELECT 1 FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
+                    WHERE cs.claim_id = p_claim_id AND cs.edge_type <> 'contradicts' AND s.community_key IS NOT NULL)
+       AND NOT public.claim_has_credible_support(p_claim_id);
+$$;
+
 -- fix round 3 (R1): does this `contradicts` edge come from the community? A source edge: the source is community class. A
 -- claim edge (the curator's conflict check writes these, both ways): the other claim is community-only. The edge stays in
 -- claim_sources, so the contest is visible; it just does not cap a claim that has credible support.
@@ -403,17 +414,6 @@ AS $$
     SELECT CASE WHEN p_source_id IS NOT NULL THEN COALESCE(public.source_is_community(p_source_id), FALSE)
                 WHEN p_parent_claim_id IS NOT NULL THEN public.claim_community_only(p_parent_claim_id)
                 ELSE FALSE END;
-$$;
-
--- Community only: grounded directly in sources, every one of them community class. (A claim grounded only through
--- parent claims is neither; its parents carry their own rating.)
-CREATE OR REPLACE FUNCTION public.claim_community_only(p_claim_id UUID)
-RETURNS BOOLEAN
-LANGUAGE sql STABLE
-AS $$
-    SELECT EXISTS (SELECT 1 FROM public.claim_sources cs JOIN public.sources s ON s.id = cs.source_id
-                    WHERE cs.claim_id = p_claim_id AND cs.edge_type <> 'contradicts' AND s.community_key IS NOT NULL)
-       AND NOT public.claim_has_credible_support(p_claim_id);
 $$;
 
 CREATE OR REPLACE FUNCTION public.claim_community_consensus(p_claim_id UUID)

@@ -344,14 +344,14 @@ async function contradict(a: string, b: string) {
 t("R1: a contradiction from a community-only claim does not cap a credible claim (legacy and D15); the edge stays", async () => {
   const credible = await claim("credible claim", [await source("https://www.energy.gov/r1{t}")]);
   const [l0, d0] = [await legacy(credible), await d15(credible)];
-  assert(l0 > 0.5 && d0 > 0.5, `baseline ${l0} ${d0}`);
+  assert(l0 > 0.31 && d0 > 0.31, `baseline (must sit above the 0.30 cap) ${l0} ${d0}`);
   const forum = await claim("forum claim", [await source("https://www.reddit.com/r/r1{t}/comments/1/")]);
   await contradict(credible, forum);
   assertEquals(await edges(credible), 1, "the edge is kept, so the contest is visible");
   assertEquals(await edges(forum), 1);
   assertEquals(await legacy(credible), l0, "legacy: not capped");
   assertEquals(await d15(credible), d0, "d15: not capped");
-  assert(await confOf(credible) > 0.5, "the stored rating is not capped either");
+  assert(await confOf(credible) > 0.31, "the stored rating is not capped either");
   assertEquals(await flag("claim_community_only", forum), true);
   assert(await legacy(forum) < 0.5 && await d15(forum) < 0.5, "the community-only claim stays under the floor");
 });
@@ -404,6 +404,16 @@ t("FU11: a retracted credible source is not credible support, and does not make 
   assertEquals(await flag("claim_has_credible_support", live), true);
   const noneLeft = await claim("retracted credible only", [dead]);
   assertEquals(await flag("claim_community_only", noneLeft), false, "a retracted credible source is not a community source either");
+});
+
+t("FU11: the legacy formula ignores a retracted source in its strong-edge term (D5 stage 1, as the 540 base)", async () => {
+  const dead = id();
+  await q(`INSERT INTO public.sources (id, url, title, content, domain, retracted_at, retraction_committed_at) VALUES ($1, $2, 't', 'c', $3, now(), now())`,
+    [dead, `https://www.nature.com/articles/fu11c-${tag}`, "www.nature.com"]);
+  const plain = await claim("inferred only", [await source("https://www.energy.gov/fu11d{t}")], "inferred_from");
+  const withDead = await claim("inferred plus a retracted statement", [await source("https://www.energy.gov/fu11e{t}")], "inferred_from");
+  await q(`SELECT public.link_claim_to_source($1, $2, 'states', 1.0)`, [withDead, dead]);
+  assertEquals(await legacy(withDead), await legacy(plain), "the retracted 'states' edge adds no base score");
 });
 
 t("grants: the full-scan helpers are owner-only (service_role cannot run them)", async () => {
