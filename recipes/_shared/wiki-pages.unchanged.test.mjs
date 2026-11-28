@@ -14,6 +14,7 @@ const rows = new Map();
 const stat = { posts: 0, postedRows: 0, gets: 0, getRows: 0, maxActive: 0 };
 let active = 0;
 let delayMs = 0;
+let slowMs = 9000;
 let getAnswer = 200;
 let refuse = new Set(); // slugs the "guard" refuses (42501, the one message)
 const GUARD = '{"code":"42501","details":null,"hint":null,"message":"wiki_pages: this page cannot be saved"}';
@@ -34,9 +35,14 @@ const server = http.createServer((req, res) => {
       return done(200, JSON.stringify(out));
     }
     if (req.method === "POST") {
-      const list = JSON.parse(raw || "[]");
+      const parsed = JSON.parse(raw || "[]"); const list = Array.isArray(parsed) ? parsed : [];
       stat.posts++; stat.postedRows += list.length;
       if (list.some((r) => refuse.has(r.slug))) return done(400, GUARD);
+      if (list.some((r) => r.slug.startsWith("content/source/slow"))) {
+        // a slow guard: the statement runs on server-side after the client gave up, and commits at the end
+        stat.slowPosts = (stat.slowPosts || 0) + 1;
+        return setTimeout(() => { for (const r of list) rows.set(r.slug, r); active--; try { res.writeHead(201, { "content-type": "application/json" }); res.end(JSON.stringify(list.map((r) => ({ slug: r.slug })))); } catch { /* client gone */ } }, slowMs);
+      }
       for (const r of list) rows.set(r.slug, r);
       return done(201, JSON.stringify(list.map((r) => ({ slug: r.slug }))));
     }
@@ -204,4 +210,68 @@ test("lab-ish: 3000 pages over 3 cycles with 20 edits per cycle: writes per cycl
   }
   assert.deepEqual(written, [3000, 20, 20]);
   assert.ok(stat.maxActive <= 2, "no stacking of concurrent statements");
+});
+
+// ── attempt 2 (tester: the same slug re-sent while its earlier send is outstanding) ──
+const slowLeaf = (v = "") => ({ id: "slow-1", title: "Slow", content: `a slow page ${v}`, content_type: "web" });
+const SLOW = "content/source/slow-1";
+
+test("1. an UNCHANGED page whose earlier send is still outstanding is not 'repaired' by a later compile; 3. a timed-out chunk is not re-sent at once", async () => {
+  process.env.WIKI_PAGES_SYNC_TIMEOUT_MS = "300";
+  process.env.WIKI_UNSYNCED_BACKOFF_BASE_MS = "60000";
+  rows.delete(SLOW);
+  for (const key of Object.keys(stat)) stat[key] = 0;
+  // compile A: a new page whose statement outlives the 300 ms client timeout
+  writeSourceLeaves([slowLeaf()], outDir);
+  const codeA = await m.finishWikiPages("A", { outDir });
+  assert.equal(codeA, 1, "recorded as unsynced (database unavailable)");
+  assert.equal(stat.slowPosts, 1, "ONE send: a timed-out chunk is not retried at once");
+  const rec = JSON.parse(readFileSync(FILE, "utf8")).rows[SLOW];
+  assert.equal(rec.attempts, 1);
+  assert.ok(rec.nextAt > Date.now(), "open ledger entry");
+  assert.ok(!rows.has(SLOW), "the statement has not committed: the row reads as missing");
+  // compile B (a separate process in the service): the file unchanged; the row still reads as missing, but its send is outstanding
+  m._resetWikiPagesForTests();
+  for (const key of Object.keys(stat)) stat[key] = 0;
+  writeSourceLeaves([slowLeaf()], outDir);
+  await m.finishWikiPages("B", { outDir });
+  assert.equal(stat.slowPosts || 0, 0, "no second statement while the first runs");
+  assert.equal(stat.posts, 0);
+  await new Promise((r) => setTimeout(r, slowMs + 300)); // the abandoned statement commits
+  assert.ok(rows.has(SLOW));
+  process.env.WIKI_PAGES_SYNC_TIMEOUT_MS = "2000";
+});
+
+test("a CHANGED page is still sent while an earlier send of the slug is open (the new content must land)", async () => {
+  process.env.WIKI_PAGES_SYNC_TIMEOUT_MS = "300";
+  rows.delete(SLOW);
+  for (const key of Object.keys(stat)) stat[key] = 0;
+  writeSourceLeaves([slowLeaf("v2")], outDir);
+  await m.finishWikiPages("C", { outDir }); // timed out, recorded
+  for (const key of Object.keys(stat)) stat[key] = 0;
+  writeSourceLeaves([slowLeaf("v3")], outDir);
+  await m.finishWikiPages("D", { outDir });
+  assert.equal(stat.slowPosts, 1, "changed content is a new send (once)");
+  await new Promise((r) => setTimeout(r, slowMs + 300));
+  process.env.WIKI_PAGES_SYNC_TIMEOUT_MS = "2000";
+});
+
+test("2. the back-off outlasts the worst statement: default base 360 s; a retry while the statement still runs sends nothing", async () => {
+  delete process.env.WIKI_UNSYNCED_BACKOFF_BASE_MS;
+  assert.ok(m.backoffMs(1) >= 300_000, "longer than the worst statement seen live (about 5 min)");
+  assert.equal(m.backoffMs(2), 2 * m.backoffMs(1));
+  // a ledger entry just recorded by a timed-out send is not due until the base has passed
+  process.env.WIKI_PAGES_SYNC_TIMEOUT_MS = "300";
+  const slug = "content/source/slow-2";
+  rows.delete(slug);
+  writeSourceLeaves([{ id: "slow-2", title: "Slow2", content: "x" }], outDir);
+  await m.finishWikiPages("E", { outDir });
+  for (const key of Object.keys(stat)) stat[key] = 0;
+  const r = await m.retryUnsyncedRows({ outDir, vaultDir: vault, log: () => {} });
+  assert.equal(r.retried, 0);
+  assert.ok(r.waiting >= 1);
+  assert.equal(stat.posts + stat.gets, 0);
+  await new Promise((rr) => setTimeout(rr, slowMs + 300));
+  process.env.WIKI_PAGES_SYNC_TIMEOUT_MS = "2000";
+  process.env.WIKI_UNSYNCED_BACKOFF_BASE_MS = "60000";
 });

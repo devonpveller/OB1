@@ -393,6 +393,8 @@ const _pathOf = new Map();    // slug -> the absolute path it was queued from (r
 const _unchanged = new Map(); // slug -> { row, absPath }: file unchanged; queued only if the DB row is missing or differs
 let _skippedRun = 0;   // unchanged pages whose row was already current this run (not sent)
 let _repairedRun = 0;  // unchanged pages whose row was missing/different (queued)
+let _outstandingRun = 0; // unchanged pages left to the retry because their earlier send is still outstanding
+let _ledgerDir; // the run's out dir (finishWikiPages), so the ledger can be read before the end of the run
 let _unverifiedRun = 0; // unchanged pages the row check could not read (not sent; the next cycle checks again)
 let _synced = 0;
 let _hiddenRun = 0; // rows neither returned nor reported withheld this run (unsynced, nothing written)
@@ -476,6 +478,16 @@ export async function wikiRowsNeedingWrite(rows) {
   return need;
 }
 
+function openLedgerSlugs() {
+  const out = new Set(_inflight);
+  try {
+    const now = Date.now();
+    const rows = readUnsynced(unsyncedFile(_ledgerDir));
+    for (const [slug, e] of Object.entries(rows)) if (Number(e?.nextAt) > now) out.add(slug);
+  } catch { /* no ledger: nothing is outstanding */ }
+  return out;
+}
+
 // Pages a guard withheld are recorded (hashes only) and have no row by design: never re-sent every cycle.
 function recordedWithheldTest() {
   const rec = readWithheldRecord(); // once per check, not once per page
@@ -486,7 +498,11 @@ function recordedWithheldTest() {
 export async function resolveUnchangedWikiPages() {
   if (!_unchanged.size) return { checked: 0, queued: 0 };
   const isHeld = recordedWithheldTest();
-  const items = [..._unchanged.values()].filter((x) => !_queue.has(x.row.slug) && !isHeld(x.row.slug));
+  // A slug whose earlier send is still OUTSTANDING (an open ledger entry: nextAt in the future; or in flight in this process)
+  // reads as "missing" because its statement has not committed. It is not repaired here: the retry owns it.
+  const open = openLedgerSlugs();
+  const items = [..._unchanged.values()].filter((x) => !_queue.has(x.row.slug) && !isHeld(x.row.slug) && !open.has(x.row.slug));
+  _outstandingRun += [..._unchanged.values()].filter((x) => open.has(x.row.slug)).length;
   _unchanged.clear();
   if (!items.length) return { checked: 0, queued: 0 };
   let need;
@@ -627,8 +643,13 @@ export async function flushWikiPages() {
     // rw-wiki-guarded-pages: a guard's refusal (42501) fails only the refused row; a failed request is retried once
     const rep = await upsertWikiPagesIsolated(part);
     if (rep.failed.length) {
-      const again = await upsertWikiPagesIsolated(part.filter((r) => rep.failed.some((f) => f.slug === r.slug)));
-      rep.failed = again.failed;
+      // rw-wiki-unchanged-rows (attempt 2): a request that TIMED OUT is not sent again at once. The abort only closes the
+      // connection; the first statement is still running (up to minutes behind the guards) and a second one on the same rows
+      // stacks on it. It stays failed here, is recorded in the ledger by finishWikiPages, and the back-off owns the re-send.
+      // Any other failure (a refused connection, a 5xx answer) is retried once, as before.
+      const timedOut = rep.failed.filter((f) => isTimeoutError(f.error));
+      const again = await upsertWikiPagesIsolated(part.filter((r) => rep.failed.some((f) => f.slug === r.slug && !isTimeoutError(f.error))));
+      rep.failed = [...timedOut, ...again.failed];
       for (const k of ["written", "withheld", "hidden", "refused"]) rep[k].push(...again[k]);
     }
     if (rep.failed.length) {
@@ -690,6 +711,7 @@ export function unsyncedWikiPages() {
  * (after logging the unsynced count and the first slugs).
  */
 export async function finishWikiPages(tag = "compile", { outDir } = {}) {
+  if (outDir) _ledgerDir = outDir;
   await flushWikiPages();
   _createPending = false;
   commitAllStagedWikiPages(); // anything staged but never queued (none expected): in place now
@@ -700,11 +722,12 @@ export async function finishWikiPages(tag = "compile", { outDir } = {}) {
   _heldRun = 0;
   const hiddenRun = _hiddenRun;
   _hiddenRun = 0;
-  if (_skippedRun || _repairedRun || _unverifiedRun) {
+  if (_skippedRun || _repairedRun || _unverifiedRun || _outstandingRun) {
     console.log(`[wiki-pages] ${tag}: ${_skippedRun} unchanged page(s) already current in the database (not sent), ${_repairedRun} repaired` +
-      (_unverifiedRun ? `, ${_unverifiedRun} not checked (database unreadable; next cycle)` : ""));
+      (_unverifiedRun ? `, ${_unverifiedRun} not checked (database unreadable; next cycle)` : "") +
+      (_outstandingRun ? `, ${_outstandingRun} left to the retry (an earlier send is still outstanding)` : ""));
   }
-  _skippedRun = 0; _repairedRun = 0; _unverifiedRun = 0;
+  _skippedRun = 0; _repairedRun = 0; _unverifiedRun = 0; _outstandingRun = 0;
   if (!u.length) {
     console.log(`[wiki-pages] ${tag}: all ${synced} written page row(s) landed` + (heldRun ? ` (${heldRun} withheld by the database, files left out)` : ""));
     return 0;
@@ -811,8 +834,15 @@ export function isVaultSlug(slug) {
 }
 // Retry back-off (rw-wiki-unchanged-rows): a row that keeps failing is not re-sent before base * 2^(attempts-1), capped.
 // An abandoned statement keeps running server-side, so a re-send inside this window would stack on it.
+//
+// The back-off is TIME based: nothing reachable through PostgREST says whether a statement is still running. So the default
+// base is longer than the worst statement seen live (about 5 minutes behind the guards): 360 s, doubling to 30 min. The
+// assumption is stated here on purpose: a statement that outlives the base is re-sent while it still runs (the pre-send read
+// of the row catches one that has committed by then). Chosen over "confirm the row first" because the row of a statement that
+// has not committed reads as missing, which is exactly the case to protect.
+export const isTimeoutError = (e) => /timed? ?out|aborted/i.test(String(e?.message ?? e ?? ""));
 export const backoffMs = (attempts) => {
-  const base = Number(process.env.WIKI_UNSYNCED_BACKOFF_BASE_MS ?? "120000");
+  const base = Number(process.env.WIKI_UNSYNCED_BACKOFF_BASE_MS ?? "360000");
   const cap = Number(process.env.WIKI_UNSYNCED_BACKOFF_MAX_MS ?? "1800000");
   return Math.min(cap, base * 2 ** Math.max(0, attempts - 1));
 };
@@ -945,7 +975,7 @@ export function _resetWikiPagesForTests() {
   _unsynced.clear();
   _unchanged.clear();
   _withheld.clear();
-  _synced = 0; _skippedRun = 0; _repairedRun = 0; _unverifiedRun = 0;
+  _synced = 0; _skippedRun = 0; _repairedRun = 0; _unverifiedRun = 0; _outstandingRun = 0; _ledgerDir = undefined;
   warnedKinds.clear();
 }
 
