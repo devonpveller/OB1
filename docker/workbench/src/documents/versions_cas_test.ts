@@ -43,6 +43,20 @@ if [ -n "$T6_FLAG" ] && [ -f "$T6_FLAG" ]; then
     fi
   done
 fi
+if [ -n "$T6_LOCKMV" ] && [ -f "$T6_LOCKMV" ]; then
+  case " $* " in
+    *" mv "*)
+      sk=$(cat "$T6_LOCKMV.skip" 2>/dev/null || echo 0)
+      if [ "$sk" -gt 0 ] 2>/dev/null; then echo $((sk-1)) > "$T6_LOCKMV.skip"
+      else
+        n=$(cat "$T6_LOCKMV")
+        if [ "$n" -gt 0 ] 2>/dev/null; then
+          echo $((n-1)) > "$T6_LOCKMV"; echo "lock-mv" >> "$T6_LOG"
+          : > "$T6_VAULT/.git/index.lock"; ${REAL_GIT} "$@"; rc=$?; rm -f "$T6_VAULT/.git/index.lock"; exit $rc
+        fi
+      fi;;
+  esac
+fi
 exec ${REAL_GIT} "$@"
 `);
 await Deno.chmod(`${wrapDir}/git`, 0o755);
@@ -50,6 +64,15 @@ if (!WIN) Deno.env.set("PATH", `${wrapDir}:${Deno.env.get("PATH")}`);
 const flag = `${wrapDir}/flag`, cmdFile = `${wrapDir}/cmd.sh`, logFile = `${wrapDir}/log`;
 Deno.env.set("T6_FLAG", flag);
 Deno.env.set("T6_LOG", logFile);
+Deno.env.set("T6_VAULT", vault);
+const lockMv = `${wrapDir}/lockmv`;
+Deno.env.set("T6_LOCKMV", lockMv);
+// the next `git mv` calls hold .git/index.lock: skip the first `skip`, then lock `count` of them (the undo of an exhausted move is the second `git mv`)
+async function armLockMv(skip: number, count: number) {
+  await Deno.writeTextFile(`${lockMv}.skip`, String(skip));
+  await Deno.writeTextFile(lockMv, String(count));
+}
+
 Deno.env.set("T6_CMD", cmdFile);
 // count: how many times the injection fires (each time the matching git call is made) before it disarms itself
 async function arm(at: string, mode: "go" | "fail" | "kill", cmd: string, count = 1) {
@@ -304,4 +327,73 @@ T("T6-FIX exhausted: another writer's commit lands in EVERY window; A's keyed mo
   assertEquals((await v.versionsOf(live, ctxA)).map((x) => x.commit), before, `history untouched; status [${(await git("status", "--porcelain")).trim()}]; log [${(await git("log", "--format=%h %s", "-n6", "--", live)).trim()}]; ls-files [${(await git("ls-files", "--", live, to)).trim()}]`);
   assertEquals((await git("status", "--porcelain", "--", live, to)).trim(), `M ${live}`, "the index is as before the move (only the unsaved edit shows)");
   assertEquals((await leftovers()).length, 0);
+});
+
+// ── attempt 7 (review 1): the undo of an exhausted move meets a held index.lock ────────────────────────────────────────────
+// The exhaustion itself (every window refused) is injected as before; the undo is the SECOND `git mv` (the forward move is the first).
+const recDb = () => {
+  const log: string[] = [];
+  // deno-lint-ignore no-explicit-any
+  const d: any = { query: (sql: string, a: unknown[] = []) => { log.push(`${sql.replace(/\s+/g, " ").trim().slice(0, 70)} ${JSON.stringify(a)}`); return Promise.resolve([]); }, tx: (fn: (x: unknown) => unknown) => fn(d) };
+  return { d, log };
+};
+
+T("T7-FIX undo retry: the undo meets index.lock twice, then succeeds - the move is undone, nothing staged, history kept", async () => {
+  const id = ++doc;
+  const live = `documents/${A.key}/undo1-${id}.md`, to = `documents/${A.key}/.trash/undo1-${id}.md`;
+  for (let i = 1; i <= 3; i++) await put(live, big(`v${i}-${id}`), `documents: edit ${live}`);
+  const before = (await v.versionsOf(live, ctxA)).map((x) => x.commit);
+  const unsaved = rewrite(`undo1-${id}`);
+  await vlt.vaultWrite(live, unsaved);
+  await arm("update-ref", "go", bEdit(id), 99);
+  await armLockMv(1, 2);
+  let err: unknown = null;
+  try {
+    await vlt.gitMv(live, to, `documents: trash ${live}`, A.name);
+  } catch (e) {
+    err = e;
+  }
+  await Deno.remove(flag).catch(() => {});
+  await Deno.remove(lockMv).catch(() => {});
+  assert(err instanceof vlt.MoveNotCommitted, `a MoveNotCommitted: ${err}`);
+  assertEquals((err as InstanceType<typeof vlt.MoveNotCommitted>).moved, false, "undone");
+  assert(/undone/.test((err as Error).message), (err as Error).message);
+  assert((await Deno.readTextFile(logFile)).split("lock-mv").length - 1 >= 2, "the undo really met the lock twice");
+  assert(await vlt.vaultExists(live) && !(await vlt.vaultExists(to)), "the file is where it was");
+  assertEquals(await vlt.vaultRead(live), unsaved);
+  assertEquals((await git("status", "--porcelain", "--", live, to)).trim(), `M ${live}`, "nothing staged for the file: only its unsaved edit shows");
+  assertEquals((await v.versionsOf(live, ctxA)).map((x) => x.commit), before, "history kept");
+  assertEquals((await git("ls-files", "--", to)).trim(), "", "no staged destination");
+});
+
+T("T7-FIX undo lock outlasts its retries: the file stays at the destination (staged), `moved` is true, and the documents listing FOLLOWS the file; an undone move answers 503 and leaves the listing", async () => {
+  const docs = await import("./repo.ts");
+  const id = ++doc;
+  const live = `documents/${A.key}/undo2-${id}.md`, to = `documents/${A.key}/.trash/undo2-${id}.md`;
+  for (let i = 1; i <= 3; i++) await put(live, big(`v${i}-${id}`), `documents: edit ${live}`);
+  await vlt.vaultWrite(live, rewrite(`undo2-${id}`));
+  const { d, log } = recDb();
+  await arm("update-ref", "go", bEdit(id), 99);
+  await armLockMv(1, 99);
+  const out = await docs.moveTo({ db: d, reg: {} as never }, live, to, `documents: trash ${live}`, A).then((r) => r, (e) => e);
+  await Deno.remove(flag).catch(() => {});
+  await Deno.remove(lockMv).catch(() => {});
+  assertEquals(out, to, "answered as done: the file really is at the destination");
+  assert(await vlt.vaultExists(to) && !(await vlt.vaultExists(live)), "the file is at `to`");
+  assertEquals((await git("ls-files", "--", to)).trim(), to, "its rename is staged");
+  assert(log.some((l) => /UPDATE public\.user_document_listings SET path/.test(l) && l.includes(live) && l.includes(to)), `the listing followed the file: ${log.join(" | ")}`);
+  await git("reset", "-q"); // the lab vault: clear the staged leftovers
+  await Deno.rename(`${vault}/${to}`, `${vault}/${live}`).catch(() => {});
+  await git("checkout", "-q", "--", ".").catch(() => {});
+  // the undone case: exhausted, undo succeeds -> a 503, the listing untouched
+  const id2 = ++doc;
+  const live2 = `documents/${A.key}/undo3-${id2}.md`, to2 = `documents/${A.key}/.trash/undo3-${id2}.md`;
+  for (let i = 1; i <= 3; i++) await put(live2, big(`v${i}-${id2}`), `documents: edit ${live2}`);
+  const rec2 = recDb();
+  await arm("update-ref", "go", bEdit(id2), 99);
+  const out2 = await docs.moveTo({ db: rec2.d, reg: {} as never }, live2, to2, `documents: trash ${live2}`, A).then((r) => r, (e) => e);
+  await Deno.remove(flag).catch(() => {});
+  assert(out2 instanceof docs.DocError && out2.status === 503 && /busy/.test(out2.message), `503 busy: ${out2}`);
+  assert(!rec2.log.some((l) => /UPDATE public\.user_document_listings SET path/.test(l)), "the listing was not touched");
+  assert(await vlt.vaultExists(live2) && !(await vlt.vaultExists(to2)));
 });

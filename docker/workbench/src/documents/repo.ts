@@ -20,7 +20,7 @@ import { postNotification } from "../contracts/repo/system.ts";
 import { config } from "../config.ts";
 import { identityConfig, type Identity, ownerKey } from "../middleware/identity.ts";
 import {
-  gitMv, gitRm, VaultNotFound, vaultCommitPath, vaultExists, vaultFileHistory, vaultFolderHistory, vaultGitShow, vaultLastCommitDate, vaultRead, vaultWrite,
+  gitMv, gitRm, MoveNotCommitted, VaultNotFound, vaultCommitPath, vaultExists, vaultFileHistory, vaultFolderHistory, vaultGitShow, vaultLastCommitDate, vaultRead, vaultWrite,
 } from "../util/vault.ts";
 import { safeJoin } from "../util/paths.ts";
 import { parseDocument, setFrontmatterField } from "./grammar.ts";
@@ -207,7 +207,18 @@ async function moveToLocked(deps: DocDeps, from: string, to: string, message: st
   await owned(deps.db, from, who);
   if (!(await vaultExists(from))) throw new DocError("no such document", 404);
   if (await vaultExists(to)) throw new DocError("a document with that name already exists there", 409);
-  await withPathLock(VAULT_GIT, () => gitMv(from, to, message, who.name));
+  try {
+    await withPathLock(VAULT_GIT, () => gitMv(from, to, message, who.name));
+  } catch (e) {
+    if (!(e instanceof MoveNotCommitted)) throw e;
+    // The move could not be committed (other writers kept committing in its window). UNDONE (`moved` false): nothing changed, the
+    // caller is told to try again (503). The undo itself FAILED (`moved` true, a held index.lock that outlasted its retries): the
+    // file really is at `to`, its rename staged and not yet committed, so the listing is made to follow the file (below) and the
+    // move is answered as done - never a listing that names the old path for a file that sits at the new one. The staged rename
+    // is committed by the next commit that takes the index; that is rw-vault-commit-scope's whole-tree-commit class.
+    if (!e.moved) throw new DocError("busy: another write is in progress, try again", 503);
+    console.error(`[documents] a move was left staged (its undo could not take the index lock); the listing follows the file: ${from} -> ${to}`);
+  }
   // The listing follows the file first, in its own transaction. A document put back (restore, unarchive) then writes its
   // one trail line AFTER that has committed, so a failing trail write (a table without the slot-510 re-run, a refused
   // insert) can never roll the listing row back: the document id, its refinery link and its reference holders stay with

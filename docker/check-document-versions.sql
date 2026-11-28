@@ -2,7 +2,7 @@
 -- relies on? Read-only; prints counts and rule names only, never a snapshot's name, an owner or a hash.
 --   psql -X -A -t -q -f check-document-versions.sql
 -- Lines: "check: <what>=<count>" for each rule, then "check: OK" or "check: FAIL (<rules>)".
--- Rules: the table, its columns and its row-level security exist; service_role holds exactly SELECT and INSERT on it
+-- Rules: the table, its columns, its row-level security, its service_role policy and its owner index exist; service_role holds exactly SELECT and INSERT on it
 -- and no other role (PUBLIC included) holds any right; no row has a malformed commit or blob id, an empty or over-long
 -- name, an unknown kind, or an empty owner.
 DO $$
@@ -20,6 +20,13 @@ BEGIN
   RAISE NOTICE 'check: columns_missing=%', n; IF n > 0 THEN bad := array_append(bad, 'columns_missing'); END IF;
   SELECT count(*) INTO n FROM pg_class WHERE oid = 'public.document_snapshots'::regclass AND NOT relrowsecurity;
   RAISE NOTICE 'check: table_without_rls=%', n; IF n > 0 THEN bad := array_append(bad, 'table_without_rls'); END IF;
+  SELECT count(*) INTO n FROM (SELECT 1) x WHERE NOT EXISTS (
+    SELECT 1 FROM pg_policies WHERE schemaname = 'public' AND tablename = 'document_snapshots'
+       AND policyname = 'document_snapshots_service_role_all' AND 'service_role' = ANY (roles));
+  RAISE NOTICE 'check: policy_missing=%', n; IF n > 0 THEN bad := array_append(bad, 'policy_missing'); END IF;
+  SELECT count(*) INTO n FROM (SELECT 1) x WHERE NOT EXISTS (
+    SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND tablename = 'document_snapshots' AND indexname = 'idx_document_snapshots_owner');
+  RAISE NOTICE 'check: owner_index_missing=%', n; IF n > 0 THEN bad := array_append(bad, 'owner_index_missing'); END IF;
   -- grants: exactly SELECT and INSERT for service_role, nothing for anyone else
   SELECT count(*) INTO n FROM (
     SELECT ro.rolname, a.privilege_type

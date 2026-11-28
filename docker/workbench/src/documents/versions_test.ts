@@ -792,3 +792,28 @@ Deno.test("every vault commit the documents API makes goes through the vault git
   }
   assertEquals(bare, [], "bare vault writers");
 });
+
+// ── attempt 7 (review 1): the checks that decide a restore / snapshot are repeated INSIDE the document's lock ──────────────
+Deno.test("restore: a restore queued behind a trash of the same document is a 404 and writes no live copy of the old text; a snapshot too", async () => {
+  const { withPathLock } = await import("./path_lock.ts");
+  for (const what of ["restore", "snapshot"] as const) {
+    const p = newPath();
+    for (let i = 1; i <= 3; i++) await put(p, body(i), `documents: edit ${p}`);
+    const t = `documents/${A.key}/.trash/${p.split("/").pop()}`;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const trash = withPathLock(p, async () => {
+      await held;
+      await vlt.gitMv(p, t, "documents: trash", A.name);
+    });
+    // passes the existence and trash checks made before the lock (the file is still there), then queues behind the trash
+    const queued = (what === "restore" ? v.restoreVersion(deps, { path: p, version: 1 }, A) : v.createSnapshot(deps, { path: p, name: "late", version: 1 }, A)).then((r) => r, (e) => e);
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    await trash;
+    const out = await queued;
+    assert(out instanceof DocError && out.status === 404 && out.message === "no such document", `${what}: ${out instanceof Error ? out.message : JSON.stringify(out)}`);
+    assert(!(await vlt.vaultExists(p)), `${what}: no live copy was written beside the trashed document`);
+    assertEquals((await v.versionsOf(t, { db, who: A })).length, 3, `${what}: the trashed document keeps its three versions`);
+  }
+});

@@ -248,6 +248,7 @@ export async function createSnapshot(deps: DocDeps, input: { path: string; name:
   const name = cleanName(input.name);
   const want = input.version == null ? null : versionNumber(input.version, "version");
   return await withPathLock(rel, async () => {
+    if (!(await vaultExists(rel))) throw noDocument(); // looked at again inside the lock (a trash or move may have run meanwhile)
     let versions = await versionsOf(rel, { db: deps.db, who });
     if (want == null) versions = await settle(deps, rel, versions, who);
     const v = want == null ? versions[versions.length - 1] : versions.find((x) => x.version === want);
@@ -274,6 +275,10 @@ export async function restoreVersion(deps: DocDeps, input: { path: string; versi
     if (!UUIDISH.test(snapId)) throw noSnapshot();
   }
   return await withPathLock(rel, async () => {
+    // Looked at again INSIDE the lock: a restore that queued behind a trash, archive or move of this document (they take this
+    // path's lock) finds the file gone from `rel`. It is then a missing document (404), never a second, live copy of the old
+    // text written back beside the trashed one.
+    if (!(await vaultExists(rel))) throw noDocument();
     // the target is looked up on the COMMITTED versions first: a restore that answers 404 changes nothing (unsaved
     // text becomes a version only once the target is known); settling only appends, so the target stays valid
     let versions = await versionsOf(rel, { db: deps.db, who });

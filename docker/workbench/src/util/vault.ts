@@ -223,10 +223,18 @@ export async function gitMv(
       if (r === "fail") break;
       await new Promise((res) => setTimeout(res, 20 * (attempt + 1)));
     }
-    const undone = await git(["mv", toRel, fromRel]); // the staged rename goes back: the file, its index entry and its text as they were
-    throw new Error(
+    // The staged rename goes back: the file, its index entry and its text as they were. The undo writes the index like the forward
+    // move does, and a held index.lock (the wiki service writes the same volume) is exactly what is likely when the tries ran out
+    // because other writers were busy: it is retried on the lock, a few times, before it is given up.
+    let undone = await git(["mv", toRel, fromRel]);
+    for (let n = 0; !undone.ok && /index\.lock/.test(undone.err) && n < UNDO_TRIES; n++) {
+      await new Promise((res) => setTimeout(res, 100 * (n + 1)));
+      undone = await git(["mv", toRel, fromRel]);
+    }
+    throw new MoveNotCommitted(
       `git move of ${fromRel} not committed (${last === "cas" ? `HEAD kept moving, ${RENAME_TRIES} tries` : "a plumbing step failed"}); ` +
         `${undone.ok ? "the move was undone" : "the move could NOT be undone: " + undone.err.slice(0, 120)}`,
+      !undone.ok,
     );
   }
 
@@ -247,6 +255,17 @@ export async function gitMv(
 
 // how many times a tracked move is rebuilt on a new HEAD after another writer's commit landed in its window
 const RENAME_TRIES = 6;
+// how many more times the undo of a move that could not be committed is tried when it meets a held index.lock
+const UNDO_TRIES = 8;
+
+// A tracked move that could not be committed. `moved` false: it was UNDONE (the file, its index entry and its text are as they
+// were; nothing was committed). `moved` true: the undo itself failed, so the file sits at the destination with its rename staged
+// and not committed - the caller that keeps a record of where the file is (the documents listing) must follow the file.
+export class MoveNotCommitted extends Error {
+  constructor(message: string, readonly moved: boolean) {
+    super(message);
+  }
+}
 
 // Commit exactly the staged rename `from` -> `to`: HEAD's tree, minus `from`, plus `to` with the blob and mode the INDEX
 // holds (what `git mv` staged), through a private index file and git's plumbing; the real index and the working tree are
