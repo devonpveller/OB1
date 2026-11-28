@@ -20,6 +20,7 @@ import { type Identity, identityOf } from "../middleware/identity.ts";
 import { CONTENT_TYPE_LABELS, fileContentType, INTAKE_CONTENT_TYPES, isIntakeContentType } from "./content_types.ts";
 import { type Extract, runAdd } from "./pipeline.ts";
 import type { IntakeFetch } from "./research_fetch.ts";
+import { formOf, type UploadedFile } from "../util/multipart.ts";
 import { insertJobWithPayload } from "../util/upload_store.ts";
 import * as repo from "./repo.ts";
 
@@ -118,12 +119,12 @@ export function intakeRouter(deps: IntakeDeps) {
     const who = await identityOf(c);
     const media = (c.req.header("content-type") ?? "").split(";")[0].trim().toLowerCase();
     let url = "", refineryId = "", path = "", declared = "";
-    let file: File | null = null;
+    let file: UploadedFile | null = null;
     if (media === "multipart/form-data") {
-      const form = await c.req.parseBody();
-      url = str(form["url"]).trim(); refineryId = str(form["refinery_id"]).trim(); path = str(form["path"]).trim();
-      declared = str(form["content_type"]).trim();
-      file = form["file"] instanceof File ? form["file"] as File : null;
+      const form = await formOf(c.req.raw); // parsed once, in a worker (util/multipart.ts)
+      url = str(form.fields["url"]).trim(); refineryId = str(form.fields["refinery_id"]).trim(); path = str(form.fields["path"]).trim();
+      declared = str(form.fields["content_type"]).trim();
+      file = form.file;
     } else {
       const b = await c.req.json().catch(() => ({})) as Record<string, unknown>;
       url = str(b.url).trim(); refineryId = str(b.refinery_id).trim(); path = str(b.path).trim(); declared = str(b.content_type).trim();
@@ -168,7 +169,7 @@ export function intakeRouter(deps: IntakeDeps) {
     let bytes: Uint8Array | null = null;
     if (file) {
       if (file.size > maxFile) return c.json({ error: `the file is larger than ${maxFile} bytes` }, 413);
-      bytes = new Uint8Array(await file.arrayBuffer());
+      bytes = file.bytes;
       const type = fileContentType(file.name, bytes);
       if (!type) return c.json({ error: "a file add is a PDF or a saved web page (a YouTube transcript is added by its link)", content_types: INTAKE_CONTENT_TYPES }, 415);
       if (declared && declared !== type) return c.json({ error: `this file is a ${CONTENT_TYPE_LABELS[type]}, not ${declared}` }, 415);

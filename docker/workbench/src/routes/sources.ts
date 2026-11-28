@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import type { Context, Next } from "hono";
 import * as repo from "../repositories/sources.ts";
 import { config } from "../config.ts";
+import { formOf } from "../util/multipart.ts";
 import { publicError } from "../util/public-error.ts";
 import { changeAuthor } from "../identity/author.ts";
 import { logChange } from "../util/changeslog.ts";
@@ -153,10 +154,9 @@ sources.patch("/:id", async (c) => {
 // source's legitimacy — the text comes from a real file, not free hand-editing.
 // NOTE: needs the raised Caddy body cap (added to the @import matcher in prod).
 sources.post("/:id/replace-from-upload", async (c) => {
-  const body = await c.req.parseBody();
-  const file = body["file"];
-  if (!(file instanceof File)) return c.json({ error: "a file is required" }, 400);
-  const bytes = new Uint8Array(await file.arrayBuffer());
+  const file = (await formOf(c.req.raw)).file; // parsed once, in a worker (util/multipart.ts)
+  if (!file) return c.json({ error: "a file is required" }, 400);
+  const bytes = file.bytes;
   try {
     const fd = new FormData();
     fd.append("file", new Blob([bytes]), file.name);

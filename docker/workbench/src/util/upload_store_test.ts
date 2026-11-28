@@ -6,7 +6,7 @@
 // variables, read when config.ts loads). It writes rows tagged `upload-store-test`: never point it at a live stack.
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert@1";
 import { Pool } from "postgres";
-import { insertJobWithPayload, closeUploadStore } from "./upload_store.ts";
+import { insertJobWithPayload, closeUploadStore, storeStats } from "./upload_store.ts";
 import { hexOf } from "./upload_store_worker.ts";
 
 const live = Deno.env.get("UPLOAD_STORE_TEST_DB") === "1";
@@ -69,6 +69,7 @@ Deno.test({ name: "stored bytes equal the uploaded bytes (hash compared in the d
     const bytes = n === 256 ? Uint8Array.from({ length: 256 }, (_, i) => i) : pattern(n, n + 1);
     const before = await sha(bytes);
     const row = await insertJobWithPayload<{ id: string; status: string }>(JOB_SQL, [`${TAG}-${n}`], `f${n}.bin`, bytes);
+    assert(storeStats.lastInWorker, "each save runs inside a Worker");
     assertEquals(row.status, "queued");
     assertEquals(await sha(bytes), before, "the caller's own bytes are untouched (the worker got a copy)");
     const got = (await sql<{ len: number; h: string; filename: string }>(
@@ -83,7 +84,11 @@ Deno.test({ name: "stored bytes equal the uploaded bytes (hash compared in the d
 Deno.test({ name: "a 32 MiB save does not hold the event loop (the bystander is answered within 1 s)", ignore: !live, sanitizeResources: false, sanitizeOps: false, async fn() {
   const bytes = pattern(32 * MiB, 99);
   const want = await sha(bytes);
+  const saves = storeStats.workerSaves;
   const r = await worstStall(() => insertJobWithPayload<{ id: string }>(JOB_SQL, [`${TAG}-32`], "big.bin", bytes));
+  // the stall bound alone does not prove a worker (a main-thread hex encode is only ~250-300 ms): the reply must say it was made in one
+  assertEquals(storeStats.workerSaves, saves + 1, "the save was answered by the upload store's worker");
+  assert(storeStats.lastInWorker, "the save ran inside a Worker, not on the request thread");
   console.log(`32 MiB saved in ${r.ms.toFixed(0)} ms; worst event-loop stall ${r.worst.toFixed(0)} ms`);
   assert(r.worst < 1000, `the event loop was held ${r.worst.toFixed(0)} ms`);
   const h = (await sql<{ h: string }>(`SELECT encode(sha256(bytes), 'hex') AS h FROM public.import_job_payloads WHERE job_id = $1::uuid`, [r.out.id]))[0].h;

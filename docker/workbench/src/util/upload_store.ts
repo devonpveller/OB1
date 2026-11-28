@@ -9,6 +9,9 @@
 import { config } from "../config.ts";
 import type { StoreReply, StoreRequest } from "./upload_store_worker.ts";
 
+// What the tests read to know a save really ran in a Worker (the reply carries the worker's own thread marker).
+export const storeStats = { workerSaves: 0, lastInWorker: false };
+
 let worker: Worker | null = null;
 let seq = 0;
 const waiting = new Map<number, { ok: (r: Record<string, unknown>) => void; fail: (e: Error) => void }>();
@@ -27,7 +30,11 @@ function start(): Worker {
     if (!p) return;
     waiting.delete(ev.data.id);
     if (ev.data.error !== undefined) p.fail(new Error(ev.data.error));
-    else p.ok(ev.data.row ?? {});
+    else {
+      storeStats.workerSaves++;
+      storeStats.lastInWorker = ev.data.inWorker === true;
+      p.ok(ev.data.row ?? {});
+    }
   };
   w.onerror = (ev) => { ev.preventDefault?.(); dead(`the upload store worker failed: ${ev.message}`); };
   w.postMessage({ conn: { hostname: config.db.host, port: config.db.port, database: config.db.database, user: config.db.user, password: config.db.password } });

@@ -23,6 +23,7 @@
 import type { Context, Next } from "hono";
 import type { Db } from "../contracts/db.ts";
 import { identityOf, type Identity, seamPath } from "./identity.ts";
+import { formOf, multipartSizeOf } from "../util/multipart.ts";
 import { documentPathsIn, ownsDocumentPaths } from "../documents/ownership.ts";
 
 const OTHER = "(another user's document)";
@@ -66,6 +67,16 @@ async function requestStrings(c: Context): Promise<string[]> {
   for (const vs of Object.values(c.req.queries())) out.push(...vs);
   if (!MUTATING(c.req.method)) return out;
   const media = (c.req.header("content-type") ?? "").split(";")[0].trim().toLowerCase();
+  if (media === "multipart/form-data") {
+    // an upload: the body is read once and parsed in a worker, and the route reuses that parse (rw-upload-store-offthread,
+    // fix round 2: cloning + decoding + parsing it here, then again in the route, held the one thread ~3 s per 32 MiB)
+    if (!(await multipartSizeOf(c.req.raw))) return out;
+    if (route.startsWith("/workbench/contract/")) throw new BodyRefused(415, "the contract API takes application/json");
+    try {
+      for (const [k, v] of (await formOf(c.req.raw)).entries) if (!textFieldsFor(route).has(k)) out.push(v);
+    } catch { throw new BodyRefused(400, "the form body cannot be read"); }
+    return out;
+  }
   const raw = await c.req.raw.clone().text();
   if (!raw.length) return out;
   const isJson = media === "application/json" || media.endsWith("+json");
@@ -78,7 +89,7 @@ async function requestStrings(c: Context): Promise<string[]> {
     let parsed: unknown;
     try { parsed = JSON.parse(raw); } catch { throw new BodyRefused(400, "the body is not valid JSON"); }
     stringsOf(parsed, out, "", textFieldsFor(route));
-  } else if (media === "multipart/form-data" || media === "application/x-www-form-urlencoded") {
+  } else if (media === "application/x-www-form-urlencoded") {
     try {
       for (const [k, v] of (await c.req.raw.clone().formData()).entries()) if (typeof v === "string" && !textFieldsFor(route).has(k)) out.push(v);
     } catch { throw new BodyRefused(400, "the form body cannot be read"); }

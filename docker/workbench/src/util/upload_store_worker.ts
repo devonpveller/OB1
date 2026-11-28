@@ -11,7 +11,7 @@ export type StoreRequest = {
   filename: string;
   bytes: Uint8Array; // a copy owned by this message
 };
-export type StoreReply = { id: number; row?: Record<string, unknown>; error?: string };
+export type StoreReply = { id: number; row?: Record<string, unknown>; error?: string; inWorker?: boolean };
 
 const DIGITS = new Uint8Array([48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102]); // 0-9a-f
 const ASCII = new TextDecoder("latin1");
@@ -57,7 +57,8 @@ export async function storeOne(conn: Conn, r: StoreRequest): Promise<Record<stri
 
 // Only a real worker listens; imported on the main thread (tests use hexOf / storeOne) this is a no-op.
 const WGS = (globalThis as { WorkerGlobalScope?: new () => unknown }).WorkerGlobalScope;
-if (WGS && self instanceof (WGS as unknown as { new (): unknown })) {
+const inWorker = !!WGS && self instanceof (WGS as unknown as { new (): unknown });
+if (inWorker) {
   let conn: Conn | null = null;
   // One upload at a time: the encode is the long part and runs here either way; a queue keeps memory at one hex copy.
   let chain: Promise<unknown> = Promise.resolve();
@@ -67,9 +68,9 @@ if (WGS && self instanceof (WGS as unknown as { new (): unknown })) {
     chain = chain.then(async () => {
       let reply: StoreReply;
       try {
-        reply = { id: m.id, row: await storeOne(conn!, m) };
+        reply = { id: m.id, row: await storeOne(conn!, m), inWorker };
       } catch (e) {
-        reply = { id: m.id, error: String((e as Error)?.message ?? e).slice(0, 500) };
+        reply = { id: m.id, error: String((e as Error)?.message ?? e).slice(0, 500), inWorker };
       }
       (self as unknown as { postMessage(r: StoreReply): void }).postMessage(reply);
     });

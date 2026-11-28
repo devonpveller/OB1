@@ -5,6 +5,7 @@
 // import_jobs so a restart never orphans an in-flight import.
 import { Hono } from "hono";
 import { config } from "../config.ts";
+import { formOf } from "../util/multipart.ts";
 import * as repo from "../repositories/import.ts";
 import { logChange } from "../util/changeslog.ts";
 import { logRefusal } from "../identity/refusal_log.ts";
@@ -127,17 +128,18 @@ async function runUrlPipeline(
 
 // POST /workbench/import  (multipart: file OR url, [target_notebook], [target_entity_ids])
 imports.post("/", async (c) => {
-  const body = await c.req.parseBody();
-  const file = body["file"];
-  const url = ((body["url"] as string) || "").trim();
-  if (!(file instanceof File) && !url) return c.json({ error: "a file or a url is required" }, 400);
-  const targetNotebook = (body["target_notebook"] as string) || null;
-  const targetEntityIds = parseEntityIds(body["target_entity_ids"]);
+  // the body was read once and parsed in a worker (util/multipart.ts): the request thread never parses an upload
+  const form = await formOf(c.req.raw);
+  const file = form.file;
+  const url = (form.fields["url"] || "").trim();
+  if (!file && !url) return c.json({ error: "a file or a url is required" }, 400);
+  const targetNotebook = form.fields["target_notebook"] || null;
+  const targetEntityIds = parseEntityIds(form.fields["target_entity_ids"]);
 
   // A URL: ONE call to the search gate, before any job exists. Not configured / unreachable = 503;
   // refused / withheld / error = the gate's reason unchanged; nothing is stored either way.
   let page: GatePage | null = null;
-  if (!(file instanceof File)) {
+  if (!file) {
     try {
       page = await fetchViaGate(url);
     } catch (e) {
@@ -148,13 +150,12 @@ imports.post("/", async (c) => {
   // rw-p5a-intake: the job is the identity seam's subject's (its intake panel lists, retries and cancels it);
   // a file's bytes are kept until the import ends well, so a failed one can be retried from the panel
   const who = await identityOf(c);
-  const bytes = file instanceof File ? new Uint8Array(await file.arrayBuffer()) : null;
   const job = await repo.createJob(targetEntityIds, targetNotebook, targetEntityIds.length > 0, {
-    owner: who.sub, actor: who.actor, url: file instanceof File ? null : url, filename: file instanceof File ? file.name : null,
-  }, file instanceof File && bytes ? { filename: file.name, bytes } : null);
+    owner: who.sub, actor: who.actor, url: file ? null : url, filename: file ? file.name : null,
+  }, file ? { filename: file.name, bytes: file.bytes } : null);
   // Fire-and-forget; state is durable in import_jobs.
-  if (file instanceof File && bytes) {
-    runPipeline(job.id, bytes, file.name, targetNotebook, targetEntityIds);
+  if (file) {
+    runPipeline(job.id, file.bytes, file.name, targetNotebook, targetEntityIds);
   } else {
     runUrlPipeline(job.id, url, page!, targetNotebook, targetEntityIds);
   }
