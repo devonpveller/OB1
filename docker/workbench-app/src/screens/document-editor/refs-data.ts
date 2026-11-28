@@ -25,7 +25,7 @@ const cq = "/workbench/contract/documents/pending-refs";
 const bad = () => new Error("unexpected answer");
 
 export async function readPending(path: string): Promise<{ rows: PendingRow[]; total: number }> {
-  const { data } = await api<any>("GET", `${cq}?path=${enc(path)}`);
+  const { data } = await api<any>("GET", `${cq}?path=${enc(path)}&limit=200`); // 200 = the route's maximum and the queue's own bound
   if (!data || !Array.isArray(data.pending_refs)) throw bad();
   return { rows: data.pending_refs as PendingRow[], total: Number(data.total) || data.pending_refs.length };
 }

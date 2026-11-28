@@ -532,7 +532,7 @@ describe("house rules", () => {
   });
   it("only the References tab changed in the shared tab bar: the other tabs are still placeholders", async () => {
     await openDoc();
-    fireEvent.click(screen.getByTestId("dtab-coverage"));
-    expect(screen.getByTestId("dpanel-coverage").textContent).toMatch(/not built yet|Coverage/);
+    fireEvent.click(screen.getByTestId("dtab-topics"));
+    expect(screen.getByTestId("dpanel-topics").textContent).toMatch(/Topics is not built yet/);
   });
 });

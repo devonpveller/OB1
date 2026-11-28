@@ -201,7 +201,7 @@ describe("ATTEMPT4 ATTACKS: N10 (replaced text)", () => {
     open();
     await wait(1200);
     expect(newTokens().length + rowsNew()).toBe(1);
-    if (newTokens().length === 1) expect(msgNow()).toMatch(/Placed/); else expect(msgNow()).toMatch(/replaced/);
+    if (newTokens().length === 1) expect(msgNow()).toMatch(/Placed/); else expect(msgNow()).toMatch(/changed or removed/);
   });
   it("R3b identical replace of only the sentence around the cursor (with 3 chars each side)", async () => {
     const { open } = await flight(inMid);
@@ -209,7 +209,7 @@ describe("ATTEMPT4 ATTACKS: N10 (replaced text)", () => {
     open();
     await wait(1200);
     expect(newTokens().length + rowsNew()).toBe(1);
-    if (newTokens().length === 1) expect(msgNow()).toMatch(/Placed/); else expect(msgNow()).toMatch(/replaced/);
+    if (newTokens().length === 1) expect(msgNow()).toMatch(/Placed/); else expect(msgNow()).toMatch(/changed or removed/);
   });
   it("R4 replace spanning the cursor, then the file fails to save", async () => {
     const { open } = await flight(inMid);
