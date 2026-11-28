@@ -177,6 +177,55 @@ describe("when the voices list did not load", () => {
     expect((screen.getByTestId("delete") as HTMLButtonElement).disabled).toBe(false);
     expect(writes()).toEqual([]);
   });
+  // a fetcher that holds the next GET of the presenters list until released (the re-read in flight)
+  const holdPresenters = () => {
+    let hold = false; let release: () => void = () => {};
+    const gate = () => new Promise<void>((r) => { release = r; });
+    setFetcher(async (u, init) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "GET" && /\/cast\/voices\?/.test(u) && failingVoices) return new Response(JSON.stringify({ error: "internal" }), { status: 500 });
+      if (method === "GET" && /\/cast\/presenters\?/.test(u) && hold) { hold = false; await gate(); }
+      const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+      const a = fake.handle(method, u, body, who);
+      return new Response(JSON.stringify(a.body), { status: a.status });
+    });
+    return { hold: () => { hold = true; }, release: () => release() };
+  };
+  const noStrayConfirm = () => {
+    expect(screen.getByTestId("editor-name").textContent).toBe("Morgan");
+    expect(screen.queryByTestId("typed-confirm")).toBeNull();
+    for (const t of ["new", "delete"]) expect((screen.getByTestId(t) as HTMLButtonElement).disabled, t).toBe(false);
+  };
+  it("attack A: delete the first row, press Delete again while the re-read is in flight: when it lands, no prompt on the next row and nothing is locked", async () => {
+    failingVoices = false;
+    const h = holdPresenters();
+    await open();
+    expect(screen.getByTestId("editor-name").textContent).toBe("Alex");
+    fireEvent.click(screen.getByTestId("delete"));
+    fireEvent.change(screen.getByTestId("typed-input"), { target: { value: "delete" } });
+    h.hold();
+    fireEvent.click(screen.getByTestId("typed-ok"));
+    await waitFor(() => expect(writes()).toContain(`DELETE /presenters/${ids.alex}`));
+    await waitFor(() => expect((screen.getByTestId("delete") as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.getByTestId("editor-name").textContent).toBe("Alex"); // the old rows are still on screen
+    fireEvent.click(screen.getByTestId("delete")); // confirming = Alex
+    h.release();
+    await waitFor(() => expect(screen.getByTestId("editor-name").textContent).toBe("Morgan"));
+    noStrayConfirm();
+  });
+  it("attack B: Try again, then Delete while the re-read is held, and the row is removed elsewhere: no prompt on the next row and nothing is locked", async () => {
+    failingVoices = true;
+    const h = holdPresenters();
+    await open();
+    expect(screen.getByTestId("editor-name").textContent).toBe("Alex");
+    h.hold();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    fireEvent.click(screen.getByTestId("delete")); // confirming = Alex
+    fake.t.presenters.delete(ids.alex);
+    h.release();
+    await waitFor(() => expect(screen.getByTestId("editor-name").textContent).toBe("Morgan"));
+    noStrayConfirm();
+  });
   it("a name-only change still saves while the list is missing", async () => {
     failingVoices = true; failVoices();
     await open();

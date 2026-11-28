@@ -115,7 +115,7 @@ function VoicesScreen() {
           </div>
           <div id="vpanel" role="tabpanel" aria-labelledby={"tab-" + tab} className="vgrid">
             <nav className="card vlist" aria-label={`Your ${tab}`} data-testid={"list-" + tab}>
-              <button type="button" className="btn pri" data-testid="new" disabled={confirming !== null}
+              <button type="button" className="btn pri" data-testid="new" disabled={confirming !== null && confirming === openId}
                 onClick={() => { choose("new"); setNonce((n) => n + 1); }}>New {one}</button>
               {cur.state === "ok" && rows.length === 0 && <p className="empty" data-testid={"voices-empty-" + tab}>You have no {tab} yet. Make one with New {one}.</p>}
               {cur.state === "ok" && cur.data.total > rows.length && <p className="meta">Showing {rows.length} of {cur.data.total}.</p>}
@@ -164,8 +164,8 @@ function Footer({ target, canSave, saving, saved, error, onSave, onDelete, isNew
   return (
     <div className="vfoot">
       <div className="vfoot-row">
-        <button type="button" className="btn pri" data-testid="save" disabled={!canSave || saving || confirming !== null} onClick={onSave}>{saving ? "Saving..." : isNew ? "Create" : "Save"}</button>
-        {!isNew && <button type="button" className="danger" data-testid="delete" disabled={confirming !== null || saving} onClick={() => setConfirming(target)}>Delete {what}</button>}
+        <button type="button" className="btn pri" data-testid="save" disabled={!canSave || saving || confirming === target} onClick={onSave}>{saving ? "Saving..." : isNew ? "Create" : "Save"}</button>
+        {!isNew && <button type="button" className="danger" data-testid="delete" disabled={confirming === target || saving} onClick={() => setConfirming(target)}>Delete {what}</button>}
         {saved && <span className="saved" role="status" data-testid="saved">Saved</span>}
       </div>
       {hint && <p className="meta" data-testid="save-hint">{hint}</p>}
