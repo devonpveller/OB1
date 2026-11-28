@@ -32,6 +32,7 @@ test.after(() => server.close());
 process.env.OPEN_BRAIN_URL = `http://127.0.0.1:${server.address().port}`;
 const vault = mkdtempSync(join(tmpdir(), "wp-retry-"));
 process.env.WIKI_GIT_DIR = vault;
+process.env.WIKI_UNSYNCED_BACKOFF_BASE_MS = "0"; // back-off has its own test (wiki-pages.unchanged.test.mjs)
 const outDir = join(vault, "content");
 mkdirSync(join(outDir, "person"), { recursive: true });
 writeFileSync(join(outDir, "person/person-a.md"), "---\ntitle: A\n---\n# A\n");

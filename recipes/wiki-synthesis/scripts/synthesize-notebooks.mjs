@@ -32,7 +32,7 @@ import { clip } from "../../_shared/clip.mjs"; // surrogate-safe truncation for 
 import { writeSourceLeaves } from "../../_shared/source-leaf.mjs";
 // Compile writes file AND row, flushed per batch; unsynced rows fail the run
 // (research-workbench D13 item 1). LLM failures are classified (item 6).
-import { queueWikiPage, writeWikiPage, maybeFlushWikiPages, finishWikiPages, vaultRel, isDatabaseUnavailableError, EXIT_COMPLETED_WITH_FAILURES } from "../../_shared/wiki-pages.mjs";
+import { queueWikiPage, queueWikiPageIfRowDiffers, writeWikiPage, maybeFlushWikiPages, finishWikiPages, vaultRel, isDatabaseUnavailableError, EXIT_COMPLETED_WITH_FAILURES } from "../../_shared/wiki-pages.mjs";
 // D13 item 6: an open structural failure is not retried until its inputs
 // (the hub's synthesis input hash, or the code) change; one notification per
 // distinct failure.
@@ -368,7 +368,7 @@ async function main() {
         // The unchanged hub's ROW is still this compile's: re-queued from its
         // file, so a hub whose row was lost (a failed flush, a restored
         // vault) converges here instead of waiting for the viewer's repair.
-        try { queueWikiPage(hubPath, fs.readFileSync(hubPath, "utf8")); } catch { /* read raced a sweep */ }
+        try { queueWikiPageIfRowDiffers(hubPath, fs.readFileSync(hubPath, "utf8")); } catch { /* read raced a sweep */ }
         await maybeFlushWikiPages();
         moc.push(`- [[${slug}|${linkSafeLabel(t.name) || slug}]] — ${srcs.length} sources`);
         skipped++;
