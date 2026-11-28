@@ -3,7 +3,8 @@
 -- Removes the four keys (notify.informational, notify.structural, notify.transient, notify.sign_in_new_device) and every
 -- person's stored value of them and every tombstone (a person's bell then shows every class again). Nothing else changes: the
 -- slot adds no table, column, function or right, so the catalog is exactly as it was before slot 720.
--- ORDER: put the PREVIOUS workbench image back FIRST, then this file, BEFORE revert-settings-tags.sql. Take a pg_dump of
+-- ORDER: put the PREVIOUS workbench image back FIRST, then this file, BEFORE revert-settings-tags.sql and BEFORE revert-ui-state.sql (this slot's rows are in
+-- section 'ui', which slot 490 owns: revert-ui-state.sql fails while they exist; rollback order 730, 720, 710, 700, 550, 490). Take a pg_dump of
 -- public.user_settings first if any of it matters. Idempotent: a second run changes nothing.
 \set ON_ERROR_STOP on
 BEGIN;

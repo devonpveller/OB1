@@ -16,11 +16,13 @@
 -- in this server detects a new device or can post such an event yet, so the row says "Not detected yet" and is reserved and always on.
 -- Rights: nothing new is created, so nothing is granted or revoked; user_settings keeps slot 400's rights (service_role).
 -- Slot 720 sits ON slots 400 + 550 (it needs the tag column) and changes neither the section nor the type CHECK, nor any
--- function, so it is independent of slots 490 and 700. Additive and idempotent: a re-run restores exactly what is written
+-- function, so it replaces nothing of 490 or 700. BUT its four rows sit in section 'ui', which slot 490 owns (490's narrowed
+-- section CHECK refuses them), so 720 depends on 490 at ROLLBACK: revert 720 BEFORE revert-ui-state.sql. Additive and idempotent: a re-run restores exactly what is written
 -- here. Fresh-volume slot 720; live: after 400 + 550 and a fresh DB backup, psql -f BEFORE the new workbench image (without
 -- the rows a person has no preference to store and nothing is hidden). Check: check-notify-prefs.sql (read-only).
 -- Revert: put the previous workbench image back FIRST, then revert-notify-prefs.sql (discards every person's stored value
--- of these four keys and their tombstones; the catalog is then exactly as before), BEFORE revert-settings-tags.sql.
+-- of these four keys and their tombstones; the catalog is then exactly as before), BEFORE revert-settings-tags.sql and BEFORE revert-ui-state.sql
+-- (revert-ui-state.sql fails while these rows exist: rollback order is 730, 720, 710, 700, 550, 490).
 -- ============================================================
 \set ON_ERROR_STOP on
 BEGIN;

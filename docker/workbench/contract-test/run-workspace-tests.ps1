@@ -669,6 +669,16 @@ try {
     $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-revert-defaults.sql
     Check ($script:rc -eq 0) '[5n] revert-settings-defaults.sql (slot 730) runs before revert-settings-tags.sql'
   }
+  if (-not $Red) {   # rwr-notify-prefs: slot 720 registers its notify.* keys in section 'ui', which slot 490 owns, so 490's revert fails while 720's rows exist: 720 reverts BEFORE 490 (and before 550 / 700)
+    $null = Dk cp (Join-Path $chainDir 'revert-notify-prefs.sql') "${db}:/tmp/g2-revert-np.sql"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-revert-np.sql
+    Check ($script:rc -eq 0) '[5n] revert-notify-prefs.sql (slot 720) runs before revert-ui-state.sql (its keys sit in 490''s section)'
+  }
+  if (-not $Red) {   # rwr-cleanup: slot 710 (cleanup_dismissals + the dismissal_kinds registry) touches no settings table or key: independent of 400 / 490 / 550, kept in the chain so the round trip covers it
+    $null = Dk cp (Join-Path $chainDir 'revert-cleanup-dismissals.sql') "${db}:/tmp/g2-revert-cd.sql"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-revert-cd.sql
+    Check ($script:rc -eq 0) '[5n] revert-cleanup-dismissals.sql (slot 710) runs in the reverse chain'
+  }
   if (-not $Red) {   # rwr-appearance: slot 700 sits on 400 + 490 + 550 (and replaces 490's setting_problem); its revert goes before all of them
     $null = Dk cp (Join-Path $chainDir 'revert-appearance.sql') "${db}:/tmp/g2-revert-ap.sql"
     $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-revert-ap.sql
@@ -710,9 +720,15 @@ try {
     $null = Dk cp (Join-Path $chainDir 'init-appearance.sql') "${db}:/tmp/g2-init-ap.sql"
     $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-init-ap.sql
     Check ($script:rc -eq 0) '[5n] init-appearance.sql (slot 700) applies again after slot 550'
+    $null = Dk cp (Join-Path $chainDir 'init-cleanup-dismissals.sql') "${db}:/tmp/g2-init-cd.sql"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-init-cd.sql
+    Check ($script:rc -eq 0) '[5n] init-cleanup-dismissals.sql (slot 710) applies again'
+    $null = Dk cp (Join-Path $chainDir 'init-notify-prefs.sql') "${db}:/tmp/g2-init-np.sql"
+    $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-init-np.sql
+    Check ($script:rc -eq 0) '[5n] init-notify-prefs.sql (slot 720) applies again after slot 700'
     $null = Dk cp (Join-Path $chainDir 'init-settings-defaults.sql') "${db}:/tmp/g2-init-defaults.sql"
     $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/g2-init-defaults.sql
-    Check ($script:rc -eq 0) '[5n] init-settings-defaults.sql (slot 730) applies again after slot 550'
+    Check ($script:rc -eq 0) '[5n] init-settings-defaults.sql (slot 730) applies again after slot 720'
   }
   Save 'postgrest-reload.log' ($g2 -join "`n")
   foreach ($l in $g2) { Write-Host "    $l" }
@@ -1471,6 +1487,14 @@ try {
     $null = Dk cp (Join-Path $dockerDir 'revert-settings-defaults.sql') "${db}:/tmp/rv730.sql"
     $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv730.sql
     Check ($script:rc -eq 0) '[5m] revert-settings-defaults.sql (slot 730) runs before 550 is reverted'
+    # rwr-notify-prefs: slot 720 registers its notify.* keys in section 'ui' (490's), so 490's revert fails while they exist: 720 reverts before 490 (it is applied again right after [5m4])
+    $null = Dk cp (Join-Path $dockerDir 'revert-notify-prefs.sql') "${db}:/tmp/rv720.sql"
+    $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv720.sql
+    Check ($script:rc -eq 0) '[5m] revert-notify-prefs.sql (slot 720) runs before 490''s revert (its keys sit in 490''s section)'
+    # rwr-cleanup: slot 710 is independent of the settings tables (own table + the dismissal_kinds registry); it reverts here so the round trip covers it (applied again right after [5m4])
+    $null = Dk cp (Join-Path $dockerDir 'revert-cleanup-dismissals.sql') "${db}:/tmp/rv710.sql"
+    $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv710.sql
+    Check ($script:rc -eq 0) '[5m] revert-cleanup-dismissals.sql (slot 710) runs in the reverse chain'
     # rwr-appearance: slot 700 sits on 400 + 490 + 550, so its revert goes before all of them (it is applied again in [5m4])
     $null = Dk cp (Join-Path $dockerDir 'revert-appearance.sql') "${db}:/tmp/rv700.sql"
     $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv700.sql
@@ -1584,6 +1608,13 @@ try {
     $co = @((Dk exec $db psql -U postgres -d openbrain -X -tA -F '|' -v ON_ERROR_STOP=1 -f /tmp/chk700.sql) -split "`n" | Where-Object { $_ -ne '' })
     Save 'check-appearance.log' ($co -join "`n")
     Check ($script:rc -eq 0 -and @($co | Where-Object { $_ -match '\|t$' }).Count -eq 6 -and @($co | Where-Object { $_ -match '\|f$' }).Count -eq 0) '[5m4] check-appearance.sql (read-only) reports six checks, all true'
+    # slots 710 and 720 go back on, in forward order (700, 710, 720, 730), before 730's own cycle below
+    $null = Dk cp (Join-Path $dockerDir 'init-cleanup-dismissals.sql') "${db}:/tmp/rv710.sql"
+    $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv710.sql
+    Check ($script:rc -eq 0) '[5m] init-cleanup-dismissals.sql (slot 710) applies again after slot 700'
+    $null = Dk cp (Join-Path $dockerDir 'init-notify-prefs.sql') "${db}:/tmp/rv720.sql"
+    $o = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -f /tmp/rv720.sql
+    Check ($script:rc -eq 0) '[5m] init-notify-prefs.sql (slot 720) applies again after slot 710'
     # rwr-settings-defaults [5m4d]: slot 730 runs cleanly 3 times, its revert twice, and init again; the revert leaves the catalog EXACTLY as
     # before it ran (keys, triggers, functions, tables, the shared store and the user tier), init restores the eight keys and the presets,
     # the check file passes, and the revert discards what it says it discards (the stored limits, the log)
