@@ -16,6 +16,7 @@ export const StartRequestBody = z.object({
   depth: z.string().optional().openapi({ example: "standard", description: "quick, standard (default) or deep: a preset of today's research limits, never above the admin ceilings" }),
   passages: z.array(z.string().max(4000)).max(20).optional().openapi({ description: "selected passages of the attached document - private, like the question" }),
   approved_question: z.string().max(300).optional().openapi({ description: "start only: the question the preview showed; the start refuses (409) rather than send a different one" }),
+  sources: z.string().optional().openapi({ example: "credible", description: "credible (no forums, Q&A sites or social posts) or community (read too, labelled, never credible on their own); omitted = the caller's research.sources_default, else credible. community is refused (403) while an admin has it switched off" }),
 }).strict().openapi("ResearchStartRequest");
 
 export const StartDepth = z.object({
@@ -30,8 +31,15 @@ export const StartShown = z.object({
   topic: z.string().nullable(),
   links: z.array(z.string()).openapi({ description: "the public links the research service will fetch itself" }),
   depth: StartDepth.nullable(),
-  refusal: z.string().nullable().openapi({ example: null, description: "why the boundary refused to form a public question, or null; a refusal starts nothing" }),
+  refusal: z.string().nullable().openapi({ example: null, description: "why the boundary refused to form a public question, or null; a refusal starts nothing (community_link_in_credible_run: a credible-only start names a community page)" }),
+  sources: z.string().nullable().openapi({ example: "credible", description: "the sources the run reads: credible or community" }),
 });
+
+export const ResearchOptions = z.object({
+  sources_default: z.string().openapi({ example: "credible", description: "the Sources choice the Start dialog opens with (the caller's research.sources_default; credible while community is switched off)" }),
+  community_allowed: z.boolean().openapi({ description: "false: an admin switched community sources off; the choice is disabled" }),
+  reason: z.string().nullable().openapi({ example: null, description: "the plain reason the community choice is disabled, or null" }),
+}).openapi("ResearchStartOptions");
 
 export const StartPreview = StartShown.extend({
   ok: z.boolean().openapi({ description: "true when a request was formed; the preview created no job and no row" }),
@@ -45,9 +53,11 @@ export const StartStarted = StartShown.extend({
 const SHOWN_EX = {
   question: "What is known about heat pumps and winter heating bills?", topic: "heat pumps winter bills",
   links: ["https://news.example.org/heat-pumps"], depth: { name: "standard", rounds: 2, max_fetch: 40, wall_ms: 600000 }, refusal: null,
+  sources: "credible",
 };
 export const RSX = {
   request: { attach: { kind: "document", path: "documents/lab-user/notes.md" }, question: "Should I buy a heat pump?", depth: "standard", passages: [] },
   preview: { ok: true, ...SHOWN_EX },
   started: { started: true, job_id: "d0d0d0d0-0000-4000-8000-000000000001", ...SHOWN_EX },
+  options: { sources_default: "credible", community_allowed: true, reason: null },
 };

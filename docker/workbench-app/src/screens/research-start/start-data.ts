@@ -17,21 +17,50 @@ export const DEPTHS: { id: Depth; label: string; blurb: string; estimate: string
 // What the run is about. There is no idea here, on purpose (operator decision 2026-11-22): an idea is researched from
 // the idea itself (its own research-now), and the back end refuses an idea attach.
 export type Attach = { kind: "none" } | { kind: "document"; path: string };
-export type StartBody = { attach: Attach; question: string; depth: Depth };
+// rwr-research-sources: which sources the run reads (the server presets it from the person's own default)
+export type Sources = "credible" | "community";
+export const SOURCES: { id: Sources; label: string; blurb: string }[] = [
+  { id: "credible", label: "Credible only", blurb: "no forums, Q&A sites or social posts" },
+  { id: "community", label: "Also community", blurb: "forums, Q&A and social posts too, labelled; never credible on their own" },
+];
+export const COMMUNITY_LABEL = "Community only - not a credible rating";
+export const COMMUNITY_CONSENSUS_LABEL = "Community consensus";
+export function sourcesText(s: Sources | null): string {
+  return s === "community" ? "It reads credible sources and community posts (forums, Q&A, social), which are labelled." : s === "credible" ? "It reads credible sources only: no forums, Q&A sites or social posts." : "";
+}
+export type SourcesOptions = { sources_default: Sources; community_allowed: boolean; reason: string | null };
+/** The dialog's Sources choice, read per mount: the person's default and whether community may be chosen. A failed read
+ *  answers credible and community disabled (the server decides again on Start). */
+export async function readSourcesOptions(): Promise<SourcesOptions> {
+  try {
+    const { data } = await api("GET", "/workbench/research/options");
+    const d = data as any;
+    const allowed = d?.community_allowed === true;
+    return {
+      sources_default: allowed && d?.sources_default === "community" ? "community" : "credible",
+      community_allowed: allowed,
+      reason: allowed ? null : (typeof d?.reason === "string" ? d.reason : "Community sources could not be checked, so research reads credible sources only."),
+    };
+  } catch {
+    return { sources_default: "credible", community_allowed: false, reason: "Community sources could not be checked, so research reads credible sources only." };
+  }
+}
+export type StartBody = { attach: Attach; question: string; depth: Depth; sources: Sources };
 export type Shown = {
   question: string | null;
   topic: string | null;
   links: string[];
   depth: { name: string; rounds: number; max_fetch: number; wall_ms: number } | null;
   refusal: string | null;
+  sources: Sources | null;
 };
 export type PreviewOut = Shown & { ok: boolean };
 
 export const MAX_QUESTION = 2000;
 
 // the one place the request body is made (trimmed question; the shape the route's strict schema takes)
-export function bodyOf(attach: Attach, question: string, depth: Depth): StartBody {
-  return { attach: attach.kind === "document" ? { kind: "document", path: attach.path } : { kind: "none" }, question: question.trim(), depth };
+export function bodyOf(attach: Attach, question: string, depth: Depth, sources: Sources = "credible"): StartBody {
+  return { attach: attach.kind === "document" ? { kind: "document", path: attach.path } : { kind: "none" }, question: question.trim(), depth, sources };
 }
 export const sameBody = (a: StartBody, b: StartBody) => JSON.stringify(a) === JSON.stringify(b);
 export const startBodyOf = (b: StartBody, approved: string) => ({ ...b, approved_question: approved });
@@ -46,6 +75,7 @@ function shownOf(d: any): Shown {
     depth: dep && typeof dep === "object" && typeof dep.rounds === "number" && typeof dep.max_fetch === "number" && typeof dep.wall_ms === "number"
       ? { name: String(dep.name ?? ""), rounds: dep.rounds, max_fetch: dep.max_fetch, wall_ms: dep.wall_ms } : null,
     refusal: strOrNull(d?.refusal),
+    sources: d?.sources === "community" || d?.sources === "credible" ? d.sources : null,
   };
 }
 
@@ -64,6 +94,7 @@ export type StartOutcome =
   | { kind: "changed" } // what would leave changed since the preview: nothing was created
   | { kind: "gone" } // the document is not available (a 404: missing, trashed or not yours: one answer)
   | { kind: "unavailable" }
+  | { kind: "community_off"; reason: string } // an admin switched community sources off: nothing was created
   | { kind: "failed" };
 
 export async function startResearch(body: StartBody, approved: string): Promise<StartOutcome> {
@@ -78,6 +109,7 @@ export async function startResearch(body: StartBody, approved: string): Promise<
       if (e.status === 409) return { kind: "changed" };
       if (e.status === 404) return { kind: "gone" };
       if (e.status === 503) return { kind: "unavailable" };
+      if (e.status === 403) return { kind: "community_off", reason: "An admin has switched community sources off. Choose Credible only." };
     }
     return { kind: "failed" };
   }
@@ -112,6 +144,7 @@ export const startResearchHref = (documentRef?: string | null) =>
 const REFUSALS: Record<string, string> = {
   no_public_evidence: "There is no public page it could use to back this question. Add a link to a public page that covers it, then try again.",
   no_candidate_passed: "It could not make a question from this that is safe to send. Try saying it more generally, or add a link to a public page.",
+  community_link_in_credible_run: "A link in this is a forum, Q&A or social page, and this run reads credible sources only. Remove the link, or choose Also community.",
 };
 export function refusalText(code: string | null): string {
   return REFUSALS[(code ?? "").slice(0, 80)] ?? "Nothing can leave the workbench from this as written. Try saying it more generally, or add a link to a public page.";

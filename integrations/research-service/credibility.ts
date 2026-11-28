@@ -28,6 +28,7 @@
 
 import { edgeWeightOk, type ParsedEdge } from "./claim-edges.ts";
 import { claimList } from "./claim-list.ts";
+import { buildSourceClasses, classifySource, type SourceClassEntry } from "./source-class.ts";
 
 export class CredibilityGateError extends Error {
   constructor(message: string) {
@@ -105,6 +106,13 @@ export interface VerdictDef {
 export interface CorroborationTerms { strongFactor: number; weakFactor: number; claimPer: number; claimCap: number }
 
 /**
+ * rwr-research-sources: the community terms (credibility_terms.community, slot 750). A community-only claim scores
+ * `weight` x its total, capped `floorMargin` under the claim floor (the legacy formula: under `legacyFloor`); two
+ * or more independent communities stating it (`consensusMin`) give the separate consensus marker.
+ */
+export interface CommunityTerms { weight: number; floorMargin: number; legacyFloor: number; consensusMin: number }
+
+/**
  * What a grounding edge's TYPE multiplies a source's total by in a claim (attempt 4, tester finding
  * F2): the registry row credibility_terms.edge_factors, read by both twins (claim_confidence_d15 in
  * SQL). Seeded states 1, corroborates 1, inferred_from 0.67 (init-claims.sql's 0.60/0.90 ratio).
@@ -128,6 +136,9 @@ export interface CredibilityModel {
   verdicts: Map<string, VerdictDef>;
   corroboration: CorroborationTerms;
   edgeFactors: EdgeFactors;
+  /** rwr-research-sources: the community classes (registry source_classes) and terms. */
+  sourceClasses: SourceClassEntry[];
+  community: CommunityTerms;
   /** "weights v<N>" - the registry version of the weight table (bumped on every change). */
   weightsVersion: string;
   /** "paper <key>" - the active paper score version. */
@@ -415,12 +426,27 @@ export function buildModel(rows: RegistryRow[], registryVersions: Record<string,
     inferred_from: unit(ef.inferred_from, "edge_factors.inferred_from"),
   };
 
+  const ct = of("credibility_terms").find((r) => r.key === "community")?.definition;
+  if (!ct) throw new CredibilityGateError("credibility_terms.community: the community terms are missing - is init-research-sources.sql applied?");
+  const cmin = ct.consensus_min;
+  if (typeof cmin !== "number" || !Number.isInteger(cmin) || cmin < 1 || cmin > 9) {
+    throw new CredibilityGateError(`credibility_terms.community: consensus_min is not an integer 1-9 (${JSON.stringify(cmin ?? null)})`);
+  }
+  const community: CommunityTerms = {
+    weight: unit(ct.weight, "community.weight"),
+    floorMargin: unit(ct.floor_margin, "community.floor_margin"),
+    legacyFloor: unit(ct.legacy_floor, "community.legacy_floor"),
+    consensusMin: cmin,
+  };
+  let sourceClasses: SourceClassEntry[];
+  try { sourceClasses = buildSourceClasses(live); } catch (e) { throw new CredibilityGateError((e as Error).message); }
+
   const weightsVersion = `weights v${registryVersions["credibility_weights"] ?? 1}`;
   const paperVersion = `paper ${paper.key}`;
   const scoredFamilies = [...families.keys()].filter((f) => [...weights.values()].some((w) => w.family === f));
   const model: CredibilityModel = {
     kinds, families, scoredFamilies, weights, domainClasses, paper, general, verdicts, corroboration, edgeFactors,
-    weightsVersion, paperVersion, modelVersion: `d15 ${weightsVersion} ${paperVersion}`,
+    sourceClasses, community, weightsVersion, paperVersion, modelVersion: `d15 ${weightsVersion} ${paperVersion}`,
   };
   validateTable(model);
   return model;
@@ -692,6 +718,8 @@ export function corroborate(
   if (!v) throw new CredibilityGateError(`entailment verdict '${verdict}' is not registered`);
   if (!v.transfers) return [];
   if (general.score.family !== "general" || paper.score.family !== "scholarly") return [];
+  // rwr-research-sources: a community source neither gives nor receives corroboration (source_rolling_total_core)
+  if (communityOf(m, general.url) || communityOf(m, paper.url)) return [];
   const linked = general.links.some((l) => sameTarget(l, paper.url, paper.doi));
   if (!linked) return [];
   const pt = weightedTotal(m, kind, paper.score).total;
@@ -805,6 +833,36 @@ export function claimTotal(m: CredibilityModel, floor: number, sourceTotals: num
   };
 }
 
+/** The community key of a URL (null = not community): the model's classifier (source-class.ts). */
+export function communityOf(m: CredibilityModel, url: string | null | undefined): string | null {
+  return classifySource(m.sourceClasses, url)?.key ?? null;
+}
+
+/**
+ * rwr-research-sources - THE COMMUNITY RULE (claim_confidence_d15 / claim_confidence in SQL are the twins). With at
+ * least one credible (non-community) source the claim is the D15 total over its CREDIBLE sources only, so its rating
+ * is the same whichever mode the run used. Community-only, it is weight x the D15 total over them, capped
+ * floorMargin under the floor: it never reaches the credible rating. `agrees` = a states / corroborates edge;
+ * two or more distinct community keys agreeing give the consensus marker (never a number).
+ */
+export function communityClaimTotal(
+  m: CredibilityModel, floor: number, sources: ReadonlyArray<{ total: number; community: string | null; agrees: boolean }>,
+) {
+  const agreeing = new Set(sources.filter((s) => s.community && s.agrees).map((s) => s.community));
+  const community_consensus = agreeing.size >= m.community.consensusMin;
+  const credible = sources.filter((s) => !s.community);
+  if (credible.length || !sources.length) {
+    return { ...claimTotal(m, floor, credible.map((s) => s.total)), community_only: false, community_consensus };
+  }
+  const base = claimTotal(m, floor, sources.map((s) => s.total));
+  const cap = Math.max(0, floor - m.community.floorMargin);
+  const total = flushUnit(Math.min(base.total * m.community.weight, cap));
+  return {
+    ...base, total, below_floor: total < floor, community_only: true, community_consensus,
+    reasons: [...base.reasons, `community only: x weight ${m.community.weight}, capped at ${r3(cap)} (never the credible rating)`],
+  };
+}
+
 /** The claim floor of a kind: the highest claim_floor among its family rows (credibility_claim_floor in SQL). */
 export function claimFloor(m: CredibilityModel, kind: string): number {
   return Math.max(...m.scoredFamilies.map((f) => weightFor(m, kind, f).claimFloor));
@@ -866,6 +924,10 @@ export interface ScoredClaim {
   total: number;
   below_floor: boolean;
   reasons: string[];
+  /** rwr-research-sources: grounded only in community sources (labelled; never the credible rating) */
+  community_only: boolean;
+  /** rwr-research-sources: two or more independent communities state it (a separate marker) */
+  community_consensus: boolean;
 }
 
 /**
@@ -903,6 +965,8 @@ export function filedClaimsCredibility(
   lineOf: (start: number) => { line: number; verdict: string } | null,
   sourceTotal: (n: number, grounders: number[]) => number | null,
   filedIds?: ReadonlyArray<string | null>,
+  /** rwr-research-sources: the community key of the package's [Source n] (null = credible); absent = none is. */
+  communityOfSource?: (n: number) => string | null,
 ): ScoredClaim[] {
   const floor = claimFloor(m, kind);
   const groups: Array<{ c: ReturnType<typeof claimList>["claims"][number]; edges: ParsedEdge[] }> = [];
@@ -927,16 +991,20 @@ export function filedClaimsCredibility(
   for (const { c, edges } of groups) {
     const grounders = [...new Set(edges.map((e) => e.sourceIndex))];
     const best = new Map<number, number>();
+    const agrees = new Set<number>();
     for (const e of edges) {
       const t = edgeTotal(m, sourceTotal(e.sourceIndex, grounders)!, e.edgeType, e.weight);
       best.set(e.sourceIndex, Math.max(best.get(e.sourceIndex) ?? 0, t));
+      if (e.edgeType === "states" || e.edgeType === "corroborates") agrees.add(e.sourceIndex);
     }
     const at = lineOf(c.start);
     out.push({
       claim: out.length, text: c.text, filed_tag: c.tag,
       edges: edges.map((e) => ({ cite: e.sourceIndex, edge_type: e.edgeType, weight: e.weight })),
       line: at ? at.line : null, verdict: at ? at.verdict : null,
-      ...claimTotal(m, floor, [...best.values()]),
+      ...communityClaimTotal(m, floor, [...best.entries()].map(([n, total]) => ({
+        total, community: communityOfSource ? communityOfSource(n) : null, agrees: agrees.has(n),
+      }))),
     });
   }
   return out;
@@ -988,7 +1056,7 @@ export function reportCredibility(
 
 export const CREDIBILITY_REGISTRIES = [
   "claim_kinds", "credibility_weights", "domain_classes", "paper_score_versions",
-  "source_families", "entailment_verdicts", "credibility_terms",
+  "source_families", "entailment_verdicts", "credibility_terms", "source_classes",
 ];
 
 interface QueryClient { queryObject<T>(sql: string, args?: unknown[]): Promise<{ rows: T[] }> }

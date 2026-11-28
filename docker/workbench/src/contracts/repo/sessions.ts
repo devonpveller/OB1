@@ -156,7 +156,9 @@ export async function jobs(db: Db, state: string | null, kinds: string[], limit:
               jsonb_build_object('origin', origin,
                                  'query', CASE WHEN o.others THEN '' ELSE left(j.query, 200) END,
                                  'refinery_id', CASE WHEN o.others THEN NULL ELSE j.refinery_id END,
-                                 'phase', progress ->> 'phase', 'error', CASE WHEN o.others THEN NULL ELSE error END) AS detail
+                                 'phase', progress ->> 'phase', 'error', CASE WHEN o.others THEN NULL ELSE error END,
+                                 -- rwr-research-sources: the run's source mode (null = not chosen: an inlet other than Start)
+                                 'sources', j.options ->> 'sources') AS detail
          FROM public.research_jobs j CROSS JOIN LATERAL (SELECT ${FOREIGN_JOB("j", "$3", "$4", adminSeesOwnerless(who))}
                                                                 OR ${STEER_TEXT_HIDDEN("j", "$3", "$5", who)} AS others) o
         WHERE ($1::text IS NULL OR j.status = $1) ORDER BY j.created_at DESC LIMIT $2`,

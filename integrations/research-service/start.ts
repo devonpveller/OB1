@@ -36,9 +36,23 @@ export function startChanged(v: BoundaryVerdict, approved: string | undefined): 
 /** What would leave the workbench, and nothing else: the question, its topic, the public links, the depth. A refusal
  *  is its code only. */
 export function previewBody(v: BoundaryVerdict, run: DerivedRun, ceilings: Budget): Record<string, unknown> {
-  if (!v.ok) return { ok: false, refusal: v.refusal };
+  if (!v.ok) return { ok: false, refusal: v.refusal, sources: run.sources ?? null };
   return {
     ok: true, question: v.request.question, topic: v.request.topic, links: v.request.links,
     depth: run.depth ? resolveDepth(run.depth, ceilings) : null,
+    sources: run.sources ?? null,
   };
+}
+
+/** rwr-research-sources: the admin switch (research.community_allowed) is off - the door refuses `community` (403). */
+export const COMMUNITY_OFF = "community sources are switched off by an admin, so research reads credible sources only";
+export function sourcesRefusal(run: DerivedRun, communityAllowed: boolean): string | null {
+  return run.sources === "community" && !communityAllowed ? COMMUNITY_OFF : null;
+}
+
+/** rwr-research-sources (operator Q7): a credible-only start whose public links include community pages is refused
+ *  with this reason (a refusal code, like the boundary's own), rather than dropping the links silently. */
+export const COMMUNITY_LINK_REFUSAL = "community_link_in_credible_run";
+export function communityLinks(run: DerivedRun, links: readonly string[], isCommunity: (url: string) => boolean): string[] {
+  return run.sources === "credible" ? links.filter((l) => isCommunity(l)) : [];
 }

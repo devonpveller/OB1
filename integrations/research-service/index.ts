@@ -37,9 +37,12 @@ import { canonicalLink } from "./boundary-gate.ts";
 import { approveIdeaQuestion, drainIdeaHandbacks } from "./boundary-ideas.ts";
 import { runCeilings } from "./depth.ts";
 import { storedCeilings } from "./limits.ts";
-import { doorRefusesIdea, formForDoor, IDEA_DOOR_REFUSAL, previewBody, startChanged } from "./start.ts";
+import {
+  COMMUNITY_LINK_REFUSAL, communityLinks, doorRefusesIdea, formForDoor, IDEA_DOOR_REFUSAL, previewBody, sourcesRefusal, startChanged,
+} from "./start.ts";
+import { sourcesModeOf } from "./source-class.ts";
 import { actorOf, FOREIGN_PROMPTS_SQL, HIDDEN_STEER_TEXTS_SQL, nonActorView, LISTED_FOR, MAY_ACT_SQL, omitPrompts, readViewer, sharedEvents, sharedJobView, sharedTree } from "./viewer.ts";
-import { classifyClaimKind, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
+import { classifyClaimKind, communityOf, CredibilityGateError, loadCredibilityModel } from "./credibility.ts";
 import { assess } from "./admission.ts";
 import { createScholarlyResolver, proxiedFetch, type ScholarlyResolver } from "./scholarly.ts";
 import { dohResolver, INTAKE_CONTENT_TYPES, type IntakeContentType, IntakeRefused, intakeFetch, mayIntakeFetch } from "./intake-fetch.ts";
@@ -429,6 +432,35 @@ async function refreshLane(): Promise<void> {
     console.log(`[lane] research-branch lane concurrency ${laneConcurrency} -> ${n}`);
     laneConcurrency = n;
     dispatcher.wake();
+  }
+}
+
+// rwr-research-sources: the admin switch research.community_allowed (slot 750; the shared admin tier). Stored false =
+// off; no stored value = the default (on). A read that fails answers OFF: the door then refuses community (fail closed).
+async function communityAllowed(): Promise<boolean> {
+  try {
+    const c = await pool.connect();
+    try {
+      const r = await c.queryObject<{ v: unknown }>(`SELECT public.setting_get(NULL, 'research.community_allowed') AS v`);
+      return r.rows[0]?.v !== false;
+    } finally { c.release(); }
+  } catch {
+    console.error("[sources] reading research.community_allowed failed: community sources refused");
+    return false;
+  }
+}
+
+/** The community links of a credible-only start (the model's classifier); a classifier that cannot load refuses all. */
+async function communityLinksOf(run: { sources?: string }, links: readonly string[]): Promise<string[]> {
+  if (run.sources !== "credible" || !links.length) return [];
+  try {
+    const c = await pool.connect();
+    try {
+      const model = await loadCredibilityModel(c);
+      return communityLinks({ sources: "credible" }, links, (u) => !!communityOf(model, u));
+    } finally { c.release(); }
+  } catch {
+    return [...links];
   }
 }
 
@@ -914,6 +946,7 @@ ${r.page.content}`)) { console.warn(`[job ${jobId}] a public link changed since 
       dryRun: options?.dry_run === true,
       contract: contract ?? undefined,
       jobId, refineryId: refinery_id ?? null, requestKind,
+      sources: sourcesModeOf(options?.sources), // rwr-research-sources: absent on every inlet but the start door
       onEvent: async (ev) => {
         await appendEvent(client, jobId, rootId, ev)
           .catch((e) => console.error(`[job ${jobId}] ${ev.type} event not recorded: ${(e as Error).message}`));
@@ -984,6 +1017,8 @@ ${r.page.content}`)) { console.warn(`[job ${jobId}] a public link changed since 
       contract: contract ?? null, // Phase 1 — records what the job was ALLOWED to do
       // kp-contract — what it dropped, per stage (key absent on a job without a contract)
       ...(contract ? { contract_drops: res.contractDrops ?? null } : {}),
+      // rwr-research-sources: the mode the run used (null = not chosen: today's behaviour) and what credible-only refused
+      sources_mode: res.sourcesMode, ...(res.communityDrops ? { community_drops: res.communityDrops } : {}),
       // research-workbench P3a: one verdict per cited line + the audit list (D10), the admission
       // trail and per-line credibility (D15), the fold on a refinery session.
       entailment: res.entailment, verdicts: res.verdicts, admission_trail: res.admissionTrail,
@@ -1404,8 +1439,14 @@ Deno.serve({ port: PORT }, async (req) => {
     if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
     // the start door below refuses an idea (slot 580 PD0b): so does its preview - the same 400, nothing formed
     if (doorRefusesIdea(parsed)) return Response.json({ error: IDEA_DOOR_REFUSAL }, { status: 400 });
+    const offP = sourcesRefusal(parsed.run, await communityAllowed());
+    if (offP) return Response.json({ error: offP, code: "community_off" }, { status: 403 });
     try {
-      return Response.json(previewBody(await formForDoor(parsed, boundaryDeps), parsed.run, await currentCeilings()), { status: 200 });
+      const pv = await formForDoor(parsed, boundaryDeps);
+      if (pv.ok && (await communityLinksOf(parsed.run, pv.request.links)).length) {
+        return Response.json({ ok: false, refusal: COMMUNITY_LINK_REFUSAL, sources: parsed.run.sources ?? null }, { status: 200 });
+      }
+      return Response.json(previewBody(pv, parsed.run, await currentCeilings()), { status: 200 });
     } catch (e) {
       console.error(`[boundary] previewing the request failed (${(e as Error).name})`);
       return Response.json({ error: "boundary_failed" }, { status: 422 });
@@ -1425,6 +1466,9 @@ Deno.serve({ port: PORT }, async (req) => {
     const parsed = parseDoorBody(raw);
     if ("error" in parsed) return Response.json({ error: parsed.error }, { status: 400 });
     const { item, purpose, run } = parsed;
+    // rwr-research-sources: the admin switch, read by THIS door too (the workbench is not trusted for it)
+    const offS = sourcesRefusal(run, await communityAllowed());
+    if (offS) return Response.json({ error: offS, code: "community_off" }, { status: 403 });
     // rw-boundary-ideas (420 reviewer R-F4): an idea's research is queued by the DATABASE (slot 580: the hand-back's
     // owner is the idea's owner, never a caller's word) and formed by the drain below - not through this door
     if (purpose === "idea-research" || item.kind === "idea") {
@@ -1447,6 +1491,10 @@ Deno.serve({ port: PORT }, async (req) => {
       return Response.json({ changed: true, ...previewBody(verdict, run, await currentCeilings()) }, { status: 409 });
     }
     if (!verdict.ok && verdict.refusal === "no_owner") return Response.json({ refused: "no_owner", handback_id: null }, { status: 200 });
+    // rwr-research-sources (Q7): a credible-only start does not take community public links - refused, nothing created
+    if (verdict.ok && (await communityLinksOf(run, verdict.request.links)).length) {
+      return Response.json({ refused: COMMUNITY_LINK_REFUSAL, handback_id: null }, { status: 200 });
+    }
     const c = await pool.connect();
     try {
       // read outside the transaction: a failed read (setting_get missing) must fall back to env, never abort the job's insert
@@ -1562,7 +1610,8 @@ Deno.serve({ port: PORT }, async (req) => {
     const cbMessage = String(body.callback?.message_id || "").trim();
     const callback = cbChat && cbMessage ? { chat_id: cbChat, message_id: cbMessage } : null;
     // deadline_at is re-added normalised; model_down_requeues and queue_origin are engine-owned.
-    const { deadline_at: _dl, model_down_requeues: _mdr, queue_origin: _qo, ...callerOptions } = (body.options || {}) as Record<string, unknown>;
+    // rwr-research-sources: `sources` is the start door's (with its admin switch), never a caller's word on this door
+    const { deadline_at: _dl, model_down_requeues: _mdr, queue_origin: _qo, sources: _src, ...callerOptions } = (body.options || {}) as Record<string, unknown>;
     void _dl; void _mdr; void _qo;
     // D17 item 1: the key decides the origin; a disagreeing body value is kept and logged once.
     const caller = callerOf(req, url)!;

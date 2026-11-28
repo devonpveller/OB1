@@ -108,6 +108,8 @@ interface ClaimRow {
   edges: { edge_id: number; source_id: string; edge_type: string; lifecycle: string; title: string; url: string | null }[];
   corroborations: number;
   contradicted_by_newer: boolean;
+  community_only: boolean | null;
+  community_consensus: boolean | null;
 }
 
 // claims(scope, filter). An evidence-only caller sees only edges whose source is active; a claim
@@ -159,7 +161,12 @@ export async function claims(db: Db, q: ClaimsQuery) {
                      WHERE x.claim_id = c.id AND x.edge_type = 'contradicts'
                        AND ((n.id IS NOT NULL AND n.status = 'active' AND n.created_at > c.created_at AND ($6::jsonb IS NULL OR n.metadata @> $6::jsonb))
                          OR (xs.id IS NOT NULL AND xs.retraction_committed_at IS NULL AND xs.created_at > c.created_at
-                             AND ($6::jsonb IS NULL OR xs.metadata @> $6::jsonb)))) AS contradicted_by_newer
+                             AND ($6::jsonb IS NULL OR xs.metadata @> $6::jsonb)))) AS contradicted_by_newer,
+            -- rwr-research-sources (slot 750): grounded only in community sources / two independent communities state
+            -- it. Over EVERY edge, so under a metadata filter (a scoped caller) they are null, never a fact about
+            -- out-of-scope sources.
+            CASE WHEN $6::jsonb IS NULL THEN public.claim_community_only(c.id) END AS community_only,
+            CASE WHEN $6::jsonb IS NULL THEN public.claim_community_consensus(c.id) END AS community_consensus
        FROM public.claims c
       WHERE ($1::uuid IS NULL OR (c.thread_id = $1 AND $6::jsonb IS NULL))
         AND ($2::uuid IS NULL OR EXISTS (SELECT 1 FROM public.claim_sources x JOIN public.sources xs ON xs.id = x.source_id
@@ -251,6 +258,8 @@ function shapeClaim(r: ClaimRow, evidenceOnly: boolean, verdicts: Map<string, st
     verdict: verdicts.get(r.id.toLowerCase()) ?? null,
     corroborations: Number(r.corroborations ?? 0),
     contradicted_by_newer: !!r.contradicted_by_newer,
+    community_only: typeof r.community_only === "boolean" ? r.community_only : null,
+    community_consensus: typeof r.community_consensus === "boolean" ? r.community_consensus : null,
   };
 }
 

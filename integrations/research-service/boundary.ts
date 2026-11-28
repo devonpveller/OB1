@@ -267,7 +267,11 @@ export async function insertDerivedJob(c: Q, req: DerivedRequest, run: DerivedRu
 /** rw-boundary-digest (plan 09 2.5 P3/P5, slot 460): how a derived job RUNS - never what it is about. The digest's
  *  article keeps its article mode and its preliminary gap pass; a dry run writes nothing canonical; the caller's
  *  deadline means the engine never starts a job nobody waits for. Enumerated values, a boolean and a timestamp only. */
-export interface DerivedRun { mode?: "article"; gap_research?: "none" | "preliminary"; dry_run?: boolean; deadline_at?: string; depth?: DepthName }
+export interface DerivedRun {
+  mode?: "article"; gap_research?: "none" | "preliminary"; dry_run?: boolean; deadline_at?: string; depth?: DepthName;
+  /** rwr-research-sources (slot 750): which sources the run may read; absent = the caller did not choose (unchanged) */
+  sources?: "credible" | "community";
+}
 
 export function runOptions(run: DerivedRun, ceilings: Budget = runCeilings()): Record<string, unknown> {
   return {
@@ -278,6 +282,7 @@ export function runOptions(run: DerivedRun, ceilings: Budget = runCeilings()): R
     ...(run.gap_research ? { gap_research: run.gap_research } : {}),
     ...(run.dry_run === true ? { dry_run: true } : {}),
     ...(run.deadline_at ? { deadline_at: run.deadline_at } : {}),
+    ...(run.sources ? { sources: run.sources } : {}),
   };
 }
 
@@ -287,8 +292,8 @@ export function parseRun(v: unknown): { run: DerivedRun } | { error: string } {
   if (v === undefined || v === null) return { run: {} };
   if (typeof v !== "object" || Array.isArray(v)) return { error: "run is an object" };
   const r = v as Record<string, unknown>;
-  const extra = Object.keys(r).filter((k) => !["mode", "gap_research", "dry_run", "deadline_at", "depth"].includes(k));
-  if (extra.length) return { error: `run carries only mode, gap_research, dry_run, deadline_at, depth (not ${extra.join(", ").slice(0, 80)})` };
+  const extra = Object.keys(r).filter((k) => !["mode", "gap_research", "dry_run", "deadline_at", "depth", "sources"].includes(k));
+  if (extra.length) return { error: `run carries only mode, gap_research, dry_run, deadline_at, depth, sources (not ${extra.join(", ").slice(0, 80)})` };
   const run: DerivedRun = {};
   if (r.mode !== undefined) { if (r.mode !== "article") return { error: "run.mode is article" }; run.mode = "article"; }
   if (r.gap_research !== undefined) {
@@ -296,6 +301,10 @@ export function parseRun(v: unknown): { run: DerivedRun } | { error: string } {
     run.gap_research = r.gap_research;
   }
   if (r.dry_run !== undefined) { if (typeof r.dry_run !== "boolean") return { error: "run.dry_run is a boolean" }; if (r.dry_run) run.dry_run = true; }
+  if (r.sources !== undefined) {
+    if (r.sources !== "credible" && r.sources !== "community") return { error: "run.sources is credible or community" };
+    run.sources = r.sources;
+  }
   if (r.depth !== undefined) {
     if (typeof r.depth !== "string" || !DEPTH_NAMES.has(r.depth)) return { error: "run.depth is quick, standard or deep" };
     run.depth = r.depth as DepthName;

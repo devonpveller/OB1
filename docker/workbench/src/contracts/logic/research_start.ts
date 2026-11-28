@@ -22,12 +22,21 @@ export const DEFAULT_DEPTH: Depth = "standard";
 
 export type Attach = { kind: "none" } | { kind: "document"; path: string };
 
+// rwr-research-sources: which sources the run may read. credible = no forums, Q&A sites or social posts; community =
+// they are read too, labelled, and never make a claim credible on their own. Absent in the body = the person's own
+// research.sources_default (else credible). The admin switch research.community_allowed off refuses community.
+export const SOURCES = ["credible", "community"] as const;
+export type Sources = (typeof SOURCES)[number];
+export const DEFAULT_SOURCES: Sources = "credible";
+export const COMMUNITY_OFF_REASON = "An admin has switched community sources off, so research reads credible sources only.";
+
 export interface StartRequest {
   attach: Attach;
   question: string;
   depth: Depth;
   passages: string[];
   approved_question?: string;
+  sources?: Sources;
 }
 
 export const MAX_QUESTION = 2000;
@@ -43,7 +52,7 @@ const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
 /** The request body, validated. Anything unexpected is the caller's error (400); no value is echoed back. */
 export function parseStart(body: unknown): StartRequest {
   if (!isObj(body)) throw new BadRequest("the body must be a JSON object");
-  const extra = Object.keys(body).filter((k) => !["attach", "question", "depth", "passages", "approved_question"].includes(k));
+  const extra = Object.keys(body).filter((k) => !["attach", "question", "depth", "passages", "approved_question", "sources"].includes(k));
   if (extra.length) throw new BadRequest("unknown field in the request");
   const a = body.attach === undefined ? { kind: "none" } : body.attach;
   if (!isObj(a) || typeof a.kind !== "string") throw new BadRequest("attach is {kind: none | document, ...}");
@@ -64,6 +73,10 @@ export function parseStart(body: unknown): StartRequest {
   }
   if (attach.kind === "none" && passages.length) throw new BadRequest("passages belong to a document");
   const out: StartRequest = { attach, question: body.question.trim(), depth: depth as Depth, passages: passages as string[] };
+  if (body.sources !== undefined) {
+    if (typeof body.sources !== "string" || !(SOURCES as readonly string[]).includes(body.sources)) throw new BadRequest("sources is credible or community");
+    out.sources = body.sources as Sources;
+  }
   if (body.approved_question !== undefined) {
     if (typeof body.approved_question !== "string" || !body.approved_question.trim() || body.approved_question.length > 300) {
       throw new BadRequest("approved_question is the question the preview showed (at most 300 characters)");

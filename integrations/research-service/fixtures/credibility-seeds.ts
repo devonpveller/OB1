@@ -13,11 +13,13 @@ import type { RegistryRow } from "../credibility.ts";
 export const CREDIBILITY_SQL = [
   new URL("../../../docker/init-research-contract.sql", import.meta.url),
   new URL("../../../docker/init-research-credibility.sql", import.meta.url),
+  // rwr-research-sources (slot 750): the community classes and credibility_terms.community
+  new URL("../../../docker/init-research-sources.sql", import.meta.url),
 ];
 
 const REGISTRIES = new Set([
   "claim_kinds", "credibility_weights", "domain_classes", "paper_score_versions",
-  "source_families", "entailment_verdicts", "credibility_terms",
+  "source_families", "entailment_verdicts", "credibility_terms", "source_classes",
 ]);
 
 const TUPLE = /\(\s*'([a-z_]+)',\s*'([a-z0-9._-]+)',\s*'((?:[^']|'')*)',\s*'(\{(?:[^']|'')*\})'\s*\)/g;
@@ -42,7 +44,7 @@ export function parseSeeds(sqlTexts: string[]): SeedSet {
   }
   // Registry versions as the P3a statement-level trigger leaves them on a fresh volume: each
   // P3a-owned registry is seeded at 0 and its one seeding statement bumps it to 1.
-  return { rows: [...rows.values()], versions: { credibility_weights: 1, claim_kinds: 1, domain_classes: 1, paper_score_versions: 1, entailment_verdicts: 1, source_families: 3, credibility_terms: 2 } };
+  return { rows: [...rows.values()], versions: { credibility_weights: 1, claim_kinds: 1, domain_classes: 1, paper_score_versions: 1, entailment_verdicts: 1, source_families: 3, credibility_terms: 3, source_classes: 1 } };
 }
 
 export function seedSet(): SeedSet {

@@ -9,6 +9,7 @@
 import { domainOf, decideReuse, backstopDecision, reuseMetric, buildCitedAndRenumber } from "./lib.ts";
 import { retrieveRelevantClaims, retrieveRelevantSources, createStagingSession, stageSource, existingFreshSource, getReuseSources, dropTombstoned } from "./kb.ts";
 import { INJECTION_GUARD, screenSources } from "./injection.ts";
+import type { SourcesMode } from "./source-class.ts";
 import { rankHits, partitionRelevant, floorKeepable } from "./filtering.ts";
 import { classifyReport, renderSys, templateById, DEFAULT_TEMPLATE_ID } from "./templates.ts";
 import {
@@ -19,7 +20,7 @@ import { applyVerdicts, type EntailmentRecord, judgeLines, type LineVerdict, typ
 import {
   classifyClaimKind, corroborate, type CorroborationEdge, type CredibilityModel, filedClaimsCredibility, flushUnit, foldReceived,
   loadCredibilityModel, reportCredibility, type ReportCredibility, type ScholarlyRecord, type ScoredClaim,
-  weightFor,
+  weightFor, communityOf,
 } from "./credibility.ts";
 import { derivedQuestion, scrubList, withoutPromptSpans, withoutPromptSpansKeepLines } from "./prompt-private.ts";
 import { assess, type AdmissionContext, type Assessment, finalScore, subjectTokens, type TrailEntry, trailEntry } from "./admission.ts";
@@ -244,6 +245,8 @@ export function scoreCuratorPackage<T>(
   verdicts: ReadonlyArray<{ line: number; verdict: string }>,
   sourceTotal: (page: T, grounders: T[]) => number | null,
   filedIds?: ReadonlyArray<string | null>,
+  /** rwr-research-sources: the community key of a cited page (null = credible); absent = no page is community. */
+  communityOfPage?: (page: T) => string | null,
 ): { claims: ScoredClaim[]; report: ReportCredibility } {
   const pkgLineToJudged = curatorLines.flatMap((l, i) => (l === null ? [] : [i]));
   const verdictOnLine = new Map(verdicts.map((v) => [v.line, v.verdict] as const));
@@ -256,7 +259,7 @@ export function scoreCuratorPackage<T>(
       const page = curatorCited[k - 1];
       if (page === undefined) return null;
       return sourceTotal(page, grounders.map((g) => curatorCited[g - 1]).filter((g): g is T => g !== undefined));
-    }, filedIds);
+    }, filedIds, communityOfPage ? (k) => (curatorCited[k - 1] === undefined ? null : communityOfPage(curatorCited[k - 1])) : undefined);
   return { claims, report: reportCredibility(m, kind, claims, verdicts.map((v) => v.line)) };
 }
 
@@ -321,6 +324,38 @@ export function restateFiledCredibility(
  * runResearch applies it whenever a contract is set (moved here from index.ts so
  * the one enforcement point is the one the tests drive).
  */
+/**
+ * rwr-research-sources - a credible-only run at the deps boundary, like withContract: community-class search hits are
+ * dropped, a community URL is never fetched, and a page whose FINAL url is community is refused. Every drop is
+ * recorded. The gather loop, the gap pass and lead following all go through these two seams.
+ */
+export function withCredibleOnly(deps: Deps, isCommunity: (url: string) => boolean, drops: ContractDrops): Deps {
+  const refused: FetchResult = { page: null, outcome: "error" };
+  return {
+    ...deps,
+    searchWeb: async (q: string, k: number, opts?: { categories?: string[] }): Promise<SearchHit[]> => {
+      const hits = await deps.searchWeb(q, k, opts);
+      return hits.filter((h) => {
+        if (!isCommunity(h.url)) return true;
+        recordDrop(drops, "search", h.url);
+        return false;
+      });
+    },
+    fetchPage: async (url: string): Promise<FetchResult> => {
+      if (isCommunity(url)) {
+        recordDrop(drops, "fetch", url);
+        return { ...refused };
+      }
+      const fr = await deps.fetchPage(url);
+      if (fr.page && fr.finalUrl && fr.finalUrl !== url && isCommunity(fr.finalUrl)) {
+        recordDrop(drops, "redirect", fr.finalUrl);
+        return { ...refused };
+      }
+      return fr;
+    },
+  };
+}
+
 export function withContract(deps: Deps, rc: ResolvedContract, drops: ContractDrops): Deps {
   const refused: FetchResult = { page: null, outcome: "error" };
   return {
@@ -489,6 +524,11 @@ export interface RunOptions {
    *  prompt) gets the prompt-span filter on the synthesis and claim it hands the curator; a derived job's question
    *  is public by construction, so its synthesis is filed as written. Absent = not derived (the filter applies). */
   requestKind?: string;
+  /** rwr-research-sources - which sources the run may read (the start door's `sources`): credible = no
+   *  community-class source is fetched or admitted (every way in is filtered and recorded in communityDrops);
+   *  community = they are admitted through the same gates as any source. Absent = every other inlet, unchanged.
+   *  In every mode a community page the injection screen could not judge is dropped (fail closed). */
+  sources?: SourcesMode | null;
 }
 export interface RunMetrics extends ReturnType<typeof reuseMetric> {
   /** P3a - the entailment stage's counts (D10). */
@@ -571,6 +611,10 @@ export interface RunResult {
   gapWork?: GapClaim[];
   /** kp-contract — what the job's contract dropped, per stage (absent without a contract). */
   contractDrops?: ContractDrops;
+  /** rwr-research-sources - the run's source mode (null = not given: today's behaviour) and, in credible mode,
+   *  every community source it refused, per stage (search, fetch, redirect, seed, kb_recall, reuse). */
+  sourcesMode: SourcesMode | null;
+  communityDrops?: ContractDrops;
 }
 export type Progress = (phase: string, message: string, counters?: Record<string, number>) => Promise<void>;
 
@@ -629,6 +673,17 @@ export async function runResearch(
     cached: async (url) => (await cachedScholarly(client, url).catch(() => null)) as ScholarlyRecord | null,
     subjectTokens: [], now,
   };
+  // rwr-research-sources: the run's source mode and the one classifier every check below uses (URL only)
+  const sourcesMode: SourcesMode | null = opts.sources === "credible" || opts.sources === "community" ? opts.sources : null;
+  const isCommunity = (url: string | null | undefined): boolean => !!communityOf(model, url);
+  const communityDrops: ContractDrops | null = sourcesMode === "credible" ? newContractDrops() : null;
+  const credibleOnly = (stage: Parameters<typeof recordDrop>[1], url: string | null | undefined, claimId?: string): boolean => {
+    if (!communityDrops || !isCommunity(url)) return true;
+    recordDrop(communityDrops, stage, url, claimId);
+    return false;
+  };
+  /** In every mode: a community page the injection screen could not judge is dropped (fail closed). */
+  const failClosed = (p: Page) => isCommunity(p.url);
   const verdictEffects: VerdictEffect[] = [...model.verdicts.values()].map((v) => ({ key: v.key, tagEffect: v.tagEffect }));
   /** Every hit the stage judged, by url, and the trail. */
   const assessed = new Map<string, Assessment>();
@@ -668,8 +723,13 @@ export async function runResearch(
   const contract = opts.contract;
   const contractDrops: ContractDrops | null = contract ? newContractDrops() : null;
   if (contract) deps = withContract(deps, contract, contractDrops!);
-  /** Spread into every RunResult: the key exists only when a contract was set. */
-  const dropsField = () => (contractDrops ? { contractDrops } : {});
+  if (communityDrops) deps = withCredibleOnly(deps, (u) => isCommunity(u), communityDrops);
+  /** Spread into every RunResult: the key exists only when a contract was set (communityDrops: credible mode). */
+  const dropsField = () => ({
+    sourcesMode,
+    ...(contractDrops ? { contractDrops } : {}),
+    ...(communityDrops ? { communityDrops } : {}),
+  });
   // Seeds are exempt from the contract's allow-list (in article mode the seed IS
   // the subject) but are dropped - before anything reads them, the recall
   // embedding included - if they hit a deny entry / red-line host.
@@ -678,8 +738,8 @@ export async function runResearch(
       if (!deniedUrl(contract, s.url)) return true;
       recordDrop(contractDrops, "seed", s.url);
       return false;
-    })
-    : seeds;
+    }).filter((s) => credibleOnly("seed", s.url))
+    : seeds.filter((s) => credibleOnly("seed", s.url));
 
   // 1. Reuse pass — recall relevant grounded claims (cheap). In article mode the
   //    recall is against the ARTICLE itself (its points are what we want to
@@ -720,6 +780,16 @@ export async function runResearch(
     });
   }
 
+  // rwr-research-sources: a credible-only run reuses no claim whose grounding source is community class
+  if (communityDrops && reuseClaims.length) {
+    const pre = await getReuseSources(client, reuseClaims.map((c) => c.id));
+    const srcById = new Map(pre.sources.map((s) => [s.id, s]));
+    reuseClaims = reuseClaims.filter((c) => {
+      const sid = pre.claimToSource[c.id];
+      return credibleOnly("reuse", (sid ? srcById.get(sid)?.url : null) ?? "", c.id);
+    });
+  }
+
   // Seed sources (e.g. a newsletter article the caller already fetched through
   // Tor) are staged directly — never re-fetched. In article mode they are THE
   // subject of the episode.
@@ -742,13 +812,14 @@ export async function runResearch(
     const heldPages: Page[] = [];
     const heldRows = new Map<string, { id: string; url: string | null; content_type: string }>();
     for (const h of await loadHeldSources(client, opts.refineryId)) {
+      if (h.url && !credibleOnly("seed", h.url)) continue;   // stays held, untouched
       const url = h.url || `urn:openbrain:held:${h.id}`;
       heldRows.set(url, { id: h.id, url: h.url, content_type: h.content_type });
       heldPages.push({ url, title: h.title, content: h.content, domain: h.url ? domainOf(h.url) : "held" });
     }
     // The chokepoint's injection screen applies to a user's source like to any page; a held
     // source that attacks the reader does not join the session (it stays held, untouched).
-    const { clean, quarantined } = heldPages.length ? await screenSources(deps, heldPages) : { clean: [], quarantined: [] };
+    const { clean, quarantined } = heldPages.length ? await screenSources(deps, heldPages, 4, failClosed) : { clean: [], quarantined: [] };
     if (quarantined.length) {
       await progress("screen", `quarantined ${quarantined.length} held source(s) for prompt injection`, { quarantined: quarantined.length });
     }
@@ -851,8 +922,8 @@ export async function runResearch(
           if (permitsUrl(contract, s.url ?? "")) return true;
           recordDrop(contractDrops, "kb_recall", s.url);
           return false;
-        })
-        : kbRecall;
+        }).filter((s) => credibleOnly("kb_recall", s.url))
+        : kbRecall.filter((s) => credibleOnly("kb_recall", s.url));
       for (const s of kbSources) {
         if (s.url && !staged.some((p) => p.url === s.url) && !kbRecalled.some((p) => p.url === s.url)) {
           const page: Page = { url: s.url, title: s.title, content: s.content,
@@ -949,7 +1020,7 @@ export async function runResearch(
       floorMayApply = true,
     ): Promise<void> => {
       if (!candidates.length) return;
-      const { clean, quarantined } = await screenSources(deps, candidates);
+      const { clean, quarantined } = await screenSources(deps, candidates, 4, failClosed);
       if (quarantined.length) {
         await progress("screen", `quarantined ${quarantined.length} ${label} source(s) for prompt injection`,
           { quarantined: quarantined.length });
@@ -1106,6 +1177,7 @@ export async function runResearch(
         let taken = 0;
         for (const link of links) {
           if (taken >= LEAD_LINKS_MAX) break;
+          if (!credibleOnly("fetch", link)) continue;   // rwr-research-sources: never judged, never fetched
           const a = assessed.get(link) ?? await admit({ url: link }, leadTrail?.id ?? null);
           if (!a.admitted) continue;
           taken++;
@@ -1335,7 +1407,7 @@ export async function runResearch(
   // two blocks therefore serve the article / seed-only / disable_web_search
   // paths, whose behaviour is unchanged.
   if (!topicPath && staged.length) {
-    const { clean, quarantined } = await screenSources(deps, staged);
+    const { clean, quarantined } = await screenSources(deps, staged, 4, failClosed);
     if (quarantined.length) {
       await progress("screen", `quarantined ${quarantined.length} source(s) for prompt injection`,
         { quarantined: quarantined.length });
@@ -1413,6 +1485,11 @@ export async function runResearch(
     : { sources: [] as Awaited<ReturnType<typeof getReuseSources>>["sources"], claimToSource: {} as Record<string, string> };
   // kp-contract — the claims were already filtered on these same sources (reuse
   // pass, above); this re-check is the backstop on the rows the pool really uses.
+  if (communityDrops && reuse.sources.length) {
+    const dropped = new Set(reuse.sources.filter((x) => !credibleOnly("reuse", x.url)).map((x) => x.id));
+    reuse.sources = reuse.sources.filter((x) => !dropped.has(x.id));
+    for (const [cid, sid] of Object.entries(reuse.claimToSource)) if (dropped.has(sid)) delete reuse.claimToSource[cid];
+  }
   if (contract && contractDrops && reuse.sources.length) {
     const dropped = new Set<string>();
     reuse.sources = reuse.sources.filter((s) => {
@@ -1617,7 +1694,7 @@ export async function runResearch(
             await progress("screen", `rejected ${gatePrelim.rejected.length} irrelevant preliminary source(s)`,
               { irrelevant: gatePrelim.rejected.length });
           }
-          const { clean: cleanPrelim, quarantined: qPrelim } = await screenSources(deps, keptPrelim);
+          const { clean: cleanPrelim, quarantined: qPrelim } = await screenSources(deps, keptPrelim, 4, failClosed);
           if (qPrelim.length) {
             await progress("screen", `quarantined ${qPrelim.length} preliminary source(s) for prompt injection`,
               { quarantined: qPrelim.length });
@@ -2004,7 +2081,7 @@ export async function runResearch(
     return foldReceived(finals[i].total, filedIn, coCited);
   };
   const { claims: lineCred, report: reportCred } = scoreCuratorPackage(model, claimKind.kind,
-    curatorSynthesis, curatorCited, curatorLines, verdicts, packageSourceTotal(new Set()));
+    curatorSynthesis, curatorCited, curatorLines, verdicts, packageSourceTotal(new Set()), undefined, (pg) => communityOf(model, pg.url));
 
   const answeredNeeds = needsStatus.filter((n) => n.status === "answered").length;
   const partialNeeds = needsStatus.filter((n) => n.status === "partial").length;
@@ -2180,7 +2257,7 @@ export async function runResearch(
     const filedCred = restateFiledCredibility(reportCred, curator, (filedIds, sourceIds) => {
       const unpersisted = new Set(sourceIds ? curatorCited.filter((_, k) => !sourceIds[k]).map((p) => p.url) : []);
       return scoreCuratorPackage(model, claimKind.kind, curatorSynthesis, curatorCited, curatorLines, verdicts,
-        packageSourceTotal(unpersisted), filedIds).report;
+        packageSourceTotal(unpersisted), filedIds, (pg) => communityOf(model, pg.url)).report;
     });
     metrics.credibility = filedCred;
     if (filedCred.filed === false) {
