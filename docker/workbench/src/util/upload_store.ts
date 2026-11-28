@@ -7,14 +7,14 @@
 //
 // The stored form is unchanged (import_job_payloads.bytes, bytea): no migration, and every reader is untouched.
 import { config } from "../config.ts";
-import type { StoreReply, StoreRequest } from "./upload_store_worker.ts";
+import type { ReadRequest, StoreReply, StoreRequest } from "./upload_store_worker.ts";
 
 // What the tests read to know a save really ran in a Worker (the reply carries the worker's own thread marker).
 export const storeStats = { workerSaves: 0, lastInWorker: false };
 
 let worker: Worker | null = null;
 let seq = 0;
-const waiting = new Map<number, { ok: (r: Record<string, unknown>) => void; fail: (e: Error) => void }>();
+const waiting = new Map<number, { ok: (r: StoreReply) => void; fail: (e: Error) => void }>();
 
 function dead(why: string) {
   worker = null;
@@ -33,7 +33,7 @@ function start(): Worker {
     else {
       storeStats.workerSaves++;
       storeStats.lastInWorker = ev.data.inWorker === true;
-      p.ok(ev.data.row ?? {});
+      p.ok(ev.data);
     }
   };
   w.onerror = (ev) => { ev.preventDefault?.(); dead(`the upload store worker failed: ${ev.message}`); };
@@ -53,7 +53,7 @@ export function insertJobWithPayload<T extends { id: string }>(
   const w = start();
   const id = ++seq;
   return new Promise<T>((ok, fail) => {
-    waiting.set(id, { ok: ok as (r: Record<string, unknown>) => void, fail });
+    waiting.set(id, { ok: (r) => ok((r.row ?? {}) as T), fail });
     // a COPY of the bytes: the caller still needs its own (the pipeline reads them after the save)
     const copy = bytes.slice();
     const req: StoreRequest = { id, jobSql, jobArgs, filename, bytes: copy };
@@ -63,6 +63,18 @@ export function insertJobWithPayload<T extends { id: string }>(
       waiting.delete(id);
       fail(e as Error);
     }
+  });
+}
+
+// A job's stored file, read back in the worker (the bytes are decoded there, never on the request thread) and
+// transferred. null when the job has no payload row.
+export function readPayload(jobId: string): Promise<{ filename: string; bytes: Uint8Array<ArrayBuffer> } | null> {
+  const w = start();
+  const id = ++seq;
+  return new Promise((ok, fail) => {
+    waiting.set(id, { ok: (r) => ok(r.payload ? { filename: r.payload.filename, bytes: new Uint8Array(r.payload.buf) } : null), fail });
+    const req: ReadRequest = { id, read: jobId };
+    try { w.postMessage(req); } catch (e) { waiting.delete(id); fail(e as Error); }
   });
 }
 

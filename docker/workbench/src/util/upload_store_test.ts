@@ -6,7 +6,7 @@
 // variables, read when config.ts loads). It writes rows tagged `upload-store-test`: never point it at a live stack.
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert@1";
 import { Pool } from "postgres";
-import { insertJobWithPayload, closeUploadStore, storeStats } from "./upload_store.ts";
+import { insertJobWithPayload, closeUploadStore, readPayload, storeStats } from "./upload_store.ts";
 import { hexOf, work } from "./upload_store_worker.ts";
 
 const live = Deno.env.get("UPLOAD_STORE_TEST_DB") === "1";
@@ -128,5 +128,27 @@ Deno.test({ name: "a bad job insert rejects and writes nothing", ignore: !live, 
   const before = (await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.import_job_payloads`))[0].n;
   await assertRejects(() => insertJobWithPayload(`INSERT INTO public.import_jobs (no_such_column) VALUES ($1) RETURNING id::text AS id`, ["x"], "a.bin", pattern(10)));
   assertEquals((await sql<{ n: number }>(`SELECT count(*)::int AS n FROM public.import_job_payloads`))[0].n, before);
+  closeUploadStore();
+}});
+
+Deno.test({ name: "readPayload: the stored file comes back whole from the worker, a 32 MiB read holds no loop, an unknown job is null", ignore: !live, sanitizeResources: false, sanitizeOps: false, async fn() {
+  for (const n of [1, 256, 65537]) {
+    const bytes = n === 256 ? Uint8Array.from({ length: 256 }, (_, i) => i) : pattern(n, n + 3);
+    const row = await insertJobWithPayload<{ id: string }>(JOB_SQL, [`${TAG}-read-${n}`], `r${n}.bin`, bytes);
+    const got = await readPayload(row.id);
+    assertEquals(got?.filename, `r${n}.bin`);
+    assertEquals(await sha(got!.bytes), await sha(bytes), `size ${n}`);
+  }
+  const big = pattern(32 * MiB, 77);
+  const want = await sha(big);
+  const saved = await insertJobWithPayload<{ id: string }>(JOB_SQL, [`${TAG}-read-big`], "big.bin", big);
+  const mainWork = { ...work };
+  const r = await worstStall(() => readPayload(saved.id));
+  console.log(`32 MiB read back in ${r.ms.toFixed(0)} ms; worst event-loop stall ${r.worst.toFixed(0)} ms`);
+  // unfakeable: readOne counts itself per thread; the read's bytea decode ran in the worker, not here
+  assertEquals({ ...work }, mainWork, "readOne ran on the request thread");
+  assert(r.worst < 500, `the event loop was held ${r.worst.toFixed(0)} ms`);
+  assertEquals(await sha(r.out!.bytes), want);
+  assertEquals(await readPayload(crypto.randomUUID()), null);
   closeUploadStore();
 }});

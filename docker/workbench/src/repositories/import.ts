@@ -5,7 +5,7 @@
 // chunks/links. Durable job state in import_jobs (survives restart; drives the
 // P6 badge via staged/committed).
 import { query, withTransaction } from "../db/pool.ts";
-import { insertJobWithPayload } from "../util/upload_store.ts";
+import { insertJobWithPayload, readPayload } from "../util/upload_store.ts";
 import { embed, toVector } from "../util/embed.ts";
 import { chunkText } from "../util/chunk.ts";
 import { vaultWriteBinary } from "../util/vault.ts";
@@ -38,7 +38,8 @@ export async function failJob(id: string, error: string): Promise<void> {
   await query(`UPDATE public.import_jobs SET status = 'failed', error = $2 WHERE id = $1 AND status <> 'cancelled'`, [id, error]);
 }
 export async function getPayload(id: string): Promise<{ filename: string; bytes: Uint8Array } | null> {
-  return (await query<{ filename: string; bytes: Uint8Array }>(`SELECT filename, bytes FROM public.import_job_payloads WHERE job_id = $1`, [id]))[0] ?? null;
+  // read in the upload store's worker: deno-postgres decodes a bytea on the reading thread, ~3 s for 32 MiB
+  return await readPayload(id);
 }
 export async function dropPayload(id: string): Promise<void> {
   await query(`DELETE FROM public.import_job_payloads WHERE job_id = $1`, [id]);

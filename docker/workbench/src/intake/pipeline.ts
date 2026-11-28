@@ -23,6 +23,7 @@ import { NotFound, Conflict } from "../contracts/repo/lifecycle.ts";
 import { type Identity, ownerKey } from "../middleware/identity.ts";
 import { fileContentType, type IntakeContentType, isIntakeContentType } from "./content_types.ts";
 import { type IntakeFetch, IntakeFetchError } from "./research_fetch.ts";
+import { readPayload } from "../util/upload_store.ts";
 
 export type Extract = (bytes: Uint8Array, filename: string) => Promise<{ markdown: string; title: string }>;
 
@@ -119,7 +120,8 @@ export async function runAdd(deps: AddDeps, jobId: string): Promise<void> {
         input = { title: got.title || job.url, content: got.text, url: job.url, content_type: got.content_type };
       }
     } else {
-      const p = (await db.query<{ filename: string; bytes: Uint8Array }>(`SELECT filename, bytes FROM public.import_job_payloads WHERE job_id = $1`, [jobId]))[0];
+      // read in the upload store's worker: deno-postgres decodes a bytea on the reading thread, ~3 s for 32 MiB
+      const p = await readPayload(jobId);
       if (!p) return void await fail("no_payload");
       const type = fileContentType(p.filename, p.bytes);
       if (!type) return void await fail("unsupported_type");
