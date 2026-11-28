@@ -271,10 +271,12 @@ try {
   $made.images += $testTag
 
   # ---------------------------------------------------------------- 4. integration tests
-  Write-Host '[4] database A + src/contracts/integration_test.ts (as ob_app_memory)'
+  Write-Host '[4] database A + src/contracts/integration_test.ts (as ob_workbench, the production login; a member of ob_app_memory)'
   if (-not (Start-Db $dbA)) { throw 'db A' }
-  $o = Dk run --rm --label $label --network $net -e "CONTRACT_TEST_DB_HOST=$dbA" -e CONTRACT_TEST_DB_USER=ob_app_memory `
-    -e "CONTRACT_TEST_DB_PASSWORD=$appPw" $testTag deno test --allow-net --allow-env --allow-read src/contracts/integration_test.ts src/contracts/library_integration_test.ts
+  # slot 730: contracts/repo/system.ts writes a setting through admin_setting_write, granted to ob_workbench only, so the test logs in
+  # as the workbench does in production (the role Start-Db set up through ob-workbench-role.ps1), not as ob_app_memory
+  $o = Dk run --rm --label $label --network $net -e "CONTRACT_TEST_DB_HOST=$dbA" -e "CONTRACT_TEST_DB_USER=$($script:wbRole[$dbA].role)" `
+    -e "CONTRACT_TEST_DB_PASSWORD=$($script:wbRole[$dbA].pw)" $testTag deno test --allow-net --allow-env --allow-read src/contracts/integration_test.ts src/contracts/library_integration_test.ts
   Save 'integration-test.log' $o
   $sum = ([regex]'(ok|FAILED) \| (\d+) passed \| (\d+) failed').Match(($o -replace '\x1b\[[0-9;]*m', ''))
   Check (($script:rc -eq 0) -and $sum.Success -and $sum.Groups[3].Value -eq '0') "integration tests: $($sum.Value)"

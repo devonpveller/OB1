@@ -16,7 +16,7 @@
 # What it does:
 #   1. stages the REAL initdb chain from docker-compose.yml (the 720 slot included) and, for 5b, the same chain WITHOUT 720
 #   2. one internal network on the pinned /25; 3. builds openbrain-workbench:wt-<id> (its build test gate) and its test stage
-#   4. the lab: database (chain + fixtures.sql; the workbench as ob_app_memory, non-superuser), stub embedder, stub research
+#   4. the lab: database (chain + fixtures.sql; the workbench as ob_workbench, the production login), stub embedder, stub research
 #      service, PostgREST + the OB1 rest Caddy, ONE workbench with WORKSPACE_IDENTITY_HEADER=X-Test-Sub
 #   5a. the notification preferences integration test (src/settings/notify_prefs_integration_test.ts: N1-N8)
 #   5b. the migration round trip: the registry rows and the schema compared with a second database built WITHOUT 720: forward x2,
@@ -222,6 +222,11 @@ try {
   if ($errs.Count) { Save 'initdb-errors.log' ($errs -join "`n") }
   $null = Dk exec $db psql -U postgres -d openbrain -X -q -v ON_ERROR_STOP=1 -c "CREATE ROLE ob_app_memory LOGIN PASSWORD '$appPw' NOSUPERUSER NOBYPASSRLS IN ROLE service_role"
   Check ($script:rc -eq 0) 'ob_app_memory (non-superuser, service_role) - the production shape'
+  # The workbench logs in as ob_workbench, as in production and as run-workspace-tests.ps1 / run-contract-tests.ps1 do (the shared
+  # ob-workbench-role.ps1): slot 730 grants settings_user_ceilings and its writer functions to ob_workbench only, so a workbench
+  # running as ob_app_memory is refused them. It runs 480 again now that ob_app_memory exists and sets the lab password.
+  . (Join-Path $ct 'ob-workbench-role.ps1')
+  $wbLogin = Use-ObWorkbenchRole $appPw
   $null = Dk cp (Join-Path $ct 'fixtures.sql') "${db}:/tmp/fixtures.sql"
   # rw-inlet-stamp (slot 470): fixtures.sql is legacy-shaped; the LAB switches 470's guards off around this load only
   $null = Dk exec $db psql -U postgres -d openbrain -X -q -c "DO `$`$ BEGIN IF to_regclass('public.inlet_connections') IS NOT NULL THEN ALTER TABLE public.thoughts DISABLE TRIGGER trg_inlet_stamp_thoughts; ALTER TABLE public.sources DISABLE TRIGGER trg_inlet_stamp_sources; END IF; END `$`$"
@@ -237,7 +242,7 @@ try {
       '-e', 'PGRST_DB_SCHEMAS=public', '-e', 'PGRST_DB_ANON_ROLE=service_role', '-e', 'PGRST_DB_POOL=4', '-e', 'PGRST_SERVER_PORT=3000', $PgrstImage)
   $null = Run-Detached "$P-rest" @('--network-alias', 'openbrain-rest', '-v', "$(Join-Path $dockerDir 'Caddyfile'):/etc/caddy/Caddyfile:ro", $CaddyImage)
   $wbArgs = @('-e', 'PORT=8000', '-e', "WORKBENCH_KEY=$key",
-      '-e', "DB_HOST=$db", '-e', 'DB_USER=ob_app_memory', '-e', "DB_PASSWORD=$appPw", '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
+      '-e', "DB_HOST=$db", '-e', "DB_USER=$($wbLogin.role)", '-e', "DB_PASSWORD=$($wbLogin.pw)", '-e', 'OPEN_BRAIN_URL=http://openbrain-rest',
       '-e', 'EMBEDDING_API_BASE=http://stub-embed:8080/v1', '-e', 'EXTRACT_URL=http://unreachable.invalid', '-e', 'WIKI_GIT_DIR=/wiki',
       '-e', 'WIKI_ASSETS_DIR=/wiki/assets', '-e', 'CONTRACT_MOUNTS_ROOT=/mounts', '-e', 'RESEARCH_URL=http://stub-research:8000',
       '-e', "RESEARCH_WORKSPACE_KEY=$wsKey", '-e', 'WORKSPACE_IDENTITY_HEADER=X-Test-Sub',
