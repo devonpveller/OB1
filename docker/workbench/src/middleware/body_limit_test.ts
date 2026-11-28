@@ -60,6 +60,24 @@ Deno.test("a body of exactly the cap is accepted, one byte more is not; any cont
   }
 });
 
+Deno.test("a DECLARED Content-Length of exactly cap+1 is refused 413, exactly cap is accepted (the declared-length branch, to the byte)", async () => {
+  // the other cases here send no Content-Length, so they count the stream; this one carries the header the server frames by
+  const cap = maxBodyBytes();
+  assertEquals(cap, 4 * 1024 * 1024); // a raised default (e.g. 5 MiB) fails here and on the 413 below
+  const send = (bytes: number, declared: number) => app().request("/workbench/notes/a.md", {
+    method: "PUT", headers: { ...JSON_H, "content-length": String(declared) }, body: jsonOf(bytes),
+  });
+  const over = await send(cap + 1, cap + 1);
+  assertEquals(over.status, 413, "declared cap+1");
+  assertEquals((await over.json()).error, `the request is too large (at most ${cap} bytes)`);
+  assertEquals(reached, 0);
+  const at = await send(cap, cap);
+  assertEquals(at.status, 200, "declared exactly cap");
+  // a length over the cap is refused on the declaration alone, whatever the body that follows
+  const lie = await app().request("/workbench/notes/a.md", { method: "PUT", headers: { ...JSON_H, "content-length": String(cap + 1) }, body: "x" });
+  assertEquals(lie.status, 413, "declared cap+1, short body");
+});
+
 Deno.test("reads carry no cap (the cap is on a write's body)", async () => {
   const r = await app().request(`/workbench/documents/file?path=${"a".repeat(8000)}`, { method: "GET" });
   assertEquals(r.status, 200);

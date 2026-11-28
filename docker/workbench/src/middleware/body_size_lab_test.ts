@@ -15,6 +15,7 @@
 // Environment: BODY_BASE (the workbench), BODY_VIEWER (the viewer), DOCS_TEST_KEY, plus the workbench's own DB_* /
 // WIKI_GIT_DIR / OPEN_BRAIN_* so src/app.ts can be imported to read its route table (it is never served here).
 import { assert, assertEquals } from "jsr:@std/assert@1";
+import { DEFAULT_MAX_BODY_BYTES, isUploadRoute } from "./body_limit.ts";
 
 const BASE = (Deno.env.get("BODY_BASE") ?? "").replace(/\/+$/, "");
 const VIEWER = (Deno.env.get("BODY_VIEWER") ?? "").replace(/\/+$/, "");
@@ -24,8 +25,14 @@ const ignore = !BASE || !VIEWER;
 const t = (name: string, fn: () => Promise<void>) => Deno.test({ name, ignore, fn, sanitizeOps: false, sanitizeResources: false });
 
 const MiB = 1024 * 1024;
-const CAP = 4 * MiB; // the workbench's default WORKBENCH_MAX_BODY_BYTES; the lab sets none
+const CAP = DEFAULT_MAX_BODY_BYTES; // the workbench's WORKBENCH_MAX_BODY_BYTES default (imported from the product); the lab sets none
 const VIEWER_CAP = 1 * MiB; // the viewer's non-upload cap (workbench-proxy.mjs bodyCap)
+const VIEWER_UPLOAD_CAP = 100 * MiB; // the viewer's cap on its three upload paths (bodyCap); mirrored: the lab image has no wiki-viewer
+// The limit that applies to a JSON body on `route` at a door: the first of the door's own cap and the workbench's non-multipart
+// cap. The viewer lets a JSON body to an upload route through up to 100 MB, so there the workbench's 4 MiB is the limit (and the
+// route is never reached: 413 from the body cap, not the route's own 400). The upload routes come from the product's own list.
+const limitFor = (door: string, route: string) =>
+  door === VIEWER ? Math.min(isUploadRoute(route) ? VIEWER_UPLOAD_CAP : VIEWER_CAP, CAP) : CAP;
 const rnd = () => crypto.randomUUID().slice(0, 8);
 const person = () => ({ [SUB_HEADER]: `bodysize-${rnd()}` }); // a non-admin: not the default subject
 
@@ -66,12 +73,13 @@ t("every write route refuses an over-the-limit body with 413 within 1 s, through
   const fill = (p: string) => p.replace(/:([A-Za-z_]+)(\{[^}]*\})?/g, (_m, _n, re) => (re && re.includes(".")) ? "x/y.md" : "x");
   const bad: string[] = [];
   let calls = 0;
-  // the workbench is sent one byte over ITS cap; the viewer one byte over ITS cap
-  for (const [name, door, size] of [["workbench", BASE, CAP + 1], ["viewer", VIEWER, VIEWER_CAP + 1]] as [string, string, number][]) {
+  // each route is sent one byte over the limit that applies at that door (limitFor)
+  for (const [name, door] of [["workbench", BASE], ["viewer", VIEWER]] as [string, string][]) {
     const who = person();
-    const body = big(size);
-    assertEquals(new TextEncoder().encode(body).length, size);
     for (const r of routes) {
+      const size = limitFor(door, fill(r.path)) + 1;
+      const body = big(size);
+      assertEquals(body.length, size);
       calls++;
       // a bystander reads while the big one is in flight: it must not wait on it
       const [big1, other] = await Promise.all([
